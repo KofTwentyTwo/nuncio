@@ -2,11 +2,12 @@
 
 ## Initial Setup
 - [x] Create workspace plan and roadmap documentation
-- [ ] Initialize Cargo workspace structure with crate scaffolding
-- [ ] Initialize git repository locally
-- [ ] Create `KofTwentyTwo/nuncio` repository on GitHub
-- [ ] Push initial commit to origin `main`
-- [ ] Create GitHub Project / Issues for roadmap tracking
+- [x] Conduct deep crate research and author master architecture document (`docs/ARCHITECTURE.md`)
+- [x] Initialize Cargo workspace structure with crate scaffolding
+- [x] Initialize git repository locally
+- [x] Create `KofTwentyTwo/nuncio` repository on GitHub
+- [x] Push initial commit to origin `main`
+- [x] Create GitHub Project / Issues for roadmap tracking
 
 ## Phase 1: Core Engine & Local Storage
 - [ ] `nuncio-core` workspace engine setup and event loop
