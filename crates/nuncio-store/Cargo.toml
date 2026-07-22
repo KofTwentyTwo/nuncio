@@ -1,0 +1,15 @@
+[package]
+name = "nuncio-store"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nuncio-core = { path = "../nuncio-core" }
+tokio.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "nuncio-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nuncio-core = { path = "../nuncio-core" }
+nuncio-mail = { path = "../nuncio-mail" }
+nuncio-cal = { path = "../nuncio-cal" }
+nuncio-store = { path = "../nuncio-store" }
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tracing.workspace = true
