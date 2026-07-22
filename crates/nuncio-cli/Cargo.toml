@@ -1,0 +1,18 @@
+[package]
+name = "nuncio-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nuncio-core = { path = "../nuncio-core" }
+nuncio-mail = { path = "../nuncio-mail" }
+nuncio-cal = { path = "../nuncio-cal" }
+nuncio-store = { path = "../nuncio-store" }
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

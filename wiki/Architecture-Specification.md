@@ -9,29 +9,29 @@ Nuncio ([nuncio.mx](https://nuncio.mx)) is a high-performance cross-platform mai
 Nuncio decouples application state management, network protocol engines, cryptography, and storage persistence from presentation interfaces.
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Presentation Shells                             │
-│                                                                        │
-│   ┌───────────────────────────┐      ┌─────────────────────────────┐   │
-│   │  nuncio-tui (Ratatui)     │      │   nuncio-gui (Tauri v2)    │   │
-│   └─────────────┬─────────────┘      └──────────────┬──────────────┘   │
-└─────────────────┼───────────────────────────────────┼──────────────────┘
-                  │ CoreCommand (mpsc)                │ CoreCommand (mpsc)
-                  ▼ CoreState (watch)                 ▼ CoreState (watch)
-┌────────────────────────────────────────────────────────────────────────┐
-│                          nuncio-core                                   │
-│                  Async Event Bus & Orchestrator                        │
-└────────┬──────────────────────┬───────────────────────┬────────────────┘
-         │                      │                       │
-         ▼                      ▼                       ▼
-┌──────────────────┐  ┌──────────────────┐    ┌──────────────────┐
-│   nuncio-mail    │  │    nuncio-cal    │    │   nuncio-store   │
-│ JMAP / IMAP / SMTP│  │ CalDAV / iCal    │    │ SQLite FTS5 / Age│
-└──────────────────┘  └──────────────────┘    └──────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                                Presentation Shells                                │
+│                                                                                   │
+│ ┌────────────────────────┐   ┌─────────────────────────┐   ┌────────────────────┐ │
+│ │   nuncio-cli (Clap)    │   │  nuncio-tui (Ratatui)   │   │nuncio-gui (Tauri v2│ │
+│ └───────────┬────────────┘   └────────────┬────────────┘   └─────────┬──────────┘ │
+└─────────────┼─────────────────────────────┼──────────────────────────┼────────────┘
+              │ CoreCommand (mpsc)          │ CoreCommand (mpsc)       │ CoreCommand (mpsc)
+              ▼ CoreState (watch)           ▼ CoreState (watch)        ▼ CoreState (watch)
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                                    nuncio-core                                    │
+│                           Async Event Bus & Orchestrator                          │
+└──────────────┬────────────────────────────┬───────────────────────┬───────────────┘
+               │                            │                       │
+               ▼                            ▼                       ▼
+┌──────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────────┐
+│       nuncio-mail        │  │        nuncio-cal        │  │       nuncio-store       │
+│    JMAP / IMAP / SMTP    │  │      CalDAV / iCal       │  │     SQLite FTS5 / Age    │
+└──────────────────────────┘  └──────────────────────────┘  └──────────────────────────┘
 ```
 
 - **Headless Engine Core**: `nuncio-core`, `nuncio-mail`, `nuncio-cal`, and `nuncio-store` contain 100% of domain rules, protocol parsing, offline caching, search indexing, and secret key encryption.
-- **Thin Presentation Shells**: `nuncio-tui` (terminal) and `nuncio-gui` (desktop) are stateless interfaces consuming unidirectional state streams (`tokio::sync::watch`) and dispatching command enums (`tokio::sync::mpsc`).
+- **Thin Presentation Shells**: `nuncio-cli` (command line), `nuncio-tui` (terminal), and `nuncio-gui` (desktop) are stateless interfaces consuming unidirectional state streams (`tokio::sync::watch`) and dispatching command enums (`tokio::sync::mpsc`).
 
 ---
 
@@ -48,6 +48,7 @@ Nuncio decouples application state management, network protocol engines, cryptog
 | **Database & Storage** | `sqlx` (SQLite WAL), `age` | `sqlx` in Write-Ahead Logging mode for async metadata; `age` chunked streaming cipher for encrypted attachments. |
 | **Full-Text Search** | SQLite FTS5 (`unicode61` + `trigram`) | Baseline ACID-compliant trigram search. Optional `tantivy` feature flag for high-volume mailboxes (>50k emails). |
 | **OS Credentials** | `keyring` | Binds to macOS Keychain Services, Windows Credential Manager, and Linux Secret Service / D-Bus. |
+| **Command Line Interface** | `clap` v4 | Fast subcommands parser supporting JSON output formatting for shell scripts and Unix piping. |
 | **Terminal Shell** | `ratatui`, `crossterm`, `html2text` | Double-buffered terminal renderer; `html2text` converts HTML emails into formatted text with link references. |
 | **Desktop Shell** | `Tauri v2` | Leverages OS native webviews (`WKWebView`, `WebView2`, `WebKitGTK`) for sandboxed, secure HTML email rendering and accessibility. |
 
@@ -111,12 +112,18 @@ pub trait MailBackend: Send + Sync {
 
 ## 4. Presentation Shell Specifications
 
-### 4.1 Terminal UI Shell (`nuncio-tui`)
+### 4.1 Command Line Interface (`nuncio-cli`)
+
+- **Execution Engine**: `clap` v4 derive macro.
+- **Subcommands**: Supports `nuncio mail list|read|send`, `nuncio cal list|add`, `nuncio sync`, and `nuncio status`.
+- **Pipeline Support**: Accepts `--json` flag to stream structured JSON outputs to stdout for processing with `jq`, `grep`, or shell automation scripts.
+
+### 4.2 Terminal UI Shell (`nuncio-tui`)
 
 - **Rendering Engine**: `ratatui` v0.28+ with `crossterm` v0.28+.
 - **HTML Email Strategy**: HTML email bodies are parsed with `html2text` and transformed into `ratatui::text::Text` structures. Links are assigned numeric footers (e.g. `o 1`) to trigger the OS default browser via `open::that`. Pressing `o` exports the message to an external browser or terminal pager (`w3m`).
 
-### 4.2 Desktop GUI Shell (`nuncio-gui`)
+### 4.3 Desktop GUI Shell (`nuncio-gui`)
 
 - **Rendering Engine**: **Tauri v2** shell calling `nuncio-core` via IPC.
 - **HTML Email Sandboxing**: Displays untrusted HTML emails inside isolated `<iframe sandbox="allow-same-origin" srcdoc="...">` tags with JavaScript execution disabled. Custom URI schemes (`nuncio-mail://`) proxy local attachments while blocking remote tracking pixels by default.

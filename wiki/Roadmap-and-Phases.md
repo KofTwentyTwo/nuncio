@@ -22,7 +22,8 @@ Nuncio ([nuncio.mx](https://nuncio.mx)) development is organized into 4 primary 
   - `rrule` recurrence expansion engine.
   - WebDAV / CalDAV (RFC 4791) `sync-collection` and `calendar-query` REPORT client via `reqwest` and `quick-xml`.
 
-## Phase 3: Terminal User Interface (TUI Shell)
+## Phase 3: Command Line & Terminal User Interfaces (CLI & TUI Shells)
+- `nuncio-cli` built on `clap` v4 for subcommand parsing (`mail`, `cal`, `sync`, `status`) and JSON output formatting for shell scripts.
 - `nuncio-tui` built on `ratatui` v0.28+ and `crossterm` v0.28+.
 - Keyboard-first mail thread navigation, composer, and folder trees.
 - `html2text` HTML email rendering into formatted terminal text with link footers.
