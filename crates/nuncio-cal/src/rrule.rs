@@ -44,8 +44,7 @@ impl RecurrenceEngine {
 
         let results = rrule_set
             .into_iter()
-            .after(window_start_dt)
-            .before(window_end_dt)
+            .filter(|dt| *dt >= window_start_dt && *dt <= window_end_dt)
             .take(Self::MAX_EXPANSION_COUNT as usize);
 
         let mut occurrences = Vec::new();

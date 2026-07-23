@@ -33,8 +33,8 @@ impl DatabaseEngine {
 
     /// Connect to a local SQLite database file with production WAL pragmas.
     pub async fn connect_file(path: &Path) -> Result<Self, DatabaseError> {
-        let path_str = path.to_str().ok_to_null();
-        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path_str))
+        let url = format!("sqlite://{}", path.to_string_lossy());
+        let options = SqliteConnectOptions::from_str(&url)
             .map_err(|e| DatabaseError::PoolCreation(e.to_string()))?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)

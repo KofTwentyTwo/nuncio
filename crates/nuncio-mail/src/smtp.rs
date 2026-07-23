@@ -5,7 +5,6 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use nuncio_core::model::Email;
-use std::str::FromStr;
 
 use crate::parser::MailError;
 

@@ -20,6 +20,4 @@ tracing.workspace = true
 keyring.workspace = true
 age.workspace = true
 aes-gcm.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true

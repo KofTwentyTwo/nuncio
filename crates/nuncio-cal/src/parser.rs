@@ -39,7 +39,11 @@ impl IcalParserAdapter {
                         icalendar::DatePerhapsTime::Date(date) => {
                             date.and_hms_opt(0, 0, 0).map_or(0, |dt| dt.and_utc().timestamp())
                         }
-                        icalendar::DatePerhapsTime::DateTime(dt) => dt.as_datetime().map_or(0, |d| d.and_utc().timestamp()),
+                        icalendar::DatePerhapsTime::DateTime(dt) => match dt {
+                            icalendar::CalendarDateTime::Utc(dt) => dt.timestamp(),
+                            icalendar::CalendarDateTime::Floating(dt) => dt.and_utc().timestamp(),
+                            icalendar::CalendarDateTime::WithTZ { date_time, .. } => date_time.and_utc().timestamp(),
+                        },
                     })
                     .unwrap_or(0);
 
@@ -49,7 +53,11 @@ impl IcalParserAdapter {
                         icalendar::DatePerhapsTime::Date(date) => {
                             date.and_hms_opt(23, 59, 59).map_or(0, |dt| dt.and_utc().timestamp())
                         }
-                        icalendar::DatePerhapsTime::DateTime(dt) => dt.as_datetime().map_or(0, |d| d.and_utc().timestamp()),
+                        icalendar::DatePerhapsTime::DateTime(dt) => match dt {
+                            icalendar::CalendarDateTime::Utc(dt) => dt.timestamp(),
+                            icalendar::CalendarDateTime::Floating(dt) => dt.and_utc().timestamp(),
+                            icalendar::CalendarDateTime::WithTZ { date_time, .. } => date_time.and_utc().timestamp(),
+                        },
                     })
                     .unwrap_or(start_time + 3600);
 
