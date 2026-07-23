@@ -224,11 +224,16 @@ impl TuiApp {
             }
             AppMode::AccountSettings => {
                 let acct_items = vec![
-                    ListItem::new(" * [ACTIVE] james.maes@kof22.com (mail.kof22.com:993 / 465 - Implicit TLS)"),
-                    ListItem::new("   [IDLE]   work@nuncio.mx (mail.nuncio.mx:993 / 465 - Implicit TLS)"),
+                    ListItem::new(" * [ACTIVE] james.maes@kof22.com (IMAP: mail.kof22.com:993 │ SMTP: mail.kof22.com:465 - Implicit TLS)"),
+                    ListItem::new("   [IDLE]   work@nuncio.mx       (IMAP: mail.nuncio.mx:993 │ SMTP: mail.nuncio.mx:465 - Implicit TLS)"),
+                    ListItem::new(""),
+                    ListItem::new(" ── ACCOUNT CONTROLS & ACTIONS ──────────────────────────────────────────"),
+                    ListItem::new(" [a] Add New Account Profile     [e] Edit Account Configuration"),
+                    ListItem::new(" [t] Test TLS Connection         [d] Delete Selected Account"),
+                    ListItem::new(" [Esc/q] Close Settings"),
                 ];
                 let acct_block = Block::default()
-                    .title(" Account Settings & Switching [a] ")
+                    .title(" Account Settings & Connectivity Manager [a] ")
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Yellow));
                 let acct_list = List::new(acct_items).block(acct_block);

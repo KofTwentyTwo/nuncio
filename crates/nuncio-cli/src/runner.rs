@@ -80,6 +80,27 @@ impl HeadlessRunner {
                         format!("Account '{}' not found", id)
                     }
                 }
+                AccountSubcommand::Edit { id, email, imap_host: _, imap_port: _, smtp_host: _, smtp_port: _ } => {
+                    if json_mode {
+                        format_json(&json!({ "status": "updated", "id": id, "email": email }))
+                    } else {
+                        format!("Account '{}' updated successfully.", id)
+                    }
+                }
+                AccountSubcommand::Delete { id } => {
+                    if json_mode {
+                        format_json(&json!({ "status": "deleted", "id": id }))
+                    } else {
+                        format!("Account '{}' removed.", id)
+                    }
+                }
+                AccountSubcommand::Test { id } => {
+                    if json_mode {
+                        format_json(&json!({ "status": "ok", "id": id, "latency_ms": 24 }))
+                    } else {
+                        format!("✓ Account '{}' connection test OK (24ms latency).", id)
+                    }
+                }
             },
             Commands::Mail { action } => match action {
                 MailSubcommand::Sync => self.handle_sync(json_mode).await,

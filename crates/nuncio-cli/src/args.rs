@@ -116,6 +116,39 @@ pub enum AccountSubcommand {
         #[arg(short, long, help = "Unique account identifier")]
         id: String,
     },
+    /// Edit an existing account profile configuration.
+    Edit {
+        /// Unique account identifier.
+        #[arg(short, long, help = "Unique account identifier")]
+        id: String,
+        /// Updated email address.
+        #[arg(short, long, help = "Updated email address")]
+        email: Option<String>,
+        /// Updated IMAP server hostname.
+        #[arg(long, help = "Updated IMAP server hostname")]
+        imap_host: Option<String>,
+        /// Updated IMAP server port.
+        #[arg(long, help = "Updated IMAP server port")]
+        imap_port: Option<u16>,
+        /// Updated SMTP server hostname.
+        #[arg(long, help = "Updated SMTP server hostname")]
+        smtp_host: Option<String>,
+        /// Updated SMTP server port.
+        #[arg(long, help = "Updated SMTP server port")]
+        smtp_port: Option<u16>,
+    },
+    /// Remove a configured account profile.
+    Delete {
+        /// Unique account identifier.
+        #[arg(short, long, help = "Unique account identifier")]
+        id: String,
+    },
+    /// Test TLS connection and credential authentication for a configured account.
+    Test {
+        /// Unique account identifier.
+        #[arg(short, long, help = "Unique account identifier")]
+        id: String,
+    },
 }
 
 /// Mail subcommands (`nuncio mail <verb>`).
