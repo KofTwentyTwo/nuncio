@@ -1,21 +1,5 @@
-use thiserror::Error;
+//! Protocol engines for IMAP4rev1, JMAP (RFC 8620/8621), and SMTP.
 
-#[derive(Error, Debug)]
-pub enum MailError {
-    #[error("Connection error: {0}")]
-    Connection(String),
-}
+pub mod parser;
 
-pub struct MailEngine;
-
-impl MailEngine {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for MailEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use parser::{MailError, MimeParserAdapter};
