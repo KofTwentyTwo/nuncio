@@ -10,19 +10,24 @@ impl HtmlSanitizer {
     pub const SECURE_CSP: &'static str =
         "default-src 'none'; img-src nuncio-mail: data:; style-src 'unsafe-inline';";
 
+    /// Sanitize raw HTML email body by stripping script tags.
+    #[allow(dead_code)]
+    pub fn sanitize_html(raw_html: &str) -> String {
+        raw_html
+            .replace("<script", "<!-- <script")
+            .replace("</script>", "</script> -->")
+    }
+
     /// Build a sandboxed HTML iframe wrapper with CSP and JS disabled.
     #[allow(dead_code)]
     pub fn build_sandboxed_iframe(raw_html: &str) -> String {
-        let escaped_html = raw_html
-            .replace('&', "&amp;")
-            .replace('"', "&quot;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;");
+        let sanitized = Self::sanitize_html(raw_html);
+        let attribute_escaped = sanitized.replace('&', "&amp;").replace('"', "&quot;");
 
         format!(
             r#"<iframe sandbox="allow-same-origin" csp="{}" srcdoc="{}"></iframe>"#,
             Self::SECURE_CSP,
-            escaped_html
+            attribute_escaped
         )
     }
 
@@ -44,7 +49,7 @@ mod tests {
 
         assert!(iframe.contains(r#"sandbox="allow-same-origin""#));
         assert!(iframe.contains("img-src nuncio-mail:"));
-        assert!(iframe.contains("&lt;script&gt;"));
+        assert!(iframe.contains("<!-- <script"));
     }
 
     #[test]

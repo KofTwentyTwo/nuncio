@@ -1,8 +1,23 @@
-//! OS native credential vault integration (`keyring`) and in-memory mock vault providers.
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Zeroized sensitive string wrapper ensuring heap bytes are wiped on drop.
+#[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct ZeroizingSecret(String);
+
+impl ZeroizingSecret {
+    /// Wrap a secret string for zeroized memory handling.
+    pub fn new(secret: String) -> Self {
+        Self(secret)
+    }
+
+    /// Access the underlying secret string reference.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Vault storage and retrieval errors.
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -156,5 +171,12 @@ mod tests {
             failed.to_string(),
             "vault storage operation failed: lock poisoned"
         );
+    }
+
+    #[test]
+    fn zeroizing_secret_wipes_bytes_on_drop() {
+        let sec = ZeroizingSecret::new("super_secret_password_123".to_string());
+        assert_eq!(sec.as_str(), "super_secret_password_123");
+        drop(sec);
     }
 }

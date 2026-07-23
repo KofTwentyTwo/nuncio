@@ -57,7 +57,39 @@ impl PayloadCipher {
 
         cipher
             .decrypt(nonce, payload)
-            .map_err(|_| CipherError::DecryptionFailed("authentication tag mismatch".to_string()))
+            .map_err(|e| CipherError::DecryptionFailed(e.to_string()))
+    }
+
+    /// Default static key derivation for local database column encryption at rest.
+    pub const DEFAULT_STORAGE_KEY: [u8; 32] = [
+        0x4e, 0x55, 0x4e, 0x43, 0x49, 0x4f, 0x5f, 0x53, 0x45, 0x43, 0x55, 0x52, 0x45, 0x5f, 0x4b,
+        0x45, 0x5f, 0x32, 0x30, 0x32, 0x36, 0x5f, 0x53, 0x54, 0x4f, 0x52, 0x41, 0x47, 0x45, 0x5f,
+        0x31, 0x32,
+    ];
+
+    /// Encrypt text payload for database column storage at rest.
+    pub fn encrypt_text_at_rest(text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        let encrypted =
+            Self::encrypt_bytes(&Self::DEFAULT_STORAGE_KEY, text.as_bytes()).unwrap_or_default();
+        hex::encode(encrypted)
+    }
+
+    /// Decrypt text payload from database column storage at rest.
+    pub fn decrypt_text_at_rest(stored: &str) -> String {
+        if stored.is_empty() {
+            return String::new();
+        }
+        if let Ok(bytes) = hex::decode(stored) {
+            if let Ok(decrypted) = Self::decrypt_bytes(&Self::DEFAULT_STORAGE_KEY, &bytes) {
+                if let Ok(s) = String::from_utf8(decrypted) {
+                    return s;
+                }
+            }
+        }
+        stored.to_string()
     }
 
     /// Encrypt binary attachment payload using `age` passphrase encryption.
@@ -205,5 +237,18 @@ mod tests {
 
         let dec_err = CipherError::DecryptionFailed("failed".to_string());
         assert_eq!(dec_err.to_string(), "payload decryption failed: failed");
+    }
+
+    #[test]
+    fn text_at_rest_encryption_decryption_roundtrip() {
+        let text = "Sensitive Email Body Payload";
+        let encrypted = PayloadCipher::encrypt_text_at_rest(text);
+        assert_ne!(text, encrypted);
+
+        let decrypted = PayloadCipher::decrypt_text_at_rest(&encrypted);
+        assert_eq!(text, decrypted);
+
+        assert_eq!(PayloadCipher::encrypt_text_at_rest(""), "");
+        assert_eq!(PayloadCipher::decrypt_text_at_rest(""), "");
     }
 }

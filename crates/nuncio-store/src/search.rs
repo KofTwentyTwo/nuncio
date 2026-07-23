@@ -82,9 +82,19 @@ impl<'a> SearchEngine<'a> {
         Ok(())
     }
 
+    /// Sanitize user search inputs to prevent SQLite FTS5 query operator syntax errors.
+    pub fn sanitize_fts5_query(query: &str) -> String {
+        let clean = query.trim();
+        if clean.is_empty() {
+            return String::new();
+        }
+        let sanitized = clean.replace('"', "").replace('*', "").replace(':', "");
+        format!("\"{}\"", sanitized)
+    }
+
     /// Perform a full-text trigram search over email subjects, senders, and body text.
     pub async fn search_messages(&self, query: &str) -> Result<Vec<SearchHit>, DatabaseError> {
-        let clean_query = query.trim();
+        let clean_query = Self::sanitize_fts5_query(query);
         if clean_query.is_empty() {
             return Ok(Vec::new());
         }
@@ -98,7 +108,7 @@ impl<'a> SearchEngine<'a> {
             LIMIT 50
             "#,
         )
-        .bind(clean_query)
+        .bind(&clean_query)
         .fetch_all(self.db.pool())
         .await
         .map_err(DatabaseError::Query)?;
@@ -111,7 +121,7 @@ impl<'a> SearchEngine<'a> {
 
     /// Perform a full-text trigram search over calendar event summaries and locations.
     pub async fn search_events(&self, query: &str) -> Result<Vec<SearchHit>, DatabaseError> {
-        let clean_query = query.trim();
+        let clean_query = Self::sanitize_fts5_query(query);
         if clean_query.is_empty() {
             return Ok(Vec::new());
         }
@@ -125,7 +135,7 @@ impl<'a> SearchEngine<'a> {
             LIMIT 50
             "#,
         )
-        .bind(clean_query)
+        .bind(&clean_query)
         .fetch_all(self.db.pool())
         .await
         .map_err(DatabaseError::Query)?;
@@ -208,5 +218,14 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "evt-1");
         assert_eq!(hits[0].title, "Architecture Summit");
+    }
+
+    #[test]
+    fn fts5_query_sanitizer_removes_special_operators() {
+        assert_eq!(SearchEngine::sanitize_fts5_query(""), "");
+        assert_eq!(
+            SearchEngine::sanitize_fts5_query("query* with: quotes\""),
+            "\"query with quotes\""
+        );
     }
 }

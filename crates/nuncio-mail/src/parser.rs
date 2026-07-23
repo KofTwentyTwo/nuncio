@@ -17,6 +17,9 @@ pub enum MailError {
 pub struct MimeParserAdapter;
 
 impl MimeParserAdapter {
+    /// Maximum allowed MIME payload size (25MB).
+    pub const MAX_PAYLOAD_BYTES: usize = 25 * 1024 * 1024;
+
     /// Parse a raw RFC 5322 byte slice into an [`Email`] domain entity.
     pub fn parse_mime(
         id: &str,
@@ -24,6 +27,12 @@ impl MimeParserAdapter {
         folder_id: &str,
         raw_bytes: &[u8],
     ) -> Result<Email, MailError> {
+        if raw_bytes.len() > Self::MAX_PAYLOAD_BYTES {
+            return Err(MailError::ParseFailed(
+                "MIME payload exceeds maximum allowed limit of 25MB".to_string(),
+            ));
+        }
+
         let msg = MessageParser::default()
             .parse(raw_bytes)
             .ok_or_else(|| MailError::ParseFailed("invalid RFC 5322 MIME structure".to_string()))?;
@@ -130,5 +139,15 @@ mod tests {
             err.to_string(),
             "failed to parse MIME email payload: invalid RFC 5322 MIME structure"
         );
+    }
+
+    #[test]
+    fn parse_oversized_mime_returns_error() {
+        let oversized = vec![0u8; MimeParserAdapter::MAX_PAYLOAD_BYTES + 1];
+        let err = MimeParserAdapter::parse_mime("msg-huge", "acct-1", "inbox", &oversized)
+            .expect_err("should fail for oversized payload");
+        assert!(err
+            .to_string()
+            .contains("exceeds maximum allowed limit of 25MB"));
     }
 }

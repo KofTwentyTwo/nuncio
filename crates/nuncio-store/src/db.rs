@@ -200,6 +200,15 @@ impl DatabaseEngine {
 
     /// Save an [`nuncio_core::model::Email`] to SQLite (INSERT OR REPLACE).
     pub async fn save_email(&self, email: &nuncio_core::model::Email) -> Result<(), DatabaseError> {
+        let enc_plain = email
+            .body_plain
+            .as_ref()
+            .map(|p| crate::cipher::PayloadCipher::encrypt_text_at_rest(p));
+        let enc_html = email
+            .body_html
+            .as_ref()
+            .map(|h| crate::cipher::PayloadCipher::encrypt_text_at_rest(h));
+
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO messages
@@ -215,8 +224,8 @@ impl DatabaseEngine {
         .bind(&email.recipient)
         .bind(email.received_at)
         .bind(if email.read { 1i64 } else { 0i64 })
-        .bind(&email.body_plain)
-        .bind(&email.body_html)
+        .bind(&enc_plain)
+        .bind(&enc_html)
         .execute(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
@@ -271,6 +280,10 @@ impl DatabaseEngine {
                     body_plain,
                     body_html,
                 )| {
+                    let dec_plain =
+                        body_plain.map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&p));
+                    let dec_html =
+                        body_html.map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&h));
                     nuncio_core::model::Email {
                         id,
                         account_id,
@@ -280,8 +293,8 @@ impl DatabaseEngine {
                         recipient,
                         received_at,
                         read: read_flag != 0,
-                        body_plain,
-                        body_html,
+                        body_plain: dec_plain,
+                        body_html: dec_html,
                         attachments: Vec::new(),
                     }
                 },
@@ -317,6 +330,13 @@ impl DatabaseEngine {
         .await
         .map_err(DatabaseError::Query)?;
 
+        let dec_plain = row
+            .8
+            .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&p));
+        let dec_html = row
+            .9
+            .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&h));
+
         Ok(nuncio_core::model::Email {
             id: row.0,
             account_id: row.1,
@@ -326,8 +346,8 @@ impl DatabaseEngine {
             recipient: row.5,
             received_at: row.6,
             read: row.7 != 0,
-            body_plain: row.8,
-            body_html: row.9,
+            body_plain: dec_plain,
+            body_html: dec_html,
             attachments: Vec::new(),
         })
     }

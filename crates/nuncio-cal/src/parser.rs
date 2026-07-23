@@ -16,6 +16,9 @@ pub enum CalendarError {
 pub struct IcalParserAdapter;
 
 impl IcalParserAdapter {
+    /// Maximum allowed iCalendar payload size (25MB).
+    pub const MAX_PAYLOAD_BYTES: usize = 25 * 1024 * 1024;
+
     /// Parse a raw iCalendar RFC 5545 string into a [`CalendarEvent`] entity.
     pub fn parse_ical(
         id: &str,
@@ -23,6 +26,12 @@ impl IcalParserAdapter {
         calendar_id: &str,
         raw_ics: &str,
     ) -> Result<CalendarEvent, CalendarError> {
+        if raw_ics.len() > Self::MAX_PAYLOAD_BYTES {
+            return Err(CalendarError::ParseFailed(
+                "iCalendar payload exceeds maximum allowed limit of 25MB".to_string(),
+            ));
+        }
+
         let calendar: icalendar::Calendar = raw_ics
             .parse()
             .map_err(|e: String| CalendarError::ParseFailed(e))?;
@@ -122,5 +131,15 @@ mod tests {
             err.to_string(),
             "failed to parse iCalendar payload: no VEVENT component found in iCalendar payload"
         );
+    }
+
+    #[test]
+    fn parse_oversized_ics_returns_error() {
+        let oversized = "A".repeat(IcalParserAdapter::MAX_PAYLOAD_BYTES + 1);
+        let err = IcalParserAdapter::parse_ical("evt-huge", "acct-1", "cal-1", &oversized)
+            .expect_err("should fail for oversized payload");
+        assert!(err
+            .to_string()
+            .contains("exceeds maximum allowed limit of 25MB"));
     }
 }
