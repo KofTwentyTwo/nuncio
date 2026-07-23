@@ -383,6 +383,12 @@ impl NsqlParser {
                     return Err(ParseError::InvalidAction("MOVE TO missing target folder".to_string()));
                 }
                 actions.push(RuleAction::MoveTo(target.to_string()));
+            } else if upper.starts_with("COPY TO") {
+                let target = trimmed[7..].trim().trim_matches('\'').trim_matches('"');
+                if target.is_empty() {
+                    return Err(ParseError::InvalidAction("COPY TO missing target folder".to_string()));
+                }
+                actions.push(RuleAction::CopyTo(target.to_string()));
             } else if upper.starts_with("FORWARD TO") {
                 let target = trimmed[10..].trim().trim_matches('\'').trim_matches('"');
                 if target.is_empty() {

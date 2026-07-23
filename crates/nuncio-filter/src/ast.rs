@@ -195,6 +195,8 @@ impl ConditionNode {
 pub enum RuleAction {
     /// Move email to target folder.
     MoveTo(String),
+    /// Copy email to target folder.
+    CopyTo(String),
     /// Mark email as read.
     MarkRead,
     /// Mark email as unread.
@@ -216,6 +218,7 @@ impl RuleAction {
     pub fn to_nsql(&self) -> String {
         match self {
             Self::MoveTo(folder) => format!("MOVE TO '{folder}'"),
+            Self::CopyTo(folder) => format!("COPY TO '{folder}'"),
             Self::MarkRead => "MARK READ".to_string(),
             Self::MarkUnread => "MARK UNREAD".to_string(),
             Self::Flag => "FLAG".to_string(),
