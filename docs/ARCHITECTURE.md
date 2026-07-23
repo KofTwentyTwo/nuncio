@@ -12,12 +12,13 @@ Nuncio decouples application state management, network protocol engines, cryptog
 ┌───────────────────────────────────────────────────────────────────────────────────┐
 │                                Presentation Shells                                │
 │                                                                                   │
-│ ┌────────────────────────┐   ┌─────────────────────────┐   ┌────────────────────┐ │
-│ │   nuncio-cli (Clap)    │   │  nuncio-tui (Ratatui)   │   │nuncio-gui (Tauri v2│ │
-│ └───────────┬────────────┘   └────────────┬────────────┘   └─────────┬──────────┘ │
-└─────────────┼─────────────────────────────┼──────────────────────────┼────────────┘
-              │ CoreCommand (mpsc)          │ CoreCommand (mpsc)       │ CoreCommand (mpsc)
-              ▼ CoreState (watch)           ▼ CoreState (watch)        ▼ CoreState (watch)
+│ ┌──────────────┐ ┌──────────────┐ ┌───────────────────┐ ┌───────────────────────┐ │
+│ │  nuncio-cli  │ │  nuncio-tui  │ │nuncio-gui(Tauri v2│ │nuncio-mcp (Native MCP │ │
+│ │ (POSIX CLI)  │ │  (Ratatui)   │ │  Desktop GUI)     │ │ LLM Agent Interface)  │ │
+│ └──────┬───────┘ └──────┬───────┘ └─────────┬─────────┘ └───────────┬───────────┘ │
+└────────┼────────────────┼───────────────────┼───────────────────────┼─────────────┘
+         │                │                   │                       │
+         ▼                ▼                   ▼                       ▼
 ┌───────────────────────────────────────────────────────────────────────────────────┐
 │                                    nuncio-core                                    │
 │                           Async Event Bus & Orchestrator                          │

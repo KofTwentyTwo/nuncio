@@ -1,0 +1,29 @@
+[package]
+name = "nuncio-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nuncio-core = { path = "../nuncio-core" }
+nuncio-mail = { path = "../nuncio-mail" }
+nuncio-cal = { path = "../nuncio-cal" }
+nuncio-store = { path = "../nuncio-store" }
+
+tokio = { workspace = true, features = ["full"] }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono = "0.4"
+tempfile.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
