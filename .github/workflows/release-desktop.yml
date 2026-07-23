@@ -1,17 +1,22 @@
-name: Nuncio Tauri v2 Desktop GUI Release (MSI, DMG, AppImage, Deb)
+name: Nuncio Desktop GUI Release Pipeline (MSI, DMG, AppImage, Deb)
 
 on:
   push:
+    branches:
+      - main
+      - rc
+      - dev
     tags:
       - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build-tauri:
-    name: Build Desktop ${{ matrix.platform }}
+    name: Build Desktop (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -27,7 +32,8 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout Code
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -49,15 +55,36 @@ jobs:
         run: |
           npm --prefix crates/nuncio-gui/ui install
 
+      - name: Determine Environment Channel & Tag
+        id: env_prep
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/heads/dev ]]; then
+            echo "channel=dev" >> $GITHUB_OUTPUT
+            echo "tag_name=dev-latest" >> $GITHUB_OUTPUT
+            echo "release_name=Nuncio Desktop (Development Nightly)" >> $GITHUB_OUTPUT
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/heads/rc || "${{ github.ref }}" == refs/tags/*rc* ]]; then
+            echo "channel=rc" >> $GITHUB_OUTPUT
+            echo "tag_name=rc-latest" >> $GITHUB_OUTPUT
+            echo "release_name=Nuncio Desktop (Release Candidate)" >> $GITHUB_OUTPUT
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "channel=prod" >> $GITHUB_OUTPUT
+            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "release_name=Nuncio Desktop Release ${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build Tauri Desktop Installers (.msi, .dmg, .AppImage, .deb)
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: 'crates/nuncio-gui/src-tauri'
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Nuncio Desktop GUI ${{ github.ref_name }}'
+          tagName: ${{ steps.env_prep.outputs.tag_name }}
+          releaseName: ${{ steps.env_prep.outputs.release_name }}
           releaseBody: 'Production Tauri v2 Desktop GUI installers (.msi, .dmg, .AppImage, .deb).'
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ steps.env_prep.outputs.is_prerelease == 'true' }}
           args: ${{ matrix.args }}

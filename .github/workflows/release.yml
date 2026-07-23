@@ -1,7 +1,11 @@
-name: Nuncio Multi-Platform Release & Nightly Pipeline
+name: Nuncio Multi-Platform Release Pipeline (Dev, RC, Prod)
 
 on:
   push:
+    branches:
+      - main
+      - rc
+      - dev
     tags:
       - 'v*'
   schedule:
@@ -73,7 +77,7 @@ jobs:
           path: ${{ matrix.artifact_name }}
 
   publish-release:
-    name: Publish GitHub Release / Nightly Pre-Release
+    name: Publish GitHub Release (Dev / RC / Prod)
     needs: build-binaries
     runs-on: ubuntu-latest
     steps:
@@ -92,17 +96,24 @@ jobs:
           cd dist-final
           sha256sum * > SHA256SUMS.txt
 
-      - name: Determine Tag & Release Name
+      - name: Determine Environment Channel, Tag & Release Name
         id: prep
         run: |
-          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "tag_name=nightly-$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+          if [[ "${{ github.ref }}" == refs/heads/dev || "${{ github.event_name }}" == "schedule" ]]; then
+            echo "tag_name=dev-nightly" >> $GITHUB_OUTPUT
             echo "release_name=Nuncio Development Nightly ($(date +'%Y-%m-%d'))" >> $GITHUB_OUTPUT
             echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=Development (Dev)" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/heads/rc || "${{ github.ref }}" == refs/tags/*rc* ]]; then
+            echo "tag_name=rc-latest" >> $GITHUB_OUTPUT
+            echo "release_name=Nuncio Release Candidate (${{ github.ref_name }})" >> $GITHUB_OUTPUT
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel=Release Candidate (RC)" >> $GITHUB_OUTPUT
           else
             echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
             echo "release_name=Nuncio Release ${{ github.ref_name }}" >> $GITHUB_OUTPUT
             echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "channel=Production (Prod GA)" >> $GITHUB_OUTPUT
           fi
 
       - name: Create GitHub Release
@@ -110,10 +121,11 @@ jobs:
         with:
           tag_name: ${{ steps.prep.outputs.tag_name }}
           name: ${{ steps.prep.outputs.release_name }}
-          prerelease: ${{ steps.prep.outputs.is_prerelease }}
+          prerelease: ${{ steps.prep.outputs.is_prerelease == 'true' }}
           files: dist-final/*
           body: |
             ## Nuncio Sovereign Mail, Calendar & Contacts Suite
+            **Release Channel**: ${{ steps.prep.outputs.channel }}
 
             ### 📦 Official Installer & Package Downloads
             - **Windows Installer**: `Nuncio_x64.msi` (WiX Installer) / `Nuncio_x64-setup.exe` (NSIS)
