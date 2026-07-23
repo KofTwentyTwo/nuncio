@@ -88,18 +88,20 @@ graph TD
 
 ## Workspace Crate Architecture
 
-The Nuncio Cargo workspace is modularized into 9 crates with strict domain boundaries:
+The Nuncio Cargo workspace is modularized into 11 crates with strict domain boundaries:
 
 | Crate Path | Architectural Role & Description |
 | :--- | :--- |
-| `crates/nuncio-core` | Core domain models (`Email`, `CalendarEvent`, `Folder`), `EventBus`, and `IpcClient`/`IpcDaemonServer` framing & JSON-RPC protocol. |
+| `crates/nuncio-core` | Core domain models (`Email`, `CalendarEvent`, `Contact`), `EventBus`, OpenPGP/S/MIME E2EE, WASM Plugins, Local LLM Summarization, and `IpcClient`/`IpcDaemonServer` framing. |
 | `crates/nuncio-mail` | IMAP4rev1, JMAP (RFC 8620/8621), SMTP transport engines, and MIME stream parser. |
-| `crates/nuncio-cal` | CalDAV (RFC 4791) client, iCalendar (RFC 5545) parser, and `rrule` recurrence engine. |
-| `crates/nuncio-store` | SQLite WAL persistence (`DatabaseEngine`), FTS5 trigram search index, AES-256-GCM column cipher, `age` attachment stream cipher, and OS Keyring vault integration. |
+| `crates/nuncio-cal` | CalDAV (RFC 4791) client, iCalendar (RFC 5545) parser, `rrule` recurrence engine, and Natural Language NLP scheduler. |
+| `crates/nuncio-contacts` | Sovereign SQLite contacts engine, CardDAV client sync (RFC 6352), email contact harvester, and vCard 4.0 generator. |
+| `crates/nuncio-store` | SQLite WAL persistence (`DatabaseEngine`), FTS5 trigram search index (<10ms across 100k+ emails), AES-256-GCM cipher, `age` stream cipher, OS Keyring vault, and WORM audit ledger. |
+| `crates/nuncio-filter` | Declarative NSQL filter engine (`sqlparser 0.54`), AST actions, 6-pass validator, dry-run tester, and HMAC webhooks. |
 | `crates/nuncio-cli` | Pure Noun + Verb CLI runner and Unix pipe scripting engine. |
-| `crates/nuncio-tui` | Terminal user interface powered by Ratatui and crossterm. |
+| `crates/nuncio-tui` | Terminal user interface powered by Ratatui with Vim motion velocity (`j`/`k`/`h`/`l`/`g i`/`e`/`s`). |
 | `crates/nuncio-gui` | Native desktop GUI application shell powered by Tauri v2 and React. |
-| `crates/nuncio-mcp` | MCP stdio server providing LLM agents direct read/write access. |
+| `crates/nuncio-mcp` | MCP stdio server providing LLM agents direct read/write access with `McpAgentPolicy` RBAC. |
 | `crates/nunciod` | Standalone background daemon binary server. |
 
 ---
