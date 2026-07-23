@@ -89,7 +89,10 @@ mod tests {
             read: None,
         };
         IpcBridge::handle_ipc_command(&bus, payload);
-        assert_eq!(IpcBridge::get_app_state(&bus).status, EngineStatus::ShuttingDown);
+        assert_eq!(
+            IpcBridge::get_app_state(&bus).status,
+            EngineStatus::ShuttingDown
+        );
 
         // Unknown action does not panic
         let unknown = IpcCommandPayload {

@@ -27,17 +27,23 @@ impl RecurrenceEngine {
         let start_dt = DateTime::from_timestamp(event.start_time, 0)
             .ok_or_else(|| CalendarError::ParseFailed("invalid start timestamp".to_string()))?;
 
-        let rrule_set_str = format!("DTSTART:{}\nRRULE:{}", start_dt.format("%Y%m%dT%H%M%SZ"), rrule_str);
+        let rrule_set_str = format!(
+            "DTSTART:{}\nRRULE:{}",
+            start_dt.format("%Y%m%dT%H%M%SZ"),
+            rrule_str
+        );
 
         let rrule_set: RRuleSet = rrule_set_str
             .parse()
             .map_err(|e: rrule::RRuleError| CalendarError::ParseFailed(e.to_string()))?;
 
-        let window_start_dt = DateTime::from_timestamp(start_window, 0)
-            .ok_or_else(|| CalendarError::ParseFailed("invalid window start timestamp".to_string()))?;
+        let window_start_dt = DateTime::from_timestamp(start_window, 0).ok_or_else(|| {
+            CalendarError::ParseFailed("invalid window start timestamp".to_string())
+        })?;
 
-        let window_end_dt = DateTime::from_timestamp(end_window, 0)
-            .ok_or_else(|| CalendarError::ParseFailed("invalid window end timestamp".to_string()))?;
+        let window_end_dt = DateTime::from_timestamp(end_window, 0).ok_or_else(|| {
+            CalendarError::ParseFailed("invalid window end timestamp".to_string())
+        })?;
 
         let duration = event.end_time - event.start_time;
 

@@ -40,13 +40,15 @@ impl JsonResponse<()> {
 /// Serialize payload to a formatted JSON string.
 pub fn format_json<T: Serialize>(data: &T) -> String {
     let response = JsonResponse::success(data);
-    serde_json::to_string(&response).unwrap_or_else(|_| r#"{"status":"error","error":"JSON serialization failed"}"#.to_string())
+    serde_json::to_string(&response)
+        .unwrap_or_else(|_| r#"{"status":"error","error":"JSON serialization failed"}"#.to_string())
 }
 
 /// Serialize error message to a formatted JSON string.
 pub fn format_json_error(message: &str) -> String {
     let response = JsonResponse::error(message);
-    serde_json::to_string(&response).unwrap_or_else(|_| r#"{"status":"error","error":"JSON serialization failed"}"#.to_string())
+    serde_json::to_string(&response)
+        .unwrap_or_else(|_| r#"{"status":"error","error":"JSON serialization failed"}"#.to_string())
 }
 
 #[cfg(test)]

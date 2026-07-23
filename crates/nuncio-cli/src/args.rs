@@ -14,7 +14,11 @@ use serde::{Deserialize, Serialize};
 )]
 pub struct Cli {
     /// Output machine-readable JSON payloads to stdout.
-    #[arg(long, global = true, help = "Output machine-readable JSON payloads to stdout")]
+    #[arg(
+        long,
+        global = true,
+        help = "Output machine-readable JSON payloads to stdout"
+    )]
     pub json: bool,
 
     /// Target specific account ID.
@@ -22,7 +26,12 @@ pub struct Cli {
     pub account: Option<String>,
 
     /// Enable verbose log output to stderr.
-    #[arg(short, long, global = true, help = "Enable detailed verbose execution logs on stderr")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "Enable detailed verbose execution logs on stderr"
+    )]
     pub verbose: bool,
 
     /// Subcommand resource noun.

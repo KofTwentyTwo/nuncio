@@ -259,7 +259,18 @@ impl DatabaseEngine {
         Ok(rows
             .into_iter()
             .map(
-                |(id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html)| {
+                |(
+                    id,
+                    account_id,
+                    folder_id,
+                    subject,
+                    sender,
+                    recipient,
+                    received_at,
+                    read_flag,
+                    body_plain,
+                    body_html,
+                )| {
                     nuncio_core::model::Email {
                         id,
                         account_id,
@@ -279,7 +290,10 @@ impl DatabaseEngine {
     }
 
     /// Retrieve a single message by ID.
-    pub async fn get_message(&self, message_id: &str) -> Result<nuncio_core::model::Email, DatabaseError> {
+    pub async fn get_message(
+        &self,
+        message_id: &str,
+    ) -> Result<nuncio_core::model::Email, DatabaseError> {
         let row: (
             String,
             String,
@@ -406,13 +420,22 @@ mod tests {
             attachments: Vec::new(),
         };
 
-        engine.save_email(&email).await.expect("save email succeeds");
+        engine
+            .save_email(&email)
+            .await
+            .expect("save email succeeds");
 
-        let fetched = engine.get_message("msg-db-100").await.expect("get message succeeds");
+        let fetched = engine
+            .get_message("msg-db-100")
+            .await
+            .expect("get message succeeds");
         assert_eq!(fetched.subject, "Database Sync Test");
         assert!(!fetched.read);
 
-        let msgs = engine.list_messages("INBOX", 10).await.expect("list messages succeeds");
+        let msgs = engine
+            .list_messages("INBOX", 10)
+            .await
+            .expect("list messages succeeds");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].id, "msg-db-100");
 
@@ -440,8 +463,14 @@ mod tests {
             sync_interval_secs: 60,
         };
 
-        engine.save_account(&acct).await.expect("save account succeeds");
-        let accounts = engine.list_accounts().await.expect("list accounts succeeds");
+        engine
+            .save_account(&acct)
+            .await
+            .expect("save account succeeds");
+        let accounts = engine
+            .list_accounts()
+            .await
+            .expect("list accounts succeeds");
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "acct-test-1");
         assert_eq!(accounts[0].email_address, "work@nuncio.mx");

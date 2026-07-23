@@ -31,14 +31,17 @@ impl IcalParserAdapter {
             if let icalendar::CalendarComponent::Event(event) = component {
                 let summary = event.get_summary().unwrap_or("No Summary").to_string();
                 let location = event.get_location().map(|l| l.to_string());
-                let rrule = event.properties().get("RRULE").map(|p| p.value().to_string());
+                let rrule = event
+                    .properties()
+                    .get("RRULE")
+                    .map(|p| p.value().to_string());
 
                 let start_time = event
                     .get_start()
                     .map(|d| match d {
-                        icalendar::DatePerhapsTime::Date(date) => {
-                            date.and_hms_opt(0, 0, 0).map_or(0, |dt| dt.and_utc().timestamp())
-                        }
+                        icalendar::DatePerhapsTime::Date(date) => date
+                            .and_hms_opt(0, 0, 0)
+                            .map_or(0, |dt| dt.and_utc().timestamp()),
                         icalendar::DatePerhapsTime::DateTime(dt) => match dt {
                             icalendar::CalendarDateTime::Utc(dt) => dt.timestamp(),
                             icalendar::CalendarDateTime::Floating(dt) => dt.and_utc().timestamp(),
@@ -50,9 +53,9 @@ impl IcalParserAdapter {
                 let end_time = event
                     .get_end()
                     .map(|d| match d {
-                        icalendar::DatePerhapsTime::Date(date) => {
-                            date.and_hms_opt(23, 59, 59).map_or(0, |dt| dt.and_utc().timestamp())
-                        }
+                        icalendar::DatePerhapsTime::Date(date) => date
+                            .and_hms_opt(23, 59, 59)
+                            .map_or(0, |dt| dt.and_utc().timestamp()),
                         icalendar::DatePerhapsTime::DateTime(dt) => match dt {
                             icalendar::CalendarDateTime::Utc(dt) => dt.timestamp(),
                             icalendar::CalendarDateTime::Floating(dt) => dt.and_utc().timestamp(),
@@ -111,8 +114,13 @@ mod tests {
             .expect_err("should fail without VEVENT");
         assert_eq!(
             err,
-            CalendarError::ParseFailed("no VEVENT component found in iCalendar payload".to_string())
+            CalendarError::ParseFailed(
+                "no VEVENT component found in iCalendar payload".to_string()
+            )
         );
-        assert_eq!(err.to_string(), "failed to parse iCalendar payload: no VEVENT component found in iCalendar payload");
+        assert_eq!(
+            err.to_string(),
+            "failed to parse iCalendar payload: no VEVENT component found in iCalendar payload"
+        );
     }
 }

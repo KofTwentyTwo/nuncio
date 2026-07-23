@@ -48,7 +48,11 @@ impl MockCalendarBackend {
         let guard = self.events.lock().unwrap();
         let matches = guard
             .iter()
-            .filter(|e| e.calendar_id == calendar_id && e.start_time >= start_window && e.end_time <= end_window)
+            .filter(|e| {
+                e.calendar_id == calendar_id
+                    && e.start_time >= start_window
+                    && e.end_time <= end_window
+            })
             .cloned()
             .collect();
 
@@ -84,7 +88,9 @@ mod tests {
         assert_eq!(events[0].id, "evt-m1");
 
         mock.set_should_fail(true);
-        assert!(mock.list_events("cal-work", 1699999000, 1700004000).is_err());
+        assert!(mock
+            .list_events("cal-work", 1699999000, 1700004000)
+            .is_err());
     }
 
     #[tokio::test]

@@ -61,11 +61,11 @@ impl TuiApp {
 
     /// Render ratatui 3-pane split widgets onto frame.
     pub fn render_frame(&self, frame: &mut ratatui::Frame) {
-        use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
-        use ratatui::style::{Color, Style};
-        use ratatui::layout::{Constraint, Direction, Layout};
         use crate::html::HtmlRenderer;
         use crate::layout::AppLayout;
+        use ratatui::layout::{Constraint, Direction, Layout};
+        use ratatui::style::{Color, Style};
+        use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)

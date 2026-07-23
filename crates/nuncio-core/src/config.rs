@@ -90,7 +90,10 @@ impl AccountConfig {
             });
         }
         if !self.email_address.contains('@')
-            || !self.email_address.split_once('@').is_some_and(|(_, domain)| domain.contains('.'))
+            || !self
+                .email_address
+                .split_once('@')
+                .is_some_and(|(_, domain)| domain.contains('.'))
         {
             return Err(ConfigError::InvalidEmailFormat);
         }
@@ -253,10 +256,7 @@ mod tests {
             serde_json::to_string(&TlsMode::StartTls).unwrap(),
             "\"start_tls\""
         );
-        assert_eq!(
-            serde_json::to_string(&TlsMode::Plain).unwrap(),
-            "\"plain\""
-        );
+        assert_eq!(serde_json::to_string(&TlsMode::Plain).unwrap(), "\"plain\"");
     }
 
     #[test]

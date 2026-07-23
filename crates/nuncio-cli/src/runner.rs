@@ -64,8 +64,10 @@ impl HeadlessRunner {
                     imap_mode,
                     smtp_mode,
                 } => {
-                    self.handle_add_account(email, imap_host, *imap_port, imap_mode, smtp_mode, json_mode)
-                        .await
+                    self.handle_add_account(
+                        email, imap_host, *imap_port, imap_mode, smtp_mode, json_mode,
+                    )
+                    .await
                 }
                 AccountSubcommand::Show { id } => {
                     let accounts = self.db.list_accounts().await.unwrap_or_default();
@@ -147,7 +149,13 @@ impl HeadlessRunner {
         }
     }
 
-    async fn handle_send_email(&self, to: &str, subject: &str, body: &str, json_mode: bool) -> String {
+    async fn handle_send_email(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+        json_mode: bool,
+    ) -> String {
         if json_mode {
             format_json(&json!({
                 "sent": true,
@@ -241,7 +249,10 @@ impl HeadlessRunner {
                 "accounts": accounts
             }))
         } else {
-            format!("Configured Accounts: {} account(s) registered", accounts.len())
+            format!(
+                "Configured Accounts: {} account(s) registered",
+                accounts.len()
+            )
         }
     }
 
@@ -268,7 +279,9 @@ mod tests {
 
     #[tokio::test]
     async fn headless_runner_executes_all_pure_noun_verb_commands() {
-        let runner = HeadlessRunner::ephemeral().await.expect("ephemeral runner initializes");
+        let runner = HeadlessRunner::ephemeral()
+            .await
+            .expect("ephemeral runner initializes");
 
         // Account Noun Commands
         let acct_add = runner

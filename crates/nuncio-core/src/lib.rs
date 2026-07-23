@@ -9,7 +9,6 @@ pub mod model;
 pub use config::{AccountConfig, AccountProtocol, ConfigError, TlsMode};
 pub use model::{Attachment, CalendarEvent, Contact, Email, Folder};
 
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;

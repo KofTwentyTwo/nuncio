@@ -48,13 +48,19 @@ impl SmtpTransportEngine {
     /// Validate SMTP server host, port, and credentials.
     pub fn validate_smtp_config(host: &str, port: u16, username: &str) -> Result<(), MailError> {
         if host.trim().is_empty() {
-            return Err(MailError::ParseFailed("SMTP host cannot be empty".to_string()));
+            return Err(MailError::ParseFailed(
+                "SMTP host cannot be empty".to_string(),
+            ));
         }
         if port == 0 {
-            return Err(MailError::ParseFailed("invalid SMTP port number".to_string()));
+            return Err(MailError::ParseFailed(
+                "invalid SMTP port number".to_string(),
+            ));
         }
         if username.trim().is_empty() {
-            return Err(MailError::ParseFailed("SMTP username cannot be empty".to_string()));
+            return Err(MailError::ParseFailed(
+                "SMTP username cannot be empty".to_string(),
+            ));
         }
         Ok(())
     }

@@ -61,7 +61,10 @@ impl PayloadCipher {
     }
 
     /// Encrypt binary attachment payload using `age` passphrase encryption.
-    pub fn encrypt_attachment_stream(passphrase: &str, input: &[u8]) -> Result<Vec<u8>, CipherError> {
+    pub fn encrypt_attachment_stream(
+        passphrase: &str,
+        input: &[u8],
+    ) -> Result<Vec<u8>, CipherError> {
         let encryptor = age::Encryptor::with_user_passphrase(secret_service_passphrase(passphrase));
         let mut encrypted_output = Vec::new();
         let mut writer = encryptor
@@ -80,7 +83,10 @@ impl PayloadCipher {
     }
 
     /// Decrypt binary attachment payload encrypted by [`PayloadCipher::encrypt_attachment_stream`].
-    pub fn decrypt_attachment_stream(passphrase: &str, ciphertext: &[u8]) -> Result<Vec<u8>, CipherError> {
+    pub fn decrypt_attachment_stream(
+        passphrase: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, CipherError> {
         let decryptor = match age::Decryptor::new(ciphertext) {
             Ok(age::Decryptor::Passphrase(d)) => d,
             Ok(_) => {

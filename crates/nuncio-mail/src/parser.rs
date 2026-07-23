@@ -56,11 +56,16 @@ impl MimeParserAdapter {
                 .unwrap_or("unnamed_attachment")
                 .to_string();
 
-            let mime_type = attachment
-                .content_type()
-                .map_or("application/octet-stream".to_string(), |c| {
-                    format!("{}/{}", c.c_type, c.c_subtype.as_deref().unwrap_or("octet-stream"))
-                });
+            let mime_type =
+                attachment
+                    .content_type()
+                    .map_or("application/octet-stream".to_string(), |c| {
+                        format!(
+                            "{}/{}",
+                            c.c_type,
+                            c.c_subtype.as_deref().unwrap_or("octet-stream")
+                        )
+                    });
 
             let content = Bytes::copy_from_slice(attachment.contents());
 
@@ -100,22 +105,30 @@ mod tests {
                     \r\n\
                     Hello Bob, this is a plain text email.";
 
-        let email = MimeParserAdapter::parse_mime("msg-1", "acct-1", "inbox", raw).expect("parse succeeds");
+        let email =
+            MimeParserAdapter::parse_mime("msg-1", "acct-1", "inbox", raw).expect("parse succeeds");
         assert_eq!(email.id, "msg-1");
         assert_eq!(email.subject, "Test Subject");
         assert_eq!(email.sender, "alice@nuncio.mx");
         assert_eq!(email.recipient, "bob@nuncio.mx");
-        assert_eq!(email.body_plain, Some("Hello Bob, this is a plain text email.".to_string()));
+        assert_eq!(
+            email.body_plain,
+            Some("Hello Bob, this is a plain text email.".to_string())
+        );
     }
 
     #[test]
     fn parse_invalid_mime_returns_error() {
         let raw = b"";
-        let err = MimeParserAdapter::parse_mime("msg-2", "acct-1", "inbox", raw).expect_err("should fail");
+        let err = MimeParserAdapter::parse_mime("msg-2", "acct-1", "inbox", raw)
+            .expect_err("should fail");
         assert_eq!(
             err,
             MailError::ParseFailed("invalid RFC 5322 MIME structure".to_string())
         );
-        assert_eq!(err.to_string(), "failed to parse MIME email payload: invalid RFC 5322 MIME structure");
+        assert_eq!(
+            err.to_string(),
+            "failed to parse MIME email payload: invalid RFC 5322 MIME structure"
+        );
     }
 }

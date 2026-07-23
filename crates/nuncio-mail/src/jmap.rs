@@ -48,10 +48,7 @@ impl JmapEngine {
     }
 
     /// Parse raw JMAP `Email/get` JSON response payload into domain [`Email`] list and new state string.
-    pub fn parse_email_response(
-        &self,
-        raw_json: &str,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    pub fn parse_email_response(&self, raw_json: &str) -> Result<(Vec<Email>, String), MailError> {
         let resp: JmapEmailGetResponse = serde_json::from_str(raw_json)
             .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {}", e)))?;
 
@@ -159,7 +156,9 @@ mod tests {
     #[test]
     fn parse_invalid_jmap_json_fails() {
         let engine = JmapEngine::new("acct-1");
-        let err = engine.parse_email_response("invalid json").expect_err("should fail");
+        let err = engine
+            .parse_email_response("invalid json")
+            .expect_err("should fail");
         assert!(matches!(err, MailError::ParseFailed(_)));
     }
 }

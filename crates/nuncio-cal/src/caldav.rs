@@ -52,9 +52,12 @@ impl CalDavClient {
                 let clean_ics = ics_data.trim();
                 if !clean_ics.is_empty() {
                     let event_id = format!("caldav-evt-{}", events.len() + 1);
-                    if let Ok(event) =
-                        IcalParserAdapter::parse_ical(&event_id, &self.account_id, calendar_id, clean_ics)
-                    {
+                    if let Ok(event) = IcalParserAdapter::parse_ical(
+                        &event_id,
+                        &self.account_id,
+                        calendar_id,
+                        clean_ics,
+                    ) {
                         events.push(event);
                     }
                 }
