@@ -10,6 +10,7 @@ members = [
     "crates/nuncio-gui/src-tauri",
     "crates/nuncio-cli",
     "crates/nuncio-mcp",
+    "crates/nunciod",
 ]
 
 [workspace.package]

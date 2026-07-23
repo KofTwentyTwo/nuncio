@@ -1,6 +1,8 @@
 //! Model Context Protocol (MCP) Tool definitions for Nuncio.
 
+use nuncio_core::ipc::{IpcClient, IpcDaemonServer};
 use nuncio_core::model::{CalendarEvent, Email};
+use nuncio_core::CoreCommand;
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
 use serde::{Deserialize, Serialize};
@@ -18,15 +20,19 @@ pub struct McpToolDefinition {
     pub input_schema: Value,
 }
 
-/// Handler managing tool registration and execution over `DatabaseEngine`.
+/// Handler managing tool registration and execution over `DatabaseEngine` and `IpcClient`.
 pub struct McpToolHandler {
     db: Arc<DatabaseEngine>,
+    ipc_client: IpcClient,
 }
 
 impl McpToolHandler {
     /// Create a new `McpToolHandler` wrapping shared `DatabaseEngine`.
     pub fn new(db: Arc<DatabaseEngine>) -> Self {
-        Self { db }
+        Self {
+            db,
+            ipc_client: IpcClient::new(IpcDaemonServer::DEFAULT_ADDR),
+        }
     }
 
     /// List all available MCP tools exposed by Nuncio.
@@ -45,7 +51,7 @@ impl McpToolHandler {
             },
             McpToolDefinition {
                 name: "nuncio_mail_send".to_string(),
-                description: "Send an email message via configured Nuncio SMTP transport.".to_string(),
+                description: "Send an email message via configured Nuncio daemon & SMTP transport.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -106,10 +112,7 @@ impl McpToolHandler {
         match name {
             "nuncio_mail_list" => {
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-                let folder_id = args
-                    .get("folder_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("INBOX");
+                let folder_id = args.get("folder_id").and_then(|v| v.as_str()).unwrap_or("INBOX");
                 let messages = self
                     .db
                     .list_messages(folder_id, limit)
@@ -118,22 +121,10 @@ impl McpToolHandler {
                 Ok(json!({ "messages": messages }))
             }
             "nuncio_mail_send" => {
-                let recipient = args
-                    .get("recipient")
-                    .and_then(|v| v.as_str())
-                    .ok_or("missing recipient")?;
-                let subject = args
-                    .get("subject")
-                    .and_then(|v| v.as_str())
-                    .ok_or("missing subject")?;
-                let body = args
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .ok_or("missing body")?;
-                let account_id = args
-                    .get("account_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or("missing account_id")?;
+                let recipient = args.get("recipient").and_then(|v| v.as_str()).ok_or("missing recipient")?;
+                let subject = args.get("subject").and_then(|v| v.as_str()).ok_or("missing subject")?;
+                let body = args.get("body").and_then(|v| v.as_str()).ok_or("missing body")?;
+                let account_id = args.get("account_id").and_then(|v| v.as_str()).ok_or("missing account_id")?;
 
                 let email = Email {
                     id: format!("mcp-outbound-{}", chrono::Utc::now().timestamp_millis()),
@@ -150,6 +141,12 @@ impl McpToolHandler {
                 };
 
                 let _ = self.db.save_email(&email).await;
+
+                // Notify daemon over IPC if online
+                if let Ok(true) = self.ipc_client.ping().await {
+                    let _ = self.ipc_client.send_command(CoreCommand::SyncAll).await;
+                }
+
                 Ok(json!({ "status": "queued_and_saved", "email_id": email.id }))
             }
             "nuncio_mail_search" => {
@@ -161,6 +158,7 @@ impl McpToolHandler {
             }
             "nuncio_cal_list_events" => {
                 let calendar_id = args.get("calendar_id").and_then(|v| v.as_str()).unwrap_or("work");
+                #[allow(clippy::type_complexity)]
                 let rows: Vec<(String, String, String, String, i64, i64, Option<String>)> = sqlx::query_as(
                     "SELECT id, account_id, calendar_id, summary, start_time, end_time, location FROM calendar_events WHERE calendar_id = ?"
                 )
@@ -171,26 +169,11 @@ impl McpToolHandler {
                 Ok(json!({ "events": rows }))
             }
             "nuncio_cal_create_event" => {
-                let account_id = args
-                    .get("account_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("acct-1");
-                let calendar_id = args
-                    .get("calendar_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or("missing calendar_id")?;
-                let summary = args
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .ok_or("missing summary")?;
-                let start_time = args
-                    .get("start_time")
-                    .and_then(|v| v.as_i64())
-                    .ok_or("missing start_time")?;
-                let end_time = args
-                    .get("end_time")
-                    .and_then(|v| v.as_i64())
-                    .ok_or("missing end_time")?;
+                let account_id = args.get("account_id").and_then(|v| v.as_str()).unwrap_or("acct-1");
+                let calendar_id = args.get("calendar_id").and_then(|v| v.as_str()).ok_or("missing calendar_id")?;
+                let summary = args.get("summary").and_then(|v| v.as_str()).ok_or("missing summary")?;
+                let start_time = args.get("start_time").and_then(|v| v.as_i64()).ok_or("missing start_time")?;
+                let end_time = args.get("end_time").and_then(|v| v.as_i64()).ok_or("missing end_time")?;
 
                 let event = CalendarEvent {
                     id: format!("mcp-evt-{}", chrono::Utc::now().timestamp_millis()),
@@ -213,6 +196,11 @@ impl McpToolHandler {
                     .bind(&event.location)
                     .execute(self.db.pool())
                     .await;
+
+                // Notify daemon over IPC if online
+                if let Ok(true) = self.ipc_client.ping().await {
+                    let _ = self.ipc_client.send_command(CoreCommand::SyncAll).await;
+                }
 
                 Ok(json!({ "status": "created", "event": event }))
             }

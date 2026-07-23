@@ -54,9 +54,22 @@ pub mod commands {
     }
 }
 
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
 /// Run Tauri v2 desktop shell application.
 pub fn run() {
     let result = tauri::Builder::default()
+        .setup(|app| {
+            if app.get_webview_window("main").is_none() {
+                let _window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                    .title("Nuncio Mail & Calendar")
+                    .inner_size(1280.0, 800.0)
+                    .resizable(true)
+                    .visible(true)
+                    .build()?;
+            }
+            Ok(())
+        })
         .manage(GuiState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_app_state,

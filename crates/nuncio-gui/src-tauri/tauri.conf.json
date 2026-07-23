@@ -4,19 +4,22 @@
   "version": "0.1.0",
   "identifier": "mx.nuncio.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm --prefix ../ui run build",
     "frontendDist": "../ui/dist"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Nuncio",
         "width": 1280,
         "height": 800,
         "resizable": true,
-        "transparent": true
+        "decorations": true,
+        "transparent": false,
+        "visible": true
       }
     ],
     "security": {

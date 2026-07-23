@@ -1,0 +1,28 @@
+[package]
+name = "nunciod"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nuncio-core = { path = "../nuncio-core" }
+nuncio-mail = { path = "../nuncio-mail" }
+nuncio-cal = { path = "../nuncio-cal" }
+nuncio-store = { path = "../nuncio-store" }
+
+tokio = { workspace = true, features = ["full"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = "0.3"
+tempfile.workspace = true
+
+[dev-dependencies]
+nuncio-cli = { path = "../nuncio-cli" }
+nuncio-mcp = { path = "../nuncio-mcp" }
