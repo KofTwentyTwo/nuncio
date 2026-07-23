@@ -68,6 +68,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.set_mode(app::AppMode::SplashScreen);
                             }
                         }
+                        UserAction::ToggleFilterRules => {
+                            if app.mode() == app::AppMode::FilterRules {
+                                app.set_mode(app::AppMode::MainView);
+                            } else {
+                                app.set_mode(app::AppMode::FilterRules);
+                            }
+                        }
+                        UserAction::ToggleFilterSyntax => {
+                            if app.mode() == app::AppMode::FilterRules {
+                                app.toggle_filter_editor_mode();
+                            } else {
+                                app.dispatch_command(nuncio_core::CoreCommand::SyncAll);
+                            }
+                        }
+                        UserAction::TestFilterPreview => {
+                            if app.mode() == app::AppMode::FilterRules {
+                                app.toggle_dry_run_preview();
+                            }
+                        }
+                        UserAction::ReorderPriorityUp => {
+                            if app.mode() == app::AppMode::FilterRules {
+                                app.reorder_filter_priority_up();
+                            }
+                        }
+                        UserAction::ReorderPriorityDown => {
+                            if app.mode() == app::AppMode::FilterRules {
+                                app.reorder_filter_priority_down();
+                            }
+                        }
+                        UserAction::ToggleFilterLogs => {
+                            if app.mode() == app::AppMode::FilterRules {
+                                app.toggle_filter_logs_drawer();
+                            }
+                        }
                         UserAction::Sync => {
                             app.dispatch_command(nuncio_core::CoreCommand::SyncAll);
                         }

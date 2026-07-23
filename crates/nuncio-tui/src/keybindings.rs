@@ -38,6 +38,18 @@ pub enum UserAction {
     ToggleAccounts,
     /// Toggle splash screen view (p).
     ToggleSplash,
+    /// Toggle filter rules manager view (f).
+    ToggleFilterRules,
+    /// Toggle NSQL syntax / editor mode (s).
+    ToggleFilterSyntax,
+    /// Test dry-run filter preview (t).
+    TestFilterPreview,
+    /// Re-order rule priority up (K).
+    ReorderPriorityUp,
+    /// Re-order rule priority down (J).
+    ReorderPriorityDown,
+    /// Toggle filter execution logs drawer (l).
+    ToggleFilterLogs,
     /// Exit application or modal (q / Esc).
     Quit,
     /// Unmapped key action.
@@ -66,11 +78,15 @@ impl KeybindingEngine {
             (KeyCode::BackTab, _) => UserAction::PreviousPane,
             (KeyCode::Char('?'), KeyModifiers::NONE) => UserAction::ToggleHelp,
             (KeyCode::Char('a'), KeyModifiers::NONE) => UserAction::ToggleAccounts,
+            (KeyCode::Char('f'), KeyModifiers::NONE) => UserAction::ToggleFilterRules,
             (KeyCode::Char('p'), KeyModifiers::NONE) => UserAction::ToggleSplash,
             (KeyCode::Char('/'), KeyModifiers::NONE) => UserAction::Search,
             (KeyCode::Char('c'), KeyModifiers::NONE) => UserAction::Compose,
             (KeyCode::Char('r'), KeyModifiers::NONE) => UserAction::Reply,
-            (KeyCode::Char('s'), KeyModifiers::NONE) => UserAction::Sync,
+            (KeyCode::Char('s'), KeyModifiers::NONE) => UserAction::ToggleFilterSyntax,
+            (KeyCode::Char('t'), KeyModifiers::NONE) => UserAction::TestFilterPreview,
+            (KeyCode::Char('K'), KeyModifiers::SHIFT) => UserAction::ReorderPriorityUp,
+            (KeyCode::Char('J'), KeyModifiers::SHIFT) => UserAction::ReorderPriorityDown,
             _ => UserAction::None,
         }
     }

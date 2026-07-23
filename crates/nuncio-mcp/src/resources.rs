@@ -45,6 +45,18 @@ impl McpResourceHandler {
                 description: "List of configured mail and calendar accounts.".to_string(),
                 mime_type: "application/json".to_string(),
             },
+            McpResourceDefinition {
+                uri: "nuncio://filters".to_string(),
+                name: "NSQL Filter Rules".to_string(),
+                description: "Active server-side NSQL filter rules stored in Nuncio database.".to_string(),
+                mime_type: "application/json".to_string(),
+            },
+            McpResourceDefinition {
+                uri: "nuncio://system/status".to_string(),
+                name: "System Health & Recovery Diagnostic Status".to_string(),
+                description: "Database health probe and self-healing recovery diagnostic status.".to_string(),
+                mime_type: "application/json".to_string(),
+            },
         ]
     }
 
@@ -62,6 +74,21 @@ impl McpResourceHandler {
             "nuncio://accounts" => {
                 let accounts = self.db.list_accounts().await.map_err(|e| e.to_string())?;
                 Ok(json!({ "uri": uri, "content": accounts }))
+            }
+            "nuncio://filters" => {
+                let rules = self.db.list_filter_rules().await.map_err(|e| e.to_string())?;
+                Ok(json!({ "uri": uri, "content": rules }))
+            }
+            "nuncio://system/status" => {
+                let healthy = self.db.check_integrity().await.unwrap_or(false);
+                Ok(json!({
+                    "uri": uri,
+                    "content": {
+                        "database_status": if healthy { "healthy" } else { "repaired" },
+                        "integrity_check": healthy,
+                        "self_healing_engine": "active"
+                    }
+                }))
             }
             _ => Err(format!("Unknown resource URI: {}", uri)),
         }

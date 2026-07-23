@@ -162,6 +162,70 @@ impl McpToolHandler {
                     "required": ["account_id"]
                 }),
             },
+            McpToolDefinition {
+                name: "nuncio_filter_list".to_string(),
+                description: "List all active server-side NSQL filter rules.".to_string(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            McpToolDefinition {
+                name: "nuncio_filter_create".to_string(),
+                description: "Create a new NSQL server-side filter rule with full 6-pass validation.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "sql": { "type": "string" },
+                        "priority": { "type": "integer" }
+                    },
+                    "required": ["name", "sql"]
+                }),
+            },
+            McpToolDefinition {
+                name: "nuncio_filter_edit".to_string(),
+                description: "Edit an existing NSQL server-side filter rule.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "name": { "type": "string" },
+                        "sql": { "type": "string" },
+                        "priority": { "type": "integer" }
+                    },
+                    "required": ["id"]
+                }),
+            },
+            McpToolDefinition {
+                name: "nuncio_filter_delete".to_string(),
+                description: "Delete an NSQL filter rule by ID.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" }
+                    },
+                    "required": ["id"]
+                }),
+            },
+            McpToolDefinition {
+                name: "nuncio_filter_test".to_string(),
+                description: "Dry-run preview evaluation of an NSQL query string.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "sql": { "type": "string" }
+                    },
+                    "required": ["sql"]
+                }),
+            },
+            McpToolDefinition {
+                name: "nuncio_filter_logs".to_string(),
+                description: "Fetch cryptographically hash-chained filter execution logs.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer" }
+                    }
+                }),
+            },
         ]
     }
 
@@ -316,6 +380,67 @@ impl McpToolHandler {
                         { "name": "keyring", "license": "MIT/Apache-2.0", "description": "OS key store integration" }
                     ]
                 }))
+            }
+            "nuncio_filter_list" => {
+                let rules = self.db.list_filter_rules().await.map_err(|e| e.to_string())?;
+                Ok(json!({ "rules": rules }))
+            }
+            "nuncio_filter_create" => {
+                let name = args.get("name").and_then(|v| v.as_str()).ok_or("missing name")?;
+                let sql = args.get("sql").and_then(|v| v.as_str()).ok_or("missing sql")?;
+                let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+                let rule = nuncio_filter::NsqlParser::parse_rule(name, priority, sql).map_err(|e| e.to_string())?;
+                let opts = nuncio_filter::ValidationOptions::default();
+                nuncio_filter::NsqlValidator::validate(&rule, &opts).map_err(|e| e.to_string())?;
+                self.db.save_filter_rule(&rule).await.map_err(|e| e.to_string())?;
+                Ok(json!({ "status": "created", "rule": rule }))
+            }
+            "nuncio_filter_edit" => {
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+                let rules = self.db.list_filter_rules().await.map_err(|e| e.to_string())?;
+                let existing = rules.into_iter().find(|r| r.id == id).ok_or("rule not found")?;
+
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or(&existing.name);
+                let sql = args.get("sql").and_then(|v| v.as_str()).unwrap_or(&existing.nsql_text);
+                let priority = args.get("priority").and_then(|v| v.as_i64()).map(|p| p as i32).unwrap_or(existing.priority);
+
+                let mut updated = nuncio_filter::NsqlParser::parse_rule(name, priority, sql).map_err(|e| e.to_string())?;
+                updated.id = id.to_string();
+                let opts = nuncio_filter::ValidationOptions::default();
+                nuncio_filter::NsqlValidator::validate(&updated, &opts).map_err(|e| e.to_string())?;
+                self.db.save_filter_rule(&updated).await.map_err(|e| e.to_string())?;
+                Ok(json!({ "status": "updated", "rule": updated }))
+            }
+            "nuncio_filter_delete" => {
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+                self.db.delete_filter_rule(id).await.map_err(|e| e.to_string())?;
+                Ok(json!({ "status": "deleted", "id": id }))
+            }
+            "nuncio_filter_test" => {
+                let sql = args.get("sql").and_then(|v| v.as_str()).ok_or("missing sql")?;
+                let rule = nuncio_filter::NsqlParser::parse_rule("Test Rule", 0, sql).map_err(|e| e.to_string())?;
+                let engine = nuncio_filter::FilterEngine::new(vec![rule]).map_err(|e| e.to_string())?;
+                let sample_email = Email {
+                    id: "mcp-test-email".to_string(),
+                    account_id: "acct-1".to_string(),
+                    folder_id: "inbox".to_string(),
+                    subject: "Test Subject".to_string(),
+                    sender: "boss@nuncio.mx".to_string(),
+                    recipient: "me@nuncio.mx".to_string(),
+                    received_at: chrono::Utc::now().timestamp(),
+                    read: false,
+                    body_plain: Some("Sample plain body".to_string()),
+                    body_html: None,
+                    attachments: Vec::new(),
+                };
+                let preview = engine.preview(&sample_email);
+                Ok(json!({ "preview": preview }))
+            }
+            "nuncio_filter_logs" => {
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+                let logs = self.db.list_filter_execution_logs(limit).await.map_err(|e| e.to_string())?;
+                Ok(json!({ "logs": logs }))
             }
             _ => Err(format!("Unknown tool: {}", name)),
         }

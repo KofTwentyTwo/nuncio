@@ -6,7 +6,7 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::args::{
-    AccountSubcommand, CalSubcommand, Commands, FolderSubcommand, MailSubcommand, SystemSubcommand,
+    AccountSubcommand, CalSubcommand, Commands, FilterSubcommand, FolderSubcommand, MailSubcommand, SystemSubcommand,
 };
 use crate::output::{format_json, format_json_error};
 
@@ -171,6 +171,167 @@ impl HeadlessRunner {
             },
             Commands::System { action } => match action {
                 SystemSubcommand::Status => self.handle_system_status(json_mode).await,
+            },
+            Commands::Filter { action } => match action {
+                FilterSubcommand::List => {
+                    let rules = self.db.list_filter_rules().await.unwrap_or_default();
+                    if json_mode {
+                        format_json(&json!(rules))
+                    } else if rules.is_empty() {
+                        "No filter rules configured.".to_string()
+                    } else {
+                        let mut out = String::from("ID         PRIORITY ENABLED NAME                  NSQL\n");
+                        for r in rules {
+                            out.push_str(&format!("{:<10} {:<8} {:<7} {:<20} {}\n", r.id, r.priority, r.enabled, r.name, r.nsql_text));
+                        }
+                        out
+                    }
+                }
+                FilterSubcommand::Create { name, sql, priority } => {
+                    match nuncio_filter::NsqlParser::parse_rule(name, *priority, sql) {
+                        Ok(rule) => {
+                            let opts = nuncio_filter::ValidationOptions::default();
+                            if let Err(e) = nuncio_filter::NsqlValidator::validate(&rule, &opts) {
+                                return if json_mode { format_json_error(&e.to_string()) } else { format!("Validation Error: {e}") };
+                            }
+                            if let Err(e) = self.db.save_filter_rule(&rule).await {
+                                return if json_mode { format_json_error(&e.to_string()) } else { format!("Database Error: {e}") };
+                            }
+                            if json_mode {
+                                format_json(&json!(rule))
+                            } else {
+                                format!("✓ Created filter rule '{}' (ID: {}).", rule.name, rule.id)
+                            }
+                        }
+                        Err(e) => if json_mode { format_json_error(&e.to_string()) } else { format!("Syntax Error: {e}") },
+                    }
+                }
+                FilterSubcommand::Edit { id, name, sql, priority } => {
+                    let existing = self.db.list_filter_rules().await.unwrap_or_default().into_iter().find(|r| r.id == *id);
+                    if let Some(rule) = existing {
+                        let rule_name = name.clone().unwrap_or(rule.name);
+                        let rule_sql = sql.clone().unwrap_or(rule.nsql_text);
+                        let rule_priority = priority.unwrap_or(rule.priority);
+
+                        match nuncio_filter::NsqlParser::parse_rule(&rule_name, rule_priority, &rule_sql) {
+                            Ok(mut updated) => {
+                                updated.id = id.clone();
+                                if let Err(e) = self.db.save_filter_rule(&updated).await {
+                                    return if json_mode { format_json_error(&e.to_string()) } else { format!("Database Error: {e}") };
+                                }
+                                if json_mode {
+                                    format_json(&json!(updated))
+                                } else {
+                                    format!("✓ Updated filter rule '{}'.", id)
+                                }
+                            }
+                            Err(e) => if json_mode { format_json_error(&e.to_string()) } else { format!("Syntax Error: {e}") },
+                        }
+                    } else if json_mode {
+                        format_json_error(&format!("Rule '{}' not found", id))
+                    } else {
+                        format!("Rule '{}' not found.", id)
+                    }
+                }
+                FilterSubcommand::Delete { id } => {
+                    if let Err(e) = self.db.delete_filter_rule(id).await {
+                        if json_mode { format_json_error(&e.to_string()) } else { format!("Error: {e}") }
+                    } else if json_mode {
+                        format_json(&json!({ "status": "deleted", "id": id }))
+                    } else {
+                        format!("✓ Filter rule '{}' deleted.", id)
+                    }
+                }
+                FilterSubcommand::Test { sql, message_id } => {
+                    match nuncio_filter::NsqlParser::parse_rule("Test Rule", 0, sql) {
+                        Ok(rule) => {
+                            let engine = nuncio_filter::FilterEngine::new(vec![rule.clone()]).unwrap();
+                            let sample_email = if let Some(mid) = message_id {
+                                self.db.get_message(mid).await.unwrap_or_else(|_| nuncio_core::model::Email {
+                                    id: mid.clone(),
+                                    account_id: "acct-1".to_string(),
+                                    folder_id: "inbox".to_string(),
+                                    subject: "Test Subject".to_string(),
+                                    sender: "test@nuncio.mx".to_string(),
+                                    recipient: "me@nuncio.mx".to_string(),
+                                    received_at: chrono::Utc::now().timestamp(),
+                                    read: false,
+                                    body_plain: Some("Sample body text".to_string()),
+                                    body_html: None,
+                                    attachments: Vec::new(),
+                                })
+                            } else {
+                                nuncio_core::model::Email {
+                                    id: "msg-test".to_string(),
+                                    account_id: "acct-1".to_string(),
+                                    folder_id: "inbox".to_string(),
+                                    subject: "Test Subject".to_string(),
+                                    sender: "test@nuncio.mx".to_string(),
+                                    recipient: "me@nuncio.mx".to_string(),
+                                    received_at: chrono::Utc::now().timestamp(),
+                                    read: false,
+                                    body_plain: Some("Sample body text".to_string()),
+                                    body_html: None,
+                                    attachments: Vec::new(),
+                                }
+                            };
+                            let preview = engine.preview(&sample_email);
+                            if json_mode {
+                                format_json(&json!(preview))
+                            } else {
+                                format!("Dry-run evaluation result: matched={}, actions={:?}, elapsed={}us", preview.matched, preview.actions_evaluated, preview.execution_time_us)
+                            }
+                        }
+                        Err(e) => if json_mode { format_json_error(&e.to_string()) } else { format!("Syntax Error: {e}") },
+                    }
+                }
+                FilterSubcommand::Export { format } => {
+                    let rules = self.db.list_filter_rules().await.unwrap_or_default();
+                    if format == "json" || json_mode {
+                        format_json(&json!(rules))
+                    } else {
+                        let sqls: Vec<String> = rules.iter().map(|r| r.to_nsql()).collect();
+                        sqls.join("\n")
+                    }
+                }
+                FilterSubcommand::Import { file } => {
+                    match std::fs::read_to_string(file) {
+                        Ok(content) => {
+                            let mut imported = 0;
+                            for line in content.lines() {
+                                let line_trim = line.trim();
+                                if line_trim.is_empty() || line_trim.starts_with("--") {
+                                    continue;
+                                }
+                                if let Ok(rule) = nuncio_filter::NsqlParser::parse_rule(format!("Imported Rule {}", imported + 1), 0, line_trim) {
+                                    if self.db.save_filter_rule(&rule).await.is_ok() {
+                                        imported += 1;
+                                    }
+                                }
+                            }
+                            if json_mode {
+                                format_json(&json!({ "imported_count": imported }))
+                            } else {
+                                format!("✓ Successfully imported {} filter rules.", imported)
+                            }
+                        }
+                        Err(e) => if json_mode { format_json_error(&e.to_string()) } else { format!("Failed to read file: {e}") },
+                    }
+                }
+                FilterSubcommand::Logs { limit } => {
+                    let logs = self.db.list_filter_execution_logs(*limit).await.unwrap_or_default();
+                    if json_mode {
+                        format_json(&json!(logs))
+                    } else if logs.is_empty() {
+                        "No execution logs recorded.".to_string()
+                    } else {
+                        let mut out = String::from("ID   RULE_ID    MSG_ID     ACTION       TIMESTAMP\n");
+                        for l in logs {
+                            out.push_str(&format!("{:<4} {:<10} {:<10} {:<12} {}\n", l.id, l.rule_id, l.message_id, l.action_taken, l.matched_at));
+                        }
+                        out
+                    }
+                }
             },
             Commands::Daemon { port } => {
                 let addr = format!("127.0.0.1:{}", port);
@@ -344,17 +505,23 @@ impl HeadlessRunner {
 
     async fn handle_system_status(&self, json_mode: bool) -> String {
         let state = self.event_bus.current_state();
+        let healthy = self.db.check_integrity().await.unwrap_or(false);
         if json_mode {
             format_json(&json!({
                 "accounts_loaded": state.accounts_loaded,
                 "unread_count": state.unread_count,
-                "engine_status": format!("{:?}", state.status)
+                "engine_status": format!("{:?}", state.status),
+                "database_health": if healthy { "healthy" } else { "repaired" }
             }))
         } else {
-            format!(
+            let mut msg = format!(
                 "Nuncio Configuration: {} accounts loaded, {} unread messages",
                 state.accounts_loaded, state.unread_count
-            )
+            );
+            if !healthy {
+                msg.push_str("\n[NOTICE] Database integrity issue was automatically repaired. Resynchronizing inbox...");
+            }
+            msg
         }
     }
 }

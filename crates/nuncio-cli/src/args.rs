@@ -72,6 +72,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: SystemSubcommand,
     },
+    /// Filter rule operations (`nuncio filter <verb>`).
+    Filter {
+        #[command(subcommand)]
+        action: FilterSubcommand,
+    },
     /// Launch centralized local background server daemon (`nuncio daemon`).
     Daemon {
         /// TCP port to bind IPC daemon server to (default: 9422).
@@ -213,6 +218,74 @@ pub enum CalSubcommand {
 pub enum SystemSubcommand {
     /// Display system, daemon, and event bus status.
     Status,
+}
+
+/// Filter subcommands (`nuncio filter <verb>`).
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilterSubcommand {
+    /// List all configured NSQL filter rules.
+    List,
+    /// Create a new NSQL filter rule.
+    Create {
+        /// Display name for rule.
+        #[arg(short, long, help = "Display name for rule")]
+        name: String,
+        /// NSQL query string.
+        #[arg(short, long, help = "NSQL query string")]
+        sql: String,
+        /// Execution priority (lower = higher priority).
+        #[arg(short, long, default_value_t = 0, help = "Rule priority")]
+        priority: i32,
+    },
+    /// Edit an existing filter rule.
+    Edit {
+        /// Rule ID.
+        #[arg(short, long, help = "Rule identifier")]
+        id: String,
+        /// Updated rule display name.
+        #[arg(short, long, help = "Updated rule display name")]
+        name: Option<String>,
+        /// Updated NSQL query string.
+        #[arg(short, long, help = "Updated NSQL query string")]
+        sql: Option<String>,
+        /// Updated rule priority.
+        #[arg(short, long, help = "Updated rule priority")]
+        priority: Option<i32>,
+    },
+    /// Delete a filter rule by ID.
+    Delete {
+        /// Rule ID.
+        #[arg(short, long, help = "Rule identifier")]
+        id: String,
+    },
+    /// Test / dry-run NSQL query against an email.
+    Test {
+        /// NSQL query string to test.
+        #[arg(short, long, help = "NSQL query string")]
+        sql: String,
+        /// Optional message ID to evaluate.
+        #[arg(short, long, help = "Message ID to evaluate")]
+        message_id: Option<String>,
+    },
+    /// Export filter rules to file format (sql or json).
+    Export {
+        /// Export format (sql or json).
+        #[arg(short, long, default_value = "sql", help = "Export format (sql/json)")]
+        format: String,
+    },
+    /// Import filter rules from file.
+    Import {
+        /// File path containing rules to import.
+        #[arg(short, long, help = "File path")]
+        file: String,
+    },
+    /// View filter execution logs.
+    Logs {
+        /// Max log records to fetch.
+        #[arg(short, long, default_value_t = 50, help = "Log limit")]
+        limit: usize,
+    },
 }
 
 #[cfg(test)]

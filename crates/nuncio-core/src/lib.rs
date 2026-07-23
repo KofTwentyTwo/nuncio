@@ -44,6 +44,8 @@ pub enum CoreCommand {
         /// Human-readable error description.
         message: String,
     },
+    /// Reload filter rules cache in memory.
+    ReloadFilters,
     /// Request graceful shutdown of the core engine.
     Shutdown,
 }
@@ -67,6 +69,33 @@ pub enum CoreEvent {
         message_id: String,
         /// New read state.
         read: bool,
+    },
+    /// Filter rule executed on a message.
+    FilterExecuted {
+        /// Filter rule identifier.
+        rule_id: String,
+        /// Email message identifier.
+        message_id: String,
+        /// Action description.
+        action_taken: String,
+    },
+    /// Progress notification during bulk filter execution over a batch of emails.
+    BatchFilterProgress {
+        /// Messages processed so far in the batch.
+        processed: usize,
+        /// Total message count in batch.
+        total: usize,
+        /// Total matching rule executions.
+        matched: usize,
+    },
+    /// Database recovery event emitted when a corrupted DB is backed up.
+    DatabaseRecovered {
+        /// Forensic backup path.
+        backup_path: String,
+        /// Number of filter rules salvaged from corrupted DB.
+        salvaged_rules_count: usize,
+        /// Whether automated resync was triggered.
+        resync_triggered: bool,
     },
     /// A non-fatal engine error occurred.
     Error {
@@ -215,6 +244,7 @@ impl EventBus {
                 self.update_state(|s| s.last_error = Some(message.clone()));
                 self.publish_event(CoreEvent::Error { message });
             }
+            CoreCommand::ReloadFilters => {}
             CoreCommand::Shutdown => {
                 self.update_state(|s| s.status = EngineStatus::ShuttingDown);
                 self.publish_event(CoreEvent::ShuttingDown);

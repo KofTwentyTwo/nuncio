@@ -1,5 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { Sidebar } from './components/Sidebar';
 import { MessageList } from './components/MessageList';
 import { Reader } from './components/Reader';
@@ -72,6 +73,21 @@ export default function App() {
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>('msg-1');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [status, setStatus] = useState<string>('Ready');
+  const [recoveryToast, setRecoveryToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const unlisten = listen('DatabaseRecovered', () => {
+        setRecoveryToast("Database auto-healed. Resyncing mail...");
+        setStatus("Resyncing");
+      });
+      return () => {
+        unlisten.then((f) => f());
+      };
+    } catch {
+      // Dev mode fallback when outside Tauri runtime
+    }
+  }, []);
 
   const handleSync = async () => {
     setStatus('Syncing');
@@ -127,6 +143,39 @@ export default function App() {
 
   return (
     <div className="app-container">
+      {recoveryToast && (
+        <div
+          className="recovery-toast"
+          style={{
+            position: 'fixed',
+            top: 16,
+            right: 16,
+            backgroundColor: '#f59e0b',
+            color: '#000',
+            padding: '12px 18px',
+            borderRadius: 8,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            fontWeight: 600,
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          <span>{recoveryToast}</span>
+          <button
+            onClick={() => setRecoveryToast(null)}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              cursor: 'pointer',
+              fontWeight: 'bold',
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <Sidebar
         folders={folders}
         activeFolderId={activeFolderId}

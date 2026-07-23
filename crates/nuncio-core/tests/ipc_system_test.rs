@@ -14,13 +14,19 @@ async fn system_test_ipc_daemon_ping_state_and_commands() {
         let _ = server.run_server().await;
     });
 
-    // Give server 50ms to bind
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
     let client = IpcClient::new(addr);
 
-    // 1. Ping Check
-    let ping_res = client.ping().await.expect("ping success");
+    // Give server time to bind TCP socket
+    let mut ping_res = false;
+    for _ in 0..15 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(res) = client.ping().await {
+            ping_res = res;
+            if ping_res {
+                break;
+            }
+        }
+    }
     assert!(ping_res);
 
     // 2. Fetch State

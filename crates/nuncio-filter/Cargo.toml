@@ -1,5 +1,5 @@
 [package]
-name = "nuncio-cli"
+name = "nuncio-filter"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -11,19 +11,20 @@ workspace = true
 
 [dependencies]
 nuncio-core = { path = "../nuncio-core" }
-nuncio-mail = { path = "../nuncio-mail" }
-nuncio-cal = { path = "../nuncio-cal" }
-nuncio-store = { path = "../nuncio-store" }
-nuncio-filter = { path = "../nuncio-filter" }
-
+sqlparser.workspace = true
 tokio.workspace = true
-sqlx.workspace = true
-clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-rpassword.workspace = true
+regex.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+arc-swap.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
+reqwest.workspace = true
+hex.workspace = true
 
-
+[dev-dependencies]
+tempfile.workspace = true

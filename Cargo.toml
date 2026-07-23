@@ -11,6 +11,7 @@ members = [
     "crates/nuncio-cli",
     "crates/nuncio-mcp",
     "crates/nunciod",
+    "crates/nuncio-filter",
 ]
 
 [workspace.package]
@@ -70,4 +71,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 quick-xml = "0.36"
 html2text = "0.12"
 rpassword = "7.3"
+sqlparser = "0.54"
+arc-swap = "1.7"
+regex = "1.10"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
 

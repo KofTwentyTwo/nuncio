@@ -14,9 +14,13 @@ nuncio-core = { path = "../nuncio-core" }
 nuncio-mail = { path = "../nuncio-mail" }
 nuncio-cal = { path = "../nuncio-cal" }
 nuncio-store = { path = "../nuncio-store" }
+nuncio-filter = { path = "../nuncio-filter" }
+
 tokio.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 futures.workspace = true
 tracing.workspace = true
 html2text.workspace = true
+chrono.workspace = true
+

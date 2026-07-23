@@ -3,15 +3,27 @@
 use crate::ipc::framing::{read_frame, write_frame};
 use crate::ipc::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use crate::{CoreCommand, EventBus};
+use futures::future::BoxFuture;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 
+/// Async handler callback signature for custom RPC extensions (e.g. `filter.*` handlers).
+pub type CustomRpcHandler = Arc<
+    dyn Fn(
+            &str,
+            serde_json::Value,
+        ) -> BoxFuture<'static, Option<Result<serde_json::Value, String>>>
+        + Send
+        + Sync,
+>;
+
 /// Centralized IPC Daemon Server managing presentation shell clients over `EventBus`.
 pub struct IpcDaemonServer {
     event_bus: Arc<EventBus>,
     bind_addr: String,
+    custom_handler: Option<CustomRpcHandler>,
 }
 
 impl IpcDaemonServer {
@@ -23,7 +35,26 @@ impl IpcDaemonServer {
         Self {
             event_bus,
             bind_addr: bind_addr.into(),
+            custom_handler: None,
         }
+    }
+
+    /// Create a new `IpcDaemonServer` with custom RPC handler extension.
+    pub fn with_handler(
+        event_bus: Arc<EventBus>,
+        bind_addr: impl Into<String>,
+        handler: CustomRpcHandler,
+    ) -> Self {
+        Self {
+            event_bus,
+            bind_addr: bind_addr.into(),
+            custom_handler: Some(handler),
+        }
+    }
+
+    /// Attach a custom RPC handler callback.
+    pub fn set_handler(&mut self, handler: CustomRpcHandler) {
+        self.custom_handler = Some(handler);
     }
 
     /// Return configured bind address.
@@ -39,16 +70,29 @@ impl IpcDaemonServer {
         loop {
             let (stream, _addr) = listener.accept().await?;
             let event_bus = self.event_bus.clone();
+            let handler = self.custom_handler.clone();
             tokio::spawn(async move {
-                let _ = Self::handle_stream(stream, event_bus).await;
+                let _ = Self::handle_stream_with_handler(stream, event_bus, handler).await;
             });
         }
     }
 
-    /// Handle bi-directional request processing and event streaming over an async byte stream.
+    /// Handle stream without custom handler.
     pub async fn handle_stream<S>(
         stream: S,
         event_bus: Arc<EventBus>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::handle_stream_with_handler(stream, event_bus, None).await
+    }
+
+    /// Handle bi-directional request processing and event streaming over an async byte stream.
+    pub async fn handle_stream_with_handler<S>(
+        stream: S,
+        event_bus: Arc<EventBus>,
+        custom_handler: Option<CustomRpcHandler>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -125,7 +169,20 @@ impl IpcDaemonServer {
                         JsonRpcResponse::error(req.id, -32602, "missing message_id")
                     }
                 }
-                _ => JsonRpcResponse::error(req.id, -32601, "Method not found"),
+                other_method => {
+                    if let Some(handler) = &custom_handler {
+                        if let Some(res) = handler(other_method, req.params.clone()).await {
+                            match res {
+                                Ok(val) => JsonRpcResponse::success(req.id, val),
+                                Err(err_msg) => JsonRpcResponse::error(req.id, -32603, err_msg),
+                            }
+                        } else {
+                            JsonRpcResponse::error(req.id, -32601, "Method not found")
+                        }
+                    } else {
+                        JsonRpcResponse::error(req.id, -32601, "Method not found")
+                    }
+                }
             };
 
             if let Ok(resp_bytes) = serde_json::to_vec(&response) {

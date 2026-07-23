@@ -135,9 +135,48 @@ impl IpcClient {
         }
     }
 
-    /// Fetch current application state snapshot from daemon.
+    /// Fetch application state snapshot from daemon.
     pub async fn get_state(&self) -> Result<Value, IpcClientError> {
         self.call_rpc("system.state", json!({})).await
+    }
+
+    /// List filter rules from running daemon.
+    pub async fn filter_list(&self) -> Result<Value, IpcClientError> {
+        self.call_rpc("filter.list", json!({})).await
+    }
+
+    /// Create a new filter rule in running daemon.
+    pub async fn filter_create(&self, name: &str, nsql: &str, priority: i32) -> Result<Value, IpcClientError> {
+        self.call_rpc(
+            "filter.create",
+            json!({ "name": name, "nsql": nsql, "priority": priority }),
+        )
+        .await
+    }
+
+    /// Edit an existing filter rule in running daemon.
+    pub async fn filter_edit(&self, id: &str, name: &str, nsql: &str, priority: i32) -> Result<Value, IpcClientError> {
+        self.call_rpc(
+            "filter.edit",
+            json!({ "id": id, "name": name, "nsql": nsql, "priority": priority }),
+        )
+        .await
+    }
+
+    /// Delete a filter rule in running daemon.
+    pub async fn filter_delete(&self, id: &str) -> Result<Value, IpcClientError> {
+        self.call_rpc("filter.delete", json!({ "id": id })).await
+    }
+
+    /// Dry-run preview evaluation of an email against filter rules.
+    pub async fn filter_preview(&self, email: &crate::model::Email) -> Result<Value, IpcClientError> {
+        let email_json = serde_json::to_value(email)?;
+        self.call_rpc("filter.preview", json!({ "email": email_json })).await
+    }
+
+    /// Query filter execution logs from running daemon.
+    pub async fn filter_logs(&self, limit: usize) -> Result<Value, IpcClientError> {
+        self.call_rpc("filter.logs", json!({ "limit": limit })).await
     }
 
     /// Subscribe to real-time `events.notify` server push stream.

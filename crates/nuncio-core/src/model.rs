@@ -55,6 +55,8 @@ pub struct Folder {
     pub unread_messages: usize,
 }
 
+/// Mailbox folder entity.
+
 /// Calendar event domain entity owned by Nuncio core.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalendarEvent {

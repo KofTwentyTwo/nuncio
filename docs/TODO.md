@@ -63,46 +63,46 @@
 - [ ] `#244`: Build macOS Apple Silicon (ARM64) and Intel (x64) `.dmg` disk image packages.
 - [ ] `#246`: Build Linux AppImage standalone executable package.
 
-### Epic 8: NSQL Server-Side Email Filter & Automation Engine (#261 – #285) - `PLANNED`
-- [ ] `#261`: Initialize `crates/nuncio-filter` workspace crate with `sqlparser = "0.54"` dependency.
-- [ ] `#262`: Implement `NuncioSqlDialect` overriding `sqlparser::dialect::Dialect` for NSQL tokenization.
-- [ ] `#263`: Implement `NsqlParser` transforming SQL text into `nuncio-core` domain AST (`FilterRule`, `ConditionNode`, `RuleAction`).
-- [ ] `#264`: Implement 6-pass `NsqlValidator` type checker (field types, folder existence, RFC 5322, ReDoS check, contradiction detection).
-- [ ] `#265`: Implement lossless round-trip code generator (`rule.to_nsql()`) verifying algebraic invariants.
-- [ ] `#266`: Add SQLite migration DDL for `filter_rules`, `filter_conditions`, `filter_actions`, and `pending_remote_mutations`.
-- [ ] `#267`: Add SQLite migration DDL for `filter_execution_logs` with composite priority indexes.
-- [ ] `#268`: Implement HMAC-SHA256 cryptographic hash-chain ledger for `filter_execution_logs` with automated chain verification.
-- [ ] `#269`: Implement parameterized SQLite query compilation (`sqlx::QueryBuilder`) guaranteeing zero raw string interpolation (100% SQLi immunized).
-- [ ] `#270`: Implement `ArcSwap<CompiledFilterSet>` lock-free read cache manager ($<5\text{ns}$ access latency).
-- [ ] `#271`: Integrate `FilterEngine::evaluate()` into `nunciod` background sync loop for pre-ingestion filtering.
-- [ ] `#272`: Implement 1M-message Keyset Chunking Engine (`WHERE id > ? LIMIT 1000`) guaranteeing $<10\text{MB}$ RAM ceiling during bulk triage.
-- [ ] `#273`: Implement Transactional Outbox pattern with exponential backoff and full jitter for remote IMAP/JMAP mutations.
-- [ ] `#274`: Implement Memory-Only Dry-Run Preview API (`filter.preview` IPC method) returning microsecond-resolution match traces without database mutations or network requests.
-- [ ] `#275`: Implement `CoreEvent::FilterExecuted` and `CoreEvent::BatchFilterProgress` IPC length-prefixed streaming notifications over UNIX sockets and Windows named pipes.
-- [ ] `#276`: Enforce AST recursion depth limit (`MAX_AST_DEPTH = 10`) to prevent stack overflow panics.
-- [ ] `#277`: Implement Tokio 50ms hard execution timeout (`tokio::time::timeout`) for regular expression evaluation tasks.
-- [ ] `#278`: Implement domain whitelist policy and session re-authentication for `FORWARD TO` actions.
-- [ ] `#279`: Implement pre-flight DNS IP blacklisting (blocking `127.0.0.1`, `169.254.169.254`, private LAN subnets) with `max_redirects(0)` for outbound `CALL WEBHOOK` actions.
-- [ ] `#280`: Implement HMAC-SHA256 request payload signatures (`X-Nuncio-Signature: t=timestamp,v1=hash`) for outbound webhooks.
-- [ ] `#281`: Add POSIX CLI (`nuncio-cli`) `nuncio filter` subcommand suite (`list`, `create --sql`, `edit`, `delete`, `test --sql`, `export --format sql`, `import`, `logs`).
-- [ ] `#282`: Implement Terminal TUI (`nuncio-tui`) `AppMode::FilterRules` with NSQL code editor ↔ visual form builder toggle (`[s]`), dry-run previewer (`[t]`), priority re-ordering (`[J]`/`[K]`), and log inspector drawer (`[l]`).
-- [ ] `#283`: Build glassmorphic React `<FilterRulesModal />` component in `nuncio-gui` with "Visual Builder" vs "NSQL Query Editor" tabs, live syntax diagnostics, dry-run split pane, and execution log inspector tab.
-- [ ] `#284`: Register Native MCP (`nuncio-mcp`) `nuncio_filter_*` tools and stream `nuncio://filters` resource.
-- [ ] `#285`: Create end-to-end integration test suite verifying 1,000,000 message batch performance, zero-warning compiler build, zero-clippy lints, and 100% test pass rate across workspace crates.
+### Epic 8: NSQL Server-Side Email Filter & Automation Engine (#261 – #285) - `COMPLETED`
+- [x] `#261`: Initialize `crates/nuncio-filter` workspace crate with `sqlparser = "0.54"` dependency.
+- [x] `#262`: Implement `NuncioSqlDialect` overriding `sqlparser::dialect::Dialect` for NSQL tokenization.
+- [x] `#263`: Implement `NsqlParser` transforming SQL text into `nuncio-core` domain AST (`FilterRule`, `ConditionNode`, `RuleAction`).
+- [x] `#264`: Implement 6-pass `NsqlValidator` type checker (field types, folder existence, RFC 5322, ReDoS check, contradiction detection).
+- [x] `#265`: Implement lossless round-trip code generator (`rule.to_nsql()`) verifying algebraic invariants.
+- [x] `#266`: Add SQLite migration DDL for `filter_rules`, `filter_conditions`, `filter_actions`, and `pending_remote_mutations`.
+- [x] `#267`: Add SQLite migration DDL for `filter_execution_logs` with composite priority indexes.
+- [x] `#268`: Implement HMAC-SHA256 cryptographic hash-chain ledger for `filter_execution_logs` with automated chain verification.
+- [x] `#269`: Implement parameterized SQLite query compilation (`sqlx::QueryBuilder`) guaranteeing zero raw string interpolation (100% SQLi immunized).
+- [x] `#270`: Implement `ArcSwap<CompiledFilterSet>` lock-free read cache manager ($<5\text{ns}$ access latency).
+- [x] `#271`: Integrate `FilterEngine::evaluate()` into `nunciod` background sync loop for pre-ingestion filtering.
+- [x] `#272`: Implement 1M-message Keyset Chunking Engine (`WHERE id > ? LIMIT 1000`) guaranteeing $<10\text{MB}$ RAM ceiling during bulk triage.
+- [x] `#273`: Implement Transactional Outbox pattern with exponential backoff and full jitter for remote IMAP/JMAP mutations.
+- [x] `#274`: Implement Memory-Only Dry-Run Preview API (`filter.preview` IPC method) returning microsecond-resolution match traces without database mutations or network requests.
+- [x] `#275`: Implement `CoreEvent::FilterExecuted` and `CoreEvent::BatchFilterProgress` IPC length-prefixed streaming notifications over UNIX sockets and Windows named pipes.
+- [x] `#276`: Enforce AST recursion depth limit (`MAX_AST_DEPTH = 10`) to prevent stack overflow panics.
+- [x] `#277`: Implement Tokio 50ms hard execution timeout (`tokio::time::timeout`) for regular expression evaluation tasks.
+- [x] `#278`: Implement domain whitelist policy and session re-authentication for `FORWARD TO` actions.
+- [x] `#279`: Implement pre-flight DNS IP blacklisting (blocking `127.0.0.1`, `169.254.169.254`, private LAN subnets) with `max_redirects(0)` for outbound `CALL WEBHOOK` actions.
+- [x] `#280`: Implement HMAC-SHA256 request payload signatures (`X-Nuncio-Signature: t=timestamp,v1=hash`) for outbound webhooks.
+- [x] `#281`: Add POSIX CLI (`nuncio-cli`) `nuncio filter` subcommand suite (`list`, `create --sql`, `edit`, `delete`, `test --sql`, `export --format sql`, `import`, `logs`).
+- [x] `#282`: Implement Terminal TUI (`nuncio-tui`) `AppMode::FilterRules` with NSQL code editor ↔ visual form builder toggle (`[s]`), dry-run previewer (`[t]`), priority re-ordering (`[J]`/`[K]`), and log inspector drawer (`[l]`).
+- [x] `#283`: Build glassmorphic React `<FilterRulesModal />` component in `nuncio-gui` with "Visual Builder" vs "NSQL Query Editor" tabs, live syntax diagnostics, dry-run split pane, and execution log inspector tab.
+- [x] `#284`: Register Native MCP (`nuncio-mcp`) `nuncio_filter_*` tools and stream `nuncio://filters` resource.
+- [x] `#285`: Create end-to-end integration test suite verifying 1,000,000 message batch performance, zero-warning compiler build, zero-clippy lints, and 100% test pass rate across workspace crates.
 
-### Epic 9: Database Corruption Self-Healing & Recovery Engine (#286 – #300) - `PLANNED`
-- [ ] `#286`: Implement `DatabaseEngine::check_integrity()` executing `PRAGMA quick_check(10);` on database open.
-- [ ] `#287`: Implement SQLite error code trap catching `SQLITE_CORRUPT` (11), `SQLITE_NOTADB` (26), and `SQLITE_CANTOPEN` (14) during runtime query execution.
-- [ ] `#288`: Implement `CorruptedBackupManager` isolating damaged `.db`, `.db-wal`, and `.db-shm` files to `~/.nuncio/corrupted_backups/nuncio_corrupted_<timestamp>.db`.
-- [ ] `#289`: Implement `SqliteRecoveryEngine` executing stream salvage to extract valid `accounts`, `filter_rules`, `filter_conditions`, and `filter_actions` records into a fresh SQLite file (`nuncio_main.db`).
-- [ ] `#290`: Implement cryptographic hash-chain audit ledger verification (`verify_chain_integrity()`) to detect log tampering or corrupted `filter_execution_logs`.
-- [ ] `#291`: Implement `SelfHealingSyncOrchestrator` in `nunciod` triggering clean background IMAP/JMAP resync when local email caches are reset.
-- [ ] `#292`: Connect OS Keyring vault credentials to re-initialize authenticated protocol connections seamlessly post-recovery.
-- [ ] `#293`: Implement `CoreEvent::DatabaseRecovered` event payload and broadcast it over IPC sockets.
-- [ ] `#294`: Add POSIX CLI (`nuncio-cli`) database recovery status notice on `CoreEvent::DatabaseRecovered`.
-- [ ] `#295`: Render Terminal TUI (`nuncio-tui`) top menu recovery banner and status indicator.
-- [ ] `#296`: Render Desktop GUI (`nuncio-gui`) toast notification and resync status badge in React frontend.
-- [ ] `#297`: Expose Native MCP (`nuncio-mcp`) database health and recovery diagnostic status in `nuncio://system/status`.
-- [ ] `#298`: Create unit test simulating database header corruption and verifying Stage 1 detection.
-- [ ] `#299`: Create integration test verifying Stage 2 backup creation and Stage 3 table salvage.
-- [ ] `#300`: Verify zero warnings (`cargo check --workspace`), zero clippy lints (`cargo clippy --workspace -- -D warnings`), and 100% passing tests.
+### Epic 9: Database Corruption Self-Healing & Recovery Engine (#286 – #300) - `COMPLETED`
+- [x] `#286`: Implement `DatabaseEngine::check_integrity()` executing `PRAGMA quick_check(10);` on database open.
+- [x] `#287`: Implement SQLite error code trap catching `SQLITE_CORRUPT` (11), `SQLITE_NOTADB` (26), and `SQLITE_CANTOPEN` (14) during runtime query execution.
+- [x] `#288`: Implement `CorruptedBackupManager` isolating damaged `.db`, `.db-wal`, and `.db-shm` files to `~/.nuncio/corrupted_backups/nuncio_corrupted_<timestamp>.db`.
+- [x] `#289`: Implement `SqliteRecoveryEngine` executing stream salvage to extract valid `accounts`, `filter_rules`, `filter_conditions`, and `filter_actions` records into a fresh SQLite file (`nuncio_main.db`).
+- [x] `#290`: Implement cryptographic hash-chain audit ledger verification (`verify_chain_integrity()`) to detect log tampering or corrupted `filter_execution_logs`.
+- [x] `#291`: Implement `SelfHealingSyncOrchestrator` in `nunciod` triggering clean background IMAP/JMAP resync when local email caches are reset.
+- [x] `#292`: Connect OS Keyring vault credentials to re-initialize authenticated protocol connections seamlessly post-recovery.
+- [x] `#293`: Implement `CoreEvent::DatabaseRecovered` event payload and broadcast it over IPC sockets.
+- [x] `#294`: Add POSIX CLI (`nuncio-cli`) database recovery status notice on `CoreEvent::DatabaseRecovered`.
+- [x] `#295`: Render Terminal TUI (`nuncio-tui`) top menu recovery banner and status indicator.
+- [x] `#296`: Render Desktop GUI (`nuncio-gui`) toast notification and resync status badge in React frontend.
+- [x] `#297`: Expose Native MCP (`nuncio-mcp`) database health and recovery diagnostic status in `nuncio://system/status`.
+- [x] `#298`: Create unit test simulating database header corruption and verifying Stage 1 detection.
+- [x] `#299`: Create integration test verifying Stage 2 backup creation and Stage 3 table salvage.
+- [x] `#300`: Verify zero warnings (`cargo check --workspace`), zero clippy lints (`cargo clippy --workspace -- -D warnings`), and 100% passing tests.
