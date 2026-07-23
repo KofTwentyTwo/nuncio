@@ -117,11 +117,13 @@ mod tests {
         let key = [42u8; 32];
         let plaintext = b"Nuncio encrypted payload text";
 
-        let ciphertext = PayloadCipher::encrypt_bytes(&key, plaintext).expect("encryption succeeds");
+        let ciphertext =
+            PayloadCipher::encrypt_bytes(&key, plaintext).expect("encryption succeeds");
         assert_ne!(ciphertext, plaintext);
         assert!(ciphertext.len() > PayloadCipher::NONCE_LEN);
 
-        let decrypted = PayloadCipher::decrypt_bytes(&key, &ciphertext).expect("decryption succeeds");
+        let decrypted =
+            PayloadCipher::decrypt_bytes(&key, &ciphertext).expect("decryption succeeds");
         assert_eq!(decrypted, plaintext);
     }
 
@@ -129,7 +131,8 @@ mod tests {
     fn aes_256_gcm_short_ciphertext_fails() {
         let key = [42u8; 32];
         let short_payload = [0u8; 5];
-        let err = PayloadCipher::decrypt_bytes(&key, &short_payload).expect_err("should fail short payload");
+        let err = PayloadCipher::decrypt_bytes(&key, &short_payload)
+            .expect_err("should fail short payload");
         assert_eq!(
             err,
             CipherError::DecryptionFailed("ciphertext payload too short".to_string())
@@ -146,7 +149,8 @@ mod tests {
         let last_idx = ciphertext.len() - 1;
         ciphertext[last_idx] ^= 0xFF;
 
-        let err = PayloadCipher::decrypt_bytes(&key, &ciphertext).expect_err("should fail tamper check");
+        let err =
+            PayloadCipher::decrypt_bytes(&key, &ciphertext).expect_err("should fail tamper check");
         assert_eq!(
             err,
             CipherError::DecryptionFailed("authentication tag mismatch".to_string())

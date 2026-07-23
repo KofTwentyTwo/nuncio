@@ -77,7 +77,10 @@ mod tests {
         let mut event_rx = app.subscribe_events();
 
         app.dispatch_command(CoreCommand::SyncAll);
-        assert_eq!(state_rx.borrow_and_update().status, nuncio_core::EngineStatus::Syncing);
+        assert_eq!(
+            state_rx.borrow_and_update().status,
+            nuncio_core::EngineStatus::Syncing
+        );
         assert_eq!(
             event_rx.recv().await.unwrap(),
             CoreEvent::SyncStarted { account_id: None }

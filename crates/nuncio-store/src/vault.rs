@@ -121,7 +121,9 @@ mod tests {
         );
 
         // Set secret
-        manager.set_secret("nuncio/key1", "secret_pass_123").unwrap();
+        manager
+            .set_secret("nuncio/key1", "secret_pass_123")
+            .unwrap();
         assert_eq!(
             manager.get_secret("nuncio/key1").unwrap(),
             "secret_pass_123"

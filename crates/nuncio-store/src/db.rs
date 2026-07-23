@@ -1,9 +1,9 @@
 //! SQLite database engine initialization, connection pooling, and migrations.
 
-use std::path::Path;
-use std::str::FromStr;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
+use std::path::Path;
+use std::str::FromStr;
 use tempfile::TempDir;
 use thiserror::Error;
 
