@@ -53,7 +53,7 @@ jobs:
 
       - name: Install Frontend UI Dependencies
         working-directory: crates/nuncio-gui/ui
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Determine Environment Channel & Tag
         id: env_prep
