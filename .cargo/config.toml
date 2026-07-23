@@ -6,5 +6,9 @@ cov = "llvm-cov --workspace --fail-under-lines 100"
 verify = ["fmt --all -- --check", "check-all", "test-all"]
 
 [build]
-# Treat warnings as errors where supported
-rustflags = ["-D", "warnings"]
+# Treat warnings as errors and forbid unsafe code at local build time
+rustflags = [
+    "-D", "warnings",
+    "-F", "unsafe_code",
+    "-D", "unused_must_use",
+]

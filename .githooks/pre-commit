@@ -1,0 +1,19 @@
+#!/bin/sh
+# Nuncio Local Security & Quality Pre-Commit Hook
+
+set -e
+
+if command -v cargo >/dev/null 2>&1; then
+    echo "=== Running Local Pre-Commit Security & Quality Checks ==="
+
+    echo "--> Checking rustfmt code formatting..."
+    cargo fmt --all -- --check
+
+    echo "--> Running Clippy linter with -D warnings..."
+    cargo clippy --all-targets --workspace -- -D warnings
+
+    echo "--> Running local unit & integration test suite..."
+    cargo test --workspace
+
+    echo "=== All Local Pre-Commit Security Checks Passed Cleanly ==="
+fi
