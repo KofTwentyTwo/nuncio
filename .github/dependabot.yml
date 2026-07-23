@@ -1,13 +1,40 @@
 version: 2
 updates:
+  # 1. Rust Workspace Crates (Cargo)
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "daily"
+      time: "04:00"
     open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps(cargo)"
 
+  # 2. Tauri v2 Desktop GUI UI (npm)
+  - package-ecosystem: "npm"
+    directory: "/crates/nuncio-gui/ui"
+    schedule:
+      interval: "daily"
+      time: "04:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "gui"
+    commit-message:
+      prefix: "deps(npm)"
+
+  # 3. GitHub Actions Workflows
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
     open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "actions"
+    commit-message:
+      prefix: "deps(actions)"
