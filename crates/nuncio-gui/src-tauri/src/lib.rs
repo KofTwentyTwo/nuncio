@@ -60,7 +60,11 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 pub fn run() {
     let result = tauri::Builder::default()
         .setup(|app| {
-            if app.get_webview_window("main").is_none() {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            } else {
                 let _window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                     .title("Nuncio Mail & Calendar")
                     .inner_size(1280.0, 800.0)
