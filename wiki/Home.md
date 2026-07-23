@@ -1,20 +1,35 @@
 # Welcome to the Nuncio Wiki
 
-Nuncio ([nuncio.mx](https://nuncio.mx)) is a cross-platform mail and calendar application written in Rust, supporting Windows, macOS, and Linux with native Command Line (CLI), Terminal (TUI), and Desktop (GUI) interfaces.
+Official domain: [nuncio.mx](https://nuncio.mx)
 
-> **Etymology**: Derived from the Latin verb ***nūntiō*** ("I announce", "I declare", "I deliver a message") and noun ***nūntius*** ("messenger", "courier", "bearer of tidings"). Nuncio is built as the digital messenger and calendar courier.
+> **Etymology**: Derived from the Latin verb ***nūntiō*** ("I announce", "I declare", "I deliver a message") and noun ***nūntius*** ("messenger", "courier", "bearer of tidings"). Nuncio is built as the ultimate cross-platform messenger and calendar courier for Windows, macOS, and Linux.
 
-## Wiki Navigation
+---
 
-- [[Architecture Specification]]: Decoupled engine design, crate breakdown, protocol traits, storage schema, search indexing, and security architecture.
-- [[Roadmap and Phases]]: High-level project phases, task tracking, and milestone goals.
+## Single Source of Truth for Planning & Execution
 
-## Architecture Highlights
+Project planning, issue tracking, atomic micro-milestones, and subagent assignments are authoritatively managed directly on GitHub:
 
-Nuncio follows a library-first architecture:
-- Core libraries (`nuncio-core`, `nuncio-mail`, `nuncio-cal`, `nuncio-store`) contain 100% of domain rules, protocol engines, offline sync, SQLite FTS5 search indexing, and cryptographic key storage.
-- Thin presentation shells (`nuncio-cli`, `nuncio-tui`, and `nuncio-gui`) consume async event streams (`tokio::sync::watch`) and dispatch command enums (`tokio::sync::mpsc`).
+- **GitHub Project Board**: [Nuncio Roadmap Project #5](https://github.com/users/KofTwentyTwo/projects/5)
+- **GitHub Milestones**: [KofTwentyTwo/nuncio/milestones](https://github.com/KofTwentyTwo/nuncio/milestones) (`v0.1.0` through `v1.0.0`)
+- **GitHub Issues**: [KofTwentyTwo/nuncio/issues](https://github.com/KofTwentyTwo/nuncio/issues)
 
-## Codebase Repository
-- GitHub Repository: [KofTwentyTwo/nuncio](https://github.com/KofTwentyTwo/nuncio)
-- GitHub Project Board: [Nuncio Roadmap Project #5](https://github.com/users/KofTwentyTwo/projects/5)
+---
+
+## Navigation
+
+- [[Architecture Specification|Architecture-Specification]]
+- [[Executive Review|Executive-Review]]
+- [[Roadmap and Project Phases|Roadmap-and-Phases]]
+
+---
+
+## Workspace Structure
+
+- `crates/nuncio-core`: Workspace management, account orchestration, async event loop.
+- `crates/nuncio-mail`: IMAP4rev1, JMAP (RFC 8620/8621), and SMTP protocol engines.
+- `crates/nuncio-cal`: CalDAV and iCalendar (RFC 5545) client libraries.
+- `crates/nuncio-store`: Encrypted local persistence and SQLite FTS5 search indexing.
+- `crates/nuncio-cli`: Scriptable command-line interface binary for Unix pipes and automation.
+- `crates/nuncio-tui`: Terminal user interface powered by Ratatui.
+- `crates/nuncio-gui`: Native desktop graphical user interface shell.
