@@ -42,6 +42,13 @@ export const AccountManagerModal: React.FC<AccountManagerModalProps> = ({ onClos
   const [newSmtpHost, setNewSmtpHost] = useState('');
   const [newSmtpPort, setNewSmtpPort] = useState(465);
 
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [editEmail, setEditEmail] = useState('');
+  const [editImapHost, setEditImapHost] = useState('');
+  const [editImapPort, setEditImapPort] = useState(993);
+  const [editSmtpHost, setEditSmtpHost] = useState('');
+  const [editSmtpPort, setEditSmtpPort] = useState(465);
+
   const [testResult, setTestResult] = useState<string | null>(null);
   const [isTesting, setIsTesting] = useState(false);
 
@@ -64,6 +71,34 @@ export const AccountManagerModal: React.FC<AccountManagerModalProps> = ({ onClos
     setNewImapHost('');
     setNewSmtpHost('');
     setTestResult(`✓ Account ${newAcct.email} successfully added and saved to encrypted vault.`);
+  };
+
+  const handleStartEdit = (acct: AccountProfile) => {
+    setEditingAccountId(acct.id);
+    setEditEmail(acct.email);
+    setEditImapHost(acct.imapHost);
+    setEditImapPort(acct.imapPort);
+    setEditSmtpHost(acct.smtpHost);
+    setEditSmtpPort(acct.smtpPort);
+  };
+
+  const handleSaveEdit = (id: string) => {
+    setAccounts(
+      accounts.map((a) =>
+        a.id === id
+          ? {
+              ...a,
+              email: editEmail,
+              imapHost: editImapHost,
+              imapPort: editImapPort,
+              smtpHost: editSmtpHost,
+              smtpPort: editSmtpPort,
+            }
+          : a
+      )
+    );
+    setEditingAccountId(null);
+    setTestResult(`✓ Account ${editEmail} configuration updated and saved.`);
   };
 
   const handleRemoveAccount = (id: string) => {
@@ -136,57 +171,141 @@ export const AccountManagerModal: React.FC<AccountManagerModalProps> = ({ onClos
           <h3 style={{ fontSize: '14px', color: '#cbd5e0', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '12px' }}>
             Configured Accounts ({accounts.length})
           </h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {accounts.map((acct) => (
               <div
                 key={acct.id}
                 style={{
                   background: '#2d3748',
                   borderRadius: '8px',
-                  padding: '14px 18px',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
+                  padding: '16px 18px',
                   border: '1px solid #4a5568',
                 }}
               >
-                <div>
-                  <div style={{ fontWeight: 600, color: '#f7fafc', fontSize: '15px' }}>{acct.email}</div>
-                  <div style={{ fontSize: '12px', color: '#a0aec0', marginTop: '4px' }}>
-                    IMAP: {acct.imapHost}:{acct.imapPort} │ SMTP: {acct.smtpHost}:{acct.smtpPort}
+                {editingAccountId === acct.id ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <h4 style={{ margin: 0, color: '#63b3ed', fontSize: '14px' }}>Editing {acct.email}</h4>
+                    <div>
+                      <label style={{ fontSize: '11px', color: '#a0aec0' }}>Email Address</label>
+                      <input
+                        type="email"
+                        value={editEmail}
+                        onChange={(e) => setEditEmail(e.target.value)}
+                        style={{ width: '100%', background: '#1a202c', border: '1px solid #4a5568', color: '#fff', padding: '6px 10px', borderRadius: '4px', fontSize: '12px' }}
+                      />
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '8px' }}>
+                      <div>
+                        <label style={{ fontSize: '11px', color: '#a0aec0' }}>IMAP Host</label>
+                        <input
+                          type="text"
+                          value={editImapHost}
+                          onChange={(e) => setEditImapHost(e.target.value)}
+                          style={{ width: '100%', background: '#1a202c', border: '1px solid #4a5568', color: '#fff', padding: '6px 10px', borderRadius: '4px', fontSize: '12px' }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '11px', color: '#a0aec0' }}>IMAP Port</label>
+                        <input
+                          type="number"
+                          value={editImapPort}
+                          onChange={(e) => setEditImapPort(Number(e.target.value))}
+                          style={{ width: '100%', background: '#1a202c', border: '1px solid #4a5568', color: '#fff', padding: '6px 10px', borderRadius: '4px', fontSize: '12px' }}
+                        />
+                      </div>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '3fr 1fr', gap: '8px' }}>
+                      <div>
+                        <label style={{ fontSize: '11px', color: '#a0aec0' }}>SMTP Host</label>
+                        <input
+                          type="text"
+                          value={editSmtpHost}
+                          onChange={(e) => setEditSmtpHost(e.target.value)}
+                          style={{ width: '100%', background: '#1a202c', border: '1px solid #4a5568', color: '#fff', padding: '6px 10px', borderRadius: '4px', fontSize: '12px' }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '11px', color: '#a0aec0' }}>SMTP Port</label>
+                        <input
+                          type="number"
+                          value={editSmtpPort}
+                          onChange={(e) => setEditSmtpPort(Number(e.target.value))}
+                          style={{ width: '100%', background: '#1a202c', border: '1px solid #4a5568', color: '#fff', padding: '6px 10px', borderRadius: '4px', fontSize: '12px' }}
+                        />
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '6px', justifyContent: 'flex-end' }}>
+                      <button
+                        onClick={() => handleSaveEdit(acct.id)}
+                        className="btn btn-primary"
+                        style={{ padding: '6px 14px', fontSize: '12px' }}
+                      >
+                        Save Changes
+                      </button>
+                      <button
+                        onClick={() => setEditingAccountId(null)}
+                        className="btn"
+                        style={{ padding: '6px 14px', fontSize: '12px', background: 'rgba(255,255,255,0.05)', color: '#a0aec0', border: '1px solid #4a5568' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
-                </div>
-                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                  <button
-                    onClick={() => handleTestConnectivity(acct)}
-                    disabled={isTesting}
-                    style={{
-                      background: 'rgba(99, 179, 237, 0.2)',
-                      border: '1px solid #63b3ed',
-                      color: '#63b3ed',
-                      padding: '6px 12px',
-                      borderRadius: '6px',
-                      fontSize: '12px',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {isTesting ? 'Testing...' : 'Test Connection'}
-                  </button>
-                  <button
-                    onClick={() => handleRemoveAccount(acct.id)}
-                    style={{
-                      background: 'rgba(245, 101, 101, 0.2)',
-                      border: '1px solid #f56565',
-                      color: '#feb2b2',
-                      padding: '6px 12px',
-                      borderRadius: '6px',
-                      fontSize: '12px',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Remove
-                  </button>
-                </div>
+                ) : (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <div style={{ fontWeight: 600, color: '#f7fafc', fontSize: '15px' }}>{acct.email}</div>
+                      <div style={{ fontSize: '12px', color: '#a0aec0', marginTop: '4px' }}>
+                        IMAP: {acct.imapHost}:{acct.imapPort} │ SMTP: {acct.smtpHost}:{acct.smtpPort}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <button
+                        onClick={() => handleStartEdit(acct)}
+                        style={{
+                          background: 'rgba(237, 137, 54, 0.2)',
+                          border: '1px solid #ed8936',
+                          color: '#fbd38d',
+                          padding: '6px 12px',
+                          borderRadius: '6px',
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleTestConnectivity(acct)}
+                        disabled={isTesting}
+                        style={{
+                          background: 'rgba(99, 179, 237, 0.2)',
+                          border: '1px solid #63b3ed',
+                          color: '#63b3ed',
+                          padding: '6px 12px',
+                          borderRadius: '6px',
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {isTesting ? 'Testing...' : 'Test Connection'}
+                      </button>
+                      <button
+                        onClick={() => handleRemoveAccount(acct.id)}
+                        style={{
+                          background: 'rgba(245, 101, 101, 0.2)',
+                          border: '1px solid #f56565',
+                          color: '#feb2b2',
+                          padding: '6px 12px',
+                          borderRadius: '6px',
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
