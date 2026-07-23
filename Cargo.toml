@@ -50,10 +50,10 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 zeroize = { version = "1.8", features = ["derive"] }
 tempfile = "3.10"
-keyring = "2.1"
-age = "0.12"
+keyring = "2.3"
+age = "0.10"
 aes-gcm = "0.10"
-mail-parser = "0.11"
+mail-parser = "0.9"
 bytes = "1.6"
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
 async-imap = { version = "0.9", default-features = false, features = ["runtime-tokio"] }
@@ -70,13 +70,13 @@ rrule = "0.10"
 chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 quick-xml = "0.36"
-html2text = "0.17"
+html2text = "0.12"
 rpassword = "7.3"
 sqlparser = "0.54"
 arc-swap = "1.7"
 regex = "1.10"
 hmac = "0.12"
-sha2 = "0.11"
+sha2 = "0.10"
 hex = "0.4"
 flate2 = "1.0"
 tar = "0.4"
