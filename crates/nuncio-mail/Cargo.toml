@@ -16,4 +16,6 @@ tracing.workspace = true
 mail-parser.workspace = true
 bytes.workspace = true
 lettre.workspace = true
+async-imap.workspace = true
+
 
