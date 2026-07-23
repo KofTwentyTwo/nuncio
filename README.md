@@ -1,14 +1,137 @@
 # Nuncio
 
-Cross-platform mail and calendar solution designed for Windows, macOS, and Linux, providing CLI, TUI, and GUI interfaces.
+> **High-Performance Library-First Mail & Calendar Suite for Developers, Power Users, and AI Agents**
 
-Official site: [nuncio.mx](https://nuncio.mx)
+Official Site: [nuncio.mx](https://nuncio.mx) | Repository: [KofTwentyTwo/nuncio](https://github.com/KofTwentyTwo/nuncio)
 
-> **Etymology**: Derived from the Latin verb ***nūntiō*** ("I announce", "I declare", "I deliver a message") and noun ***nūntius*** ("messenger", "courier", "bearer of tidings"). Nuncio is built as the ultimate cross-platform messenger and calendar courier.
+> **Etymology**: Derived from the Latin verb ***nūntiō*** ("I announce", "I declare", "I deliver a message") and noun ***nūntius*** ("messenger", "courier", "bearer of tidings"). Nuncio is built as the ultimate cross-platform messenger and calendar courier across Linux, macOS, and Windows.
 
 ---
 
-## Single Source of Truth for Project Planning
+## 4 Presentation Interfaces + Central Daemon Topology
+
+Nuncio operates on a **Hybrid Daemon-First Architecture**. Centralized state management, SQLite WAL persistence, credential security enclaves, and protocol synchronizers reside inside a standalone background daemon (`nunciod`). Four decoupled presentation interfaces communicate with `nunciod` over native IPC socket streams:
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                  Presentation Shells                                   │
+│                                                                                        │
+│  ┌──────────────┐   ┌──────────────┐   ┌───────────────────┐   ┌────────────────────┐  │
+│  │  nuncio-cli  │   │  nuncio-tui  │   │nuncio-gui(Tauri v2│   │    nuncio-mcp      │  │
+│  │ (POSIX CLI)  │   │  (Ratatui)   │   │  Desktop GUI)     │   │ (MCP AI Interface) │  │
+│  └──────┬───────┘   └──────┬───────┘   └─────────┬─────────┘   └─────────┬──────────┘  │
+│         │                  │                     │                       │             │
+│         └──────────────────┴──────────┬──────────┴───────────────────────┘             │
+│                                       │                                                │
+│                                   IpcClient                                            │
+│                        (Auto-Spawn + Retry Loop + JSON-RPC)                            │
+└───────────────────────────────────────┼────────────────────────────────────────────────┘
+                                        │
+           ┌────────────────────────────┴────────────────────────────┐
+           │ POSIX: UNIX Domain Socket (`~/.nuncio/nuncio.sock`)     │
+           │ Windows: Named Pipe (`\\.\pipe\nuncio-ipc`)              │
+           └────────────────────────────┬────────────────────────────┘
+                                        │
+┌───────────────────────────────────────┼────────────────────────────────────────────────┐
+│                                       ▼                                                │
+│                                IpcDaemonServer                                         │
+│                               (Security Enclave)                                       │
+│                                                                                        │
+│                                  nunciod Daemon                                        │
+│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                 nuncio-core                                      │  │
+│  │       EventBus (mpsc command_tx | watch state_tx | broadcast event_tx)           │  │
+│  └──────────────┬──────────────────────────┬──────────────────────────┬─────────────┘  │
+│                 │                          │                          │                │
+│                 ▼                          ▼                          ▼                │
+│  ┌──────────────────────────┐┌──────────────────────────┐┌──────────────────────────┐  │
+│  │       nuncio-mail        ││        nuncio-cal        ││       nuncio-store       │  │
+│  │    JMAP / IMAP / SMTP    ││      CalDAV / iCal       ││     SQLite FTS5 / Age    │  │
+│  └──────────────────────────┘└──────────────────────────┘└──────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **`nuncio-cli` (POSIX CLI)**: Scriptable `<Noun> <Verb>` commands with deterministic `--json` output and offline-resilient local SQLite reads.
+2. **`nuncio-tui` (Terminal TUI)**: Keyboard-first 3-pane split view built in Ratatui with Vim navigation (`j`/`k`/`h`/`l`) and live `CoreEvent` push updates.
+3. **`nuncio-gui` (Tauri v2 Desktop GUI)**: Cross-platform native window host with React 18 + Vite + TypeScript frontend, glassmorphic styling, and strict HTML `<iframe sandbox>` CSP email rendering.
+4. **`nuncio-mcp` (Native LLM Agent UI)**: Model Context Protocol (MCP) JSON-RPC 2.0 stdio server exposing tools (`nuncio_mail_send`, `nuncio_cal_create_event`), resources (`nuncio://mail/inbox`), and prompts for local AI agents (Claude, Cursor, Antigravity).
+5. **`nunciod` (Central Daemon Binary)**: Standalone background process owning SQLite WAL storage, security enclaves, background protocol sync loops, and multi-client IPC socket streams.
+
+---
+
+## Workspace Crate Architecture
+
+The Nuncio Cargo workspace is modularized into 9 crates with strict domain boundaries:
+
+| Crate Path | Architectural Role & Description |
+| :--- | :--- |
+| `crates/nuncio-core` | Core domain models (`Email`, `CalendarEvent`, `Folder`), `EventBus`, and `IpcClient`/`IpcDaemonServer` framing & JSON-RPC protocol. |
+| `crates/nuncio-mail` | IMAP4rev1, JMAP (RFC 8620/8621), SMTP transport engines, and MIME stream parser. |
+| `crates/nuncio-cal` | CalDAV (RFC 4791) client, iCalendar (RFC 5545) parser, and `rrule` recurrence engine. |
+| `crates/nuncio-store` | SQLite WAL persistence (`DatabaseEngine`), FTS5 trigram search index, AES-256-GCM column cipher, `age` attachment stream cipher, and OS Keyring vault integration. |
+| `crates/nuncio-cli` | Pure Noun + Verb CLI runner and Unix pipe scripting engine. |
+| `crates/nuncio-tui` | Terminal user interface powered by Ratatui and crossterm. |
+| `crates/nuncio-gui` | Native desktop GUI application shell powered by Tauri v2 and React. |
+| `crates/nuncio-mcp` | MCP stdio server providing LLM agents direct read/write access. |
+| `crates/nunciod` | Standalone background daemon binary server. |
+
+---
+
+## CLI Command Usage (Pure Noun + Verb Syntax)
+
+Nuncio CLI enforces standardized `<Noun> <Verb> [Flags]` syntax with optional `--json` output envelopes:
+
+```bash
+# Account Management
+nuncio account add --email james.maes@kof22.com --imap-host mail.kof22.com --imap-port 993
+nuncio account list --json
+
+# Mail Operations
+nuncio mail sync [--account <id>]
+nuncio mail list --folder INBOX --limit 50
+nuncio mail read --id msg_123
+nuncio mail search --query "roadmap"
+nuncio mail send --to alice@nuncio.mx --subject "Release Update" --body "Message body"
+
+# Calendar Operations
+nuncio cal list --calendar work
+nuncio cal create --summary "Team Standup" --start 1774348800 --end 1774352400
+
+# System Status
+nuncio system status --json
+nuncio daemon
+```
+
+---
+
+## Quality Gates & Verification Commands
+
+Build configurations enforce strict zero-warning policy (`-D warnings -F unsafe_code -D unused_must_use`):
+
+```bash
+# 1. Compiler & Linter Quality Gate (Zero warnings allowed)
+cargo check --workspace
+cargo clippy --workspace -- -D warnings
+
+# 2. Run Full Integration Test Suite (100 tests across 9 crates)
+cargo test --workspace
+
+# 3. Formatter Gate
+cargo fmt --all --check
+```
+
+---
+
+## Master Architectural Documentation & Roadmaps
+
+- **[Enhanced Production Roadmap (V1, V2, V3)](docs/PLAN-enhanced-roadmap-v1-v2-v3.md)**: Deep commercial feature specification benchmarked against Superhuman, Mimestream, Apple Mail, Outlook, Hey, Cron, and Fantastical.
+- **[Hybrid Daemon Architecture Blueprint](docs/PLAN-hybrid-daemon-architecture.md)**: Sockets, framing, auto-spawning, and security enclave design.
+- **[Executive Audit Review Report](docs/EXECUTIVE-AUDIT-REVIEW.md)**: Authoritative technical audit scorecard across architecture, security, code quality, UI/UX, and performance.
+- **[Architecture Specification](docs/ARCHITECTURE.md)**: Domain encapsulation, Hexagonal Ports & Adapters model, and IPC streaming contracts.
+
+---
+
+## Single Source of Truth for Execution
 
 Project planning, issue tracking, atomic micro-milestones, and subagent assignments are authoritatively managed directly on GitHub:
 
@@ -17,72 +140,6 @@ Project planning, issue tracking, atomic micro-milestones, and subagent assignme
 - **GitHub Issues**: [KofTwentyTwo/nuncio/issues](https://github.com/KofTwentyTwo/nuncio/issues)
 
 ---
-
-## JetBrains RustRover Setup
-
-Nuncio is fully pre-configured for **JetBrains RustRover**:
-
-- **Cargo Workspace Auto-Detection**: Open `R:\Git.Local\KofTwentyTwo\nuncio` in RustRover. The IDE will automatically index all 7 workspace member crates (`crates/*`).
-- **Pre-Configured Shared Run Configurations** (accessible in RustRover's top-right run menu):
-  - `Cargo Check All`: Runs `cargo check-all` (compiler/clippy warnings as errors).
-  - `Cargo Test All`: Runs full workspace test suite.
-  - `Cargo Coverage Gate`: Runs `cargo cov` (100% unit test line coverage verification).
-  - `Run nuncio-cli (status)`: Launches CLI status subcommand.
-  - `Run nuncio-tui`: Launches Terminal UI client.
-  - `Run nuncio-gui`: Launches Native Desktop GUI shell.
-- **Automatic Code Formatting**: `rustfmt` format-on-save is enabled by default via `.idea/codeStyles/Project.xml`.
-
----
-
-## Overview
-
-Nuncio follows a library-first architecture. All core business logic, protocol synchronization, offline storage, indexing, and state management are isolated within headless Rust libraries. Presentation layers remain lightweight shells driving a command line interface (CLI), terminal UI (TUI), or native desktop GUI.
-## CLI Usage (Noun + Verb Syntax)
-
-Nuncio CLI follows a standardized `<Noun> <Verb> [Flags]` command structure:
-
-```bash
-# Account Operations
-nuncio account add --email james.maes@kof22.com --imap-host mail.kof22.com --imap-port 993
-nuncio account list
-
-# Email Operations
-nuncio mail sync [--account <id>]
-nuncio mail list --folder INBOX
-nuncio mail read --id msg_123
-nuncio mail search --query "roadmap"
-nuncio mail send --to alice@nuncio.mx --subject "Update" --body "Message"
-
-# Folder & Calendar Operations
-nuncio folder list
-nuncio cal list
-nuncio system status
-```
-
-## Workspace Architecture
-
-- `crates/nuncio-core`: Workspace management, account orchestration, async event routing.
-- `crates/nuncio-mail`: IMAP4rev1, JMAP (RFC 8620/8621), and SMTP protocol engines.
-- `crates/nuncio-cal`: CalDAV and iCalendar (RFC 5545) client libraries.
-- `crates/nuncio-store`: Encrypted local persistence and SQLite FTS5 search indexing.
-- `crates/nuncio-cli`: Scriptable command-line interface binary for Unix pipes and automation.
-- `crates/nuncio-tui`: Terminal user interface powered by Ratatui.
-- `crates/nuncio-gui`: Native desktop graphical user interface shell.
-
-## Local Build & Verification Commands
-
-- Rust 1.75+ toolchain
-
-```bash
-# Compiler & Linter Verification (warnings as errors)
-cargo check-all
-
-# Run Full Test Suite
-cargo test-all
-
-# 100% Line Coverage Gate Verification
-cargo cov
-```
 
 ## License
 

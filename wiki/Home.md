@@ -1,35 +1,23 @@
 # Welcome to the Nuncio Wiki
 
-Official domain: [nuncio.mx](https://nuncio.mx)
+Nuncio is a high-performance, library-first cross-platform mail and calendar suite for Windows, macOS, and Linux.
 
-> **Etymology**: Derived from the Latin verb ***nūntiō*** ("I announce", "I declare", "I deliver a message") and noun ***nūntius*** ("messenger", "courier", "bearer of tidings"). Nuncio is built as the ultimate cross-platform messenger and calendar courier for Windows, macOS, and Linux.
-
----
-
-## Single Source of Truth for Planning & Execution
-
-Project planning, issue tracking, atomic micro-milestones, and subagent assignments are authoritatively managed directly on GitHub:
-
-- **GitHub Project Board**: [Nuncio Roadmap Project #5](https://github.com/users/KofTwentyTwo/projects/5)
-- **GitHub Milestones**: [KofTwentyTwo/nuncio/milestones](https://github.com/KofTwentyTwo/nuncio/milestones) (`v0.1.0` through `v1.0.0`)
-- **GitHub Issues**: [KofTwentyTwo/nuncio/issues](https://github.com/KofTwentyTwo/nuncio/issues)
+Official Site: [nuncio.mx](https://nuncio.mx) | GitHub Repository: [KofTwentyTwo/nuncio](https://github.com/KofTwentyTwo/nuncio)
 
 ---
 
-## Navigation
+## 4 Presentation Interfaces + Central Daemon
 
-- [[Architecture Specification|Architecture-Specification]]
-- [[Executive Review|Executive-Review]]
-- [[Roadmap and Project Phases|Roadmap-and-Phases]]
+- **`nuncio-cli` (POSIX CLI)**: Pure Noun + Verb scriptable interface (`--json`).
+- **`nuncio-tui` (Terminal TUI)**: Keyboard-first split-pane interface powered by Ratatui.
+- **`nuncio-gui` (Tauri v2 Desktop GUI)**: Native desktop window with React 18 + Vite + TypeScript frontend.
+- **`nuncio-mcp` (Native LLM Agent UI)**: Model Context Protocol (MCP) JSON-RPC 2.0 stdio server for AI agents.
+- **`nunciod` (Central Daemon Binary)**: Standalone background process owning SQLite WAL storage, security enclaves, background protocol sync loops, and multi-client IPC socket streams.
 
 ---
 
-## Workspace Structure
+## Wiki Navigation
 
-- `crates/nuncio-core`: Workspace management, account orchestration, async event loop.
-- `crates/nuncio-mail`: IMAP4rev1, JMAP (RFC 8620/8621), and SMTP protocol engines.
-- `crates/nuncio-cal`: CalDAV and iCalendar (RFC 5545) client libraries.
-- `crates/nuncio-store`: Encrypted local persistence and SQLite FTS5 search indexing.
-- `crates/nuncio-cli`: Scriptable command-line interface binary for Unix pipes and automation.
-- `crates/nuncio-tui`: Terminal user interface powered by Ratatui.
-- `crates/nuncio-gui`: Native desktop graphical user interface shell.
+1. **[Architecture Specification](Architecture-Specification)**: Hybrid Daemon-First Architecture (`nunciod`), 4-byte length-prefixed IPC framing, database encryption at rest, and zero-trust sandboxing.
+2. **[Roadmap and Phases](Roadmap-and-Phases)**: Master V1, V2, and V3 micro-feature breakdown for commercial mail and calendar parity.
+3. **[Executive Review](Executive-Review)**: Authoritative technical audit scorecards across architecture, security, code standards, UI/UX, and performance.

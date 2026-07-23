@@ -1,47 +1,28 @@
-# Nuncio Roadmap and Project Phases
+# Nuncio Enhanced Production Roadmap (V1, V2, V3)
 
-Nuncio ([nuncio.mx](https://nuncio.mx)) development is organized into 4 primary roadmap phases executed via a **Multi-Agent Architecture**:
-- **Master Orchestrator**: Antigravity (`agy`)
-- **Engine & Core Subagent**: Claude Code (`claude`)
-- **CLI & Automation Subagent**: OpenAI Codex (`codex`)
-- **UI Shells & CI/CD Subagent**: Antigravity Worker (`agy-worker`)
+> **Zero-Mock Commercial Parity Roadmap & Micro-Feature Specification**  
+> Benchmarked against Superhuman, Mimestream, Apple Mail, Outlook, HEY, Fantastical, Cron, and ProtonMail.
 
 ---
 
-## Phase 1: Core Engine & SQLite FTS5 Storage
-- `nuncio-core` workspace engine setup, configuration schema, and Tokio async event bus -> **Claude Code Subagent**
-- `nuncio-store` SQLite database persistence with WAL mode -> **Claude Code Subagent**
-- SQLite FTS5 virtual table schemas (`unicode61` + `trigram`) for mail envelopes and calendar events -> **Claude Code Subagent**
-- `keyring` integration for OS Keychain / Credential Manager secrets -> **Claude Code Subagent**
-- `age` payload encryption for disk attachment blobs -> **Claude Code Subagent**
+## Roadmap Phases Summary
 
-## Phase 2: Protocol Engine Libraries
-- `nuncio-mail`:
-  - `mail-parser` integration for zero-copy MIME parsing -> **Claude Code Subagent**
-  - `jmap-client` + `jmap-proto` JMAP (RFC 8620/8621) sync engine over HTTP/2 and WebSockets -> **Claude Code Subagent**
-  - `async-imap` IMAP4rev1 dual-socket connection manager (IDLE push stream + fetch pool) -> **Claude Code Subagent**
-  - `lettre` async Tokio SMTP transport -> **Claude Code Subagent**
-- `nuncio-cal`:
-  - `calcard` iCalendar (RFC 5545) and vCard (RFC 6350) parsing to JSCalendar (RFC 8984) -> **Claude Code Subagent**
-  - `rrule` recurrence expansion engine -> **Claude Code Subagent**
-  - WebDAV / CalDAV (RFC 4791) `sync-collection` and `calendar-query` REPORT client via `reqwest` and `quick-xml` -> **Claude Code Subagent**
-- Protocol server mocks (`wiremock`, `MockMailBackend`, `MockKeyring`) -> **Claude Code Subagent**
-
-## Phase 3: Command Line & Terminal User Interfaces (CLI & TUI Shells)
-- `nuncio-cli` built on `clap` v4 for subcommand parsing (`mail`, `cal`, `sync`, `status`) and JSON output formatting -> **OpenAI Codex Subagent**
-- `nuncio-tui` built on `ratatui` v0.28+ and `crossterm` v0.28+ -> **Antigravity Worker Subagent**
-- Keyboard-first mail thread navigation, composer, and folder trees -> **Antigravity Worker Subagent**
-- `html2text` HTML email rendering into formatted terminal text with link footers -> **Antigravity Worker Subagent**
-- Calendar day, week, and month grid layouts -> **Antigravity Worker Subagent**
-
-## Phase 4: Desktop GUI Shell & Cross-Platform Packaging
-- `nuncio-gui` built on `Tauri v2` wrapper calling `nuncio-core` via IPC -> **Antigravity Worker Subagent**
-- Untrusted HTML email sandboxing (`<iframe sandbox>` with custom `nuncio-mail://` URI scheme) -> **Antigravity Worker Subagent**
-- Native OS accessibility tree integration (VoiceOver, NVDA/JAWS, Orca) -> **Antigravity Worker Subagent**
-- Windows (`.msi` / `.exe`), macOS (`.dmg`), and Linux (`.AppImage` / `.deb`) CI automated release pipelines -> **Antigravity Master Agent (agy)**
+| Release Phase | Target Audience | Key Feature Highlights |
+| :--- | :--- | :--- |
+| **V1 (GA Launch)** | Developers & Power Users | Full 4-shell presentation layer (`nuncio-cli`, `nuncio-tui`, `nuncio-gui`, `nuncio-mcp`), centralized `nunciod` daemon, IMAP/SMTP/CalDAV drivers, FTS5 trigram search (<3.2ms), OS keyring integration, zero `.unwrap()` runtime safety. |
+| **V2 (Power User & Enterprise)** | Enterprise Teams & Security Professionals | JMAP RFC 8620/8621 native transport, OAuth2 PKCE token rotation, CardDAV contact sync, OpenPGP / S/MIME encryption, multi-timezone calendar overlays, 1-on-1 scheduling link generation, Zoom/Teams/Meet link detection. |
+| **V3 (Platform & AI Automation)** | AI-Native Workflows & Developers | Local LLM agent auto-categorization & triage, automated meeting summaries, Lua/WASM plugin runtime, webhook workflow engine, age encrypted cloud sync relay. |
 
 ---
 
-## Project Tracking Links
-- GitHub Issues: [KofTwentyTwo/nuncio/issues](https://github.com/KofTwentyTwo/nuncio/issues)
-- GitHub Project Board: [Nuncio Roadmap Project #5](https://github.com/users/KofTwentyTwo/projects/5)
+## Release Milestones (v0.1.0 to v1.0.0)
+
+- **v0.1.0 (Core Library Engine)**: Hexagonal domain models, `EventBus`, SQLite WAL `DatabaseEngine`.
+- **v0.2.0 (Storage & FTS5 Search)**: Trigram FTS5 search index, AES-256-GCM column encryption, age attachment stream ciphers.
+- **v0.3.0 (IMAP & SMTP Drivers)**: `async-imap` TLS connections, IDLE real-time push, `lettre` SMTP MIME transport.
+- **v0.4.0 (CalDAV & iCal Recurrence)**: CalDAV HTTP REPORT queries, iCalendar RFC 5545 parsing, `rrule` recurrence expansion.
+- **v0.5.0 (Ratatui TUI Shell)**: 3-pane split-view terminal UI, Vim motions (`j`/`k`/`h`/`l`), HTML to terminal plaintext conversion.
+- **v0.6.0 (Tauri v2 Desktop GUI)**: React 18 + Vite desktop UI, glassmorphic CSS, strict HTML `<iframe sandbox>` CSP enforcement.
+- **v0.7.0 (Native MCP Server)**: Stdio JSON-RPC 2.0 MCP server for local LLM agents (`nuncio_mail_send`, `nuncio_cal_create_event`).
+- **v0.8.0 (Hybrid Daemon & IPC)**: Central `nunciod` binary, 4-byte length-prefixed IPC framing codec, auto-spawning retry loop.
+- **v1.0.0 (GA Release)**: Production packaging, installers, zero warnings, 100% test coverage gate.
