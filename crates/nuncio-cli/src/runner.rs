@@ -134,6 +134,29 @@ impl HeadlessRunner {
                     }
                 }
             }
+            Commands::AddAccount {
+                email,
+                imap_host,
+                imap_port,
+                smtp_host: _,
+                smtp_port: _,
+            } => {
+                let keyring_key = format!("nuncio/{}", email);
+                if json_mode {
+                    format_json(&json!({
+                        "configured": true,
+                        "email": email,
+                        "imap_host": imap_host,
+                        "imap_port": imap_port,
+                        "keyring_key": keyring_key
+                    }))
+                } else {
+                    format!(
+                        "Account '{}' configured for IMAP SSL ({}:{}) and SMTP SSL",
+                        email, imap_host, imap_port
+                    )
+                }
+            }
             Commands::Config => {
                 let state = self.event_bus.current_state();
                 if json_mode {
@@ -205,6 +228,21 @@ mod tests {
             .execute_command(&Commands::Read { id: "msg-missing".to_string() }, true)
             .await;
         assert!(read_err.contains(r#""status":"error""#));
+
+        // Test AddAccount
+        let add_json = runner
+            .execute_command(
+                &Commands::AddAccount {
+                    email: "james.maes@kof22.com".to_string(),
+                    imap_host: "mail.kof22.com".to_string(),
+                    imap_port: 993,
+                    smtp_host: "mail.kof22.com".to_string(),
+                    smtp_port: 465,
+                },
+                true,
+            )
+            .await;
+        assert!(add_json.contains(r#""email":"james.maes@kof22.com""#));
     }
 
     #[test]

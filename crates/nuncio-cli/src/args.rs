@@ -64,6 +64,25 @@ pub enum Commands {
     },
     /// Display or validate CLI account configuration.
     Config,
+    /// Add and configure a new mail account.
+    AddAccount {
+        /// Email address or username.
+        #[arg(short, long)]
+        email: String,
+        /// IMAP server hostname.
+        #[arg(long, default_value = "mail.kof22.com")]
+        imap_host: String,
+        /// IMAP server port (SSL).
+        #[arg(long, default_value_t = 993)]
+        imap_port: u16,
+        /// SMTP server hostname.
+        #[arg(long, default_value = "mail.kof22.com")]
+        smtp_host: String,
+        /// SMTP server port (SSL).
+        #[arg(long, default_value_t = 465)]
+        smtp_port: u16,
+    },
+
 
 }
 
@@ -139,6 +158,18 @@ mod tests {
             cli_read.command,
             Commands::Read {
                 id: "msg-123".to_string()
+            }
+        );
+
+        let cli_add = Cli::parse_from(["nuncio", "add-account", "--email", "james.maes@kof22.com"]);
+        assert_eq!(
+            cli_add.command,
+            Commands::AddAccount {
+                email: "james.maes@kof22.com".to_string(),
+                imap_host: "mail.kof22.com".to_string(),
+                imap_port: 993,
+                smtp_host: "mail.kof22.com".to_string(),
+                smtp_port: 465,
             }
         );
     }
