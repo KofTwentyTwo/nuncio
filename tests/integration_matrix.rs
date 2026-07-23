@@ -1,7 +1,7 @@
 //! Full offline end-to-end integration test matrix for Nuncio core services.
 
 use nuncio_cal::{CalendarError, MockCalendarBackend};
-use nuncio_cli::{Commands, HeadlessRunner};
+use nuncio_cli::{Commands, HeadlessRunner, MailSubcommand};
 use nuncio_core::model::{CalendarEvent, Email, Folder};
 use nuncio_core::{CoreCommand, EngineStatus, EventBus};
 use nuncio_mail::{MailBackend, MockMailBackend};
@@ -88,7 +88,14 @@ async fn full_offline_integration_test_matrix() {
 
     // 8. Test HeadlessRunner CLI pipeline
     let runner = HeadlessRunner::ephemeral().await.expect("runner init");
-    let output_json = runner.execute_command(&Commands::Sync, true).await;
+    let output_json = runner
+        .execute_command(
+            &Commands::Mail {
+                action: MailSubcommand::Sync,
+            },
+            true,
+        )
+        .await;
     assert!(output_json.contains(r#""status":"ok""#));
 
     // 9. Dispatch EventBus command and verify state update
