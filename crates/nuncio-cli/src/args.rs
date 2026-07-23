@@ -3,37 +3,43 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
-/// Nuncio CLI — Developer-first cross-platform mail & calendar automation.
+/// Nuncio CLI — Pure Noun + Verb Developer-First Mail & Calendar Automation.
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
-#[command(name = "nuncio", author, version, about, long_about = None)]
+#[command(
+    name = "nuncio",
+    author,
+    version,
+    about = "Pure Noun + Verb CLI for mail & calendar operations",
+    long_about = "Nuncio CLI provides a structured, scriptable interface using pure <Noun> <Verb> [Flags] syntax."
+)]
 pub struct Cli {
     /// Output machine-readable JSON payloads to stdout.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Output machine-readable JSON payloads to stdout")]
     pub json: bool,
 
     /// Target specific account ID.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Target a specific configured account ID")]
     pub account: Option<String>,
 
     /// Enable verbose log output to stderr.
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, help = "Enable detailed verbose execution logs on stderr")]
     pub verbose: bool,
 
-    /// Subcommand action to perform.
+    /// Subcommand resource noun.
     #[command(subcommand)]
     pub command: Commands,
 }
 
-/// Available subcommands for `nuncio-cli`.
+/// Available resource Nouns for `nuncio-cli`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Commands {
-    /// Account operations (`nuncio account <verb>`).
+    /// Account management operations (`nuncio account <verb>`).
     Account {
         #[command(subcommand)]
         action: AccountSubcommand,
     },
-    /// Mail operations (`nuncio mail <verb>`).
+    /// Email operations (`nuncio mail <verb>`).
     Mail {
         #[command(subcommand)]
         action: MailSubcommand,
@@ -48,74 +54,10 @@ pub enum Commands {
         #[command(subcommand)]
         action: CalSubcommand,
     },
-    /// System & Configuration operations (`nuncio system <verb>`).
+    /// System and daemon status (`nuncio system <verb>`).
     System {
         #[command(subcommand)]
         action: SystemSubcommand,
-    },
-
-    // Short-cut top-level aliases for backwards compatibility
-    /// Shortcut: Trigger mail & calendar synchronization.
-    Sync,
-    /// Shortcut: List messages in inbox folder.
-    List {
-        /// Mailbox folder name (default: "inbox").
-        #[arg(short, long, default_value = "inbox")]
-        folder: String,
-    },
-    /// Shortcut: Send an email message.
-    Send {
-        /// Recipient email address.
-        #[arg(short, long)]
-        to: String,
-        /// Message subject line.
-        #[arg(short, long)]
-        subject: String,
-        /// Message body content.
-        #[arg(short, long)]
-        body: String,
-    },
-    /// Shortcut: Perform full-text search across messages and calendar events.
-    Search {
-        /// Query string.
-        #[arg(short, long)]
-        query: String,
-    },
-    /// Shortcut: List available local mailbox folders.
-    Folders,
-    /// Shortcut: Read a specific message by ID.
-    Read {
-        /// Unique message identifier.
-        #[arg(short, long)]
-        id: String,
-    },
-    /// Shortcut: Display or validate CLI account configuration.
-    Config,
-    /// Shortcut: List all configured accounts.
-    Accounts,
-    /// Shortcut: Add a new mail account.
-    AddAccount {
-        /// Email address or username.
-        #[arg(short, long)]
-        email: String,
-        /// IMAP server hostname.
-        #[arg(long, default_value = "mail.kof22.com")]
-        imap_host: String,
-        /// IMAP server port (SSL).
-        #[arg(long, default_value_t = 993)]
-        imap_port: u16,
-        /// SMTP server hostname.
-        #[arg(long, default_value = "mail.kof22.com")]
-        smtp_host: String,
-        /// SMTP server port (SSL).
-        #[arg(long, default_value_t = 465)]
-        smtp_port: u16,
-        /// IMAP connection transport mode (implicit_tls, start_tls, plain).
-        #[arg(long, default_value = "implicit_tls")]
-        imap_mode: String,
-        /// SMTP connection transport mode (implicit_tls, start_tls, plain).
-        #[arg(long, default_value = "implicit_tls")]
-        smtp_mode: String,
     },
 }
 
@@ -123,36 +65,36 @@ pub enum Commands {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AccountSubcommand {
-    /// List all configured accounts (`nuncio account list`).
+    /// List all configured mail and calendar accounts.
     List,
-    /// Add a new mail account (`nuncio account add`).
+    /// Add and configure a new mail account securely.
     Add {
-        /// Email address or username.
-        #[arg(short, long)]
+        /// Email address or account username.
+        #[arg(short, long, help = "Email address or account username")]
         email: String,
         /// IMAP server hostname.
-        #[arg(long, default_value = "mail.kof22.com")]
+        #[arg(long, default_value = "mail.kof22.com", help = "IMAP server hostname")]
         imap_host: String,
         /// IMAP server port (SSL).
-        #[arg(long, default_value_t = 993)]
+        #[arg(long, default_value_t = 993, help = "IMAP server port (default: 993)")]
         imap_port: u16,
         /// SMTP server hostname.
-        #[arg(long, default_value = "mail.kof22.com")]
+        #[arg(long, default_value = "mail.kof22.com", help = "SMTP server hostname")]
         smtp_host: String,
         /// SMTP server port (SSL).
-        #[arg(long, default_value_t = 465)]
+        #[arg(long, default_value_t = 465, help = "SMTP server port (default: 465)")]
         smtp_port: u16,
-        /// IMAP connection transport mode.
-        #[arg(long, default_value = "implicit_tls")]
+        /// IMAP connection transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, default_value = "implicit_tls", help = "IMAP transport mode")]
         imap_mode: String,
-        /// SMTP connection transport mode.
-        #[arg(long, default_value = "implicit_tls")]
+        /// SMTP connection transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, default_value = "implicit_tls", help = "SMTP transport mode")]
         smtp_mode: String,
     },
-    /// Show account details (`nuncio account show`).
+    /// Display details for a specific configured account.
     Show {
         /// Unique account identifier.
-        #[arg(short, long)]
+        #[arg(short, long, help = "Unique account identifier")]
         id: String,
     },
 }
@@ -161,36 +103,36 @@ pub enum AccountSubcommand {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MailSubcommand {
-    /// Trigger mail synchronization (`nuncio mail sync`).
+    /// Synchronize local email cache with remote IMAP/JMAP server.
     Sync,
-    /// List emails in a folder (`nuncio mail list`).
+    /// List email messages in a specified folder.
     List {
         /// Mailbox folder name (default: "inbox").
-        #[arg(short, long, default_value = "inbox")]
+        #[arg(short, long, default_value = "inbox", help = "Mailbox folder name")]
         folder: String,
     },
-    /// Read a specific email message (`nuncio mail read`).
+    /// Read a specific email message by ID.
     Read {
         /// Unique message identifier.
-        #[arg(short, long)]
+        #[arg(short, long, help = "Unique message identifier")]
         id: String,
     },
-    /// Send an email message (`nuncio mail send`).
+    /// Compose and send an email message via SMTP.
     Send {
         /// Recipient email address.
-        #[arg(short, long)]
+        #[arg(short, long, help = "Recipient email address")]
         to: String,
         /// Message subject line.
-        #[arg(short, long)]
+        #[arg(short, long, help = "Message subject line")]
         subject: String,
-        /// Message body content.
-        #[arg(short, long)]
+        /// Message body text content.
+        #[arg(short, long, help = "Message body text content")]
         body: String,
     },
-    /// Search emails (`nuncio mail search`).
+    /// Full-text search across all cached email messages.
     Search {
-        /// Query string.
-        #[arg(short, long)]
+        /// Search query string.
+        #[arg(short, long, help = "Search query string")]
         query: String,
     },
 }
@@ -199,7 +141,7 @@ pub enum MailSubcommand {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FolderSubcommand {
-    /// List mailbox folders (`nuncio folder list`).
+    /// List available mailbox folders.
     List,
 }
 
@@ -207,9 +149,9 @@ pub enum FolderSubcommand {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CalSubcommand {
-    /// List calendar events (`nuncio cal list`).
+    /// List upcoming calendar events.
     List,
-    /// Sync calendar events (`nuncio cal sync`).
+    /// Synchronize local calendar cache with remote CalDAV server.
     Sync,
 }
 
@@ -217,7 +159,7 @@ pub enum CalSubcommand {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SystemSubcommand {
-    /// Show system and daemon status (`nuncio system status`).
+    /// Display system, daemon, and event bus status.
     Status,
 }
 
@@ -226,7 +168,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_noun_verb_account_commands() {
+    fn parse_pure_noun_verb_account_commands() {
         let cli_list = Cli::parse_from(["nuncio", "account", "list"]);
         assert_eq!(
             cli_list.command,
@@ -261,8 +203,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_noun_verb_mail_commands() {
-        let cli_sync = Cli::parse_from(["nuncio", "mail", "sync"]);
+    fn parse_pure_noun_verb_mail_commands() {
+        let cli_sync = Cli::parse_from(["nuncio", "--json", "--verbose", "mail", "sync"]);
+        assert!(cli_sync.json);
+        assert!(cli_sync.verbose);
         assert_eq!(
             cli_sync.command,
             Commands::Mail {
@@ -279,15 +223,5 @@ mod tests {
                 }
             }
         );
-    }
-
-    #[test]
-    fn parse_legacy_shortcut_commands() {
-        let cli_sync = Cli::parse_from(["nuncio", "--json", "sync"]);
-        assert!(cli_sync.json);
-        assert_eq!(cli_sync.command, Commands::Sync);
-
-        let cli_accounts = Cli::parse_from(["nuncio", "accounts"]);
-        assert_eq!(cli_accounts.command, Commands::Accounts);
     }
 }

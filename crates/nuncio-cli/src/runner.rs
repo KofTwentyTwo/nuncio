@@ -52,7 +52,7 @@ impl HeadlessRunner {
     /// Execute a CLI subcommand, returning a formatted string output.
     pub async fn execute_command(&self, cmd: &Commands, json_mode: bool) -> String {
         match cmd {
-            // Structured Noun + Verb Commands
+            // Pure Noun + Verb Commands
             Commands::Account { action } => match action {
                 AccountSubcommand::List => self.handle_accounts_list(json_mode).await,
                 AccountSubcommand::Add {
@@ -111,30 +111,6 @@ impl HeadlessRunner {
             Commands::System { action } => match action {
                 SystemSubcommand::Status => self.handle_system_status(json_mode).await,
             },
-
-            // Legacy Short-Cut Subcommands
-            Commands::Sync => self.handle_sync(json_mode).await,
-            Commands::List { folder } => self.handle_list_folder(folder, json_mode).await,
-            Commands::Send { to, subject, body } => {
-                self.handle_send_email(to, subject, body, json_mode).await
-            }
-            Commands::Search { query } => self.handle_search(query, json_mode).await,
-            Commands::Folders => self.handle_folders_list(json_mode).await,
-            Commands::Read { id } => self.handle_read_message(id, json_mode).await,
-            Commands::AddAccount {
-                email,
-                imap_host,
-                imap_port,
-                smtp_host: _,
-                smtp_port: _,
-                imap_mode,
-                smtp_mode,
-            } => {
-                self.handle_add_account(email, imap_host, *imap_port, imap_mode, smtp_mode, json_mode)
-                    .await
-            }
-            Commands::Accounts => self.handle_accounts_list(json_mode).await,
-            Commands::Config => self.handle_system_status(json_mode).await,
         }
     }
 
@@ -291,107 +267,29 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn headless_runner_executes_all_commands() {
+    async fn headless_runner_executes_all_pure_noun_verb_commands() {
         let runner = HeadlessRunner::ephemeral().await.expect("ephemeral runner initializes");
 
-        // Test Sync
-        let sync_out = runner.execute_command(&Commands::Sync, false).await;
-        assert!(sync_out.contains("Synchronization started"));
-
-        let sync_json = runner.execute_command(&Commands::Sync, true).await;
-        assert!(sync_json.contains(r#""status":"sync_started""#));
-
-        // Test Noun-Verb Mail Sync
-        let noun_sync = runner
+        // Account Noun Commands
+        let acct_add = runner
             .execute_command(
-                &Commands::Mail {
-                    action: MailSubcommand::Sync,
+                &Commands::Account {
+                    action: AccountSubcommand::Add {
+                        email: "james.maes@kof22.com".to_string(),
+                        imap_host: "mail.kof22.com".to_string(),
+                        imap_port: 993,
+                        smtp_host: "mail.kof22.com".to_string(),
+                        smtp_port: 465,
+                        imap_mode: "implicit_tls".to_string(),
+                        smtp_mode: "implicit_tls".to_string(),
+                    },
                 },
                 true,
             )
             .await;
-        assert!(noun_sync.contains(r#""status":"sync_started""#));
+        assert!(acct_add.contains(r#""email":"james.maes@kof22.com""#));
 
-        // Test List
-        let list_out = runner
-            .execute_command(
-                &Commands::List {
-                    folder: "INBOX".to_string(),
-                },
-                false,
-            )
-            .await;
-        assert!(list_out.contains("INBOX"));
-
-        // Test Send
-        let send_out = runner
-            .execute_command(
-                &Commands::Send {
-                    to: "alice@nuncio.mx".to_string(),
-                    subject: "Test".to_string(),
-                    body: "Hello".to_string(),
-                },
-                false,
-            )
-            .await;
-        assert!(send_out.contains("alice@nuncio.mx"));
-
-        // Test Search
-        let search_json = runner
-            .execute_command(
-                &Commands::Search {
-                    query: "test".to_string(),
-                },
-                true,
-            )
-            .await;
-        assert!(search_json.contains(r#""query":"test""#));
-
-        // Test Folders
-        let folders_json = runner.execute_command(&Commands::Folders, true).await;
-        assert!(folders_json.contains(r#""folders":[]"#));
-
-        // Test Noun-Verb Folder List
-        let noun_folders = runner
-            .execute_command(
-                &Commands::Folder {
-                    action: FolderSubcommand::List,
-                },
-                true,
-            )
-            .await;
-        assert!(noun_folders.contains(r#""folders":[]"#));
-
-        // Test Read Missing
-        let read_err = runner
-            .execute_command(
-                &Commands::Read {
-                    id: "nonexistent".to_string(),
-                },
-                true,
-            )
-            .await;
-        assert!(read_err.contains(r#""status":"error""#));
-
-        // Test AddAccount
-        let add_json = runner
-            .execute_command(
-                &Commands::AddAccount {
-                    email: "james.maes@kof22.com".to_string(),
-                    imap_host: "mail.kof22.com".to_string(),
-                    imap_port: 993,
-                    smtp_host: "mail.kof22.com".to_string(),
-                    smtp_port: 465,
-                    imap_mode: "implicit_tls".to_string(),
-                    smtp_mode: "implicit_tls".to_string(),
-                },
-                true,
-            )
-            .await;
-        assert!(add_json.contains(r#""email":"james.maes@kof22.com""#));
-
-        // Test Noun-Verb Account Add & List & Show
-        let noun_acct_list = runner
+        let acct_list = runner
             .execute_command(
                 &Commands::Account {
                     action: AccountSubcommand::List,
@@ -399,9 +297,9 @@ mod tests {
                 true,
             )
             .await;
-        assert!(noun_acct_list.contains(r#""accounts":[]"#));
+        assert!(acct_list.contains(r#""accounts":[]"#));
 
-        let noun_acct_show = runner
+        let acct_show = runner
             .execute_command(
                 &Commands::Account {
                     action: AccountSubcommand::Show {
@@ -411,13 +309,81 @@ mod tests {
                 false,
             )
             .await;
-        assert!(noun_acct_show.contains("Account 'missing' not found"));
+        assert!(acct_show.contains("Account 'missing' not found"));
 
-        // Test Accounts
-        let accts_json = runner.execute_command(&Commands::Accounts, true).await;
-        assert!(accts_json.contains(r#""accounts":[]"#));
+        // Mail Noun Commands
+        let mail_sync = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Sync,
+                },
+                true,
+            )
+            .await;
+        assert!(mail_sync.contains(r#""status":"sync_started""#));
 
-        // Test Cal & System Noun-Verb Commands
+        let mail_list = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::List {
+                        folder: "INBOX".to_string(),
+                    },
+                },
+                false,
+            )
+            .await;
+        assert!(mail_list.contains("INBOX"));
+
+        let mail_read_err = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Read {
+                        id: "missing".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mail_read_err.contains(r#""status":"error""#));
+
+        let mail_send = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Send {
+                        to: "alice@nuncio.mx".to_string(),
+                        subject: "Test".to_string(),
+                        body: "Body".to_string(),
+                    },
+                },
+                false,
+            )
+            .await;
+        assert!(mail_send.contains("alice@nuncio.mx"));
+
+        let mail_search = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Search {
+                        query: "roadmap".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mail_search.contains(r#""query":"roadmap""#));
+
+        // Folder Noun Commands
+        let folder_list = runner
+            .execute_command(
+                &Commands::Folder {
+                    action: FolderSubcommand::List,
+                },
+                true,
+            )
+            .await;
+        assert!(folder_list.contains(r#""folders":[]"#));
+
+        // Cal Noun Commands
         let cal_list = runner
             .execute_command(
                 &Commands::Cal {
@@ -438,6 +404,7 @@ mod tests {
             .await;
         assert!(cal_sync.contains(r#""status":"calendar_sync_started""#));
 
+        // System Noun Commands
         let sys_status = runner
             .execute_command(
                 &Commands::System {
@@ -447,10 +414,6 @@ mod tests {
             )
             .await;
         assert!(sys_status.contains(r#""unread_count":0"#));
-
-        // Test Config
-        let config_json = runner.execute_command(&Commands::Config, true).await;
-        assert!(config_json.contains(r#""unread_count":0"#));
     }
 
     #[test]
