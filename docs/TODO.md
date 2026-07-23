@@ -62,3 +62,30 @@
 - [ ] `#242`: Build Windows WiX installer (`.msi`) for `nuncio-gui` and `nuncio-cli`.
 - [ ] `#244`: Build macOS Apple Silicon (ARM64) and Intel (x64) `.dmg` disk image packages.
 - [ ] `#246`: Build Linux AppImage standalone executable package.
+
+### Epic 8: NSQL Server-Side Email Filter & Automation Engine (#261 – #285) - `PLANNED`
+- [ ] `#261`: Initialize `crates/nuncio-filter` workspace crate with `sqlparser = "0.54"` dependency.
+- [ ] `#262`: Implement `NuncioSqlDialect` overriding `sqlparser::dialect::Dialect` for NSQL tokenization.
+- [ ] `#263`: Implement `NsqlParser` transforming SQL text into `nuncio-core` domain AST (`FilterRule`, `ConditionNode`, `RuleAction`).
+- [ ] `#264`: Implement 6-pass `NsqlValidator` type checker (field types, folder existence, RFC 5322, ReDoS check, contradiction detection).
+- [ ] `#265`: Implement lossless round-trip code generator (`rule.to_nsql()`) verifying algebraic invariants.
+- [ ] `#266`: Add SQLite migration DDL for `filter_rules`, `filter_conditions`, `filter_actions`, and `pending_remote_mutations`.
+- [ ] `#267`: Add SQLite migration DDL for `filter_execution_logs` with composite priority indexes.
+- [ ] `#268`: Implement HMAC-SHA256 cryptographic hash-chain ledger for `filter_execution_logs` with automated chain verification.
+- [ ] `#269`: Implement parameterized SQLite query compilation (`sqlx::QueryBuilder`) guaranteeing zero raw string interpolation (100% SQLi immunized).
+- [ ] `#270`: Implement `ArcSwap<CompiledFilterSet>` lock-free read cache manager ($<5\text{ns}$ access latency).
+- [ ] `#271`: Integrate `FilterEngine::evaluate()` into `nunciod` background sync loop for pre-ingestion filtering.
+- [ ] `#272`: Implement 1M-message Keyset Chunking Engine (`WHERE id > ? LIMIT 1000`) guaranteeing $<10\text{MB}$ RAM ceiling during bulk triage.
+- [ ] `#273`: Implement Transactional Outbox pattern with exponential backoff and full jitter for remote IMAP/JMAP mutations.
+- [ ] `#274`: Implement Memory-Only Dry-Run Preview API (`filter.preview` IPC method) returning microsecond-resolution match traces without database mutations or network requests.
+- [ ] `#275`: Implement `CoreEvent::FilterExecuted` and `CoreEvent::BatchFilterProgress` IPC length-prefixed streaming notifications over UNIX sockets and Windows named pipes.
+- [ ] `#276`: Enforce AST recursion depth limit (`MAX_AST_DEPTH = 10`) to prevent stack overflow panics.
+- [ ] `#277`: Implement Tokio 50ms hard execution timeout (`tokio::time::timeout`) for regular expression evaluation tasks.
+- [ ] `#278`: Implement domain whitelist policy and session re-authentication for `FORWARD TO` actions.
+- [ ] `#279`: Implement pre-flight DNS IP blacklisting (blocking `127.0.0.1`, `169.254.169.254`, private LAN subnets) with `max_redirects(0)` for outbound `CALL WEBHOOK` actions.
+- [ ] `#280`: Implement HMAC-SHA256 request payload signatures (`X-Nuncio-Signature: t=timestamp,v1=hash`) for outbound webhooks.
+- [ ] `#281`: Add POSIX CLI (`nuncio-cli`) `nuncio filter` subcommand suite (`list`, `create --sql`, `edit`, `delete`, `test --sql`, `export --format sql`, `import`, `logs`).
+- [ ] `#282`: Implement Terminal TUI (`nuncio-tui`) `AppMode::FilterRules` with NSQL code editor ↔ visual form builder toggle (`[s]`), dry-run previewer (`[t]`), priority re-ordering (`[J]`/`[K]`), and log inspector drawer (`[l]`).
+- [ ] `#283`: Build glassmorphic React `<FilterRulesModal />` component in `nuncio-gui` with "Visual Builder" vs "NSQL Query Editor" tabs, live syntax diagnostics, dry-run split pane, and execution log inspector tab.
+- [ ] `#284`: Register Native MCP (`nuncio-mcp`) `nuncio_filter_*` tools and stream `nuncio://filters` resource.
+- [ ] `#285`: Create end-to-end integration test suite verifying 1,000,000 message batch performance, zero-warning compiler build, zero-clippy lints, and 100% test pass rate across workspace crates.
