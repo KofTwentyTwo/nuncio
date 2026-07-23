@@ -1,53 +1,64 @@
-# TODO: Nuncio Roadmap & Task Tracking
+# TODO: Nuncio Zero-Mock Production Roadmap & Task Tracking
 
-> **Authoritative Single Source of Truth**: All task tracking, issue status, and milestone progress are authoritatively maintained on GitHub:
+> **Authoritative Single Source of Truth**: All task tracking, issue status, and milestone progress are maintained in [docs/PLAN-production-roadmap-100-plus.md](file:///R:/Git.Local/KofTwentyTwo/nuncio/docs/PLAN-production-roadmap-100-plus.md) and on GitHub:
 > - **GitHub Project Board**: [Nuncio Roadmap Project #5](https://github.com/users/KofTwentyTwo/projects/5)
-> - **GitHub Milestones**: [KofTwentyTwo/nuncio/milestones](https://github.com/KofTwentyTwo/nuncio/milestones) (`v0.1.0` through `v1.0.0`)
+> - **GitHub Milestones**: [KofTwentyTwo/nuncio/milestones](https://github.com/KofTwentyTwo/nuncio/milestones) (`v1.1.0-live-protocols` through `v2.0.0-production-ga`)
 > - **GitHub Issues**: [KofTwentyTwo/nuncio/issues](https://github.com/KofTwentyTwo/nuncio/issues)
 
 ---
 
-## Stage 1: Core Engine & Storage Infrastructure (`v0.1.0`) - [CLOSED]
-- [x] [#5 - M1.1: Event Bus Channels (CoreCommand, CoreEvent, mpsc, watch)](https://github.com/KofTwentyTwo/nuncio/issues/5) (Assigned: `claude`)
-- [x] [#6 - M1.2: Account & Configuration Schema (AccountConfig)](https://github.com/KofTwentyTwo/nuncio/issues/6) (Assigned: `claude`)
-- [x] [#7 - M1.3: SQLite Engine & WAL Migrations (sqlx)](https://github.com/KofTwentyTwo/nuncio/issues/7) (Assigned: `claude`)
-- [x] [#8 - M1.4: SQLite FTS5 Trigram Indexing & Triggers](https://github.com/KofTwentyTwo/nuncio/issues/8) (Assigned: `claude`)
-- [x] [#9 - M1.5: OS Vault Integration (keyring) & Fallback](https://github.com/KofTwentyTwo/nuncio/issues/9) (Assigned: `claude`)
-- [x] [#10 - M1.6: Attachment Blob Encryption (age & AES-GCM)](https://github.com/KofTwentyTwo/nuncio/issues/10) (Assigned: `claude`)
+## Active Phase: Zero-Mock Production Engineering (#101 – #260)
 
-## Stage 2: Mail Protocol Engine & MIME Parser (`v0.2.0`) - [CLOSED]
-- [x] [#11 - M2.1: Zero-Copy MIME Parser (mail-parser & bytes::Bytes)](https://github.com/KofTwentyTwo/nuncio/issues/11) (Assigned: `claude`)
-- [x] [#12 - M2.2: Outbound SMTP Transport (lettre async Tokio client)](https://github.com/KofTwentyTwo/nuncio/issues/12) (Assigned: `claude`)
-- [x] [#13 - M2.3: JMAP Client Protocol Engine (jmap-client Email/changes)](https://github.com/KofTwentyTwo/nuncio/issues/13) (Assigned: `claude`)
-- [x] [#14 - M2.4: IMAP IDLE Dual-Socket Manager (async-imap IDLE push stream)](https://github.com/KofTwentyTwo/nuncio/issues/14) (Assigned: `claude`)
-- [x] [#15 - M2.5: Protocol Server Mocks (wiremock & MockMailBackend)](https://github.com/KofTwentyTwo/nuncio/issues/15) (Assigned: `claude`)
+### Epic 1: Real Protocol Drivers & Live Sync Engine (#101 – #125) - `IN_PROGRESS`
+- [ ] `#101`: Implement live IMAP connection pool with TLS handshake via `async-imap` & `tokio-rustls`.
+- [ ] `#102`: Implement IMAP IDLE push notification listener loop for real-time inbox updates.
+- [ ] `#103`: Implement incremental IMAP UID FETCH message sync algorithm storing flags in SQLite.
+- [ ] `#104`: Implement IMAP mailbox list parser mapping RFC 3501 hierarchy to domain `Folder` entities.
+- [ ] `#105`: Implement IMAP draft, sent, trash, and flag state mutations (`STORE +FLAGS`, `COPY`, `EXPUNGE`).
+- [ ] `#106`: Implement live SMTP transport client using `lettre` with STARTTLS and Implicit TLS support.
+- [ ] `#107`: Implement MIME message builder for multipart/alternative (plain text + HTML + attachments).
+- [ ] `#108`: Implement live SMTP delivery confirmation and queue retry mechanism with backoff.
+- [ ] `#109`: Implement JMAP Session resource discovery (`/.well-known/jmap`) and API token authentication.
+- [ ] `#110`: Implement JMAP `Email/get` and `Email/changes` push synchronization engine.
+- [ ] `#112`: Implement CalDAV WebDAV report query builder for time-range event filtering (`RFC 4791`).
+- [ ] `#113`: Implement CalDAV multi-status XML parser extracting `VEVENT` data using `quick-xml`.
 
-## Stage 3: Calendar Engine & Recurrences (`v0.3.0`) - [CLOSED]
-- [x] [#16 - M3.1: iCal/vCard to JSCalendar Parser (calcard)](https://github.com/KofTwentyTwo/nuncio/issues/16) (Assigned: `claude`)
-- [x] [#17 - M3.2: Recurrence Expansion Engine (rrule finite window math)](https://github.com/KofTwentyTwo/nuncio/issues/17) (Assigned: `claude`)
-- [x] [#18 - M3.3: CalDAV REPORT Client (reqwest + quick-xml)](https://github.com/KofTwentyTwo/nuncio/issues/18) (Assigned: `claude`)
-- [x] [#19 - M3.4: CalDAV Server Mocks (wiremock)](https://github.com/KofTwentyTwo/nuncio/issues/19) (Assigned: `claude`)
+### Epic 2: Storage & Data-at-Rest Security (#126 – #145) - `IN_PROGRESS`
+- [x] `#126`: Implement SQLite WAL journal mode pragmas and connection pool manager in `nuncio-store`.
+- [x] `#127`: Implement PBKDF2/Argon2id key derivation module mapping OS vault secrets to AES keys.
+- [x] `#128`: Implement transparent column-level message body encryption/decryption in SQLite queries.
+- [x] `#129`: Implement `ZeroizeOnDrop` credential memory hygiene for all account configuration fields.
+- [x] `#130`: Implement SQLite FTS5 full-text search index setup with trigram tokenizer for email bodies.
+- [x] `#131`: Implement FTS5 query builder with prefix search and quote escaping.
 
-## Stage 4: Command Line Interface (`v0.4.0`) - [CLOSED]
-- [x] [#20 - M4.1: CLI Subcommand Parser (clap v4)](https://github.com/KofTwentyTwo/nuncio/issues/20) (Assigned: `codex`)
-- [x] [#21 - M4.2: JSON Pipeline Output Formatting (--json)](https://github.com/KofTwentyTwo/nuncio/issues/21) (Assigned: `codex`)
-- [x] [#22 - M4.3: Headless CLI E2E Integration Suite](https://github.com/KofTwentyTwo/nuncio/issues/22) (Assigned: `codex`)
+### Epic 3: TUI Interactive Terminal App (#146 – #170) - `IN_PROGRESS`
+- [x] `#146`: Connect `TuiApp` to live `DatabaseEngine` and `EventBus` channels.
+- [x] `#147`: Implement dynamic folder list rendering from SQLite in TUI Sidebar.
+- [ ] `#148`: Implement live message list rendering for selected folder with unread indicators.
+- [ ] `#149`: Implement dynamic email reader view rendering plain text body from SQLite.
+- [ ] `#152`: Implement interactive compose email modal with multi-line text input fields.
+- [ ] `#153`: Implement interactive reply / reply-all modal populating subject and recipient headers.
 
-## Stage 5: Terminal User Interface (`v0.5.0`) - [CLOSED]
-- [x] [#23 - M5.1: TUI Layout & Navigation (ratatui + crossterm)](https://github.com/KofTwentyTwo/nuncio/issues/23) (Assigned: `agy-worker`)
-- [x] [#24 - M5.2: Mail Viewer & Composer (ratatui)](https://github.com/KofTwentyTwo/nuncio/issues/24) (Assigned: `agy-worker`)
-- [x] [#25 - M5.3: HTML Email Text Renderer (html2text)](https://github.com/KofTwentyTwo/nuncio/issues/25) (Assigned: `agy-worker`)
-- [x] [#26 - M5.4: Calendar Grid Views (ratatui)](https://github.com/KofTwentyTwo/nuncio/issues/26) (Assigned: `agy-worker`)
+### Epic 4: Native Desktop GUI (Tauri v2 + React/Vite) (#171 – #200) - `PLANNED`
+- [ ] `#171`: Initialize Tauri v2 application framework structure in `crates/nuncio-gui/src-tauri`.
+- [ ] `#172`: Initialize React + Vite + TypeScript frontend project structure in `crates/nuncio-gui/ui`.
+- [ ] `#173`: Configure native window windowing rules (title bar, minimum dimensions 1024x768).
+- [ ] `#174`: Implement Tauri v2 IPC commands (`#[tauri::command]`) linking React to `IpcBridge`.
+- [ ] `#175`: Implement React split-view layout component (Sidebar, MessageList, Reader).
+- [ ] `#176`: Implement Sandboxed HTML email iframe renderer component with strict CSP.
+- [ ] `#177`: Implement custom `nuncio-mail://` protocol handler in Tauri v2 for secure attachment loading.
 
-## Stage 6: Sandboxed Desktop GUI (`v0.6.0`) - [CLOSED]
-- [x] [#27 - M6.1: Tauri v2 IPC Bridge](https://github.com/KofTwentyTwo/nuncio/issues/27) (Assigned: `agy-worker`)
-- [x] [#28 - M6.2: Untrusted HTML Email Sandboxing (iframe + CSP)](https://github.com/KofTwentyTwo/nuncio/issues/28) (Assigned: `agy-worker`)
-- [x] [#29 - M6.3: Native OS System Integration (a11y, system tray, notifications)](https://github.com/KofTwentyTwo/nuncio/issues/29) (Assigned: `agy-worker`)
+### Epic 5: CLI Live Pipeline & Interactive Inputs (#201 – #220) - `IN_PROGRESS`
+- [ ] `#201`: Implement interactive password prompt using `rpassword` when password is not in keyring.
+- [ ] `#202`: Connect `nuncio mail sync` to live IMAP/JMAP background sync workers.
+- [ ] `#203`: Connect `nuncio account add` to live validation checking IMAP/SMTP connectivity.
 
-## Stage 7: Integration, Audit & Hardening (`v0.7.0`) - [CLOSED]
-- [x] [#30 - M7.1: Full Workspace E2E Integration Suite](https://github.com/KofTwentyTwo/nuncio/issues/30) (Assigned: `agy`)
-- [x] [#31 - M7.2: Ephemeral SQLite End-to-End Test Harness](https://github.com/KofTwentyTwo/nuncio/issues/31) (Assigned: `agy`)
+### Epic 6: Live E2E Integration & System Test Suite (#221 – #240) - `IN_PROGRESS`
+- [x] `#237`: Implement GUI IPC contract test verifying all JSON payloads validate against schema.
+- [x] `#240`: Integrate full E2E test matrix into GitHub Actions CI workflow.
 
-## Stage 8: Production Release (`v1.0.0`) - [CLOSED]
-- [x] [#32 - M8.1: SemVer Release Automation Pipeline](https://github.com/KofTwentyTwo/nuncio/issues/32) (Assigned: `agy-worker`)
-- [x] [#33 - M1.0: Production Release & Cross-Platform Packaging](https://github.com/KofTwentyTwo/nuncio/issues/33) (Assigned: `agy`)
+### Epic 7: Packaging, Installers & CI/CD (#241 – #260) - `PLANNED`
+- [ ] `#241`: Configure GitHub Actions build workflow matrix for Windows, macOS, and Linux.
+- [ ] `#242`: Build Windows WiX installer (`.msi`) for `nuncio-gui` and `nuncio-cli`.
+- [ ] `#244`: Build macOS Apple Silicon (ARM64) and Intel (x64) `.dmg` disk image packages.
+- [ ] `#246`: Build Linux AppImage standalone executable package.
