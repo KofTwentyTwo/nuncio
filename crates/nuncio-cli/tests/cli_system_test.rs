@@ -22,6 +22,12 @@ async fn system_test_cli_noun_verb_execution_matrix() {
     let json: Value = serde_json::from_str(&out).expect("valid json");
     assert_eq!(json["status"], "ok");
 
+    // 1b. Banner output
+    let out: String = runner.execute_command(&Commands::Banner, true).await;
+    let json: Value = serde_json::from_str(&out).expect("valid json");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["name"], "Nuncio");
+
     // 2. Account list & add
     let out: String = runner
         .execute_command(

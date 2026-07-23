@@ -90,6 +90,20 @@ impl HeadlessRunner {
                 }
                 MailSubcommand::Search { query } => self.handle_search(query, json_mode).await,
             },
+            Commands::Banner => {
+                crate::output::print_splash_banner();
+                if json_mode {
+                    format_json(&serde_json::json!({
+                        "name": "Nuncio",
+                        "site": "https://nuncio.mx",
+                        "version": "1.0.0",
+                        "etymology": "nūntiō (Latin: I announce, I declare, I deliver a message)",
+                        "shells": ["cli", "tui", "gui", "mcp"]
+                    }))
+                } else {
+                    String::new()
+                }
+            },
             Commands::Folder { action } => match action {
                 FolderSubcommand::List => self.handle_folders_list(json_mode).await,
             },

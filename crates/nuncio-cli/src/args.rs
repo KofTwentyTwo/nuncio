@@ -58,6 +58,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: FolderSubcommand,
     },
+    /// Print official Nuncio ASCII splash screen & brand banner.
+    Banner,
     /// Calendar event operations (`nuncio cal <verb>`).
     Cal {
         #[command(subcommand)]

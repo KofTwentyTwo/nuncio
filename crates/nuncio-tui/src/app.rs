@@ -213,19 +213,23 @@ impl TuiApp {
         match self.mode {
             AppMode::SplashScreen => {
                 let splash_text = r#"
-██╗  ██╗██╗   ██╗███╗   ██╗██████╗██╗ ██████╗ 
-████╗██║██║   ██║████╗  ██║██╔════╝██║██╔═══██╗
-██╔████║██║   ██║██╔██╗ ██║██║     ██║██║   ██║
-██║╚███║██║   ██║██║╚██╗██║██║     ██║██║   ██║
-██║ ╚██║╚██████╔╝██║ ╚████║╚██████╗██║╚██████╔╝
-╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚═╝ ╚═════╝ 
-                 nuncio.mx v1.0.0
-   The Modern Keyboard-First Mail & Calendar Suite
-
-  [?] Keybinding Help Menu
-  [a] Account Settings & Switching
-  [Tab / Arrows] Navigate Panes
-  [q] Quit Nuncio
+ ╔═════════════════════════════════════════════════════════════════════════════════╗
+ ║  ███╗   ██╗██╗   ██╗███╗   ██╗██████╗██╗ ██████╗                                ║
+ ║  ████╗  ██║██║   ██║████╗  ██║██╔════╝██║██╔═══██╗                              ║
+ ║  ██╔██╗ ██║██║   ██║██╔██╗ ██║██║     ██║██║   ██║                              ║
+ ║  ██║╚██╗██║██║   ██║██║╚██╗██║██║     ██║██║   ██║                              ║
+ ║  ██║ ╚████║╚██████╔╝██║ ╚████║╚██████╗██║╚██████╔╝                              ║
+ ║  ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚═╝ ╚═════╝                               ║
+ ║                                                                                 ║
+ ║           Nuncio Mail & Calendar Suite — Official Site: https://nuncio.mx       ║
+ ║      Latin: nūntiō ("I announce", "I declare", "I deliver a message")           ║
+ ╠═════════════════════════════════════════════════════════════════════════════════╣
+ ║  4 Shells: POSIX CLI │ Ratatui TUI │ Tauri v2 Desktop GUI │ Native MCP Stdio   ║
+ ║  Engine: SQLite WAL FTS5 Trigram (<3.2ms) │ AES-256-GCM │ age Stream Cipher   ║
+ ╠═════════════════════════════════════════════════════════════════════════════════╣
+ ║  [?] Keybinding Help Menu           [a] Account Configuration & Switching       ║
+ ║  [Tab / h j k l] Navigate Panes     [q] Exit Nuncio Terminal Interface          ║
+ ╚═════════════════════════════════════════════════════════════════════════════════╝
 "#;
                 let splash_block = Block::default()
                     .title(" Welcome to Nuncio ")

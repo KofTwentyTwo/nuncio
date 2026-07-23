@@ -51,6 +51,27 @@ pub fn format_json_error(message: &str) -> String {
         .unwrap_or_else(|_| r#"{"status":"error","error":"JSON serialization failed"}"#.to_string())
 }
 
+/// Print ANSI color ASCII art splash banner for CLI startup.
+pub fn print_splash_banner() {
+    let banner = r#"
+ ╔═════════════════════════════════════════════════════════════════════╗
+ ║  ███╗   ██╗██╗   ██╗███╗   ██╗██████╗██╗ ██████╗                    ║
+ ║  ████╗  ██║██║   ██║████╗  ██║██╔════╝██║██╔═══██╗                   ║
+ ║  ██╔██╗ ██║██║   ██║██╔██╗ ██║██║     ██║██║   ██║                   ║
+ ║  ██║╚██╗██║██║   ██║██║╚██╗██║██║     ██║██║   ██║                   ║
+ ║  ██║ ╚████║╚██████╔╝██║ ╚████║╚██████╗██║╚██████╔╝                   ║
+ ║  ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚═╝ ╚═════╝                    ║
+ ║                                                                     ║
+ ║        Nuncio Mail & Calendar Suite — https://nuncio.mx            ║
+ ║   Latin: nūntiō ("I announce, I declare, I deliver a message")      ║
+ ╠═════════════════════════════════════════════════════════════════════╣
+ ║  4 Presentation Shells: POSIX CLI │ Ratatui TUI │ GUI │ MCP AI Stdio ║
+ ║  Engine: SQLite WAL FTS5 Trigram │ AES-256-GCM │ age Stream Cipher  ║
+ ╚═════════════════════════════════════════════════════════════════════╝
+"#;
+    println!("{banner}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
