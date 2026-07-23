@@ -53,7 +53,7 @@ jobs:
 
       - name: Install Frontend UI Dependencies
         run: |
-          npm --prefix crates/nuncio-gui/ui install
+          cd crates/nuncio-gui/ui && npm install
 
       - name: Determine Environment Channel & Tag
         id: env_prep
