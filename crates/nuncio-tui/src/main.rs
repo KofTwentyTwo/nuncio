@@ -6,7 +6,7 @@ mod keybindings;
 mod layout;
 
 use app::TuiApp;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -33,20 +33,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('q'), KeyModifiers::NONE) | (KeyCode::Esc, _) => app.quit(),
-                    (KeyCode::Tab, KeyModifiers::NONE) => {
-                        let next_pane = app.active_pane().next();
-                        app.set_active_pane(next_pane);
+                use keybindings::{KeybindingEngine, UserAction};
+                match KeybindingEngine::handle_key(key) {
+                    UserAction::Quit => {
+                        if app.mode() != app::AppMode::MainView {
+                            app.set_mode(app::AppMode::MainView);
+                        } else {
+                            app.quit();
+                        }
                     }
-                    (KeyCode::BackTab, _) => {
-                        let prev_pane = app.active_pane().previous();
-                        app.set_active_pane(prev_pane);
+                    UserAction::NextPane => {
+                        app.set_active_pane(app.active_pane().next());
                     }
-                    (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                    UserAction::PreviousPane => {
+                        app.set_active_pane(app.active_pane().previous());
+                    }
+                    UserAction::ToggleHelp => {
+                        if app.mode() == app::AppMode::HelpModal {
+                            app.set_mode(app::AppMode::MainView);
+                        } else {
+                            app.set_mode(app::AppMode::HelpModal);
+                        }
+                    }
+                    UserAction::ToggleAccounts => {
+                        if app.mode() == app::AppMode::AccountSettings {
+                            app.set_mode(app::AppMode::MainView);
+                        } else {
+                            app.set_mode(app::AppMode::AccountSettings);
+                        }
+                    }
+                    UserAction::ToggleSplash => {
+                        if app.mode() == app::AppMode::SplashScreen {
+                            app.set_mode(app::AppMode::MainView);
+                        } else {
+                            app.set_mode(app::AppMode::SplashScreen);
+                        }
+                    }
+                    UserAction::Sync => {
                         app.dispatch_command(nuncio_core::CoreCommand::SyncAll);
                     }
-                    _ => {}
+                    UserAction::MoveDown
+                    | UserAction::MoveUp
+                    | UserAction::JumpTop
+                    | UserAction::JumpBottom
+                    | UserAction::Search
+                    | UserAction::Compose
+                    | UserAction::Reply
+                    | UserAction::None => {}
                 }
             }
         }
