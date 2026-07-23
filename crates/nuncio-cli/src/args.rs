@@ -60,6 +60,8 @@ pub enum Commands {
     },
     /// Print official Nuncio ASCII splash screen & brand banner.
     Banner,
+    /// Display open-source third-party library licenses and acknowledgments.
+    Licenses,
     /// Calendar event operations (`nuncio cal <verb>`).
     Cal {
         #[command(subcommand)]

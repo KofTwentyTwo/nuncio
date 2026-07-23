@@ -100,6 +100,11 @@ impl McpToolHandler {
                 }),
             },
             McpToolDefinition {
+                name: "nuncio_licenses".to_string(),
+                description: "Return third-party open-source library acknowledgments and license metadata.".to_string(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            McpToolDefinition {
                 name: "nuncio_account_list".to_string(),
                 description: "List configured email and calendar account profiles.".to_string(),
                 input_schema: json!({ "type": "object", "properties": {} }),
@@ -207,6 +212,22 @@ impl McpToolHandler {
             "nuncio_account_list" => {
                 let accounts = self.db.list_accounts().await.map_err(|e| e.to_string())?;
                 Ok(json!({ "accounts": accounts }))
+            }
+            "nuncio_licenses" => {
+                Ok(json!({
+                    "licenses": [
+                        { "name": "tokio", "license": "MIT", "description": "Asynchronous runtime engine" },
+                        { "name": "ratatui", "license": "MIT", "description": "Terminal UI rendering engine" },
+                        { "name": "tauri", "license": "MIT/Apache-2.0", "description": "Desktop WebView shell" },
+                        { "name": "sqlx", "license": "MIT/Apache-2.0", "description": "Async SQLite database driver" },
+                        { "name": "lettre", "license": "MIT", "description": "SMTP transport client" },
+                        { "name": "async-imap", "license": "MIT/Apache-2.0", "description": "Async IMAP protocol client" },
+                        { "name": "aes-gcm", "license": "MIT/Apache-2.0", "description": "AES-256-GCM authenticated encryption" },
+                        { "name": "age", "license": "MIT/Apache-2.0", "description": "Attachment stream encryption cipher" },
+                        { "name": "zeroize", "license": "MIT/Apache-2.0", "description": "Secure memory wiping" },
+                        { "name": "keyring", "license": "MIT/Apache-2.0", "description": "OS key store integration" }
+                    ]
+                }))
             }
             _ => Err(format!("Unknown tool: {}", name)),
         }

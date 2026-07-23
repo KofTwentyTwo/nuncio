@@ -168,6 +168,7 @@ Project planning, issue tracking, atomic micro-milestones, and subagent assignme
 
 ---
 
-## License
+## License & Open Source Acknowledgments
 
-MIT OR Apache-2.0
+- **Nuncio License**: MIT OR Apache-2.0
+- **Third-Party Open Source Libraries**: See **[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)** for full credits and license terms (Tokio, Ratatui, Tauri v2, SQLx, Lettre, async-imap, RustCrypto AES-GCM, age, Zeroize, Keyring, React, Lucide, Vite).

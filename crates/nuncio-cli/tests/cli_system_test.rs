@@ -28,6 +28,11 @@ async fn system_test_cli_noun_verb_execution_matrix() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["data"]["name"], "Nuncio");
 
+    // 1c. Licenses output
+    let out: String = runner.execute_command(&Commands::Licenses, true).await;
+    let json: Value = serde_json::from_str(&out).expect("valid json");
+    assert_eq!(json["status"], "ok");
+
     // 2. Account list & add
     let out: String = runner
         .execute_command(

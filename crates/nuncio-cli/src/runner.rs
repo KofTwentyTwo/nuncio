@@ -104,6 +104,30 @@ impl HeadlessRunner {
                     String::new()
                 }
             },
+            Commands::Licenses => {
+                let credits = vec![
+                    ("tokio", "MIT", "Event-driven asynchronous runtime engine"),
+                    ("ratatui", "MIT", "Terminal User Interface rendering library"),
+                    ("tauri", "MIT/Apache-2.0", "Cross-platform desktop application shell"),
+                    ("sqlx", "MIT/Apache-2.0", "Async SQLite database driver"),
+                    ("lettre", "MIT", "Email creation & SMTP client"),
+                    ("async-imap", "MIT/Apache-2.0", "Async IMAP protocol client"),
+                    ("aes-gcm", "MIT/Apache-2.0", "AES-256-GCM authenticated encryption"),
+                    ("age", "MIT/Apache-2.0", "Attachment stream encryption cipher"),
+                    ("zeroize", "MIT/Apache-2.0", "Secure heap memory wiping"),
+                    ("keyring", "MIT/Apache-2.0", "OS native key store integration"),
+                ];
+                if json_mode {
+                    format_json(&serde_json::json!({ "licenses": credits }))
+                } else {
+                    let mut out = String::from("\nNuncio Third-Party Open Source Library Acknowledgments:\n\n");
+                    for (lib, lic, desc) in credits {
+                        out.push_str(&format!("  • {:<15} [{:<14}] {}\n", lib, lic, desc));
+                    }
+                    out.push_str("\nFull license terms available in THIRD_PARTY_LICENSES.md\n");
+                    out
+                }
+            },
             Commands::Folder { action } => match action {
                 FolderSubcommand::List => self.handle_folders_list(json_mode).await,
             },
