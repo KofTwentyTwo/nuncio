@@ -3,7 +3,7 @@
 use lettre::message::{header::ContentType, Mailbox, Message};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
-use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+use lettre::{AsyncSmtpTransport, Tokio1Executor};
 use nuncio_core::model::Email;
 
 use crate::parser::MailError;
@@ -87,7 +87,6 @@ impl SmtpTransportEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
 
     fn sample_email() -> Email {
         Email {

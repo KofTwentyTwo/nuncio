@@ -1,8 +1,8 @@
 //! Headless engine runner executing CLI commands against core services.
 
-use nuncio_core::{CoreCommand, EngineStatus, EventBus};
+use nuncio_core::{CoreCommand, EventBus};
 use nuncio_store::{DatabaseEngine, DatabaseError};
-use serde_json::{json, Value};
+use serde_json::json;
 use thiserror::Error;
 
 use crate::args::Commands;
@@ -36,11 +36,13 @@ impl HeadlessRunner {
     }
 
     /// Access the underlying `EventBus`.
+    #[allow(dead_code)]
     pub fn event_bus(&self) -> &EventBus {
         &self.event_bus
     }
 
     /// Access the underlying `DatabaseEngine`.
+    #[allow(dead_code)]
     pub fn db(&self) -> &DatabaseEngine {
         &self.db
     }
@@ -258,6 +260,7 @@ mod tests {
                 true,
             )
             .await;
+        assert!(add_json.contains(r#""email":"james.maes@kof22.com""#));
         // Test Accounts
         let accts_json = runner.execute_command(&Commands::Accounts, true).await;
         assert!(accts_json.contains(r#""accounts":[]"#));

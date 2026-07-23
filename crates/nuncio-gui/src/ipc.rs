@@ -4,6 +4,7 @@ use nuncio_core::{AppState, CoreCommand, EventBus};
 use serde::{Deserialize, Serialize};
 
 /// Tauri IPC command payload wrapper.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcCommandPayload {
     /// Action type name.
@@ -24,6 +25,7 @@ impl IpcBridge {
     }
 
     /// Process incoming IPC payload command.
+    #[allow(dead_code)]
     pub fn handle_ipc_command(bus: &EventBus, payload: IpcCommandPayload) {
         match payload.action.as_str() {
             "sync" => bus.process_command(CoreCommand::SyncAll),

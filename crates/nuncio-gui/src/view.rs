@@ -44,12 +44,14 @@ impl GuiViewState {
     }
 
     /// Select active folder.
+    #[allow(dead_code)]
     pub fn select_folder(&mut self, folder_id: &str) {
         self.active_folder_id = folder_id.to_string();
         self.selected_message_id = None;
     }
 
     /// Select active message preview.
+    #[allow(dead_code)]
     pub fn select_message(&mut self, message_id: &str) {
         self.selected_message_id = Some(message_id.to_string());
     }

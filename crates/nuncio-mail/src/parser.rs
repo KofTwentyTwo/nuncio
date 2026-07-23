@@ -1,7 +1,7 @@
 //! Zero-copy MIME parser adapter wrapping Stalwart's `mail-parser` library.
 
 use bytes::Bytes;
-use mail_parser::Message;
+use mail_parser::{MessageParser, MimeHeaders};
 use nuncio_core::model::{Attachment, Email};
 use thiserror::Error;
 
@@ -24,7 +24,8 @@ impl MimeParserAdapter {
         folder_id: &str,
         raw_bytes: &[u8],
     ) -> Result<Email, MailError> {
-        let msg = Message::parse(raw_bytes)
+        let msg = MessageParser::default()
+            .parse(raw_bytes)
             .ok_or_else(|| MailError::ParseFailed("invalid RFC 5322 MIME structure".to_string()))?;
 
         let subject = msg.subject().unwrap_or("No Subject").to_string();
@@ -58,7 +59,7 @@ impl MimeParserAdapter {
             let mime_type = attachment
                 .content_type()
                 .map_or("application/octet-stream".to_string(), |c| {
-                    format!("{}/{}", c.c_type, c.c_subtype.unwrap_or("octet-stream"))
+                    format!("{}/{}", c.c_type, c.c_subtype.as_deref().unwrap_or("octet-stream"))
                 });
 
             let content = Bytes::copy_from_slice(attachment.contents());

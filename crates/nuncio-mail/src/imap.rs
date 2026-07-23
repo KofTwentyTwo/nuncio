@@ -34,6 +34,16 @@ impl ImapDualSocketManager {
         }
     }
 
+    /// Retrieve the target IMAP server hostname.
+    pub fn server_host(&self) -> &str {
+        &self.server_host
+    }
+
+    /// Retrieve the target IMAP server port.
+    pub fn server_port(&self) -> u16 {
+        self.server_port
+    }
+
     /// Retrieve the current IDLE socket state.
     pub fn idle_state(&self) -> IdleSocketState {
         if self.idle_active.load(Ordering::SeqCst) {

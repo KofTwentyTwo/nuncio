@@ -343,16 +343,6 @@ impl DatabaseEngine {
     }
 }
 
-trait ToNullStr {
-    fn ok_to_null(&self) -> &str;
-}
-
-impl ToNullStr for Option<&str> {
-    fn ok_to_null(&self) -> &str {
-        self.unwrap_or("")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

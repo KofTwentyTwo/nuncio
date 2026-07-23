@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Action events mapped from terminal key inputs.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserAction {
     /// Move selection down (j / Down).
@@ -32,10 +33,12 @@ pub enum UserAction {
 }
 
 /// Keybinding translation engine mapping crossterm input events to [`UserAction`].
+#[allow(dead_code)]
 pub struct KeybindingEngine;
 
 impl KeybindingEngine {
     /// Translate a crossterm [`KeyEvent`] into a [`UserAction`].
+    #[allow(dead_code)]
     pub fn handle_key(key: KeyEvent) -> UserAction {
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), KeyModifiers::NONE) | (KeyCode::Esc, _) => UserAction::Quit,

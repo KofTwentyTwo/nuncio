@@ -48,11 +48,13 @@ impl TuiApp {
     }
 
     /// Subscribe to core application state snapshots.
+    #[allow(dead_code)]
     pub fn subscribe_state(&self) -> watch::Receiver<AppState> {
         self.event_bus.subscribe_state()
     }
 
     /// Subscribe to core discrete transactional events.
+    #[allow(dead_code)]
     pub fn subscribe_events(&self) -> broadcast::Receiver<CoreEvent> {
         self.event_bus.subscribe_events()
     }
