@@ -4,7 +4,6 @@ use nuncio_core::{AppState, CoreCommand, EventBus};
 use serde::{Deserialize, Serialize};
 
 /// Tauri IPC command payload wrapper.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcCommandPayload {
     /// Action type name.
@@ -13,6 +12,18 @@ pub struct IpcCommandPayload {
     pub message_id: Option<String>,
     /// Read flag if applicable.
     pub read: Option<bool>,
+    /// Target account ID if applicable.
+    pub account_id: Option<String>,
+    /// Email address if applicable.
+    pub email: Option<String>,
+    /// IMAP server host.
+    pub imap_host: Option<String>,
+    /// IMAP server port.
+    pub imap_port: Option<u16>,
+    /// SMTP server host.
+    pub smtp_host: Option<String>,
+    /// SMTP server port.
+    pub smtp_port: Option<u16>,
 }
 
 /// Tauri IPC bridge orchestrating communications between WebVIEW frontend and `EventBus`.
@@ -25,7 +36,6 @@ impl IpcBridge {
     }
 
     /// Process incoming IPC payload command.
-    #[allow(dead_code)]
     pub fn handle_ipc_command(bus: &EventBus, payload: IpcCommandPayload) {
         match payload.action.as_str() {
             "sync" => bus.process_command(CoreCommand::SyncAll),
@@ -39,6 +49,15 @@ impl IpcBridge {
                 }
             }
             "shutdown" => bus.process_command(CoreCommand::Shutdown),
+            "add_account" => {
+                bus.process_command(CoreCommand::SyncAll);
+            }
+            "remove_account" => {
+                bus.process_command(CoreCommand::SyncAll);
+            }
+            "test_connectivity" => {
+                bus.process_command(CoreCommand::SyncAll);
+            }
             _ => {}
         }
     }
@@ -56,6 +75,12 @@ mod tests {
             action: "sync".to_string(),
             message_id: None,
             read: None,
+            account_id: None,
+            email: None,
+            imap_host: None,
+            imap_port: None,
+            smtp_host: None,
+            smtp_port: None,
         };
 
         IpcBridge::handle_ipc_command(&bus, payload);
@@ -73,6 +98,12 @@ mod tests {
             action: "mark_read".to_string(),
             message_id: Some("msg-1".to_string()),
             read: Some(true),
+            account_id: None,
+            email: None,
+            imap_host: None,
+            imap_port: None,
+            smtp_host: None,
+            smtp_port: None,
         };
 
         IpcBridge::handle_ipc_command(&bus, payload);
@@ -87,6 +118,12 @@ mod tests {
             action: "shutdown".to_string(),
             message_id: None,
             read: None,
+            account_id: None,
+            email: None,
+            imap_host: None,
+            imap_port: None,
+            smtp_host: None,
+            smtp_port: None,
         };
         IpcBridge::handle_ipc_command(&bus, payload);
         assert_eq!(
@@ -99,6 +136,12 @@ mod tests {
             action: "unknown".to_string(),
             message_id: None,
             read: None,
+            account_id: None,
+            email: None,
+            imap_host: None,
+            imap_port: None,
+            smtp_host: None,
+            smtp_port: None,
         };
         IpcBridge::handle_ipc_command(&bus, unknown);
     }

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Folder } from '../types';
+import { AccountManagerModal } from './AccountManagerModal';
 
 interface SidebarProps {
   folders: Folder[];
@@ -17,6 +18,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSync,
 }) => {
   const [showLicenses, setShowLicenses] = useState(false);
+  const [showAccounts, setShowAccounts] = useState(false);
 
   return (
     <aside className="sidebar">
@@ -53,12 +55,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </button>
         <button
           className="btn"
-          style={{ width: '100%', marginTop: '6px', fontSize: '11px', background: 'rgba(255, 255, 255, 0.05)', color: '#a0aec0', border: '1px solid rgba(255, 255, 255, 0.1)' }}
+          style={{ width: '100%', marginTop: '6px', fontSize: '11px', background: 'rgba(99, 179, 237, 0.15)', color: '#63b3ed', border: '1px solid rgba(99, 179, 237, 0.3)' }}
+          onClick={() => setShowAccounts(true)}
+        >
+          Accounts & Connectivity
+        </button>
+        <button
+          className="btn"
+          style={{ width: '100%', marginTop: '4px', fontSize: '11px', background: 'rgba(255, 255, 255, 0.05)', color: '#a0aec0', border: '1px solid rgba(255, 255, 255, 0.1)' }}
           onClick={() => setShowLicenses(true)}
         >
           Licenses & Open Source Credits
         </button>
       </div>
+
+      {showAccounts && <AccountManagerModal onClose={() => setShowAccounts(false)} />}
 
       {showLicenses && (
         <div style={{

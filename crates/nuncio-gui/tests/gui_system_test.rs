@@ -19,6 +19,12 @@ async fn system_test_gui_ipc_sandbox_and_view_matrix() {
             action: "sync".to_string(),
             message_id: None,
             read: None,
+            account_id: None,
+            email: None,
+            imap_host: None,
+            imap_port: None,
+            smtp_host: None,
+            smtp_port: None,
         },
     );
     assert_eq!(state_rx.borrow_and_update().status, EngineStatus::Syncing);
@@ -30,6 +36,12 @@ async fn system_test_gui_ipc_sandbox_and_view_matrix() {
             action: "mark_read".to_string(),
             message_id: Some("msg-100".to_string()),
             read: Some(true),
+            account_id: None,
+            email: None,
+            imap_host: None,
+            imap_port: None,
+            smtp_host: None,
+            smtp_port: None,
         },
     );
 
@@ -40,6 +52,12 @@ async fn system_test_gui_ipc_sandbox_and_view_matrix() {
             action: "shutdown".to_string(),
             message_id: None,
             read: None,
+            account_id: None,
+            email: None,
+            imap_host: None,
+            imap_port: None,
+            smtp_host: None,
+            smtp_port: None,
         },
     );
 
