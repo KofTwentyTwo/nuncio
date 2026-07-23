@@ -26,6 +26,12 @@ pub enum UserAction {
     Reply,
     /// Refresh / sync (s).
     Sync,
+    /// Toggle help modal overlay (? / h).
+    ToggleHelp,
+    /// Toggle accounts / settings view (a).
+    ToggleAccounts,
+    /// Toggle splash screen view (p).
+    ToggleSplash,
     /// Exit application or modal (q / Esc).
     Quit,
     /// Unmapped key action.
@@ -44,10 +50,17 @@ impl KeybindingEngine {
             (KeyCode::Char('q'), KeyModifiers::NONE) | (KeyCode::Esc, _) => UserAction::Quit,
             (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => UserAction::MoveDown,
             (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => UserAction::MoveUp,
+            (KeyCode::Char('h'), KeyModifiers::NONE) | (KeyCode::Left, _) => {
+                UserAction::PreviousPane
+            }
+            (KeyCode::Char('l'), KeyModifiers::NONE) | (KeyCode::Right, _) => UserAction::NextPane,
             (KeyCode::Char('g'), KeyModifiers::NONE) => UserAction::JumpTop,
             (KeyCode::Char('G'), KeyModifiers::SHIFT) => UserAction::JumpBottom,
             (KeyCode::Tab, KeyModifiers::NONE) => UserAction::NextPane,
             (KeyCode::BackTab, _) => UserAction::PreviousPane,
+            (KeyCode::Char('?'), KeyModifiers::NONE) => UserAction::ToggleHelp,
+            (KeyCode::Char('a'), KeyModifiers::NONE) => UserAction::ToggleAccounts,
+            (KeyCode::Char('p'), KeyModifiers::NONE) => UserAction::ToggleSplash,
             (KeyCode::Char('/'), KeyModifiers::NONE) => UserAction::Search,
             (KeyCode::Char('c'), KeyModifiers::NONE) => UserAction::Compose,
             (KeyCode::Char('r'), KeyModifiers::NONE) => UserAction::Reply,
@@ -122,6 +135,38 @@ mod tests {
         assert_eq!(
             KeybindingEngine::handle_key(make_key(KeyCode::Char('z'), KeyModifiers::NONE)),
             UserAction::None
+        );
+    }
+
+    #[test]
+    fn translate_arrow_keys_and_modal_shortcuts() {
+        assert_eq!(
+            KeybindingEngine::handle_key(make_key(KeyCode::Down, KeyModifiers::NONE)),
+            UserAction::MoveDown
+        );
+        assert_eq!(
+            KeybindingEngine::handle_key(make_key(KeyCode::Up, KeyModifiers::NONE)),
+            UserAction::MoveUp
+        );
+        assert_eq!(
+            KeybindingEngine::handle_key(make_key(KeyCode::Left, KeyModifiers::NONE)),
+            UserAction::PreviousPane
+        );
+        assert_eq!(
+            KeybindingEngine::handle_key(make_key(KeyCode::Right, KeyModifiers::NONE)),
+            UserAction::NextPane
+        );
+        assert_eq!(
+            KeybindingEngine::handle_key(make_key(KeyCode::Char('?'), KeyModifiers::NONE)),
+            UserAction::ToggleHelp
+        );
+        assert_eq!(
+            KeybindingEngine::handle_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            UserAction::ToggleAccounts
+        );
+        assert_eq!(
+            KeybindingEngine::handle_key(make_key(KeyCode::Char('p'), KeyModifiers::NONE)),
+            UserAction::ToggleSplash
         );
     }
 }
