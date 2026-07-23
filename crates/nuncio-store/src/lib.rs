@@ -1,21 +1,5 @@
-use thiserror::Error;
+//! Local storage, full-text search indexing, and credential security for Nuncio.
 
-#[derive(Error, Debug)]
-pub enum StoreError {
-    #[error("Database error: {0}")]
-    Database(String),
-}
+pub mod db;
 
-pub struct StorageEngine;
-
-impl StorageEngine {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for StorageEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use db::{DatabaseEngine, DatabaseError};

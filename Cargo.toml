@@ -30,3 +30,5 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 ratatui = "0.28"
 crossterm = "0.28"
 clap = { version = "4.5", features = ["derive", "env"] }
+tempfile = "3.10"
+
