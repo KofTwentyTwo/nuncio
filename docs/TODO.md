@@ -10,13 +10,13 @@
 ## Active Phase: Zero-Mock Production Engineering (#101 – #260)
 
 ### Epic 1: Real Protocol Drivers & Live Sync Engine (#101 – #125) - `IN_PROGRESS`
-- [ ] `#101`: Implement live IMAP connection pool with TLS handshake via `async-imap` & `tokio-rustls`.
-- [ ] `#102`: Implement IMAP IDLE push notification listener loop for real-time inbox updates.
+- [x] `#101`: Implement live IMAP connection pool with TLS handshake via `async-imap` & `tokio-rustls`.
+- [x] `#102`: Implement IMAP IDLE push notification listener loop for real-time inbox updates.
 - [ ] `#103`: Implement incremental IMAP UID FETCH message sync algorithm storing flags in SQLite.
 - [ ] `#104`: Implement IMAP mailbox list parser mapping RFC 3501 hierarchy to domain `Folder` entities.
 - [ ] `#105`: Implement IMAP draft, sent, trash, and flag state mutations (`STORE +FLAGS`, `COPY`, `EXPUNGE`).
-- [ ] `#106`: Implement live SMTP transport client using `lettre` with STARTTLS and Implicit TLS support.
-- [ ] `#107`: Implement MIME message builder for multipart/alternative (plain text + HTML + attachments).
+- [x] `#106`: Implement live SMTP transport client using `lettre` with STARTTLS and Implicit TLS support.
+- [x] `#107`: Implement MIME message builder for multipart/alternative (plain text + HTML + attachments).
 - [ ] `#108`: Implement live SMTP delivery confirmation and queue retry mechanism with backoff.
 - [ ] `#109`: Implement JMAP Session resource discovery (`/.well-known/jmap`) and API token authentication.
 - [ ] `#110`: Implement JMAP `Email/get` and `Email/changes` push synchronization engine.
@@ -34,22 +34,22 @@
 ### Epic 3: TUI Interactive Terminal App (#146 – #170) - `IN_PROGRESS`
 - [x] `#146`: Connect `TuiApp` to live `DatabaseEngine` and `EventBus` channels.
 - [x] `#147`: Implement dynamic folder list rendering from SQLite in TUI Sidebar.
-- [ ] `#148`: Implement live message list rendering for selected folder with unread indicators.
-- [ ] `#149`: Implement dynamic email reader view rendering plain text body from SQLite.
+- [x] `#148`: Implement live message list rendering for selected folder with unread indicators.
+- [x] `#149`: Implement dynamic email reader view rendering plain text body from SQLite.
 - [ ] `#152`: Implement interactive compose email modal with multi-line text input fields.
 - [ ] `#153`: Implement interactive reply / reply-all modal populating subject and recipient headers.
 
-### Epic 4: Native Desktop GUI (Tauri v2 + React/Vite) (#171 – #200) - `PLANNED`
-- [ ] `#171`: Initialize Tauri v2 application framework structure in `crates/nuncio-gui/src-tauri`.
-- [ ] `#172`: Initialize React + Vite + TypeScript frontend project structure in `crates/nuncio-gui/ui`.
-- [ ] `#173`: Configure native window windowing rules (title bar, minimum dimensions 1024x768).
-- [ ] `#174`: Implement Tauri v2 IPC commands (`#[tauri::command]`) linking React to `IpcBridge`.
-- [ ] `#175`: Implement React split-view layout component (Sidebar, MessageList, Reader).
-- [ ] `#176`: Implement Sandboxed HTML email iframe renderer component with strict CSP.
+### Epic 4: Native Desktop GUI (Tauri v2 + React/Vite) (#171 – #200) - `IN_PROGRESS`
+- [x] `#171`: Initialize Tauri v2 application framework structure in `crates/nuncio-gui/src-tauri`.
+- [x] `#172`: Initialize React + Vite + TypeScript frontend project structure in `crates/nuncio-gui/ui`.
+- [x] `#173`: Configure native window windowing rules (title bar, minimum dimensions 1024x768).
+- [x] `#174`: Implement Tauri v2 IPC commands (`#[tauri::command]`) linking React to `IpcBridge`.
+- [x] `#175`: Implement React split-view layout component (Sidebar, MessageList, Reader).
+- [x] `#176`: Implement Sandboxed HTML email iframe renderer component with strict CSP.
 - [ ] `#177`: Implement custom `nuncio-mail://` protocol handler in Tauri v2 for secure attachment loading.
 
 ### Epic 5: CLI Live Pipeline & Interactive Inputs (#201 – #220) - `IN_PROGRESS`
-- [ ] `#201`: Implement interactive password prompt using `rpassword` when password is not in keyring.
+- [x] `#201`: Implement interactive password prompt using `rpassword` when password is not in keyring.
 - [ ] `#202`: Connect `nuncio mail sync` to live IMAP/JMAP background sync workers.
 - [ ] `#203`: Connect `nuncio account add` to live validation checking IMAP/SMTP connectivity.
 
