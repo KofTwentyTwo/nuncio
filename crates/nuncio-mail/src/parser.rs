@@ -5,12 +5,44 @@ use mail_parser::{MessageParser, MimeHeaders};
 use nuncio_core::model::{Attachment, Email};
 use thiserror::Error;
 
-/// Errors returned by the MIME parsing engine.
+/// Errors returned by the MIME parsing engine and transport operations.
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum MailError {
     /// Failed to parse RFC 5322 byte slice.
     #[error("failed to parse MIME email payload: {0}")]
     ParseFailed(String),
+
+    /// SMTP transport delivery failed.
+    #[error("SMTP transport delivery failed: {0}")]
+    SmtpFailed(String),
+
+    /// SMTP authentication failed.
+    #[error("SMTP authentication failed: {0}")]
+    AuthenticationFailed(String),
+
+    /// Connection or TLS transport setup failed.
+    #[error("SMTP transport connection failed: {0}")]
+    TransportFailed(String),
+
+    /// TLS connection or handshake failed.
+    #[error("TLS connection failed: {0}")]
+    TlsError(String),
+
+    /// IMAP connection or protocol error.
+    #[error("IMAP error: {0}")]
+    ImapError(String),
+
+    /// Network or IO error.
+    #[error("network I/O error: {0}")]
+    NetworkError(String),
+
+    /// Authentication failure.
+    #[error("authentication error: {0}")]
+    AuthError(String),
+
+    /// General operational failure.
+    #[error("operation failed: {0}")]
+    OperationFailed(String),
 }
 
 /// MIME parser adapter converting raw byte buffers into Nuncio [`Email`] domain entities.

@@ -54,7 +54,7 @@ bytes = "1.6"
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
 async-imap = { version = "0.9", default-features = false, features = ["runtime-tokio"] }
 tokio-rustls = "0.26"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 webpki-roots = "0.26"
 rustls-pki-types = "1.7"
 tokio-stream = "0.1"
