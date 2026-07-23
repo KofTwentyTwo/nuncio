@@ -1,8 +1,16 @@
-use nuncio_core::NuncioEngine;
+//! Nuncio GUI application entry point.
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let engine = NuncioEngine::new();
-    println!("Starting {} GUI desktop shell ({})", engine.name, engine.domain);
-    Ok(())
+mod ipc;
+
+use ipc::IpcBridge;
+use nuncio_core::EventBus;
+
+fn main() {
+    let bus = EventBus::new();
+    let state = IpcBridge::get_app_state(&bus);
+
+    println!(
+        "Nuncio GUI Desktop Shell Initialized: status={:?}, unread={}",
+        state.status, state.unread_count
+    );
 }
