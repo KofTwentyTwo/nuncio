@@ -55,12 +55,20 @@ impl MockMailBackend {
 #[async_trait]
 impl MailBackend for MockMailBackend {
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError> {
-        if *self.should_fail.lock().unwrap() {
+        let should_fail = self
+            .should_fail
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        if *should_fail {
             return Err(MailError::ParseFailed(
                 "simulated network failure".to_string(),
             ));
         }
-        Ok(self.folders.lock().unwrap().clone())
+        let folders = self
+            .folders
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        Ok(folders.clone())
     }
 
     async fn sync_messages(
@@ -68,15 +76,20 @@ impl MailBackend for MockMailBackend {
         folder_id: &str,
         _since_state: Option<&str>,
     ) -> Result<(Vec<Email>, String), MailError> {
-        if *self.should_fail.lock().unwrap() {
+        let should_fail = self
+            .should_fail
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        if *should_fail {
             return Err(MailError::ParseFailed(
                 "simulated network failure".to_string(),
             ));
         }
-        let matches = self
+        let messages = self
             .messages
             .lock()
-            .unwrap()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        let matches = messages
             .iter()
             .filter(|m| m.folder_id == folder_id)
             .cloned()
@@ -85,12 +98,20 @@ impl MailBackend for MockMailBackend {
     }
 
     async fn send_email(&self, email: &Email) -> Result<(), MailError> {
-        if *self.should_fail.lock().unwrap() {
+        let should_fail = self
+            .should_fail
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        if *should_fail {
             return Err(MailError::ParseFailed(
                 "simulated network failure".to_string(),
             ));
         }
-        self.sent_messages.lock().unwrap().push(email.clone());
+        let mut sent = self
+            .sent_messages
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        sent.push(email.clone());
         Ok(())
     }
 }

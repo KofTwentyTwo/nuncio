@@ -88,7 +88,7 @@ impl<'a> SearchEngine<'a> {
         if clean.is_empty() {
             return String::new();
         }
-        let sanitized = clean.replace('"', "").replace('*', "").replace(':', "");
+        let sanitized = clean.replace(['"', '*', ':'], "");
         format!("\"{}\"", sanitized)
     }
 

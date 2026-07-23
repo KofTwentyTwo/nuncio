@@ -39,13 +39,20 @@ impl MockCalendarBackend {
         start_window: i64,
         end_window: i64,
     ) -> Result<Vec<CalendarEvent>, CalendarError> {
-        if *self.should_fail.lock().unwrap() {
+        let should_fail = self
+            .should_fail
+            .lock()
+            .map_err(|e| CalendarError::ParseFailed(e.to_string()))?;
+        if *should_fail {
             return Err(CalendarError::ParseFailed(
                 "simulated CalDAV network failure".to_string(),
             ));
         }
 
-        let guard = self.events.lock().unwrap();
+        let guard = self
+            .events
+            .lock()
+            .map_err(|e| CalendarError::ParseFailed(e.to_string()))?;
         let matches = guard
             .iter()
             .filter(|e| {

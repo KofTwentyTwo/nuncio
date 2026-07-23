@@ -143,6 +143,7 @@ impl DatabaseEngine {
     }
 
     /// Query all saved accounts in SQLite.
+    #[allow(clippy::type_complexity)]
     pub async fn list_accounts(&self) -> Result<Vec<nuncio_core::AccountConfig>, DatabaseError> {
         let rows: Vec<(
             String,
@@ -234,6 +235,7 @@ impl DatabaseEngine {
     }
 
     /// Query synced email messages for a specific folder.
+    #[allow(clippy::type_complexity)]
     pub async fn list_messages(
         &self,
         folder_id: &str,
@@ -303,6 +305,7 @@ impl DatabaseEngine {
     }
 
     /// Retrieve a single message by ID.
+    #[allow(clippy::type_complexity)]
     pub async fn get_message(
         &self,
         message_id: &str,
