@@ -1,27 +1,61 @@
-# PLAN: Nuncio Mail & Calendar Infrastructure
+# PLAN: Nuncio Multi-Agent Implementation Strategy
 
 ## Goal
-Build Nuncio (nuncio.mx), a high performance cross-platform mail and calendar application written in Rust, following a library-first architecture with minimal UI shells for Terminal (TUI) and Desktop (GUI).
+Build Nuncio ([nuncio.mx](https://nuncio.mx)), a high performance cross-platform mail and calendar application in Rust, using a library-first architecture with skinny shells for CLI, TUI, and GUI across Windows, macOS, and Linux.
 
-## Architecture Strategy
-- Core Libs First: All protocol handling, offline synchronization, storage, indexing, and cryptography reside in decoupled Rust crates.
-- Skinny UI Shells: Terminal and Desktop shells consume core APIs via async channels and state streams.
-- Target Platforms: Windows, macOS, and Linux.
+## Multi-Agent Execution Strategy
 
-## Crate Layout
-- `crates/nuncio-core`: Workspace management, account orchestration, async event bus.
-- `crates/nuncio-mail`: IMAP4rev1, JMAP (RFC 8620/8621), SMTP client engines.
-- `crates/nuncio-cal`: CalDAV, iCalendar (RFC 5545) synchronization and event primitives.
-- `crates/nuncio-store`: Encrypted local persistence and SQLite FTS5 full-text indexing.
-- `crates/nuncio-tui`: Ratatui based terminal user interface binary.
-- `crates/nuncio-gui`: Desktop GUI binary shell.
+Antigravity (`agy`) operates as the **Master Orchestrator Agent**, managing high-level task decomposition, roadmap tracking, multi-agent dispatching, quality gate validation (`cargo verify`, `cargo cov`), git branch workflows, and wiki documentation.
 
-## High Level Roadmap Phases
-1. Phase 1: Engine Foundation & Storage (Core, SQLite FTS5 schema, basic store)
-2. Phase 2: Mail & Calendar Protocols (IMAP IDLE, JMAP, CalDAV sync engines)
-3. Phase 3: Terminal UI (Ratatui interface for mail triage and calendar viewing)
-4. Phase 4: Desktop GUI Shell & Cross-Platform Packaging (Windows, macOS, Linux targets)
+Subagents are assigned specialized domain responsibilities based on their model strengths:
 
-## Open Questions
-- Default GUI engine choice: Native GPU framework (Slint/Iced/GPUI) vs Tauri v2.
-- Local encryption default: SQLCipher vs custom age/AES-GCM at rest payload encryption.
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                   Antigravity Master Agent (agy)                       │
+│    Roadmap Management, Subagent Dispatching, Quality Verification     │
+└────────┬──────────────────────┬───────────────────────┬────────────────┘
+         │                      │                       │
+         ▼                      ▼                       ▼
+┌──────────────────┐  ┌──────────────────┐    ┌──────────────────┐
+│   Claude Code    │  │   OpenAI Codex   │    │Antigravity Worker│
+│ Engine & Domain  │  │   CLI & Automation│   │  TUI & GUI Shells│
+└──────────────────┘  └──────────────────┘    └──────────────────┘
+```
+
+### Subagent Role Breakdown
+
+1. **Claude Code Subagent (`claude`)**:
+   - **Assigned Domain**: Headless engine crates (`crates/nuncio-core`, `crates/nuncio-mail`, `crates/nuncio-cal`, `crates/nuncio-store`).
+   - **Key Tasks**: `sqlx` SQLite WAL migrations, FTS5 trigram triggers, `mail-parser` zero-copy MIME parsing, `jmap-client` WebSocket streams, `async-imap` dual-socket manager, `calcard` JSCalendar conversions, `rrule` recurrence algorithms, `age` blob encryption, and 100% unit test line coverage enforcement.
+
+2. **OpenAI Codex Subagent (`codex`)**:
+   - **Assigned Domain**: CLI tool & pipeline automation (`crates/nuncio-cli`).
+   - **Key Tasks**: `clap` v4 subcommand derive parsers (`nuncio mail list|read|send`, `nuncio cal list|add`), JSON output formatters (`--json`), shell autocomplete generation, and automated data generator scripts.
+
+3. **Antigravity Worker Subagent (`agy`)**:
+   - **Assigned Domain**: Presentation shells & CI/CD packaging (`crates/nuncio-tui`, `crates/nuncio-gui`).
+   - **Key Tasks**: `ratatui` + `crossterm` TUI screen layouts, `html2text` hyperlink text formatting, `Tauri v2` desktop GUI shell wrapper, native OS webview sandboxing (`nuncio-mail://` scheme), and GitHub Actions cross-platform matrix build pipelines.
+
+---
+
+## High Level Roadmap Phases & Assigned Subagent
+
+### Phase 1: Engine Foundation & Storage
+- `nuncio-core` workspace engine setup & Tokio event loop -> **Claude Code Subagent**
+- `nuncio-store` SQLite WAL schema & FTS5 trigram indexes -> **Claude Code Subagent**
+- `keyring` OS vault integration & `age` payload encryption -> **Claude Code Subagent**
+- Unit test suite with 100% line coverage gate -> **Claude Code Subagent**
+
+### Phase 2: Mail & Calendar Protocol Engine Libraries
+- `nuncio-mail` `mail-parser`, `jmap-client`, `async-imap`, `lettre` -> **Claude Code Subagent**
+- `nuncio-cal` `calcard`, `rrule`, `reqwest` CalDAV REPORT queries -> **Claude Code Subagent**
+- Protocol mocks (`wiremock`, `MockMailBackend`, `MockKeyring`) -> **Claude Code Subagent**
+
+### Phase 3: Command Line & Terminal User Interfaces
+- `nuncio-cli` subcommands (`mail`, `cal`, `sync`, `status`) & JSON pipes -> **OpenAI Codex Subagent**
+- `nuncio-tui` Ratatui layout, composer, and `html2text` renderer -> **Antigravity Worker Subagent**
+
+### Phase 4: Desktop GUI Shell & Cross-Platform Packaging
+- `nuncio-gui` Tauri v2 wrapper calling `nuncio-core` IPC -> **Antigravity Worker Subagent**
+- Untrusted HTML email iframe sandboxing & CSP headers -> **Antigravity Worker Subagent**
+- GitHub Actions cross-platform release pipeline -> **Antigravity Master Agent (agy)**

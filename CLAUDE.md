@@ -2,6 +2,13 @@
 
 Nuncio ([nuncio.mx](https://nuncio.mx)) is a cross-platform mail and calendar solution written in Rust.
 
+## Multi-Agent Execution Framework
+
+- **Master Orchestrator Agent (`agy` / Antigravity)**: Manages high-level task decomposition, roadmap tracking ([docs/PLAN-nuncio-roadmap.md](file:///R:/Git.Local/KofTwentyTwo/nuncio/docs/PLAN-nuncio-roadmap.md), [docs/TODO.md](file:///R:/Git.Local/KofTwentyTwo/nuncio/docs/TODO.md)), subagent dispatching, quality gate validation (`cargo verify`, `cargo cov`), git branch workflows, and wiki documentation.
+- **Claude Code Subagent (`claude`)**: Assigned to headless engine crates (`crates/nuncio-core`, `crates/nuncio-mail`, `crates/nuncio-cal`, `crates/nuncio-store`), SQLite FTS5 migrations, protocol parsers, `rrule` recurrence math, `age` encryption, and 100% unit test coverage.
+- **OpenAI Codex Subagent (`codex`)**: Assigned to CLI subcommands and shell pipeline automation (`crates/nuncio-cli`).
+- **Antigravity Worker Subagent (`agy-worker`)**: Assigned to TUI (`crates/nuncio-tui`), GUI (`crates/nuncio-gui`), webview sandboxing, and CI/CD cross-platform release matrix.
+
 ## Architecture Guidelines
 
 1. **Library-First ("Ghost" Decoupled Model)**:
