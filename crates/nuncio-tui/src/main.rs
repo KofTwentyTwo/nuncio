@@ -1,7 +1,9 @@
 //! Nuncio Terminal UI application entry point.
 
+mod keybindings;
 mod layout;
 
+use keybindings::{KeybindingEngine, UserAction};
 use layout::{ActivePane, AppLayout};
 use ratatui::layout::Rect;
 
