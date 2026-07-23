@@ -262,6 +262,22 @@ impl McpToolHandler {
                     }
                 }),
             },
+            McpToolDefinition {
+                name: "nuncio_audit_list".to_string(),
+                description: "List immutable WORM cryptographic audit log records.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Maximum number of records to return (default 50)" },
+                        "offset": { "type": "integer", "description": "Offset sequence index" }
+                    }
+                }),
+            },
+            McpToolDefinition {
+                name: "nuncio_audit_verify".to_string(),
+                description: "Verify the cryptographic integrity of the entire WORM audit log chain.".to_string(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
         ]
     }
 
@@ -569,6 +585,16 @@ impl McpToolHandler {
                     "target_version": target_version,
                     "message": "Software update downloaded and verified. Restart required to apply changes."
                 }))
+            }
+            "nuncio_audit_list" => {
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+                let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let records = self.db.list_worm_audit_records(limit, offset).await.map_err(|e| e.to_string())?;
+                Ok(json!({ "records": records }))
+            }
+            "nuncio_audit_verify" => {
+                let is_valid = self.db.verify_worm_audit_chain(nuncio_core::DEFAULT_WORM_KEY).await.is_ok();
+                Ok(json!({ "status": "verified", "chain_integrity_valid": is_valid }))
             }
             _ => Err(format!("Unknown tool: {}", name)),
         }

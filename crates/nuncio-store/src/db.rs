@@ -253,9 +253,32 @@ impl DatabaseEngine {
                 hash TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS worm_audit_records (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_ns INTEGER NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                data_hash TEXT NOT NULL,
+                previous_block_hash TEXT NOT NULL,
+                record_hmac TEXT NOT NULL
+            );
+
+            CREATE TRIGGER IF NOT EXISTS prevent_worm_audit_update
+            BEFORE UPDATE ON worm_audit_records
+            BEGIN
+                SELECT RAISE(ABORT, 'WORM audit records are immutable and cannot be updated');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS prevent_worm_audit_delete
+            BEFORE DELETE ON worm_audit_records
+            BEGIN
+                SELECT RAISE(ABORT, 'WORM audit records are immutable and cannot be deleted');
+            END;
+
             CREATE INDEX IF NOT EXISTS idx_filter_rules_priority ON filter_rules(enabled, priority ASC);
             CREATE INDEX IF NOT EXISTS idx_filter_logs_rule ON filter_execution_logs(rule_id, matched_at DESC);
             CREATE INDEX IF NOT EXISTS idx_pending_mutations_status ON pending_remote_mutations(status, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_worm_audit_seq ON worm_audit_records(sequence ASC);
             "#,
         )
         .execute(&self.pool)
@@ -831,6 +854,97 @@ impl DatabaseEngine {
                 }
             })
             .collect())
+    }
+
+    /// Append a new immutable WORM audit record to the log ledger.
+    pub async fn append_worm_audit_record(
+        &self,
+        actor: &str,
+        action: &str,
+        data_payload: &[u8],
+        secret_key: &[u8],
+    ) -> Result<nuncio_core::WormAuditRecord, DatabaseError> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i64;
+
+        let last_row: Option<(i64, String)> = sqlx::query_as(
+            "SELECT sequence, record_hmac FROM worm_audit_records ORDER BY sequence DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let (next_seq, prev_hash) = match last_row {
+            Some((seq, hash)) => (seq as u64 + 1, hash),
+            None => (1, "GENESIS".to_string()),
+        };
+
+        let record = nuncio_core::WormAuditRecord::create_signed(
+            secret_key,
+            next_seq,
+            now_ns,
+            actor,
+            action,
+            data_payload,
+            &prev_hash,
+        )
+        .map_err(|e| DatabaseError::ChainIntegrityFailed(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO worm_audit_records (sequence, timestamp_ns, actor, action, data_hash, previous_block_hash, record_hmac)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(record.sequence as i64)
+        .bind(record.timestamp_ns)
+        .bind(&record.actor)
+        .bind(&record.action)
+        .bind(&record.data_hash)
+        .bind(&record.previous_block_hash)
+        .bind(&record.record_hmac)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(record)
+    }
+
+    /// List WORM audit records in order of sequence.
+    pub async fn list_worm_audit_records(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<nuncio_core::WormAuditRecord>, DatabaseError> {
+        let rows: Vec<(i64, i64, String, String, String, String, String)> = sqlx::query_as(
+            "SELECT sequence, timestamp_ns, actor, action, data_hash, previous_block_hash, record_hmac
+             FROM worm_audit_records ORDER BY sequence ASC LIMIT ? OFFSET ?",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| nuncio_core::WormAuditRecord {
+                sequence: r.0 as u64,
+                timestamp_ns: r.1,
+                actor: r.2,
+                action: r.3,
+                data_hash: r.4,
+                previous_block_hash: r.5,
+                record_hmac: r.6,
+            })
+            .collect())
+    }
+
+    /// Verify the entire WORM cryptographic audit log chain.
+    pub async fn verify_worm_audit_chain(
+        &self,
+        secret_key: &[u8],
+    ) -> Result<(), DatabaseError> {
+        let records = self.list_worm_audit_records(100_000, 0).await?;
+        nuncio_core::verify_worm_chain(&records, secret_key)
+            .map_err(|e| DatabaseError::ChainIntegrityFailed(e.to_string()))
     }
 }
 
