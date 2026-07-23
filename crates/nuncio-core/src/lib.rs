@@ -5,9 +5,12 @@
 pub mod config;
 pub mod ipc;
 pub mod model;
+pub mod update;
 
 pub use config::{AccountConfig, AccountProtocol, ConfigError, TlsMode};
-pub use model::{Attachment, CalendarEvent, Contact, Email, Folder};
+pub use model::{Attachment, CalendarEvent, Contact, DaemonTelemetry, Email, Folder};
+pub use update::{ReleaseInfo, UpdateCheckResult, UpdateEngine, UpdateError};
+
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -97,7 +100,15 @@ pub enum CoreEvent {
         /// Whether automated resync was triggered.
         resync_triggered: bool,
     },
+    /// Software update available on GitHub Releases.
+    UpdateAvailable {
+        /// Latest available release version (e.g. "0.2.0").
+        version: String,
+        /// Release notes / changelog.
+        release_notes: String,
+    },
     /// A non-fatal engine error occurred.
+
     Error {
         /// Error message text.
         message: String,

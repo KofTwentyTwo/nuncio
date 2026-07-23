@@ -14,15 +14,23 @@ async fn e2e_multi_shell_daemon_concurrency_test() {
         let _ = server.run_server().await;
     });
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
     // Simulate 3 concurrent shells connecting to nunciod daemon
     let client_cli = IpcClient::new(addr);
     let client_tui = IpcClient::new(addr);
     let client_mcp = IpcClient::new(addr);
 
-    // 1. All 3 shells ping daemon successfully
-    assert!(client_cli.ping().await.expect("cli ping"));
+    // Give server time to bind TCP socket
+    let mut ping_res = false;
+    for _ in 0..15 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(res) = client_cli.ping().await {
+            ping_res = res;
+            if ping_res {
+                break;
+            }
+        }
+    }
+    assert!(ping_res);
     assert!(client_tui.ping().await.expect("tui ping"));
     assert!(client_mcp.ping().await.expect("mcp ping"));
 

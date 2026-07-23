@@ -52,7 +52,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
-    // Custom RPC Handler for filter.* methods
+    // Background Auto-Update Check Listener Loop (24h interval)
+    let event_bus_update = event_bus.clone();
+    let _update_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Ok(updater) = nuncio_core::UpdateEngine::new() {
+                if let Ok(result) = updater.check_for_updates().await {
+                    if result.update_available {
+                        if let Some(info) = result.release_info {
+                            event_bus_update.publish_event(CoreEvent::UpdateAvailable {
+                                version: info.version,
+                                release_notes: info.release_notes,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Custom RPC Handler for filter.* and update.* methods
+
     let db_rpc = db.clone();
     let engine_rpc = filter_engine.clone();
     let event_bus_rpc = event_bus.clone();
@@ -193,10 +216,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                     Some(Ok(json!({ "processed": processed, "matched": matched_count })))
                 }
+                "update.check" => {
+                    match nuncio_core::UpdateEngine::new() {
+                        Ok(updater) => match updater.check_for_updates().await {
+                            Ok(res) => Some(Ok(json!(res))),
+                            Err(e) => Some(Err(e.to_string())),
+                        },
+                        Err(e) => Some(Err(e.to_string())),
+                    }
+                }
+                "update.apply" => {
+                    match nuncio_core::UpdateEngine::new() {
+                        Ok(updater) => match updater.check_for_updates().await {
+                            Ok(res) => {
+                                if let Some(info) = res.release_info {
+                                    match updater.apply_update(&info).await {
+                                        Ok(msg) => Some(Ok(json!({ "status": "updated", "message": msg }))),
+                                        Err(e) => Some(Err(e.to_string())),
+                                    }
+                                } else {
+                                    Some(Ok(json!({ "status": "already_up_to_date", "message": "Already up to date" })))
+                                }
+                            }
+                            Err(e) => Some(Err(e.to_string())),
+                        },
+                        Err(e) => Some(Err(e.to_string())),
+                    }
+                }
                 _ => None,
             }
         })
     });
+
 
     let addr = std::env::var("NUNCIO_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:9422".to_string());
     let server = IpcDaemonServer::with_handler(event_bus.clone(), &addr, handler);

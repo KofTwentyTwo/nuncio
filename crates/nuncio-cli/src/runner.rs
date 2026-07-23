@@ -7,7 +7,9 @@ use thiserror::Error;
 
 use crate::args::{
     AccountSubcommand, CalSubcommand, Commands, FilterSubcommand, FolderSubcommand, MailSubcommand, SystemSubcommand,
+    UpdateSubcommand,
 };
+
 use crate::output::{format_json, format_json_error};
 
 /// Errors emitted by the CLI headless runner.
@@ -333,7 +335,60 @@ impl HeadlessRunner {
                     }
                 }
             },
+            Commands::Update { action } => match action {
+                UpdateSubcommand::Check => {
+                    match nuncio_core::UpdateEngine::new() {
+                        Ok(updater) => match updater.check_for_updates().await {
+                            Ok(res) => {
+                                if json_mode {
+                                    format_json(&json!(res))
+                                } else if res.update_available {
+                                    let notes = res.release_info.as_ref().map(|i| i.release_notes.as_str()).unwrap_or("");
+                                    format!("Update available: v{} (current: v{})\n\nRelease Notes:\n{}", res.latest_version, res.current_version, notes)
+                                } else {
+                                    format!("Nuncio is up to date (version v{}).", res.current_version)
+                                }
+                            }
+                            Err(e) => if json_mode { format_json_error(&e.to_string()) } else { format!("Error checking updates: {e}") },
+                        },
+                        Err(e) => if json_mode { format_json_error(&e.to_string()) } else { format!("Error initializing updater: {e}") },
+                    }
+                }
+                UpdateSubcommand::Apply => {
+                    match nuncio_core::UpdateEngine::new() {
+                        Ok(updater) => match updater.check_for_updates().await {
+                            Ok(res) => {
+                                if let Some(info) = res.release_info {
+                                    if !res.update_available {
+                                        if json_mode {
+                                            format_json(&json!({ "status": "already_up_to_date", "current_version": res.current_version }))
+                                        } else {
+                                            format!("Nuncio is already up to date (version v{}).", res.current_version)
+                                        }
+                                    } else {
+                                        match updater.apply_update(&info).await {
+                                            Ok(msg) => if json_mode {
+                                                format_json(&json!({ "status": "updated", "version": info.version, "message": msg }))
+                                            } else {
+                                                format!("✓ {msg}")
+                                            },
+                                            Err(e) => if json_mode { format_json_error(&e.to_string()) } else { format!("Failed to apply update: {e}") },
+                                        }
+                                    }
+                                } else if json_mode {
+                                    format_json(&json!({ "status": "already_up_to_date", "current_version": res.current_version }))
+                                } else {
+                                    format!("Nuncio is already up to date (version v{}).", res.current_version)
+                                }
+                            }
+                            Err(e) => if json_mode { format_json_error(&e.to_string()) } else { format!("Error checking updates: {e}") },
+                        },
+                        Err(e) => if json_mode { format_json_error(&e.to_string()) } else { format!("Error initializing updater: {e}") },
+                    }
+                }
+            },
             Commands::Daemon { port } => {
+
                 let addr = format!("127.0.0.1:{}", port);
                 if json_mode {
                     format_json(&json!({ "status": "daemon_running", "bind_addr": addr }))

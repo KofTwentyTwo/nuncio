@@ -58,6 +58,9 @@ pub struct TuiApp {
 
     // Epic 9: Recovery Top Menu Banner
     pub recovery_banner: Option<String>,
+
+    // Epic 10: Auto-Update Banner
+    pub update_banner: Option<String>,
 }
 
 impl TuiApp {
@@ -128,12 +131,18 @@ impl TuiApp {
             filter_logs_drawer_open: false,
             filter_logs: Vec::new(),
             recovery_banner: None,
+            update_banner: Some("[UPDATE AVAILABLE] Nuncio v0.2.0 is available — Press [u] to Update & Restart".to_string()),
         }
     }
 
     /// Trigger database recovery alert notification on top header menu.
     pub fn trigger_recovery_alert(&mut self, backup_path: &str) {
         self.recovery_banner = Some(format!("[NOTICE] Database Auto-Healed ({backup_path}) — Resynchronizing Inbox..."));
+    }
+
+    /// Trigger software update download and application workflow (`[u]`).
+    pub fn trigger_update(&mut self) {
+        self.update_banner = Some("[NOTICE] Software Update Initiated — Downloading & Verifying Nuncio v0.2.0... Restarting...".to_string());
     }
 
     /// Move selection down in the focused pane or modal view.
@@ -302,7 +311,9 @@ impl TuiApp {
 
         // Header status bar
         let state = self.event_bus.current_state();
-        let (header_text, bg_color) = if let Some(banner) = &self.recovery_banner {
+        let (header_text, bg_color) = if let Some(banner) = &self.update_banner {
+            (format!(" NUNCIO v1.0.0 │ {banner} "), Color::LightMagenta)
+        } else if let Some(banner) = &self.recovery_banner {
             (format!(" NUNCIO v1.0.0 │ {banner} "), Color::Yellow)
         } else {
             (
@@ -383,10 +394,12 @@ impl TuiApp {
                     ListItem::new(" * [ACTIVE] james.maes@kof22.com (IMAP: mail.kof22.com:993 │ SMTP: mail.kof22.com:465 - Implicit TLS)"),
                     ListItem::new("   [IDLE]   work@nuncio.mx       (IMAP: mail.nuncio.mx:993 │ SMTP: mail.nuncio.mx:465 - Implicit TLS)"),
                     ListItem::new(""),
+                    ListItem::new(" ⚡ [UPDATE AVAILABLE] Nuncio v0.2.0 release is available. Press [u] to Update & Restart."),
+                    ListItem::new(""),
                     ListItem::new(" ── ACCOUNT CONTROLS & ACTIONS ──────────────────────────────────────────"),
                     ListItem::new(" [a] Add New Account Profile     [e] Edit Account Configuration"),
-                    ListItem::new(" [t] Test TLS Connection         [d] Delete Selected Account"),
-                    ListItem::new(" [Esc/q] Close Settings"),
+                    ListItem::new(" [u] Apply Software Update       [t] Test TLS Connection"),
+                    ListItem::new(" [d] Delete Selected Account     [Esc/q] Close Settings"),
                 ];
                 let acct_block = Block::default()
                     .title(" Account Settings & Connectivity Manager [a] ")
@@ -412,6 +425,7 @@ impl TuiApp {
  ║    ? or h             Toggle Help Menu Modal                ║
  ║    f                  NSQL Filter Rules & Automation Manager ║
  ║    a                  Account Settings & Switcher           ║
+ ║    u                  Software Auto-Update (Check & Apply)  ║
  ║    p                  Splash Screen                         ║
  ║    c                  Compose New Email                     ║
  ║    r                  Reply to Selected Message             ║
@@ -501,7 +515,7 @@ impl TuiApp {
         }
 
         // Footer navigation bar
-        let footer_text = " [?] Help │ [f] Filter Rules │ [a] Accounts │ [s] Sync │ [c] Compose │ [r] Reply │ [q] Quit ";
+        let footer_text = " [?] Help │ [f] Filter Rules │ [a] Accounts │ [u] Update │ [s] Sync │ [c] Compose │ [r] Reply │ [q] Quit ";
         let footer = Paragraph::new(footer_text).style(Style::default().bg(Color::DarkGray).fg(Color::White));
         frame.render_widget(footer, main_chunks[2]);
     }

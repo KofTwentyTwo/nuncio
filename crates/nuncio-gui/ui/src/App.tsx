@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Sidebar } from './components/Sidebar';
 import { MessageList } from './components/MessageList';
 import { Reader } from './components/Reader';
+import { UpdateBanner } from './components/UpdateBanner';
 import { Folder, Message } from './types';
 
 const INITIAL_FOLDERS: Folder[] = [
@@ -76,17 +77,20 @@ export default function App() {
   const [recoveryToast, setRecoveryToast] = useState<string | null>(null);
 
   useEffect(() => {
+    let cleanup: (() => void) | undefined;
     try {
-      const unlisten = listen('DatabaseRecovered', () => {
+      listen('DatabaseRecovered', () => {
         setRecoveryToast("Database auto-healed. Resyncing mail...");
         setStatus("Resyncing");
-      });
-      return () => {
-        unlisten.then((f) => f());
-      };
+      }).then((unlistenFn) => {
+        cleanup = unlistenFn;
+      }).catch(() => {});
     } catch {
       // Dev mode fallback when outside Tauri runtime
     }
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, []);
 
   const handleSync = async () => {
@@ -142,65 +146,68 @@ export default function App() {
   }, [messages, selectedMessageId]);
 
   return (
-    <div className="app-container">
-      {recoveryToast && (
-        <div
-          className="recovery-toast"
-          style={{
-            position: 'fixed',
-            top: 16,
-            right: 16,
-            backgroundColor: '#f59e0b',
-            color: '#000',
-            padding: '12px 18px',
-            borderRadius: 8,
-            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-            fontWeight: 600,
-            zIndex: 9999,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-          }}
-        >
-          <span>{recoveryToast}</span>
-          <button
-            onClick={() => setRecoveryToast(null)}
+    <div className="app-container" style={{ flexDirection: 'column' }}>
+      <UpdateBanner />
+      <div style={{ display: 'flex', flex: 1, width: '100%', height: '100%', overflow: 'hidden' }}>
+        {recoveryToast && (
+          <div
+            className="recovery-toast"
             style={{
-              border: 'none',
-              background: 'transparent',
-              cursor: 'pointer',
-              fontWeight: 'bold',
+              position: 'fixed',
+              top: 16,
+              right: 16,
+              backgroundColor: '#f59e0b',
+              color: '#000',
+              padding: '12px 18px',
+              borderRadius: 8,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+              fontWeight: 600,
+              zIndex: 9999,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
             }}
           >
-            ✕
-          </button>
-        </div>
-      )}
-      <Sidebar
-        folders={folders}
-        activeFolderId={activeFolderId}
-        onSelectFolder={(fId) => {
-          setActiveFolderId(fId);
-          const firstInFolder = messages.find((m) => m.folderId === fId);
-          setSelectedMessageId(firstInFolder ? firstInFolder.id : null);
-        }}
-        status={status}
-        onSync={handleSync}
-      />
-      <MessageList
-        messages={folderMessages}
-        selectedMessageId={selectedMessageId}
-        onSelectMessage={(id) => {
-          setSelectedMessageId(id);
-          const target = messages.find((m) => m.id === id);
-          if (target && !target.read) {
-            handleToggleRead(id, false);
-          }
-        }}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-      />
-      <Reader message={selectedMessage} onToggleRead={handleToggleRead} />
+            <span>{recoveryToast}</span>
+            <button
+              onClick={() => setRecoveryToast(null)}
+              style={{
+                border: 'none',
+                background: 'transparent',
+                cursor: 'pointer',
+                fontWeight: 'bold',
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        <Sidebar
+          folders={folders}
+          activeFolderId={activeFolderId}
+          onSelectFolder={(fId) => {
+            setActiveFolderId(fId);
+            const firstInFolder = messages.find((m) => m.folderId === fId);
+            setSelectedMessageId(firstInFolder ? firstInFolder.id : null);
+          }}
+          status={status}
+          onSync={handleSync}
+        />
+        <MessageList
+          messages={folderMessages}
+          selectedMessageId={selectedMessageId}
+          onSelectMessage={(id) => {
+            setSelectedMessageId(id);
+            const target = messages.find((m) => m.id === id);
+            if (target && !target.read) {
+              handleToggleRead(id, false);
+            }
+          }}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+        />
+        <Reader message={selectedMessage} onToggleRead={handleToggleRead} />
+      </div>
     </div>
   );
 }

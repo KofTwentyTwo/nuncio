@@ -102,6 +102,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.toggle_filter_logs_drawer();
                             }
                         }
+                        UserAction::TriggerUpdate => {
+                            app.trigger_update();
+                        }
                         UserAction::Sync => {
                             app.dispatch_command(nuncio_core::CoreCommand::SyncAll);
                         }

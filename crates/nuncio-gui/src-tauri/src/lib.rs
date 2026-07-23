@@ -59,6 +59,7 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 /// Run Tauri v2 desktop shell application.
 pub fn run() {
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();

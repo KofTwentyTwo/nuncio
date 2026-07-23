@@ -28,6 +28,19 @@ async fn system_test_mcp_protocol_initialize_tools_and_resources() {
     assert!(tools.iter().any(|t| t["name"] == "nuncio_mail_search"));
     assert!(tools.iter().any(|t| t["name"] == "nuncio_cal_list_events"));
     assert!(tools.iter().any(|t| t["name"] == "nuncio_cal_create_event"));
+    assert!(tools.iter().any(|t| t["name"] == "nuncio_update_check"));
+    assert!(tools.iter().any(|t| t["name"] == "nuncio_update_apply"));
+
+    // 2b. Test Update Check & Apply Tools
+    let check_req = r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"nuncio_update_check","arguments":{}}}"#;
+    let resp = server.handle_request_json(check_req).await.expect("update check response");
+    assert_eq!(resp["id"], 21);
+    assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("update_available"));
+
+    let apply_req = r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"nuncio_update_apply","arguments":{"version":"0.2.0"}}}"#;
+    let resp = server.handle_request_json(apply_req).await.expect("update apply response");
+    assert_eq!(resp["id"], 22);
+    assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("update_initiated"));
 
     // 3. Tools Call (Create & List Calendar Event)
     let create_req = r#"{

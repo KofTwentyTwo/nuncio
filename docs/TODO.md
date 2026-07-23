@@ -57,11 +57,24 @@
 - [x] `#237`: Implement GUI IPC contract test verifying all JSON payloads validate against schema.
 - [x] `#240`: Integrate full E2E test matrix into GitHub Actions CI workflow.
 
-### Epic 7: Packaging, Installers & CI/CD (#241 – #260) - `PLANNED`
-- [ ] `#241`: Configure GitHub Actions build workflow matrix for Windows, macOS, and Linux.
-- [ ] `#242`: Build Windows WiX installer (`.msi`) for `nuncio-gui` and `nuncio-cli`.
-- [ ] `#244`: Build macOS Apple Silicon (ARM64) and Intel (x64) `.dmg` disk image packages.
-- [ ] `#246`: Build Linux AppImage standalone executable package.
+### Epic 7: Packaging, Installers & CI/CD (#241 – #260) - `COMPLETED`
+- [x] `#241`: Configure GitHub Actions release matrix for Windows, macOS (arm64 + x86_64), and Linux.
+- [x] `#242`: Build Windows binary archive (`.zip`) and setup installer integration in `.github/workflows/release.yml`.
+- [x] `#243`: Build macOS Universal `.tar.gz` and `.dmg` binary bundles.
+- [x] `#244`: Build Linux AppImage and standalone `.tar.gz` packages.
+- [x] `#245`: Create Homebrew Tap formula `Formula/nuncio.rb` in `KofTwentyTwo/homebrew-tap` (`brew install koftwentytwo/tap/nuncio`).
+- [x] `#246`: Create automated daily pre-release Nightly build pipeline (`0 0 * * *`) tagging `nightly-<YYYY-MM-DD>`.
+
+### Epic 10: Cross-Platform Auto-Update Engine (#301 – #315) - `IN_PROGRESS`
+- [x] `#301`: Implement `UpdateEngine` in `crates/nuncio-core/src/update.rs` querying GitHub Releases API (`https://api.github.com/repos/KofTwentyTwo/nuncio/releases/latest`).
+- [x] `#302`: Implement SHA-256 checksum verification against `SHA256SUMS.txt` before binary replacement.
+- [x] `#303`: Implement atomic self-replacement engine swapping running binary executables (`nuncio-cli`, `nuncio-tui`, `nuncio-mcp`, `nunciod`).
+- [x] `#304`: Implement 24h background auto-update checker loop in `nunciod` broadcasting `CoreEvent::UpdateAvailable` over IPC.
+- [x] `#305`: Add `nuncio self-update`, `nuncio update check`, and `nuncio update apply` subcommands to `nuncio-cli`.
+- [x] `#306`: Build glassmorphic `<UpdateBanner />` in Tauri v2 Desktop GUI (`nuncio-gui`) linked to `@tauri-apps/plugin-updater`.
+- [x] `#307`: Add `[u]` key chord and update notification banner to Terminal TUI (`nuncio-tui`).
+- [x] `#308`: Add `nuncio_update_check` and `nuncio_update_apply` tools to Native MCP (`nuncio-mcp`).
+- [x] `#309`: Verify zero-warning quality gates (`cargo check --workspace`) and 100% test pass rate across workspace.
 
 ### Epic 8: NSQL Server-Side Email Filter & Automation Engine (#261 – #285) - `COMPLETED`
 - [x] `#261`: Initialize `crates/nuncio-filter` workspace crate with `sqlparser = "0.54"` dependency.

@@ -203,7 +203,7 @@ impl NsqlValidator {
     }
 
     /// Pass 6: Action Validity & Security Compliance.
-    fn pass6_action_security(actions: &[RuleAction], opts: &ValidationOptions) -> Result<(), ValidationError> {
+    pub fn pass6_action_security(actions: &[RuleAction], opts: &ValidationOptions) -> Result<(), ValidationError> {
         for action in actions {
             match action {
                 RuleAction::ForwardTo(email) => {

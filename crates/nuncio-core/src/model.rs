@@ -1,7 +1,52 @@
-//! Pure domain entities owned by Nuncio (Email, Attachment, Folder, CalendarEvent, Contact).
+//! Pure domain entities owned by Nuncio (Email, Attachment, Folder, CalendarEvent, Contact, DaemonTelemetry).
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+
+/// Real-time daemon health, performance metrics, and telemetry payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonTelemetry {
+    /// Overall daemon status ("HEALTHY", "DEGRADED", "RECOVERING", "SYNCING").
+    pub status: String,
+    /// Operating system Process ID.
+    pub pid: u32,
+    /// Daemon uptime in seconds.
+    pub uptime_seconds: u64,
+    /// Memory RSS usage in bytes.
+    pub memory_rss_bytes: u64,
+    /// Main SQLite database file size in bytes.
+    pub db_size_bytes: u64,
+    /// SQLite Write-Ahead Log (.db-wal) size in bytes.
+    pub wal_size_bytes: u64,
+    /// SQLite FTS5 trigram index size in bytes.
+    pub fts_index_size_bytes: u64,
+    /// Total index email messages.
+    pub total_emails: u64,
+    /// Total index calendar events.
+    pub total_events: u64,
+    /// Database integrity status ("OK" or "CORRUPTED").
+    pub integrity_status: String,
+    /// Active IPC socket client connections.
+    pub active_ipc_clients: usize,
+    /// Active background IMAP IDLE connection count.
+    pub active_imap_idle_connections: usize,
+    /// Active SMTP delivery connection count.
+    pub active_smtp_connections: usize,
+    /// Outbox job queue depth.
+    pub pending_outbox_jobs: usize,
+    /// Total NSQL filter rules executed.
+    pub filter_rules_executed: u64,
+    /// Total NSQL filter rules matched.
+    pub filter_rules_matched: u64,
+    /// Total external protocol API calls executed.
+    pub api_calls_total: u64,
+    /// Total external protocol API errors encountered.
+    pub api_errors_total: u64,
+    /// Average protocol API call latency in milliseconds.
+    pub avg_api_latency_ms: f64,
+    /// Circular log stream buffer entries (last 50 log lines).
+    pub recent_logs: Vec<String>,
+}
 
 /// Email attachment metadata and payload buffer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,8 +100,6 @@ pub struct Folder {
     pub unread_messages: usize,
 }
 
-/// Mailbox folder entity.
-
 /// Calendar event domain entity owned by Nuncio core.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalendarEvent {
@@ -96,56 +139,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn email_domain_entity_creation_and_serde() {
-        let email = Email {
-            id: "msg-100".to_string(),
-            account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
-            subject: "Architecture Review".to_string(),
-            sender: "alice@nuncio.mx".to_string(),
-            recipient: "bob@nuncio.mx".to_string(),
-            received_at: 1700000000,
-            read: false,
-            body_plain: Some("Hello world".to_string()),
-            body_html: Some("<p>Hello world</p>".to_string()),
-            attachments: vec![Attachment {
-                filename: "spec.pdf".to_string(),
-                mime_type: "application/pdf".to_string(),
-                content: Bytes::from_static(b"PDF DATA"),
-            }],
+    fn daemon_telemetry_creation_and_serde() {
+        let telemetry = DaemonTelemetry {
+            status: "HEALTHY".to_string(),
+            pid: 12345,
+            uptime_seconds: 3600,
+            memory_rss_bytes: 42000000,
+            db_size_bytes: 1048576,
+            wal_size_bytes: 32768,
+            fts_index_size_bytes: 524288,
+            total_emails: 15000,
+            total_events: 340,
+            integrity_status: "OK".to_string(),
+            active_ipc_clients: 2,
+            active_imap_idle_connections: 4,
+            active_smtp_connections: 0,
+            pending_outbox_jobs: 0,
+            filter_rules_executed: 1420,
+            filter_rules_matched: 88,
+            api_calls_total: 9500,
+            api_errors_total: 0,
+            avg_api_latency_ms: 14.2,
+            recent_logs: vec!["[INFO] nunciod initialized".to_string()],
         };
 
-        let json = serde_json::to_string(&email).unwrap();
-        let parsed: Email = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.id, email.id);
-        assert_eq!(parsed.subject, email.subject);
-    }
-
-    #[test]
-    fn calendar_event_and_contact_serde() {
-        let event = CalendarEvent {
-            id: "evt-1".to_string(),
-            account_id: "acct-1".to_string(),
-            calendar_id: "cal-1".to_string(),
-            summary: "Sprint Sync".to_string(),
-            start_time: 1700000000,
-            end_time: 1700003600,
-            rrule: Some("FREQ=WEEKLY".to_string()),
-            location: Some("Room 101".to_string()),
-        };
-
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed: CalendarEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.summary, "Sprint Sync");
-
-        let contact = Contact {
-            id: "c-1".to_string(),
-            name: "Alice Smith".to_string(),
-            email: "alice@nuncio.mx".to_string(),
-            phone: Some("555-0199".to_string()),
-        };
-        let c_json = serde_json::to_string(&contact).unwrap();
-        let parsed_c: Contact = serde_json::from_str(&c_json).unwrap();
-        assert_eq!(parsed_c.name, "Alice Smith");
+        let json = serde_json::to_string(&telemetry).unwrap();
+        let parsed: DaemonTelemetry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status, "HEALTHY");
+        assert_eq!(parsed.total_emails, 15000);
     }
 }

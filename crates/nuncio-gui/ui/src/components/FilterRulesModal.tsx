@@ -51,7 +51,7 @@ export const FilterRulesModal: React.FC<FilterRulesModalProps> = ({ onClose }) =
   const [showPreview, setShowPreview] = useState<boolean>(true);
   const [testEmailSender, setTestEmailSender] = useState<string>('boss@nuncio.mx');
   const [testEmailSubject, setTestEmailSubject] = useState<string>('Quarterly Review');
-  const [testEmailSize, setTestEmailSize] = useState<number>(2048);
+  const [_testEmailSize, _setTestEmailSize] = useState<number>(2048);
   const [previewResult, setPreviewResult] = useState<{ matched: boolean; actions: string[]; timeUs: number } | null>({
     matched: true,
     actions: ["MOVE TO 'Priority'", 'FLAG'],

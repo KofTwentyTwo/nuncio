@@ -77,6 +77,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: FilterSubcommand,
     },
+    /// Software update operations (`nuncio update <verb>`).
+    Update {
+        #[command(subcommand)]
+        action: UpdateSubcommand,
+    },
     /// Launch centralized local background server daemon (`nuncio daemon`).
     Daemon {
         /// TCP port to bind IPC daemon server to (default: 9422).
@@ -84,6 +89,17 @@ pub enum Commands {
         port: u16,
     },
 }
+
+/// Software update subcommands (`nuncio update <verb>`).
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateSubcommand {
+    /// Check for available software updates on GitHub Releases.
+    Check,
+    /// Download, verify SHA256 checksum, and apply latest software update.
+    Apply,
+}
+
 
 /// Account subcommands (`nuncio account <verb>`).
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,4 +365,24 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn parse_pure_noun_verb_update_commands() {
+        let cli_check = Cli::parse_from(["nuncio", "update", "check"]);
+        assert_eq!(
+            cli_check.command,
+            Commands::Update {
+                action: UpdateSubcommand::Check
+            }
+        );
+
+        let cli_apply = Cli::parse_from(["nuncio", "update", "apply"]);
+        assert_eq!(
+            cli_apply.command,
+            Commands::Update {
+                action: UpdateSubcommand::Apply
+            }
+        );
+    }
 }
+

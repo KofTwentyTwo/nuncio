@@ -50,6 +50,8 @@ pub enum UserAction {
     ReorderPriorityDown,
     /// Toggle filter execution logs drawer (l).
     ToggleFilterLogs,
+    /// Trigger software update check and application (u).
+    TriggerUpdate,
     /// Exit application or modal (q / Esc).
     Quit,
     /// Unmapped key action.
@@ -80,6 +82,7 @@ impl KeybindingEngine {
             (KeyCode::Char('a'), KeyModifiers::NONE) => UserAction::ToggleAccounts,
             (KeyCode::Char('f'), KeyModifiers::NONE) => UserAction::ToggleFilterRules,
             (KeyCode::Char('p'), KeyModifiers::NONE) => UserAction::ToggleSplash,
+            (KeyCode::Char('u'), KeyModifiers::NONE) => UserAction::TriggerUpdate,
             (KeyCode::Char('/'), KeyModifiers::NONE) => UserAction::Search,
             (KeyCode::Char('c'), KeyModifiers::NONE) => UserAction::Compose,
             (KeyCode::Char('r'), KeyModifiers::NONE) => UserAction::Reply,
@@ -273,6 +276,10 @@ mod tests {
         assert_eq!(
             KeybindingEngine::handle_key(make_key(KeyCode::Char('p'), KeyModifiers::NONE)),
             UserAction::ToggleSplash
+        );
+        assert_eq!(
+            KeybindingEngine::handle_key(make_key(KeyCode::Char('u'), KeyModifiers::NONE)),
+            UserAction::TriggerUpdate
         );
     }
 }
