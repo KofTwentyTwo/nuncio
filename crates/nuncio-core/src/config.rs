@@ -13,6 +13,18 @@ pub enum AccountProtocol {
     ImapSmtp,
 }
 
+/// Security and transport encryption mode for mail protocol streams (IMAP & SMTP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsMode {
+    /// Implicit TLS / SSL connection established immediately upon TCP socket connect (e.g. IMAP 993, SMTPS 465).
+    ImplicitTls,
+    /// Explicit STARTTLS upgrading plain TCP connection to TLS after initial handshake (e.g. IMAP 143, SMTP 587).
+    StartTls,
+    /// Plain unencrypted TCP connection without TLS (e.g. Local dev / testing ports 143, 25, 2525).
+    Plain,
+}
+
 /// Errors returned when validating an [`AccountConfig`].
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum ConfigError {
@@ -50,6 +62,10 @@ pub struct AccountConfig {
     pub server_port: u16,
     /// Whether TLS connection encryption is enabled.
     pub use_tls: bool,
+    /// IMAP connection security transport mode.
+    pub imap_tls_mode: TlsMode,
+    /// SMTP connection security transport mode.
+    pub smtp_tls_mode: TlsMode,
     /// Keyring entry key used to retrieve OS vault credentials.
     pub keyring_secret_key: String,
     /// Background sync polling interval in seconds (minimum 10s).
@@ -112,6 +128,8 @@ mod tests {
             server_host: "jmap.nuncio.mx".to_string(),
             server_port: 443,
             use_tls: true,
+            imap_tls_mode: TlsMode::ImplicitTls,
+            smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-123".to_string(),
             sync_interval_secs: 60,
         }
@@ -223,6 +241,22 @@ mod tests {
         assert_eq!(imap_json, "\"imap-smtp\"");
         let parsed_imap: AccountProtocol = serde_json::from_str(&imap_json).unwrap();
         assert_eq!(parsed_imap, AccountProtocol::ImapSmtp);
+    }
+
+    #[test]
+    fn tls_mode_serde_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&TlsMode::ImplicitTls).unwrap(),
+            "\"implicit_tls\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TlsMode::StartTls).unwrap(),
+            "\"start_tls\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TlsMode::Plain).unwrap(),
+            "\"plain\""
+        );
     }
 
     #[test]

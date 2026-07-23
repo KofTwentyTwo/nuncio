@@ -1,6 +1,6 @@
 //! Ephemeral SQLite end-to-end integration test harness and WAL lifecycle verification.
 
-use nuncio_core::config::{AccountConfig, AccountProtocol};
+use nuncio_core::config::{AccountConfig, AccountProtocol, TlsMode};
 use nuncio_core::{AppState, CoreCommand, EngineStatus, EventBus};
 use nuncio_store::DatabaseEngine;
 use tempfile::tempdir;
@@ -24,6 +24,8 @@ async fn test_ephemeral_harness_multi_account_lifecycle() {
         server_host: "jmap.nuncio.mx".to_string(),
         server_port: 443,
         use_tls: true,
+        imap_tls_mode: TlsMode::ImplicitTls,
+        smtp_tls_mode: TlsMode::ImplicitTls,
         keyring_secret_key: "nuncio/acct-work".to_string(),
         sync_interval_secs: 30,
     };
@@ -37,6 +39,8 @@ async fn test_ephemeral_harness_multi_account_lifecycle() {
         server_host: "imap.nuncio.mx".to_string(),
         server_port: 993,
         use_tls: true,
+        imap_tls_mode: TlsMode::ImplicitTls,
+        smtp_tls_mode: TlsMode::StartTls,
         keyring_secret_key: "nuncio/acct-personal".to_string(),
         sync_interval_secs: 60,
     };

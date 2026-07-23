@@ -81,6 +81,12 @@ pub enum Commands {
         /// SMTP server port (SSL).
         #[arg(long, default_value_t = 465)]
         smtp_port: u16,
+        /// IMAP connection transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, default_value = "implicit_tls")]
+        imap_mode: String,
+        /// SMTP connection transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, default_value = "implicit_tls")]
+        smtp_mode: String,
     },
 
 
@@ -170,6 +176,8 @@ mod tests {
                 imap_port: 993,
                 smtp_host: "mail.kof22.com".to_string(),
                 smtp_port: 465,
+                imap_mode: "implicit_tls".to_string(),
+                smtp_mode: "implicit_tls".to_string(),
             }
         );
     }

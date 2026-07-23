@@ -140,6 +140,8 @@ impl HeadlessRunner {
                 imap_port,
                 smtp_host: _,
                 smtp_port: _,
+                imap_mode,
+                smtp_mode,
             } => {
                 let keyring_key = format!("nuncio/{}", email);
                 if json_mode {
@@ -148,12 +150,14 @@ impl HeadlessRunner {
                         "email": email,
                         "imap_host": imap_host,
                         "imap_port": imap_port,
+                        "imap_mode": imap_mode,
+                        "smtp_mode": smtp_mode,
                         "keyring_key": keyring_key
                     }))
                 } else {
                     format!(
-                        "Account '{}' configured for IMAP SSL ({}:{}) and SMTP SSL",
-                        email, imap_host, imap_port
+                        "Account '{}' configured for IMAP ({}:{}, mode: {}) and SMTP (mode: {})",
+                        email, imap_host, imap_port, imap_mode, smtp_mode
                     )
                 }
             }
@@ -238,6 +242,8 @@ mod tests {
                     imap_port: 993,
                     smtp_host: "mail.kof22.com".to_string(),
                     smtp_port: 465,
+                    imap_mode: "implicit_tls".to_string(),
+                    smtp_mode: "implicit_tls".to_string(),
                 },
                 true,
             )

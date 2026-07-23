@@ -6,7 +6,7 @@ pub mod config;
 
 pub mod model;
 
-pub use config::{AccountConfig, AccountProtocol, ConfigError};
+pub use config::{AccountConfig, AccountProtocol, ConfigError, TlsMode};
 pub use model::{Attachment, CalendarEvent, Contact, Email, Folder};
 
 
