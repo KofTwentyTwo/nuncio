@@ -15,12 +15,15 @@ Nuncio ([nuncio.mx](https://nuncio.mx)) is a cross-platform mail and calendar so
    - **Error Handling**: Use `thiserror` for library crates (`nuncio-core`, `nuncio-mail`, `nuncio-cal`, `nuncio-store`). `unwrap()` and `expect()` are **forbidden** in production library code (permitted only in tests and prototypes).
    - **Security**: Never store plain-text passwords, tokens, or encryption keys in source files or SQLite tables. Route all credentials to OS native vaults via `keyring`. Payload attachments encrypted at rest via `age`. Untrusted HTML email sandboxed inside `<iframe sandbox>` with JS disabled.
 
-3. **Testing Requirements & 100% Line Coverage**:
+3. **Testing, E2E & Mocking Standards**:
    - **Test-First Commit Policy**: 100% of workspace tests (`cargo test --workspace`) MUST pass locally before committing or triggering CI pipelines.
-   - **100% Line Coverage Requirement**: **100% line coverage** is required for all unit tests across the workspace (`cargo llvm-cov --workspace --fail-under-lines 100`). Code missing test coverage is rejected by CI/CD and local quality gates.
-   - **Unit Tests**: Inline `#[cfg(test)]` modules in every crate testing parsers, recurrence logic, and event handlers.
-   - **Integration Tests**: `tests/` directories testing database migrations, SQLite FTS5 queries, and channel event loops.
-   - **Mocking**: Protocol traits (`MailBackend`, `CalDavClient`) MUST be mocked for deterministic offline testing.
+   - **100% Line Coverage Requirement**: **100% line coverage** is required for unit tests across workspace engine crates (`cargo llvm-cov --workspace --fail-under-lines 100`).
+   - **Integration Testing Standards**: `tests/` directories MUST test multi-crate interaction, SQLite WAL migrations, FTS5 trigram queries, and channel event loops using isolated ephemeral databases (`tempfile` or `:memory:`). State leakage between tests is forbidden.
+   - **End-to-End (E2E) Testing Standards**: Headless E2E integration tests MUST validate complete user workflows from `nuncio-cli` subcommands and `nuncio-core` state streams down through storage and protocol layers.
+   - **Full Mocks for External Systems**:
+     - All external network protocols (JMAP, IMAP, CalDAV, CardDAV, SMTP) MUST be 100% mocked for offline test execution using `wiremock` or mock trait implementations (`MockMailBackend`, `MockCalDavClient`).
+     - OS native vaults MUST be mocked via an in-memory `MockKeyring` provider during tests.
+     - Live network calls during test runs are strictly **forbidden**.
 
 4. **Commit & Branch Conventions**:
    - Commit messages MUST follow Conventional Commits format (`feat(scope): description`, `fix(scope): description`). Subject lines under 72 characters, imperative mood, zero AI attribution.
@@ -37,7 +40,7 @@ cargo fmt --all -- --check
 # 2. Clippy Linter Check (warnings as errors)
 cargo check-all
 
-# 3. Complete Test Suite Execution (100% passing required)
+# 3. Complete Test Suite Execution (Unit, Integration & E2E - 100% passing required)
 cargo test-all
 
 # 4. Enforce 100% Code Coverage Threshold

@@ -1,6 +1,6 @@
 # Nuncio Architecture Specification
 
-Nuncio ([nuncio.mx](https://nuncio.mx)) is a high-performance cross-platform mail and calendar client for macOS, Windows, and Linux. This document defines the system architecture, crate layout, data models, network protocol engines, storage strategy, and presentation shell integrations.
+Nuncio ([nuncio.mx](https://nuncio.mx)) is a high-performance cross-platform mail and calendar client for macOS, Windows, and Linux. This document defines the system architecture, crate layout, data models, network protocol engines, storage strategy, presentation shell integrations, and quality gates.
 
 ---
 
@@ -51,6 +51,7 @@ Nuncio decouples application state management, network protocol engines, cryptog
 | **Command Line Interface** | `clap` v4 | Fast subcommands parser supporting JSON output formatting for shell scripts and Unix piping. |
 | **Terminal Shell** | `ratatui`, `crossterm`, `html2text` | Double-buffered terminal renderer; `html2text` converts HTML emails into formatted text with link references. |
 | **Desktop Shell** | `Tauri v2` | Leverages OS native webviews (`WKWebView`, `WebView2`, `WebKitGTK`) for sandboxed, secure HTML email rendering and accessibility. |
+| **Mocking & Test Infra** | `wiremock`, `tempfile` | `wiremock` provides HTTP/JMAP/CalDAV mock servers; `tempfile` provides ephemeral SQLite databases for isolated integration tests. |
 
 ---
 
@@ -131,33 +132,31 @@ pub trait MailBackend: Send + Sync {
 
 ---
 
-## 5. Event Loop & State Binding
+## 5. Testing, E2E & Protocol Mocking Standards
 
-Communication between presentation shells and `nuncio-core` relies on thread-safe async channels:
-
-```rust
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum CoreCommand {
-    SelectAccount(String),
-    SelectFolder { account_id: String, folder_id: String },
-    FetchMessageBody { message_id: String },
-    SendMail(OutgoingMessage),
-    TriggerSync,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum CoreEvent {
-    AccountUpdated(AccountState),
-    MailReceived { folder_id: String, message_id: String },
-    SyncProgress { total: u32, current: u32, message: String },
-    Error { code: String, message: String },
-}
-
-pub struct CoreEngine {
-    command_tx: tokio::sync::mpsc::UnboundedSender<CoreCommand>,
-    state_rx: tokio::sync::watch::Receiver<AppState>,
-    event_tx: tokio::sync::broadcast::Sender<CoreEvent>,
-}
+```
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                          Offline Test Suite Execution                             │
+│                                                                                   │
+│ ┌────────────────────────┐   ┌─────────────────────────┐   ┌────────────────────┐ │
+│ │   Unit Tests (100%)    │   │   Integration Tests     │   │   Headless E2E     │ │
+│ └───────────┬────────────┘   └────────────┬────────────┘   └─────────┬──────────┘ │
+└─────────────┼─────────────────────────────┼──────────────────────────┼────────────┘
+              │                             │                          │
+              ▼                             ▼                          ▼
+┌───────────────────────────────────────────────────────────────────────────────────┐
+│                            Mocking Subsystem Layer                                │
+│                                                                                   │
+│  - Mock Mail/Cal Traits: MockMailBackend, MockCalDavClient                        │
+│  - Mock Network Protocol Servers: wiremock (JMAP / CalDAV / WebDAV)               │
+│  - Mock Vault Store: In-memory MockKeyring (headless CI support)                  │
+└───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Presentation shells send commands via `command_tx` and receive reactive state updates through `state_rx`.
+1. **100% Unit Test Line Coverage**: All engine domain logic, parsers, and recurrence algorithms require 100% line coverage (`cargo llvm-cov --workspace --fail-under-lines 100`).
+2. **Integration Test Isolation**: Integration tests in `tests/` MUST use ephemeral databases (`tempfile` or `:memory:`) with zero state leakage.
+3. **Headless E2E Test Suite**: E2E tests validate complete user workflows from `nuncio-cli` subcommands down through core engine streams and storage persistence.
+4. **100% Offline Mocks for External Systems**:
+   - Network protocols (JMAP, IMAP, CalDAV, CardDAV, SMTP) are 100% mocked via `wiremock` and async mock traits.
+   - OS native vaults are mocked via `MockKeyring` in-memory provider.
+   - Live network connections during testing are strictly forbidden.
