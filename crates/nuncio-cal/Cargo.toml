@@ -17,4 +17,7 @@ icalendar.workspace = true
 chrono-tz.workspace = true
 rrule.workspace = true
 chrono.workspace = true
+reqwest.workspace = true
+quick-xml.workspace = true
+
 
