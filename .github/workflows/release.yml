@@ -113,14 +113,16 @@ jobs:
           prerelease: ${{ steps.prep.outputs.is_prerelease }}
           files: dist-final/*
           body: |
-            ## Nuncio Sovereign Mail & Calendar Suite
+            ## Nuncio Sovereign Mail, Calendar & Contacts Suite
 
-            - **POSIX CLI**: `nuncio-cli`
-            - **Vim Ratatui TUI**: `nuncio-tui`
-            - **Native MCP LLM Agent Server**: `nuncio-mcp`
-            - **Background Daemon**: `nunciod`
+            ### 📦 Official Installer & Package Downloads
+            - **Windows Installer**: `Nuncio_x64.msi` (WiX Installer) / `Nuncio_x64-setup.exe` (NSIS)
+            - **macOS Disk Image**: `Nuncio_x64.dmg` (Intel) / `Nuncio_aarch64.dmg` (Apple Silicon)
+            - **Linux Packages**: `Nuncio_amd64.AppImage` / `Nuncio_amd64.deb`
+            - **CLI & Daemon Archives**: `nuncio-x86_64-unknown-linux-gnu.tar.gz`, `nuncio-aarch64-apple-darwin.tar.gz`, `nuncio-x86_64-apple-darwin.tar.gz`, `nuncio-x86_64-pc-windows-msvc.zip`
 
-            ### Installation:
-            - **Homebrew**: `brew install koftwentytwo/tap/nuncio`
-            - **Cargo**: `cargo install nuncio-cli nuncio-tui nuncio-mcp nunciod`
-            - **Manual**: Download the platform binary archive below and verify `SHA256SUMS.txt`.
+            ### 🚀 Package Managers
+            - **Homebrew Tap**: `brew install koftwentytwo/tap/nuncio`
+            - **Cargo Source**: `cargo install --git https://github.com/KofTwentyTwo/nuncio.git nuncio-cli nuncio-tui nuncio-mcp nunciod`
+
+            Verify payload hashes against `SHA256SUMS.txt`.

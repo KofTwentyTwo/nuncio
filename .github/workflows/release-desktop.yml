@@ -1,0 +1,63 @@
+name: Nuncio Tauri v2 Desktop GUI Release (MSI, DMG, AppImage, Deb)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-tauri:
+    name: Build Desktop ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+          - platform: 'macos-13'
+            args: '--target x86_64-apple-darwin'
+          - platform: 'ubuntu-22.04'
+            args: ''
+          - platform: 'windows-latest'
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || matrix.platform == 'macos-13' && 'x86_64-apple-darwin' || '' }}
+
+      - name: Install Linux Dependencies (Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install Frontend UI Dependencies
+        run: |
+          npm --prefix crates/nuncio-gui/ui install
+
+      - name: Build Tauri Desktop Installers (.msi, .dmg, .AppImage, .deb)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: 'crates/nuncio-gui/src-tauri'
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Nuncio Desktop GUI ${{ github.ref_name }}'
+          releaseBody: 'Production Tauri v2 Desktop GUI installers (.msi, .dmg, .AppImage, .deb).'
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
