@@ -17,5 +17,6 @@ nuncio-store = { path = "../nuncio-store" }
 tokio.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+futures.workspace = true
 tracing.workspace = true
 html2text.workspace = true

@@ -14,6 +14,12 @@ pub enum UserAction {
     JumpTop,
     /// Jump to bottom of list (G).
     JumpBottom,
+    /// Jump to Inbox folder (gi).
+    JumpInbox,
+    /// Jump to Sent folder (gs).
+    JumpSent,
+    /// Jump to Archive folder (ga).
+    JumpArchive,
     /// Switch to next pane (Tab).
     NextPane,
     /// Switch to previous pane (BackTab).
@@ -70,6 +76,65 @@ impl KeybindingEngine {
     }
 }
 
+/// Vim leader chord state machine for multi-key sequences (`gg`, `gi`, `gs`, `ga`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LeaderState {
+    #[default]
+    Idle,
+    PendingG,
+}
+
+/// Stateful Vim leader chord key processor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VimLeaderStateMachine {
+    state: LeaderState,
+}
+
+impl VimLeaderStateMachine {
+    /// Construct a new `VimLeaderStateMachine`.
+    pub fn new() -> Self {
+        Self {
+            state: LeaderState::Idle,
+        }
+    }
+
+    /// Access current leader state.
+    pub fn state(&self) -> LeaderState {
+        self.state
+    }
+
+    /// Process a incoming key event through the leader chord state machine.
+    pub fn process_key(&mut self, key: KeyEvent) -> UserAction {
+        match (self.state, key.code, key.modifiers) {
+            (LeaderState::Idle, KeyCode::Char('g'), KeyModifiers::NONE) => {
+                self.state = LeaderState::PendingG;
+                UserAction::None
+            }
+            (LeaderState::PendingG, KeyCode::Char('g'), KeyModifiers::NONE) => {
+                self.state = LeaderState::Idle;
+                UserAction::JumpTop
+            }
+            (LeaderState::PendingG, KeyCode::Char('i'), KeyModifiers::NONE) => {
+                self.state = LeaderState::Idle;
+                UserAction::JumpInbox
+            }
+            (LeaderState::PendingG, KeyCode::Char('s'), KeyModifiers::NONE) => {
+                self.state = LeaderState::Idle;
+                UserAction::JumpSent
+            }
+            (LeaderState::PendingG, KeyCode::Char('a'), KeyModifiers::NONE) => {
+                self.state = LeaderState::Idle;
+                UserAction::JumpArchive
+            }
+            (LeaderState::PendingG, _, _) => {
+                self.state = LeaderState::Idle;
+                KeybindingEngine::handle_key(key)
+            }
+            (LeaderState::Idle, _, _) => KeybindingEngine::handle_key(key),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +161,31 @@ mod tests {
             KeybindingEngine::handle_key(make_key(KeyCode::Char('G'), KeyModifiers::SHIFT)),
             UserAction::JumpBottom
         );
+    }
+
+    #[test]
+    fn vim_leader_chords_gg_gi_gs_ga() {
+        let mut sm = VimLeaderStateMachine::new();
+
+        // Single 'g' puts state machine in PendingG
+        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::None);
+        assert_eq!(sm.state(), LeaderState::PendingG);
+
+        // 'g' + 'g' -> JumpTop
+        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::JumpTop);
+        assert_eq!(sm.state(), LeaderState::Idle);
+
+        // 'g' + 'i' -> JumpInbox
+        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::None);
+        assert_eq!(sm.process_key(make_key(KeyCode::Char('i'), KeyModifiers::NONE)), UserAction::JumpInbox);
+
+        // 'g' + 's' -> JumpSent
+        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::None);
+        assert_eq!(sm.process_key(make_key(KeyCode::Char('s'), KeyModifiers::NONE)), UserAction::JumpSent);
+
+        // 'g' + 'a' -> JumpArchive
+        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::None);
+        assert_eq!(sm.process_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE)), UserAction::JumpArchive);
     }
 
     #[test]

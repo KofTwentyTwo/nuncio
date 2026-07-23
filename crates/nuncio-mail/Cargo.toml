@@ -30,3 +30,4 @@ tokio-stream.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 wiremock.workspace = true
+reqwest.workspace = true
