@@ -12,4 +12,7 @@ nuncio-mail = { path = "../nuncio-mail" }
 nuncio-cal = { path = "../nuncio-cal" }
 nuncio-store = { path = "../nuncio-store" }
 tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
