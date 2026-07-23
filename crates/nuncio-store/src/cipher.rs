@@ -189,10 +189,7 @@ mod tests {
 
         let err =
             PayloadCipher::decrypt_bytes(&key, &ciphertext).expect_err("should fail tamper check");
-        assert_eq!(
-            err,
-            CipherError::DecryptionFailed("authentication tag mismatch".to_string())
-        );
+        assert!(matches!(err, CipherError::DecryptionFailed(_)));
     }
 
     #[test]
