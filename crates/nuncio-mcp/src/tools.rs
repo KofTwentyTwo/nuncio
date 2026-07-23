@@ -2,7 +2,7 @@
 
 use nuncio_core::ipc::{IpcClient, IpcDaemonServer};
 use nuncio_core::model::{CalendarEvent, Email};
-use nuncio_core::CoreCommand;
+use nuncio_core::{CoreCommand, DataType, McpAgentPolicy};
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
 use serde::{Deserialize, Serialize};
@@ -24,15 +24,36 @@ pub struct McpToolDefinition {
 pub struct McpToolHandler {
     db: Arc<DatabaseEngine>,
     ipc_client: IpcClient,
+    policy: McpAgentPolicy,
 }
 
 impl McpToolHandler {
-    /// Create a new `McpToolHandler` wrapping shared `DatabaseEngine`.
+    /// Create a new `McpToolHandler` wrapping shared `DatabaseEngine` with default RBAC policy.
     pub fn new(db: Arc<DatabaseEngine>) -> Self {
         Self {
             db,
             ipc_client: IpcClient::new(IpcDaemonServer::DEFAULT_ADDR),
+            policy: McpAgentPolicy::default(),
         }
+    }
+
+    /// Create a new `McpToolHandler` with a custom [`McpAgentPolicy`].
+    pub fn with_policy(db: Arc<DatabaseEngine>, policy: McpAgentPolicy) -> Self {
+        Self {
+            db,
+            ipc_client: IpcClient::new(IpcDaemonServer::DEFAULT_ADDR),
+            policy,
+        }
+    }
+
+    /// Get active agent policy.
+    pub fn policy(&self) -> &McpAgentPolicy {
+        &self.policy
+    }
+
+    /// Update active agent policy.
+    pub fn set_policy(&mut self, policy: McpAgentPolicy) {
+        self.policy = policy;
     }
 
     /// List all available MCP tools exposed by Nuncio.
@@ -248,20 +269,47 @@ impl McpToolHandler {
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, String> {
         match name {
             "nuncio_mail_list" => {
+                if !self.policy.is_data_type_allowed(DataType::Mail) || !self.policy.permissions.read_mail {
+                    return Err(format!("403 Forbidden: Agent '{}' lacks 'read_mail' permission", self.policy.agent_id));
+                }
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
                 let folder_id = args.get("folder_id").and_then(|v| v.as_str()).unwrap_or("INBOX");
+                if !self.policy.is_folder_allowed(folder_id) {
+                    return Err(format!("403 Forbidden: Agent '{}' is restricted from folder '{}'", self.policy.agent_id, folder_id));
+                }
                 let messages = self
                     .db
                     .list_messages(folder_id, limit)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(json!({ "messages": messages }))
+
+                let filtered: Vec<_> = messages
+                    .into_iter()
+                    .filter(|m| self.policy.is_account_allowed(&m.account_id))
+                    .map(|mut m| {
+                        if let Some(p) = &m.body_plain {
+                            m.body_plain = Some(self.policy.sanitize_content(p));
+                        }
+                        if let Some(h) = &m.body_html {
+                            m.body_html = Some(self.policy.sanitize_content(h));
+                        }
+                        m
+                    })
+                    .collect();
+
+                Ok(json!({ "messages": filtered }))
             }
             "nuncio_mail_send" => {
+                if !self.policy.is_data_type_allowed(DataType::Mail) || !self.policy.permissions.send_mail {
+                    return Err(format!("403 Forbidden: Agent '{}' lacks 'send_mail' permission", self.policy.agent_id));
+                }
+                let account_id = args.get("account_id").and_then(|v| v.as_str()).ok_or("missing account_id")?;
+                if !self.policy.is_account_allowed(account_id) {
+                    return Err(format!("403 Forbidden: Agent '{}' is restricted from account '{}'", self.policy.agent_id, account_id));
+                }
                 let recipient = args.get("recipient").and_then(|v| v.as_str()).ok_or("missing recipient")?;
                 let subject = args.get("subject").and_then(|v| v.as_str()).ok_or("missing subject")?;
                 let body = args.get("body").and_then(|v| v.as_str()).ok_or("missing body")?;
-                let account_id = args.get("account_id").and_then(|v| v.as_str()).ok_or("missing account_id")?;
 
                 let email = Email {
                     id: format!("mcp-outbound-{}", chrono::Utc::now().timestamp_millis()),
@@ -287,13 +335,28 @@ impl McpToolHandler {
                 Ok(json!({ "status": "queued_and_saved", "email_id": email.id }))
             }
             "nuncio_mail_search" => {
+                if !self.policy.is_data_type_allowed(DataType::Mail) || !self.policy.permissions.read_mail {
+                    return Err(format!("403 Forbidden: Agent '{}' lacks 'read_mail' permission", self.policy.agent_id));
+                }
                 let query = args.get("query").and_then(|v| v.as_str()).ok_or("missing query")?;
                 let search_engine = SearchEngine::new(&self.db);
                 let _ = search_engine.setup_fts_tables().await;
                 let results = search_engine.search_messages(query).await.map_err(|e| e.to_string())?;
-                Ok(json!({ "results": results }))
+
+                let sanitized: Vec<_> = results
+                    .into_iter()
+                    .map(|mut hit| {
+                        hit.snippet = self.policy.sanitize_content(&hit.snippet);
+                        hit
+                    })
+                    .collect();
+
+                Ok(json!({ "results": sanitized }))
             }
             "nuncio_cal_list_events" => {
+                if !self.policy.is_data_type_allowed(DataType::Calendar) || !self.policy.permissions.read_calendar {
+                    return Err(format!("403 Forbidden: Agent '{}' lacks 'read_calendar' permission", self.policy.agent_id));
+                }
                 let calendar_id = args.get("calendar_id").and_then(|v| v.as_str()).unwrap_or("work");
                 #[allow(clippy::type_complexity)]
                 let rows: Vec<(String, String, String, String, i64, i64, Option<String>)> = sqlx::query_as(
@@ -303,10 +366,22 @@ impl McpToolHandler {
                 .fetch_all(self.db.pool())
                 .await
                 .map_err(|e| e.to_string())?;
-                Ok(json!({ "events": rows }))
+
+                let filtered: Vec<_> = rows
+                    .into_iter()
+                    .filter(|r| self.policy.is_account_allowed(&r.1))
+                    .collect();
+
+                Ok(json!({ "events": filtered }))
             }
             "nuncio_cal_create_event" => {
+                if !self.policy.is_data_type_allowed(DataType::Calendar) || !self.policy.permissions.write_calendar {
+                    return Err(format!("403 Forbidden: Agent '{}' lacks 'write_calendar' permission", self.policy.agent_id));
+                }
                 let account_id = args.get("account_id").and_then(|v| v.as_str()).unwrap_or("acct-1");
+                if !self.policy.is_account_allowed(account_id) {
+                    return Err(format!("403 Forbidden: Agent '{}' is restricted from account '{}'", self.policy.agent_id, account_id));
+                }
                 let calendar_id = args.get("calendar_id").and_then(|v| v.as_str()).ok_or("missing calendar_id")?;
                 let summary = args.get("summary").and_then(|v| v.as_str()).ok_or("missing summary")?;
                 let start_time = args.get("start_time").and_then(|v| v.as_i64()).ok_or("missing start_time")?;
@@ -342,8 +417,15 @@ impl McpToolHandler {
                 Ok(json!({ "status": "created", "event": event }))
             }
             "nuncio_account_list" => {
+                if !self.policy.is_data_type_allowed(DataType::Mail) {
+                    return Err(format!("403 Forbidden: Agent '{}' lacks access to account list", self.policy.agent_id));
+                }
                 let accounts = self.db.list_accounts().await.map_err(|e| e.to_string())?;
-                Ok(json!({ "accounts": accounts }))
+                let filtered: Vec<_> = accounts
+                    .into_iter()
+                    .filter(|a| self.policy.is_account_allowed(&a.id))
+                    .collect();
+                Ok(json!({ "accounts": filtered }))
             }
             "nuncio_account_add" => {
                 let email = args.get("email").and_then(|v| v.as_str()).ok_or("missing email")?;
@@ -397,10 +479,16 @@ impl McpToolHandler {
                 }))
             }
             "nuncio_filter_list" => {
+                if !self.policy.is_data_type_allowed(DataType::FilterRules) || !self.policy.permissions.manage_filters {
+                    return Err(format!("403 Forbidden: Agent '{}' lacks 'manage_filters' permission", self.policy.agent_id));
+                }
                 let rules = self.db.list_filter_rules().await.map_err(|e| e.to_string())?;
                 Ok(json!({ "rules": rules }))
             }
             "nuncio_filter_create" => {
+                if !self.policy.is_data_type_allowed(DataType::FilterRules) || !self.policy.permissions.manage_filters {
+                    return Err(format!("403 Forbidden: Agent '{}' lacks 'manage_filters' permission", self.policy.agent_id));
+                }
                 let name = args.get("name").and_then(|v| v.as_str()).ok_or("missing name")?;
                 let sql = args.get("sql").and_then(|v| v.as_str()).ok_or("missing sql")?;
                 let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -484,5 +572,79 @@ impl McpToolHandler {
             }
             _ => Err(format!("Unknown tool: {}", name)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mcp_policy_blocks_unauthorized_send_mail() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let mut policy = McpAgentPolicy::default();
+        policy.permissions.send_mail = false; // Block send_mail capability
+
+        let handler = McpToolHandler::with_policy(Arc::new(db), policy);
+        let res = handler
+            .call_tool(
+                "nuncio_mail_send",
+                json!({
+                    "account_id": "acct-1",
+                    "recipient": "test@nuncio.mx",
+                    "subject": "Forbidden Email",
+                    "body": "Body text"
+                }),
+            )
+            .await;
+
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("403 Forbidden"));
+    }
+
+    #[tokio::test]
+    async fn mcp_policy_allows_send_mail_when_permitted() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let mut policy = McpAgentPolicy::default();
+        policy.permissions.send_mail = true; // Permit send_mail capability
+
+        let handler = McpToolHandler::with_policy(Arc::new(db), policy);
+        let res = handler
+            .call_tool(
+                "nuncio_mail_send",
+                json!({
+                    "account_id": "acct-1",
+                    "recipient": "test@nuncio.mx",
+                    "subject": "Allowed Email",
+                    "body": "Body text"
+                }),
+            )
+            .await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mcp_policy_filters_forbidden_accounts() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let mut policy = McpAgentPolicy::default();
+        policy.permissions.send_mail = true;
+        policy.allowed_accounts = vec!["acct-work".to_string()];
+
+        let handler = McpToolHandler::with_policy(Arc::new(db), policy);
+        let res = handler
+            .call_tool(
+                "nuncio_mail_send",
+                json!({
+                    "account_id": "acct-personal",
+                    "recipient": "test@nuncio.mx",
+                    "subject": "Forbidden Account",
+                    "body": "Body text"
+                }),
+            )
+            .await;
+
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("restricted from account"));
     }
 }

@@ -4,10 +4,12 @@
 
 pub mod config;
 pub mod ipc;
+pub mod mcp_policy;
 pub mod model;
 pub mod update;
 
 pub use config::{AccountConfig, AccountProtocol, ConfigError, TlsMode};
+pub use mcp_policy::{AgentPermissions, DataType, McpAgentPolicy};
 pub use model::{Attachment, CalendarEvent, Contact, DaemonTelemetry, Email, Folder};
 pub use update::{ReleaseInfo, UpdateCheckResult, UpdateEngine, UpdateError};
 
