@@ -1,6 +1,6 @@
 //! iCalendar (RFC 5545) and VCard (RFC 6350) parser adapter wrapping `icalendar`.
 
-use icalendar::Component;
+use icalendar::{Component, EventLike};
 use nuncio_core::model::CalendarEvent;
 use thiserror::Error;
 
@@ -31,7 +31,7 @@ impl IcalParserAdapter {
             if let icalendar::CalendarComponent::Event(event) = component {
                 let summary = event.get_summary().unwrap_or("No Summary").to_string();
                 let location = event.get_location().map(|l| l.to_string());
-                let rrule = event.get_property("RRULE").map(|p| p.value().to_string());
+                let rrule = event.properties().get("RRULE").map(|p| p.value().to_string());
 
                 let start_time = event
                     .get_start()
@@ -42,7 +42,7 @@ impl IcalParserAdapter {
                         icalendar::DatePerhapsTime::DateTime(dt) => match dt {
                             icalendar::CalendarDateTime::Utc(dt) => dt.timestamp(),
                             icalendar::CalendarDateTime::Floating(dt) => dt.and_utc().timestamp(),
-                            icalendar::CalendarDateTime::WithTZ { date_time, .. } => date_time.and_utc().timestamp(),
+                            icalendar::CalendarDateTime::WithTz(dt, _) => dt.and_utc().timestamp(),
                         },
                     })
                     .unwrap_or(0);
@@ -56,7 +56,7 @@ impl IcalParserAdapter {
                         icalendar::DatePerhapsTime::DateTime(dt) => match dt {
                             icalendar::CalendarDateTime::Utc(dt) => dt.timestamp(),
                             icalendar::CalendarDateTime::Floating(dt) => dt.and_utc().timestamp(),
-                            icalendar::CalendarDateTime::WithTZ { date_time, .. } => date_time.and_utc().timestamp(),
+                            icalendar::CalendarDateTime::WithTz(dt, _) => dt.and_utc().timestamp(),
                         },
                     })
                     .unwrap_or(start_time + 3600);

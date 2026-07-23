@@ -1,9 +1,8 @@
 //! iCalendar recurrence expansion engine wrapping `rrule`.
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use nuncio_core::model::CalendarEvent;
 use rrule::RRuleSet;
-use std::str::FromStr;
 
 use crate::parser::CalendarError;
 
