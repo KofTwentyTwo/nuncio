@@ -39,6 +39,9 @@ bytes = "1.6"
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
 async-imap = { version = "0.9", default-features = false, features = ["runtime-tokio"] }
 wiremock = "0.6"
+icalendar = "0.15"
+chrono-tz = "0.9"
+
 
 
 
