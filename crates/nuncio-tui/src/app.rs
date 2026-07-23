@@ -25,6 +25,12 @@ pub struct TuiApp {
     active_pane: ActivePane,
     mode: AppMode,
     running: bool,
+    pub accounts: Vec<nuncio_core::AccountConfig>,
+    pub selected_account_idx: usize,
+    pub folders: Vec<nuncio_core::model::Folder>,
+    pub selected_folder_idx: usize,
+    pub messages: Vec<nuncio_core::model::Email>,
+    pub selected_message_idx: usize,
 }
 
 impl TuiApp {
@@ -35,6 +41,97 @@ impl TuiApp {
             active_pane: ActivePane::Sidebar,
             mode: AppMode::MainView,
             running: true,
+            accounts: Vec::new(),
+            selected_account_idx: 0,
+            folders: vec![
+                nuncio_core::model::Folder {
+                    id: "inbox".to_string(),
+                    name: "INBOX".to_string(),
+                    total_messages: 2,
+                    unread_messages: 1,
+                },
+                nuncio_core::model::Folder {
+                    id: "sent".to_string(),
+                    name: "Sent".to_string(),
+                    total_messages: 0,
+                    unread_messages: 0,
+                },
+                nuncio_core::model::Folder {
+                    id: "drafts".to_string(),
+                    name: "Drafts".to_string(),
+                    total_messages: 0,
+                    unread_messages: 0,
+                },
+                nuncio_core::model::Folder {
+                    id: "archive".to_string(),
+                    name: "Archive".to_string(),
+                    total_messages: 0,
+                    unread_messages: 0,
+                },
+                nuncio_core::model::Folder {
+                    id: "trash".to_string(),
+                    name: "Trash".to_string(),
+                    total_messages: 0,
+                    unread_messages: 0,
+                },
+            ],
+            selected_folder_idx: 0,
+            messages: Vec::new(),
+            selected_message_idx: 0,
+        }
+    }
+
+    /// Move selection down in the focused pane or modal view.
+    pub fn move_selection_down(&mut self) {
+        match self.mode {
+            AppMode::AccountSettings => {
+                if !self.accounts.is_empty() && self.selected_account_idx + 1 < self.accounts.len()
+                {
+                    self.selected_account_idx += 1;
+                }
+            }
+            AppMode::MainView => match self.active_pane {
+                ActivePane::Sidebar => {
+                    if !self.folders.is_empty() && self.selected_folder_idx + 1 < self.folders.len()
+                    {
+                        self.selected_folder_idx += 1;
+                    }
+                }
+                ActivePane::MessageList => {
+                    if !self.messages.is_empty()
+                        && self.selected_message_idx + 1 < self.messages.len()
+                    {
+                        self.selected_message_idx += 1;
+                    }
+                }
+                ActivePane::Reader => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// Move selection up in the focused pane or modal view.
+    pub fn move_selection_up(&mut self) {
+        match self.mode {
+            AppMode::AccountSettings => {
+                if self.selected_account_idx > 0 {
+                    self.selected_account_idx -= 1;
+                }
+            }
+            AppMode::MainView => match self.active_pane {
+                ActivePane::Sidebar => {
+                    if self.selected_folder_idx > 0 {
+                        self.selected_folder_idx -= 1;
+                    }
+                }
+                ActivePane::MessageList => {
+                    if self.selected_message_idx > 0 {
+                        self.selected_message_idx -= 1;
+                    }
+                }
+                ActivePane::Reader => {}
+            },
+            _ => {}
         }
     }
 

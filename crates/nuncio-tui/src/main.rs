@@ -1,17 +1,10 @@
-//! Nuncio Terminal UI application entry point.
-
-mod app;
-mod html;
-mod keybindings;
-mod layout;
-
-use app::TuiApp;
 use crossterm::event::{self, Event};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
 use nuncio_core::EventBus;
+use nuncio_tui::{app, keybindings, TuiApp};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::stdout;
@@ -72,9 +65,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     UserAction::Sync => {
                         app.dispatch_command(nuncio_core::CoreCommand::SyncAll);
                     }
-                    UserAction::MoveDown
-                    | UserAction::MoveUp
-                    | UserAction::JumpTop
+                    UserAction::MoveDown => {
+                        app.move_selection_down();
+                    }
+                    UserAction::MoveUp => {
+                        app.move_selection_up();
+                    }
+                    UserAction::JumpTop
                     | UserAction::JumpBottom
                     | UserAction::Search
                     | UserAction::Compose

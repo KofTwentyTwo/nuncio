@@ -1,12 +1,5 @@
-//! Nuncio GUI application entry point.
-
-mod ipc;
-mod sandbox;
-mod view;
-
-use ipc::IpcBridge;
 use nuncio_core::EventBus;
-use view::GuiViewState;
+use nuncio_gui::{GuiViewState, IpcBridge};
 
 fn main() {
     let bus = EventBus::new();

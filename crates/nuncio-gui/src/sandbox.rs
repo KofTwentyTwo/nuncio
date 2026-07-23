@@ -14,7 +14,11 @@ impl HtmlSanitizer {
     #[allow(dead_code)]
     pub fn sanitize_html(raw_html: &str) -> String {
         let lower = raw_html.to_lowercase();
-        if lower.contains("<script") || lower.contains("javascript:") || lower.contains("onerror=") || lower.contains("onload=") {
+        if lower.contains("<script")
+            || lower.contains("javascript:")
+            || lower.contains("onerror=")
+            || lower.contains("onload=")
+        {
             raw_html
                 .replace("<script", "<!-- <script")
                 .replace("<SCRIPT", "<!-- <SCRIPT")

@@ -1,12 +1,5 @@
-//! Nuncio CLI main application entry point.
-
-mod args;
-mod output;
-mod runner;
-
-use args::Cli;
 use clap::Parser;
-use runner::HeadlessRunner;
+use nuncio_cli::{args::Cli, HeadlessRunner};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
