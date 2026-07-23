@@ -43,6 +43,7 @@ graph TD
 
 ## Wiki Navigation
 
-1. **[Architecture Specification](Architecture-Specification)**: Hybrid Daemon-First Architecture (`nunciod`), 4-byte length-prefixed IPC framing, database encryption at rest, and zero-trust sandboxing.
-2. **[Roadmap and Phases](Roadmap-and-Phases)**: Master V1, V2, and V3 micro-feature breakdown for commercial mail and calendar parity.
-3. **[Executive Review](Executive-Review)**: Authoritative technical audit scorecards across architecture, security, code standards, UI/UX, and performance.
+1. **[Multi-Shell Parity Matrix](Multi-Shell-Parity-Matrix)**: Comprehensive audit matrix verifying 100% 1:1 feature parity across CLI, TUI, GUI, and MCP interfaces.
+2. **[Architecture Specification](Architecture-Specification)**: Hybrid Daemon-First Architecture (`nunciod`), 4-byte length-prefixed IPC framing, database encryption at rest, and zero-trust sandboxing.
+3. **[Roadmap and Phases](Roadmap-and-Phases)**: Master V1, V2, and V3 micro-feature breakdown for commercial mail and calendar parity.
+4. **[Executive Review](Executive-Review)**: Authoritative technical audit scorecards across architecture, security, code standards, UI/UX, and performance.
