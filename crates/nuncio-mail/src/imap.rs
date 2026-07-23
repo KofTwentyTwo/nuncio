@@ -2,8 +2,10 @@
 
 use async_trait::async_trait;
 use nuncio_core::model::{Email, Folder};
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
@@ -42,8 +44,8 @@ pub enum IdleEvent {
 
 /// Build default TLS ClientConfig using webpki-roots CA certificates.
 pub fn build_tls_config() -> Result<Arc<ClientConfig>, MailError> {
-    let mut root_store = RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let root_store = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
     let config = ClientConfig::builder()
         .with_root_certificates(root_store)
@@ -69,9 +71,9 @@ pub async fn connect_tls_stream(host: &str, port: u16) -> Result<TlsStream<TcpSt
     let target_port = if port == 0 { 993 } else { port };
     let addr = format!("{}:{}", host, target_port);
 
-    let tcp_stream = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| MailError::NetworkError(format!("TCP connection to {} failed: {}", addr, e)))?;
+    let tcp_stream = TcpStream::connect(&addr).await.map_err(|e| {
+        MailError::NetworkError(format!("TCP connection to {} failed: {}", addr, e))
+    })?;
 
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|e| MailError::TlsError(format!("invalid TLS server name '{}': {}", host, e)))?;
@@ -138,7 +140,10 @@ impl ImapDualSocketManager {
             .login(username, password)
             .await
             .map_err(|(err, _client)| {
-                MailError::AuthError(format!("IMAP login failed for user '{}': {}", username, err))
+                MailError::AuthError(format!(
+                    "IMAP login failed for user '{}': {}",
+                    username, err
+                ))
             })?;
         Ok(session)
     }
@@ -208,7 +213,7 @@ impl ImapEngine {
         session: &mut async_imap::Session<S>,
     ) -> Result<Vec<Email>, MailError>
     where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
         session.select(folder_id).await.map_err(|e| {
             MailError::ImapError(format!("failed to select folder '{}': {}", folder_id, e))
@@ -350,16 +355,17 @@ impl ImapEngine {
     /// Listen for real-time IMAP IDLE notification events on an active IMAP session.
     pub async fn listen_idle_session<S, F>(
         &self,
-        session: &mut async_imap::Session<S>,
+        session: async_imap::Session<S>,
         folder_id: &str,
         mut callback: F,
-    ) -> Result<(), MailError>
+    ) -> Result<async_imap::Session<S>, MailError>
     where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-        F: FnMut(IdleEvent) + Send + 'static,
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+        F: FnMut(IdleEvent) + Send,
     {
         self.socket_manager.start_idle_listener()?;
 
+        let mut session = session;
         session.select(folder_id).await.map_err(|e| {
             MailError::ImapError(format!(
                 "IDLE failed selecting folder '{}': {}",
@@ -367,10 +373,7 @@ impl ImapEngine {
             ))
         })?;
 
-        let mut handle = session
-            .idle()
-            .await
-            .map_err(|e| MailError::ImapError(format!("IDLE initialization error: {}", e)))?;
+        let mut handle = session.idle();
 
         while self.socket_manager.idle_state() == IdleSocketState::Listening {
             handle
@@ -378,53 +381,53 @@ impl ImapEngine {
                 .await
                 .map_err(|e| MailError::ImapError(format!("IDLE init failed: {}", e)))?;
 
-            let idle_resp = handle
-                .wait()
+            let (wait_fut, _stop) = handle.wait();
+            let idle_resp = wait_fut
                 .await
                 .map_err(|e| MailError::ImapError(format!("IDLE wait error: {}", e)))?;
 
             match idle_resp {
-                async_imap::extensions::idle::IdleResponse::New(unhandled) => {
-                    if let async_imap::types::Response::MailboxData(mb_data) = unhandled {
-                        match mb_data {
-                            async_imap::types::MailboxData::Exists(n) => {
-                                callback(IdleEvent::NewMessage {
-                                    folder_id: folder_id.to_string(),
-                                    exists_count: n,
-                                });
-                            }
-                            async_imap::types::MailboxData::Expunge(seq) => {
-                                callback(IdleEvent::Expunge {
-                                    folder_id: folder_id.to_string(),
-                                    sequence_number: seq,
-                                });
-                            }
-                            _ => {}
+                async_imap::extensions::idle::IdleResponse::NewData(resp_data) => {
+                    match resp_data.parsed() {
+                        async_imap::imap_proto::Response::MailboxData(
+                            async_imap::imap_proto::MailboxDatum::Exists(n),
+                        ) => {
+                            callback(IdleEvent::NewMessage {
+                                folder_id: folder_id.to_string(),
+                                exists_count: *n,
+                            });
                         }
+                        async_imap::imap_proto::Response::Expunge(seq) => {
+                            callback(IdleEvent::Expunge {
+                                folder_id: folder_id.to_string(),
+                                sequence_number: *seq,
+                            });
+                        }
+                        _ => {}
                     }
                 }
                 async_imap::extensions::idle::IdleResponse::Timeout => {
                     // IDLE timeout reached; loop back to re-issue IDLE init
                 }
-                async_imap::extensions::idle::IdleResponse::Manual => {
+                async_imap::extensions::idle::IdleResponse::ManualInterrupt => {
                     break;
                 }
             }
         }
 
-        let _ = handle
+        let session = handle
             .done()
             .await
             .map_err(|e| MailError::ImapError(format!("IDLE done command error: {}", e)))?;
 
         callback(IdleEvent::Disconnected);
-        Ok(())
+        Ok(session)
     }
 
     /// Listen for real-time notification events using IMAP IDLE capability.
     pub async fn listen_idle<F>(&self, folder_id: &str, mut callback: F) -> Result<(), MailError>
     where
-        F: FnMut(IdleEvent) + Send + 'static,
+        F: FnMut(IdleEvent) + Send,
     {
         let (username, password) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
@@ -435,15 +438,15 @@ impl ImapEngine {
             }
         };
 
-        let mut session = self
+        let session = self
             .socket_manager
             .connect_session(username, password)
             .await?;
-        let res = self
-            .listen_idle_session(&mut session, folder_id, callback)
-            .await;
+        let mut session = self
+            .listen_idle_session(session, folder_id, callback)
+            .await?;
         let _ = session.logout().await;
-        res
+        Ok(())
     }
 }
 
@@ -470,6 +473,7 @@ impl MailBackend for ImapEngine {
                     unread_messages: 0,
                 });
             }
+            drop(mailboxes);
             let _ = session.logout().await;
             if !folders.is_empty() {
                 return Ok(folders);
@@ -567,15 +571,22 @@ mod tests {
     #[tokio::test]
     async fn listen_idle_callback_invocation() -> Result<(), MailError> {
         let engine = ImapEngine::new("acct-1", "mail.kof22.com", 993);
-        let mut events = Vec::new();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+
         engine
-            .listen_idle("INBOX", |event| {
-                events.push(event);
+            .listen_idle("INBOX", move |event| {
+                if let Ok(mut guard) = events_clone.lock() {
+                    guard.push(event);
+                }
             })
             .await?;
 
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0], IdleEvent::Disconnected);
+        let guard = events
+            .lock()
+            .map_err(|e| MailError::ImapError(e.to_string()))?;
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0], IdleEvent::Disconnected);
         assert_eq!(
             engine.socket_manager().idle_state(),
             IdleSocketState::Listening
