@@ -42,7 +42,7 @@ impl IcalParserAdapter {
                         icalendar::DatePerhapsTime::DateTime(dt) => match dt {
                             icalendar::CalendarDateTime::Utc(dt) => dt.timestamp(),
                             icalendar::CalendarDateTime::Floating(dt) => dt.and_utc().timestamp(),
-                            icalendar::CalendarDateTime::WithTz(dt, _) => dt.and_utc().timestamp(),
+                            _ => 0,
                         },
                     })
                     .unwrap_or(0);
@@ -56,7 +56,7 @@ impl IcalParserAdapter {
                         icalendar::DatePerhapsTime::DateTime(dt) => match dt {
                             icalendar::CalendarDateTime::Utc(dt) => dt.timestamp(),
                             icalendar::CalendarDateTime::Floating(dt) => dt.and_utc().timestamp(),
-                            icalendar::CalendarDateTime::WithTz(dt, _) => dt.and_utc().timestamp(),
+                            _ => 0,
                         },
                     })
                     .unwrap_or(start_time + 3600);
