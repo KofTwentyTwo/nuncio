@@ -66,7 +66,7 @@ futures = "0.3"
 wiremock = "0.6"
 icalendar = "0.15"
 chrono-tz = "0.9"
-rrule = "0.10"
+rrule = "0.14"
 chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 quick-xml = "0.36"
