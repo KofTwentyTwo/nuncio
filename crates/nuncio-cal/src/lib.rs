@@ -1,21 +1,5 @@
-use thiserror::Error;
+//! iCalendar (RFC 5545), CalDAV (RFC 4791), and recurrence engine for Nuncio.
 
-#[derive(Error, Debug)]
-pub enum CalendarError {
-    #[error("Calendar sync error: {0}")]
-    Sync(String),
-}
+pub mod parser;
 
-pub struct CalendarEngine;
-
-impl CalendarEngine {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for CalendarEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use parser::{CalendarError, IcalParserAdapter};

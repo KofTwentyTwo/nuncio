@@ -4,7 +4,8 @@ pub mod config;
 pub mod model;
 
 pub use config::{AccountConfig, AccountProtocol, ConfigError};
-pub use model::{Attachment, Email, Folder};
+pub use model::{Attachment, CalendarEvent, Contact, Email, Folder};
+
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
