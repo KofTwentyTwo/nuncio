@@ -85,9 +85,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Finalize GitHub Release
+      - name: Generate SHA256 Checksums and Publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
+          gh release download "${TAG}" --dir release_assets
+          cd release_assets
+          sha256sum * > SHA256SUMS.txt
+          gh release upload "${TAG}" SHA256SUMS.txt
           gh release edit "${TAG}" --draft=false
+
