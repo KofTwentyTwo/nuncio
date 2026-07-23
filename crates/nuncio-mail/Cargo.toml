@@ -15,3 +15,5 @@ thiserror.workspace = true
 tracing.workspace = true
 mail-parser.workspace = true
 bytes.workspace = true
+lettre.workspace = true
+

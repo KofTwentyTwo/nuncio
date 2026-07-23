@@ -1,5 +1,7 @@
 //! Protocol engines for IMAP4rev1, JMAP (RFC 8620/8621), and SMTP.
 
 pub mod parser;
+pub mod smtp;
 
 pub use parser::{MailError, MimeParserAdapter};
+pub use smtp::SmtpTransportEngine;
