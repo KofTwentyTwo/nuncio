@@ -89,7 +89,7 @@ impl PayloadCipher {
                 }
             }
         }
-        stored.to_string()
+        String::new()
     }
 
     /// Encrypt binary attachment payload using `age` passphrase encryption.

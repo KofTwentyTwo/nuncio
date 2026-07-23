@@ -10,12 +10,22 @@ impl HtmlSanitizer {
     pub const SECURE_CSP: &'static str =
         "default-src 'none'; img-src nuncio-mail: data:; style-src 'unsafe-inline';";
 
-    /// Sanitize raw HTML email body by stripping script tags.
+    /// Sanitize raw HTML email body by stripping script tags and event handlers.
     #[allow(dead_code)]
     pub fn sanitize_html(raw_html: &str) -> String {
-        raw_html
-            .replace("<script", "<!-- <script")
-            .replace("</script>", "</script> -->")
+        let lower = raw_html.to_lowercase();
+        if lower.contains("<script") || lower.contains("javascript:") || lower.contains("onerror=") || lower.contains("onload=") {
+            raw_html
+                .replace("<script", "<!-- <script")
+                .replace("<SCRIPT", "<!-- <SCRIPT")
+                .replace("</script>", "</script> -->")
+                .replace("</SCRIPT>", "</SCRIPT> -->")
+                .replace("javascript:", "blocked:")
+                .replace("onerror=", "blocked_onerror=")
+                .replace("onload=", "blocked_onload=")
+        } else {
+            raw_html.to_string()
+        }
     }
 
     /// Build a sandboxed HTML iframe wrapper with CSP and JS disabled.
@@ -25,7 +35,7 @@ impl HtmlSanitizer {
         let attribute_escaped = sanitized.replace('&', "&amp;").replace('"', "&quot;");
 
         format!(
-            r#"<iframe sandbox="allow-same-origin" csp="{}" srcdoc="{}"></iframe>"#,
+            r#"<iframe sandbox="" csp="{}" srcdoc="{}"></iframe>"#,
             Self::SECURE_CSP,
             attribute_escaped
         )
@@ -47,7 +57,7 @@ mod tests {
         let raw = "<p>Hello <script>alert(1)</script></p>";
         let iframe = HtmlSanitizer::build_sandboxed_iframe(raw);
 
-        assert!(iframe.contains(r#"sandbox="allow-same-origin""#));
+        assert!(iframe.contains(r#"sandbox=""#));
         assert!(iframe.contains("img-src nuncio-mail:"));
         assert!(iframe.contains("<!-- <script"));
     }
