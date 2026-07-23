@@ -31,6 +31,9 @@ jobs:
             args: ''
 
     runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout Code
         uses: actions/checkout@v7
