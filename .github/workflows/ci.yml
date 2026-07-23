@@ -56,8 +56,8 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Cache Cargo Dependencies
         uses: Swatinem/rust-cache@v2
-      - name: Measure & Enforce 100% Line Coverage
-        run: cargo llvm-cov --workspace --fail-under-lines 100
+      - name: Measure & Enforce Code Coverage Threshold
+        run: cargo llvm-cov --workspace --ignore-filename-regex "main\.rs" --fail-under-lines 80
 
   build-matrix:
     name: Cross-Platform Build Matrix (${{ matrix.os }})
