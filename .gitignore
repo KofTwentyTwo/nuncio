@@ -9,10 +9,14 @@
 .env.*
 !.env.example
 
-# IDE & Editor files
-.idea/
+# IDE & Editor files (keep shared RustRover run configurations)
+.idea/*
+!.idea/runConfigurations/
+!.idea/codeStyles/
+!.idea/misc.xml
+!.idea/modules.xml
+!.idea/vcs.xml
 .vscode/
-*.iml
 
 # OS files
 .DS_Store

@@ -18,6 +18,22 @@ Project planning, issue tracking, atomic micro-milestones, and subagent assignme
 
 ---
 
+## JetBrains RustRover Setup
+
+Nuncio is fully pre-configured for **JetBrains RustRover**:
+
+- **Cargo Workspace Auto-Detection**: Open `R:\Git.Local\KofTwentyTwo\nuncio` in RustRover. The IDE will automatically index all 7 workspace member crates (`crates/*`).
+- **Pre-Configured Shared Run Configurations** (accessible in RustRover's top-right run menu):
+  - `Cargo Check All`: Runs `cargo check-all` (compiler/clippy warnings as errors).
+  - `Cargo Test All`: Runs full workspace test suite.
+  - `Cargo Coverage Gate`: Runs `cargo cov` (100% unit test line coverage verification).
+  - `Run nuncio-cli (status)`: Launches CLI status subcommand.
+  - `Run nuncio-tui`: Launches Terminal UI client.
+  - `Run nuncio-gui`: Launches Native Desktop GUI shell.
+- **Automatic Code Formatting**: `rustfmt` format-on-save is enabled by default via `.idea/codeStyles/Project.xml`.
+
+---
+
 ## Overview
 
 Nuncio follows a library-first architecture. All core business logic, protocol synchronization, offline storage, indexing, and state management are isolated within headless Rust libraries. Presentation layers remain lightweight shells driving a command line interface (CLI), terminal UI (TUI), or native desktop GUI.

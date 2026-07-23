@@ -1,0 +1,8 @@
+<component name="ProjectCodeStyleConfiguration">
+  <code_scheme name="Project" version="173">
+    <RustCodeStyleSettings>
+      <option name="USE_RUSTFMT" value="true" />
+      <option name="RUN_RUSTFMT_ON_SAVE" value="true" />
+    </RustCodeStyleSettings>
+  </code_scheme>
+</component>

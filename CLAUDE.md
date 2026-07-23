@@ -2,6 +2,19 @@
 
 Nuncio ([nuncio.mx](https://nuncio.mx)) is a cross-platform mail and calendar solution written in Rust.
 
+## JetBrains RustRover IDE Integration
+
+Nuncio is pre-configured for **JetBrains RustRover** out of the box:
+- **Workspace Cargo Resolution**: RustRover automatically recognizes all 7 workspace member crates (`crates/*`).
+- **Pre-Configured Shared Run Configurations**: Located in `.idea/runConfigurations/`:
+  - `Cargo Check All`: Executes `cargo check-all` with warnings treated as errors.
+  - `Cargo Test All`: Executes `cargo test-all` for the full workspace.
+  - `Cargo Coverage Gate`: Executes `cargo cov` measuring 100% unit test line coverage.
+  - `Run nuncio-cli (status)`: Executes `cargo run -p nuncio-cli -- status`.
+  - `Run nuncio-tui`: Executes `cargo run -p nuncio-tui`.
+  - `Run nuncio-gui`: Executes `cargo run -p nuncio-gui`.
+- **Code Style & Formatting**: `.idea/codeStyles/Project.xml` configures RustRover to format files automatically via `rustfmt` on save.
+
 ## Multi-Agent Execution Framework
 
 - **Master Orchestrator Agent (`agy` / Antigravity)**: Manages high-level task decomposition, roadmap tracking ([docs/PLAN-nuncio-roadmap.md](file:///R:/Git.Local/KofTwentyTwo/nuncio/docs/PLAN-nuncio-roadmap.md), [docs/TODO.md](file:///R:/Git.Local/KofTwentyTwo/nuncio/docs/TODO.md)), subagent dispatching, quality gate validation (`cargo verify`, `cargo cov`), git branch workflows, and wiki documentation.
