@@ -80,7 +80,8 @@ impl TuiApp {
             " NUNCIO v1.0.0 │ Status: {:?} │ Unread: {} ",
             state.status, state.unread_count
         );
-        let header = Paragraph::new(header_text).style(Style::default().bg(Color::Blue).fg(Color::White));
+        let header =
+            Paragraph::new(header_text).style(Style::default().bg(Color::Blue).fg(Color::White));
         frame.render_widget(header, main_chunks[0]);
 
         // 3-Pane split
@@ -97,7 +98,10 @@ impl TuiApp {
         let sidebar_block = Block::default()
             .title(" Folders (20%) ")
             .borders(Borders::ALL)
-            .border_style(AppLayout::border_style(ActivePane::Sidebar, self.active_pane));
+            .border_style(AppLayout::border_style(
+                ActivePane::Sidebar,
+                self.active_pane,
+            ));
         let sidebar_list = List::new(sidebar_items).block(sidebar_block);
         frame.render_widget(sidebar_list, sidebar_area);
 
@@ -110,7 +114,10 @@ impl TuiApp {
         let list_block = Block::default()
             .title(" Messages (35%) ")
             .borders(Borders::ALL)
-            .border_style(AppLayout::border_style(ActivePane::MessageList, self.active_pane));
+            .border_style(AppLayout::border_style(
+                ActivePane::MessageList,
+                self.active_pane,
+            ));
         let msg_list = List::new(msg_items).block(list_block);
         frame.render_widget(msg_list, list_area);
 
@@ -122,13 +129,17 @@ impl TuiApp {
         let reader_block = Block::default()
             .title(" Reader (45%) ")
             .borders(Borders::ALL)
-            .border_style(AppLayout::border_style(ActivePane::Reader, self.active_pane));
+            .border_style(AppLayout::border_style(
+                ActivePane::Reader,
+                self.active_pane,
+            ));
         let reader_p = Paragraph::new(reader_text).block(reader_block);
         frame.render_widget(reader_p, reader_area);
 
         // Bottom hotkey status bar
         let footer_text = " [Tab] Cycle Pane │ [j/k] Move │ [c] Compose │ [r] Reply │ [s] Sync │ [/] Search │ [q] Quit ";
-        let footer = Paragraph::new(footer_text).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+        let footer = Paragraph::new(footer_text)
+            .style(Style::default().bg(Color::DarkGray).fg(Color::White));
         frame.render_widget(footer, main_chunks[2]);
     }
 }
