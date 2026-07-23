@@ -1,6 +1,7 @@
 //! Nuncio GUI application entry point.
 
 mod ipc;
+mod sandbox;
 
 use ipc::IpcBridge;
 use nuncio_core::EventBus;
