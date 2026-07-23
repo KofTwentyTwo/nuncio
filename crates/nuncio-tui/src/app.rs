@@ -287,13 +287,24 @@ impl TuiApp {
                     AppLayout::compute_layout(main_chunks[1]);
 
                 // Sidebar widget
-                let sidebar_items = vec![
-                    ListItem::new(" > INBOX (2)"),
-                    ListItem::new("   Sent"),
-                    ListItem::new("   Drafts"),
-                    ListItem::new("   Archive"),
-                    ListItem::new("   Trash"),
-                ];
+                let sidebar_items: Vec<ListItem> = self
+                    .folders
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, folder)| {
+                        let prefix = if idx == self.selected_folder_idx {
+                            " > "
+                        } else {
+                            "   "
+                        };
+                        let text = if folder.unread_messages > 0 {
+                            format!("{}{:<12} ({})", prefix, folder.name, folder.unread_messages)
+                        } else {
+                            format!("{}{}", prefix, folder.name)
+                        };
+                        ListItem::new(text)
+                    })
+                    .collect();
                 let sidebar_block = Block::default()
                     .title(" Folders (20%) ")
                     .borders(Borders::ALL)
@@ -305,13 +316,33 @@ impl TuiApp {
                 frame.render_widget(sidebar_list, sidebar_area);
 
                 // Message List widget
-                let msg_items = vec![
-                    ListItem::new(" * Alice Maes   Q3 Architecture Roadmap"),
-                    ListItem::new("   Bob Smith    Server Migration Update"),
-                    ListItem::new("   Charlie      PDF Attachment Invoice"),
-                ];
+                let msg_items: Vec<ListItem> = if self.messages.is_empty() {
+                    vec![ListItem::new(" (No messages in folder)")]
+                } else {
+                    self.messages
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, msg)| {
+                            let prefix = if idx == self.selected_message_idx {
+                                " > "
+                            } else {
+                                "   "
+                            };
+                            let unread_flag = if msg.read { " " } else { "*" };
+                            let sender_short = if msg.sender.len() > 16 {
+                                &msg.sender[..16]
+                            } else {
+                                &msg.sender
+                            };
+                            ListItem::new(format!(
+                                "{} {} {:<16} {}",
+                                prefix, unread_flag, sender_short, msg.subject
+                            ))
+                        })
+                        .collect()
+                };
                 let list_block = Block::default()
-                    .title(" Messages (35%) ")
+                    .title(format!(" Messages ({}) ", self.messages.len()))
                     .borders(Borders::ALL)
                     .border_style(AppLayout::border_style(
                         ActivePane::MessageList,
@@ -321,18 +352,28 @@ impl TuiApp {
                 frame.render_widget(msg_list, list_area);
 
                 // Reader widget
-                let reader_text = HtmlRenderer::render_html(
-                    "From: Alice Maes <alice@nuncio.mx>\nSubject: Q3 Architecture Roadmap\n\nHey James,\nHere is the architecture roadmap.",
-                    reader_area.width as usize,
-                );
+                let selected_msg = self.messages.get(self.selected_message_idx);
+                let reader_content = if let Some(msg) = selected_msg {
+                    let body = msg
+                        .body_plain
+                        .as_deref()
+                        .unwrap_or("(No plain text content)");
+                    format!(
+                        "Subject: {}\nFrom: {}\nTo: {}\nDate: {}\n\n{}",
+                        msg.subject, msg.sender, msg.recipient, msg.received_at, body
+                    )
+                } else {
+                    "Select a message to view content.".to_string()
+                };
+                let reader_rendered = HtmlRenderer::render_html(&reader_content, 80);
                 let reader_block = Block::default()
-                    .title(" Reader (45%) ")
+                    .title(" Email Reader (45%) ")
                     .borders(Borders::ALL)
                     .border_style(AppLayout::border_style(
                         ActivePane::Reader,
                         self.active_pane,
                     ));
-                let reader_p = Paragraph::new(reader_text).block(reader_block);
+                let reader_p = Paragraph::new(reader_rendered).block(reader_block);
                 frame.render_widget(reader_p, reader_area);
             }
         }
