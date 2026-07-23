@@ -12,14 +12,24 @@ async fn system_test_cli_noun_verb_execution_matrix() {
 
     // 1. System status
     let out: String = runner
-        .execute_command(&Commands::System { action: SystemSubcommand::Status }, true)
+        .execute_command(
+            &Commands::System {
+                action: SystemSubcommand::Status,
+            },
+            true,
+        )
         .await;
     let json: Value = serde_json::from_str(&out).expect("valid json");
     assert_eq!(json["status"], "ok");
 
     // 2. Account list & add
     let out: String = runner
-        .execute_command(&Commands::Account { action: AccountSubcommand::List }, true)
+        .execute_command(
+            &Commands::Account {
+                action: AccountSubcommand::List,
+            },
+            true,
+        )
         .await;
     let json: Value = serde_json::from_str(&out).expect("valid json");
     assert_eq!(json["status"], "ok");
@@ -45,7 +55,12 @@ async fn system_test_cli_noun_verb_execution_matrix() {
 
     // 3. Folder list
     let out: String = runner
-        .execute_command(&Commands::Folder { action: FolderSubcommand::List }, true)
+        .execute_command(
+            &Commands::Folder {
+                action: FolderSubcommand::List,
+            },
+            true,
+        )
         .await;
     let json: Value = serde_json::from_str(&out).expect("valid json");
     assert_eq!(json["status"], "ok");
@@ -79,7 +94,12 @@ async fn system_test_cli_noun_verb_execution_matrix() {
 
     // 5. Calendar list & sync
     let out: String = runner
-        .execute_command(&Commands::Cal { action: CalSubcommand::List }, true)
+        .execute_command(
+            &Commands::Cal {
+                action: CalSubcommand::List,
+            },
+            true,
+        )
         .await;
     let json: Value = serde_json::from_str(&out).expect("valid json");
     assert_eq!(json["status"], "ok");
