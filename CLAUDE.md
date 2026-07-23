@@ -5,10 +5,8 @@ Nuncio ([nuncio.mx](https://nuncio.mx)) is a cross-platform mail and calendar so
 ## Semantic Versioning 2.0.0 & Release Policy
 
 - **SemVer Standard**: All releases follow **Semantic Versioning 2.0.0** (`MAJOR.MINOR.PATCH`).
-  - `MAJOR`: Incremented on breaking API or model contract changes.
-  - `MINOR`: Incremented when new backward-compatible capabilities or crates are added.
-  - `PATCH`: Incremented on backward-compatible bug fixes and security patches.
-- **Git Tag Format**: Release tags MUST follow `vMAJOR.MINOR.PATCH` format (e.g., `v0.1.0`, `v0.2.0`, `v1.0.0`).
+- **UNIFIED V3 RELEASE MANDATE**: **No public release tag or binary distribution will be cut until Phase V3 (Platform & AI Automation) is 100% feature complete, verified, and working across all 4 presentation UIs on Linux, macOS, and Windows.**
+- **Git Tag Format**: Release tags MUST follow `vMAJOR.MINOR.PATCH` format (e.g. `v3.0.0` for GA launch).
 - **Automated GitHub Releases Workflow**: Pushing a `v*.*.*` tag triggers [.github/workflows/release.yml](file:///R:/Git.Local/KofTwentyTwo/nuncio/.github/workflows/release.yml) to compile, package, compute SHA256 checksums, and publish release binaries for Windows (`.zip` / `.msi`), macOS (`.tar.gz` / `.dmg`), and Linux (`.tar.gz` / `.AppImage`).
 
 ## JetBrains RustRover IDE Integration
