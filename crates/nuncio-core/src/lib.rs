@@ -1,5 +1,8 @@
 //! Core event bus, state management, and command orchestration for Nuncio.
 
+pub mod config;
+pub use config::{AccountConfig, AccountProtocol, ConfigError};
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
