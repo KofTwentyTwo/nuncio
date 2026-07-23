@@ -4,6 +4,8 @@ Cross-platform mail and calendar solution designed for Windows, macOS, and Linux
 
 Official site: [nuncio.mx](https://nuncio.mx)
 
+> **Etymology**: Derived from the Latin verb ***nūntiō*** ("I announce", "I declare", "I deliver a message") and noun ***nūntius*** ("messenger", "courier", "bearer of tidings"). Nuncio is built as the ultimate cross-platform messenger and calendar courier.
+
 ## Overview
 
 Nuncio follows a library-first architecture. All core business logic, protocol synchronization, offline storage, indexing, and state management are isolated within headless Rust libraries. Presentation layers remain lightweight shells driving a command line interface (CLI), terminal UI (TUI), or native desktop GUI.

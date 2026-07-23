@@ -2,6 +2,8 @@
 
 Nuncio ([nuncio.mx](https://nuncio.mx)) is a cross-platform mail and calendar application written in Rust, supporting Windows, macOS, and Linux with native Command Line (CLI), Terminal (TUI), and Desktop (GUI) interfaces.
 
+> **Etymology**: Derived from the Latin verb ***nūntiō*** ("I announce", "I declare", "I deliver a message") and noun ***nūntius*** ("messenger", "courier", "bearer of tidings"). Nuncio is built as the digital messenger and calendar courier.
+
 ## Wiki Navigation
 
 - [[Architecture Specification]]: Decoupled engine design, crate breakdown, protocol traits, storage schema, search indexing, and security architecture.
