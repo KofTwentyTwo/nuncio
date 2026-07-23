@@ -1,0 +1,10 @@
+[alias]
+# Development quality enforcement aliases
+check-all = "clippy --all-targets --workspace -- -D warnings"
+test-all = "test --workspace"
+cov = "llvm-cov --workspace --fail-under-lines 100"
+verify = ["fmt --all -- --check", "check-all", "test-all"]
+
+[build]
+# Treat warnings as errors where supported
+rustflags = ["-D", "warnings"]

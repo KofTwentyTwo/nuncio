@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   fmt:
@@ -22,7 +23,7 @@ jobs:
         run: cargo fmt --all -- --check
 
   clippy:
-    name: Clippy Linter Audit
+    name: Clippy Linter Audit (Zero Warnings)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,9 +46,22 @@ jobs:
       - name: Run Workspace Tests
         run: cargo test --workspace
 
+  coverage:
+    name: Enforce 100% Code Coverage Threshold
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Measure & Enforce 100% Line Coverage
+        run: cargo llvm-cov --workspace --fail-under-lines 100
+
   build-matrix:
     name: Cross-Platform Build Matrix (${{ matrix.os }})
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, coverage]
     strategy:
       fail-fast: false
       matrix:
