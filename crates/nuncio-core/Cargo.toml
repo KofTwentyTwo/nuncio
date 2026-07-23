@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 tokio.workspace = true
 async-trait.workspace = true

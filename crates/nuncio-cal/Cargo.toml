@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 nuncio-core = { path = "../nuncio-core" }
 tokio.workspace = true
@@ -23,6 +26,3 @@ quick-xml.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 wiremock.workspace = true
-
-
-

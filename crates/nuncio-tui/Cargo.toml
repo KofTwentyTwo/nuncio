@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 nuncio-core = { path = "../nuncio-core" }
 nuncio-mail = { path = "../nuncio-mail" }
@@ -16,4 +19,3 @@ ratatui.workspace = true
 crossterm.workspace = true
 tracing.workspace = true
 html2text.workspace = true
-

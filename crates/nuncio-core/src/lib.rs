@@ -1,6 +1,9 @@
 //! Core event bus, state management, and command orchestration for Nuncio.
 
+#![forbid(unsafe_code)]
+
 pub mod config;
+
 pub mod model;
 
 pub use config::{AccountConfig, AccountProtocol, ConfigError};

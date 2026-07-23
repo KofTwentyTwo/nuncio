@@ -1,5 +1,7 @@
 //! Local storage, full-text search indexing, and credential security for Nuncio.
 
+#![forbid(unsafe_code)]
+
 pub mod cipher;
 pub mod db;
 pub mod search;
