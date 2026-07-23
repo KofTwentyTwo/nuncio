@@ -1,0 +1,8 @@
+{
+  "name": "nuncio-gui-tauri",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}
