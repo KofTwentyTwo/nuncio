@@ -17,10 +17,11 @@ Official Site: [nuncio.mx](https://nuncio.mx) | GitHub Repository: [KofTwentyTwo
 ## 4 Presentation Interfaces + Central Daemon
 
 - **`nuncio-cli` (POSIX CLI)**: Pure Noun + Verb scriptable interface (`--json`).
-- **`nuncio-tui` (Terminal TUI)**: Keyboard-first split-pane interface powered by Ratatui.
+- **`nuncio-tui` (Terminal TUI)**: Keyboard-first split-pane interface powered by Ratatui with Vim motion velocity (`j`/`k`/`h`/`l`/`g i`/`e`/`s`).
 - **`nuncio-gui` (Tauri v2 Desktop GUI)**: Native desktop window with React 18 + Vite + TypeScript frontend.
 - **`nuncio-mcp` (Native LLM Agent UI)**: Model Context Protocol (MCP) JSON-RPC 2.0 stdio server for AI agents.
 - **`nunciod` (Central Daemon Binary)**: Standalone background process owning SQLite WAL storage, security enclaves, background protocol sync loops, and multi-client IPC socket streams.
+- **Completed Platform Epics**: Native JMAP (RFC 8620/8621), OpenPGP/S/MIME E2EE, WASM/QuickJS Plugins, Autonomous Local LLM Thread Summarization, and Natural Language Calendar NLP Scheduler.
 
 ---
 
