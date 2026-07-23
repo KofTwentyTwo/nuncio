@@ -3698,7 +3698,7 @@ dependencies = [
  "chrono-tz 0.10.4",
  "icalendar",
  "nuncio-core",
- "quick-xml 0.36.2",
+ "quick-xml",
  "reqwest 0.12.28",
  "rrule",
  "serde",
@@ -3737,7 +3737,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "nuncio-core",
- "quick-xml 0.36.2",
+ "quick-xml",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -4492,7 +4492,7 @@ checksum = "7da1d65da6dd5d1e44199ac0f58712d241c0f439f80adea8924d832384087f85"
 dependencies = [
  "base64 0.22.1",
  "indexmap 2.14.0",
- "quick-xml 0.41.0",
+ "quick-xml",
  "serde",
  "time",
 ]
@@ -4675,15 +4675,6 @@ checksum = "645dbe486e346d9b5de3ef16ede18c26e6c70ad97418f4874b8b1889d6e761ea"
 dependencies = [
  "ar_archive_writer",
  "cc",
-]
-
-[[package]]
-name = "quick-xml"
-version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
