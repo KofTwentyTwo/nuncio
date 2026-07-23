@@ -76,7 +76,7 @@ impl CompiledFilter {
                 let body = email.body_plain.as_deref().or(email.body_html.as_deref()).unwrap_or("");
                 Self::eval_string_op(body, &leaf.operator, &leaf.value, regexes)
             }
-            FilterField::Folder => Self::eval_string_op(&email.folder_id, &leaf.operator, &leaf.value, regexes),
+            FilterField::Folder | FilterField::Account => Self::eval_string_op(&email.folder_id, &leaf.operator, &leaf.value, regexes),
             FilterField::HasAttachment => {
                 let has = !email.attachments.is_empty();
                 if let FilterValue::Boolean(b) = leaf.value {

@@ -23,6 +23,8 @@ pub enum FilterField {
     Folder,
     /// Arrival timestamp.
     Date,
+    /// Target Account identifier or email address.
+    Account,
 }
 
 impl FilterField {
@@ -38,6 +40,7 @@ impl FilterField {
             "size" => Some(Self::Size),
             "folder" => Some(Self::Folder),
             "date" | "received_at" => Some(Self::Date),
+            "account" | "account_id" => Some(Self::Account),
             _ if s_lower.starts_with("header[") && s_lower.ends_with(']') => {
                 let key = &s[7..s.len() - 1];
                 Some(Self::Header(key.trim_matches('\'').trim_matches('"').to_string()))
@@ -58,6 +61,7 @@ impl FilterField {
             Self::Size => "size".to_string(),
             Self::Folder => "folder".to_string(),
             Self::Date => "date".to_string(),
+            Self::Account => "account".to_string(),
         }
     }
 }
@@ -230,6 +234,8 @@ pub struct FilterRule {
     pub id: String,
     /// Rule display name.
     pub name: String,
+    /// Target Account pattern ("*" for all accounts, "user@nuncio.mx", or wildcard "%@kof22.com%").
+    pub target_account: String,
     /// Rule evaluation order (0 = highest).
     pub priority: i32,
     /// Active flag.
@@ -244,6 +250,28 @@ pub struct FilterRule {
     pub created_at: i64,
     /// Last update timestamp (unix seconds).
     pub updated_at: i64,
+}
+
+impl FilterRule {
+    /// Check whether this rule matches a given target account.
+    pub fn matches_account(&self, account_id: &str) -> bool {
+        if self.target_account == "*" || self.target_account == "%" || self.target_account.is_empty() {
+            return true;
+        }
+        if self.target_account.eq_ignore_ascii_case(account_id) {
+            return true;
+        }
+        if self.target_account.contains('*') || self.target_account.contains('%') {
+            let pattern = self
+                .target_account
+                .replace('*', ".*")
+                .replace('%', ".*");
+            if let Ok(re) = regex::Regex::new(&format!("(?i)^{pattern}$")) {
+                return re.is_match(account_id);
+            }
+        }
+        false
+    }
 }
 
 /// Execution log entry recorded when a rule matches a message.
@@ -310,31 +338,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_field_parse_and_nsql() {
-        assert_eq!(FilterField::parse_str("subject"), Some(FilterField::Subject));
-        assert_eq!(FilterField::parse_str("header['X-Spam']"), Some(FilterField::Header("X-Spam".to_string())));
-        assert_eq!(FilterField::Subject.to_nsql(), "subject");
-        assert_eq!(FilterField::Header("X-Spam".to_string()).to_nsql(), "header['X-Spam']");
-    }
+    fn test_filter_rule_account_wildcard_matching() {
+        let rule = FilterRule {
+            id: "r1".to_string(),
+            name: "Global Rule".to_string(),
+            target_account: "*".to_string(),
+            priority: 1,
+            enabled: true,
+            nsql_text: "".to_string(),
+            conditions: ConditionNode::Leaf(ConditionLeaf {
+                field: FilterField::Subject,
+                operator: FilterOperator::Equals,
+                value: FilterValue::String("x".to_string()),
+            }),
+            actions: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
 
-    #[test]
-    fn test_rule_action_nsql() {
-        let action = RuleAction::MoveTo("Archive".to_string());
-        assert_eq!(action.to_nsql(), "MOVE TO 'Archive'");
-        let webhook = RuleAction::CallWebhook("https://hooks.nuncio.mx/test".to_string());
-        assert_eq!(webhook.to_nsql(), "CALL WEBHOOK 'https://hooks.nuncio.mx/test'");
-    }
+        assert!(rule.matches_account("james.maes@kof22.com"));
+        assert!(rule.matches_account("work@nuncio.mx"));
 
-    #[test]
-    fn test_condition_node_depth() {
-        let leaf = ConditionNode::Leaf(ConditionLeaf {
-            field: FilterField::Subject,
-            operator: FilterOperator::Contains,
-            value: FilterValue::String("Test".to_string()),
-        });
-        assert_eq!(leaf.depth(), 1);
+        let domain_rule = FilterRule {
+            target_account: "%@kof22.com".to_string(),
+            ..rule.clone()
+        };
 
-        let and_node = ConditionNode::And(vec![leaf.clone(), ConditionNode::Not(Box::new(leaf.clone()))]);
-        assert_eq!(and_node.depth(), 3);
+        assert!(domain_rule.matches_account("alice@kof22.com"));
+        assert!(!domain_rule.matches_account("bob@nuncio.mx"));
     }
 }

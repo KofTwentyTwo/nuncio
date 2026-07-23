@@ -74,7 +74,7 @@ impl NsqlValidator {
                     FilterValue::Boolean(_) => Ok(()),
                     _ => Err(ValidationError::FieldTypeMismatch("field 'has_attachment' requires a boolean value".to_string())),
                 },
-                FilterField::Subject | FilterField::From | FilterField::To | FilterField::Body | FilterField::Header(_) | FilterField::Folder => match &leaf.value {
+                FilterField::Subject | FilterField::From | FilterField::To | FilterField::Body | FilterField::Header(_) | FilterField::Folder | FilterField::Account => match &leaf.value {
                     FilterValue::String(_) | FilterValue::List(_) => Ok(()),
                     _ => Err(ValidationError::FieldTypeMismatch(format!("field {:?} requires a string or string list value", leaf.field))),
                 },

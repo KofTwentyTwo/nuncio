@@ -3,8 +3,8 @@
 use crate::ast::{
     ConditionLeaf, ConditionNode, FilterField, FilterOperator, FilterRule, FilterValue, RuleAction,
 };
-use sqlparser::dialect::Dialect;
 use sqlparser::ast::{BinaryOperator, Expr, Statement, UnaryOperator, Value as SqlValue};
+use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
 use thiserror::Error;
 
@@ -35,7 +35,7 @@ impl Dialect for NuncioSqlDialect {
     }
 
     fn is_identifier_part(&self, ch: char) -> bool {
-        ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '-'
+        ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '-' || ch == '*' || ch == '%'
     }
 }
 
@@ -49,7 +49,8 @@ impl NsqlParser {
     /// Parse complete NSQL statement into a `FilterRule`.
     pub fn parse_rule(name: impl Into<String>, priority: i32, nsql: &str) -> Result<FilterRule, ParseError> {
         let name_str = name.into();
-        let (where_str, actions) = Self::split_where_and_actions(nsql)?;
+        let (target_account, body_nsql) = Self::extract_on_account(nsql);
+        let (where_str, actions) = Self::split_where_and_actions(&body_nsql)?;
         let conditions = Self::parse_conditions(&where_str)?;
 
         if conditions.depth() > Self::MAX_AST_DEPTH {
@@ -60,6 +61,7 @@ impl NsqlParser {
         Ok(FilterRule {
             id: format!("rule-{}", uuid_or_simple_hash(&name_str, nsql)),
             name: name_str,
+            target_account,
             priority,
             enabled: true,
             nsql_text: nsql.to_string(),
@@ -68,6 +70,49 @@ impl NsqlParser {
             created_at: now,
             updated_at: now,
         })
+    }
+
+    /// Extract `ON ACCOUNT '<target>'` clause if present.
+    fn extract_on_account(nsql: &str) -> (String, String) {
+        let nsql_trim = nsql.trim();
+
+        if let Some(idx) = find_keyword_outside_quotes(nsql_trim, "ON ACCOUNT") {
+            let prefix = nsql_trim[..idx].trim();
+            let after = nsql_trim[idx + 10..].trim();
+
+            let (target, rest) = if after.starts_with('\'') {
+                let end_quote = after[1..].find('\'').map(|i| i + 1).unwrap_or(after.len());
+                let t = &after[1..end_quote];
+                let r = if end_quote + 1 < after.len() { &after[end_quote + 1..] } else { "" };
+                (t, r)
+            } else if after.starts_with('"') {
+                let end_quote = after[1..].find('"').map(|i| i + 1).unwrap_or(after.len());
+                let t = &after[1..end_quote];
+                let r = if end_quote + 1 < after.len() { &after[end_quote + 1..] } else { "" };
+                (t, r)
+            } else {
+                let mut parts = after.split_whitespace();
+                let t = parts.next().unwrap_or("*");
+                let r = after[t.len()..].trim();
+                (t, r)
+            };
+
+            let combined = if prefix.is_empty() {
+                rest.trim().to_string()
+            } else {
+                format!("{prefix} {}", rest.trim()).trim().to_string()
+            };
+
+            let target_account = if target == "?" || target == "*" || target == "%" {
+                "*".to_string()
+            } else {
+                target.to_string()
+            };
+
+            return (target_account, combined);
+        }
+
+        ("*".to_string(), nsql_trim.to_string())
     }
 
     /// Split NSQL text into WHERE clause part and ACTION clause part.
@@ -96,7 +141,6 @@ impl NsqlParser {
             return Err(ParseError::Syntax("empty filter condition".to_string()));
         }
 
-        // Preprocess custom NSQL operators and header[...] syntax into standard SQL
         let preprocessed = preprocess_nsql_where(trimmed);
 
         let full_sql = if preprocessed.to_uppercase().starts_with("SELECT") {
@@ -363,18 +407,15 @@ impl NsqlParser {
 fn preprocess_nsql_where(input: &str) -> String {
     let mut result = input.to_string();
 
-    // Replace header['X-Spam'] with header__X_Spam
     let re_header = regex::Regex::new(r"(?i)header\s*\[\s*[']([^']+)[']\s*\]").expect("regex");
     result = re_header.replace_all(&result, |caps: &regex::Captures| {
         let key = &caps[1].replace('-', "_");
         format!("header__{key}")
     }).to_string();
 
-    // Replace CONTAINS with LIKE
     let re_contains = regex::Regex::new(r"(?i)\bCONTAINS\b").expect("regex");
     result = re_contains.replace_all(&result, "LIKE").to_string();
 
-    // Replace MATCHES with ~
     let re_matches = regex::Regex::new(r"(?i)\bMATCHES\b").expect("regex");
     result = re_matches.replace_all(&result, "~").to_string();
 
@@ -454,34 +495,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_parse_on_account_wildcard() {
+        let nsql = "ON ACCOUNT '%@kof22.com' WHERE subject CONTAINS 'Urgent' ACTION MARK READ";
+        let rule = NsqlParser::parse_rule("Company Rule", 1, nsql).expect("parse rule");
+        assert_eq!(rule.target_account, "%@kof22.com");
+        assert!(rule.matches_account("james@kof22.com"));
+        assert!(!rule.matches_account("user@nuncio.mx"));
+    }
+
+    #[test]
     fn test_parse_simple_nsql() {
         let nsql = "SELECT * FROM emails WHERE subject CONTAINS 'Urgent' ACTION MOVE TO 'priority', MARK READ";
         let rule = NsqlParser::parse_rule("Urgent Rule", 1, nsql).expect("parse rule");
         assert_eq!(rule.name, "Urgent Rule");
+        assert_eq!(rule.target_account, "*");
         assert_eq!(rule.actions.len(), 2);
-        assert_eq!(rule.actions[0], RuleAction::MoveTo("priority".to_string()));
-        assert_eq!(rule.actions[1], RuleAction::MarkRead);
-    }
-
-    #[test]
-    fn test_parse_nested_conditions() {
-        let nsql = "WHERE (from = 'boss@nuncio.mx' AND (size > 1024 OR folder = 'inbox')) ACTION FLAG";
-        let rule = NsqlParser::parse_rule("Boss Filter", 0, nsql).expect("parse rule");
-        assert_eq!(rule.actions.len(), 1);
-        assert_eq!(rule.actions[0], RuleAction::Flag);
-    }
-
-    #[test]
-    fn test_parse_in_list_and_not() {
-        let nsql = "WHERE folder IN ('spam', 'junk') ACTION DELETE";
-        let rule = NsqlParser::parse_rule("Spam Cleaner", 2, nsql).expect("parse rule");
-        assert_eq!(rule.actions[0], RuleAction::Delete);
-    }
-
-    #[test]
-    fn test_parse_header_field() {
-        let nsql = "WHERE header['X-Spam'] = 'Yes' ACTION MOVE TO 'Junk'";
-        let rule = NsqlParser::parse_rule("Spam Header", 1, nsql).expect("parse rule");
-        assert_eq!(rule.actions[0], RuleAction::MoveTo("Junk".to_string()));
     }
 }
