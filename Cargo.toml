@@ -37,6 +37,8 @@ aes-gcm = "0.10"
 mail-parser = "0.9"
 bytes = "1.6"
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
+async-imap = { version = "0.9", default-features = false, features = ["runtime-tokio"] }
+
 
 
 
