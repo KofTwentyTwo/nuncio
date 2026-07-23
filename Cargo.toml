@@ -45,6 +45,8 @@ rrule = "0.10"
 chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 quick-xml = "0.36"
+html2text = "0.12"
+
 
 
 
