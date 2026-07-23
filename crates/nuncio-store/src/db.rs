@@ -946,6 +946,51 @@ impl DatabaseEngine {
         nuncio_core::verify_worm_chain(&records, secret_key)
             .map_err(|e| DatabaseError::ChainIntegrityFailed(e.to_string()))
     }
+
+    /// Export a collection of email messages to a target output path in the requested portable format.
+    pub async fn export_messages_to_file(
+        &self,
+        messages: &[nuncio_core::model::Email],
+        format: nuncio_core::ExportFormat,
+        output_path: &Path,
+    ) -> Result<nuncio_core::ExportSummary, DatabaseError> {
+        let file = std::fs::File::create(output_path)
+            .map_err(|e| DatabaseError::RecoveryFailed(format!("failed to create output file: {e}")))?;
+
+        let bytes_written = match format {
+            nuncio_core::ExportFormat::Mbox => {
+                nuncio_core::ExportEngine::export_mbox(messages, file)
+                    .map_err(|e| DatabaseError::RecoveryFailed(e.to_string()))?
+            }
+            nuncio_core::ExportFormat::EmlZip => {
+                nuncio_core::ExportEngine::export_eml_zip(messages, file)
+                    .map_err(|e| DatabaseError::RecoveryFailed(e.to_string()))?
+            }
+            nuncio_core::ExportFormat::Json => {
+                nuncio_core::ExportEngine::export_json(messages, file)
+                    .map_err(|e| DatabaseError::RecoveryFailed(e.to_string()))?
+            }
+            nuncio_core::ExportFormat::JsonLines => {
+                nuncio_core::ExportEngine::export_jsonl(messages, file)
+                    .map_err(|e| DatabaseError::RecoveryFailed(e.to_string()))?
+            }
+        };
+
+        // Record WORM audit log for this data export
+        let _ = self.append_worm_audit_record(
+            "system.export",
+            "data.export",
+            output_path.to_string_lossy().as_bytes(),
+            nuncio_core::DEFAULT_WORM_KEY,
+        ).await;
+
+        Ok(nuncio_core::ExportSummary {
+            output_path: output_path.to_string_lossy().to_string(),
+            format,
+            message_count: messages.len(),
+            bytes_written,
+        })
+    }
 }
 
 fn compute_log_hash(

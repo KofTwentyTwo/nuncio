@@ -278,6 +278,20 @@ impl McpToolHandler {
                 description: "Verify the cryptographic integrity of the entire WORM audit log chain.".to_string(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
+            McpToolDefinition {
+                name: "nuncio_export_data".to_string(),
+                description: "Export emails, accounts, or NSQL query results to portable MBOX, EML ZIP archive, or JSON formats.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "format": { "type": "string", "description": "Export format: mbox, zip, json, jsonl (default: mbox)" },
+                        "output_path": { "type": "string", "description": "Target output file path" },
+                        "folder_id": { "type": "string", "description": "Optional folder ID filter" },
+                        "limit": { "type": "integer", "description": "Maximum records (default 1000)" }
+                    },
+                    "required": ["output_path"]
+                }),
+            },
         ]
     }
 
@@ -595,6 +609,21 @@ impl McpToolHandler {
             "nuncio_audit_verify" => {
                 let is_valid = self.db.verify_worm_audit_chain(nuncio_core::DEFAULT_WORM_KEY).await.is_ok();
                 Ok(json!({ "status": "verified", "chain_integrity_valid": is_valid }))
+            }
+            "nuncio_export_data" => {
+                if !self.policy.is_data_type_allowed(DataType::Mail) || !self.policy.permissions.read_mail {
+                    return Err(format!("403 Forbidden: Agent '{}' lacks 'read_mail' permission for data export", self.policy.agent_id));
+                }
+                let output_str = args.get("output_path").and_then(|v| v.as_str()).ok_or("missing output_path")?;
+                let format_str = args.get("format").and_then(|v| v.as_str()).unwrap_or("mbox");
+                let folder_id = args.get("folder_id").and_then(|v| v.as_str()).unwrap_or("INBOX");
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
+
+                let format: nuncio_core::ExportFormat = format_str.parse().map_err(|e: String| e)?;
+                let messages = self.db.list_messages(folder_id, limit).await.map_err(|e| e.to_string())?;
+
+                let summary = self.db.export_messages_to_file(&messages, format, std::path::Path::new(output_str)).await.map_err(|e| e.to_string())?;
+                Ok(json!({ "status": "exported", "summary": summary }))
             }
             _ => Err(format!("Unknown tool: {}", name)),
         }

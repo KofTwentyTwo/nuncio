@@ -27,6 +27,7 @@ flate2.workspace = true
 tar.workspace = true
 regex.workspace = true
 zip.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
