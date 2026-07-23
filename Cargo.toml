@@ -50,7 +50,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 zeroize = { version = "1.8", features = ["derive"] }
 tempfile = "3.10"
-keyring = "2.1"
+keyring = "4.1"
 age = "0.10"
 aes-gcm = "0.10"
 mail-parser = "0.9"
