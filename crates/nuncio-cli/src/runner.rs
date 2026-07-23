@@ -224,9 +224,28 @@ impl HeadlessRunner {
         json_mode: bool,
     ) -> String {
         let keyring_key = format!("nuncio/{}", email);
+        let account_id = format!("acct-{}", email.replace('@', "-at-").replace('.', "-"));
+
+        let acct = nuncio_core::AccountConfig {
+            id: account_id.clone(),
+            name: email.to_string(),
+            email_address: email.to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: imap_host.to_string(),
+            server_port: imap_port,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: keyring_key.clone(),
+            sync_interval_secs: 300,
+        };
+
+        let _ = self.db.save_account(&acct).await;
+
         if json_mode {
             format_json(&json!({
                 "configured": true,
+                "account_id": account_id,
                 "email": email,
                 "imap_host": imap_host,
                 "imap_port": imap_port,
@@ -236,8 +255,8 @@ impl HeadlessRunner {
             }))
         } else {
             format!(
-                "Account '{}' configured for IMAP ({}:{}, mode: {}) and SMTP (mode: {})",
-                email, imap_host, imap_port, imap_mode, smtp_mode
+                "Account '{}' (ID: {}) saved to SQLite database and configured for IMAP ({}:{}, mode: {}) and SMTP (mode: {})",
+                email, account_id, imap_host, imap_port, imap_mode, smtp_mode
             )
         }
     }
@@ -310,7 +329,7 @@ mod tests {
                 true,
             )
             .await;
-        assert!(acct_list.contains(r#""accounts":[]"#));
+        assert!(acct_list.contains("acct-james-maes-at-kof22-com"));
 
         let acct_show = runner
             .execute_command(
