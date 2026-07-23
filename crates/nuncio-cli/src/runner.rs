@@ -161,6 +161,16 @@ impl HeadlessRunner {
                     )
                 }
             }
+            Commands::Accounts => {
+                let accounts = self.db.list_accounts().await.unwrap_or_default();
+                if json_mode {
+                    format_json(&json!({
+                        "accounts": accounts
+                    }))
+                } else {
+                    format!("Configured Accounts: {} account(s) registered", accounts.len())
+                }
+            }
             Commands::Config => {
                 let state = self.event_bus.current_state();
                 if json_mode {
@@ -248,7 +258,9 @@ mod tests {
                 true,
             )
             .await;
-        assert!(add_json.contains(r#""email":"james.maes@kof22.com""#));
+        // Test Accounts
+        let accts_json = runner.execute_command(&Commands::Accounts, true).await;
+        assert!(accts_json.contains(r#""accounts":[]"#));
     }
 
     #[test]

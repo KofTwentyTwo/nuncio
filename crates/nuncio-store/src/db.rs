@@ -93,6 +93,17 @@ impl DatabaseEngine {
                 rrule TEXT,
                 location TEXT
             );
+            CREATE TABLE IF NOT EXISTS accounts (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                email_address TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                server_host TEXT NOT NULL,
+                server_port INTEGER NOT NULL,
+                use_tls INTEGER NOT NULL,
+                keyring_secret_key TEXT NOT NULL,
+                sync_interval_secs INTEGER NOT NULL
+            );
             "#,
         )
         .execute(&self.pool)
@@ -100,6 +111,91 @@ impl DatabaseEngine {
         .map_err(DatabaseError::Query)?;
 
         Ok(())
+    }
+
+    /// Save an [`nuncio_core::AccountConfig`] to SQLite.
+    pub async fn save_account(
+        &self,
+        config: &nuncio_core::AccountConfig,
+    ) -> Result<(), DatabaseError> {
+        let protocol_str = serde_json::to_string(&config.protocol).unwrap_or_default();
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO accounts
+            (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&config.id)
+        .bind(&config.name)
+        .bind(&config.email_address)
+        .bind(protocol_str)
+        .bind(&config.server_host)
+        .bind(config.server_port as i64)
+        .bind(if config.use_tls { 1i64 } else { 0i64 })
+        .bind(&config.keyring_secret_key)
+        .bind(config.sync_interval_secs as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(())
+    }
+
+    /// Query all saved accounts in SQLite.
+    pub async fn list_accounts(&self) -> Result<Vec<nuncio_core::AccountConfig>, DatabaseError> {
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            i64,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs
+            FROM accounts
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    name,
+                    email_address,
+                    protocol_str,
+                    server_host,
+                    server_port,
+                    use_tls,
+                    keyring_secret_key,
+                    sync_interval_secs,
+                )| {
+                    let protocol = serde_json::from_str(&protocol_str)
+                        .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
+                    nuncio_core::AccountConfig {
+                        id,
+                        name,
+                        email_address,
+                        protocol,
+                        server_host,
+                        server_port: server_port as u16,
+                        use_tls: use_tls != 0,
+                        imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                        smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                        keyring_secret_key,
+                        sync_interval_secs: sync_interval_secs as u64,
+                    }
+                },
+            )
+            .collect())
     }
 
     /// Save an [`nuncio_core::model::Email`] to SQLite (INSERT OR REPLACE).
@@ -334,6 +430,31 @@ mod tests {
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].id, "INBOX");
         assert_eq!(folders[0].unread_messages, 1);
+    }
+
+    #[tokio::test]
+    async fn test_save_and_list_accounts() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let acct = nuncio_core::AccountConfig {
+            id: "acct-test-1".to_string(),
+            name: "Work Account".to_string(),
+            email_address: "work@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: "nuncio/acct-test-1".to_string(),
+            sync_interval_secs: 60,
+        };
+
+        engine.save_account(&acct).await.expect("save account succeeds");
+        let accounts = engine.list_accounts().await.expect("list accounts succeeds");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "acct-test-1");
+        assert_eq!(accounts[0].email_address, "work@nuncio.mx");
     }
 
     #[test]

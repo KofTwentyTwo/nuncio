@@ -64,7 +64,10 @@ pub enum Commands {
     },
     /// Display or validate CLI account configuration.
     Config,
+    /// List all configured accounts and active selection.
+    Accounts,
     /// Add and configure a new mail account.
+
     AddAccount {
         /// Email address or username.
         #[arg(short, long)]
@@ -166,6 +169,9 @@ mod tests {
                 id: "msg-123".to_string()
             }
         );
+
+        let cli_accounts = Cli::parse_from(["nuncio", "accounts"]);
+        assert_eq!(cli_accounts.command, Commands::Accounts);
 
         let cli_add = Cli::parse_from(["nuncio", "add-account", "--email", "james.maes@kof22.com"]);
         assert_eq!(
