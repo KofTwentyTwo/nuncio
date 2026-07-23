@@ -2,7 +2,7 @@
 
 > **Authoritative Single Source of Truth**: All task tracking, issue status, and milestone progress are maintained in [docs/PLAN-production-roadmap-100-plus.md](file:///R:/Git.Local/KofTwentyTwo/nuncio/docs/PLAN-production-roadmap-100-plus.md) and on GitHub:
 > - **GitHub Project Board**: [Nuncio Roadmap Project #5](https://github.com/users/KofTwentyTwo/projects/5)
-> - **GitHub Milestones**: [KofTwentyTwo/nuncio/milestones](https://github.com/KofTwentyTwo/nuncio/milestones) (`v1.1.0-live-protocols` through `v2.0.0-production-ga`)
+> - **GitHub Milestones**: [KofTwentyTwo/nuncio/milestones](https://github.com/KofTwentyTwo/nuncio/milestones) (`v0.1.0` through `v3.0.0`)
 > - **GitHub Issues**: [KofTwentyTwo/nuncio/issues](https://github.com/KofTwentyTwo/nuncio/issues)
 
 ---

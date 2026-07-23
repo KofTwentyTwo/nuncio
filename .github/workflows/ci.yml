@@ -69,7 +69,7 @@ jobs:
       - name: Cache Cargo Dependencies
         uses: Swatinem/rust-cache@v2
       - name: Measure & Enforce Code Coverage Threshold
-        run: cargo llvm-cov --workspace --ignore-filename-regex "main\.rs" --fail-under-lines 80
+        run: cargo llvm-cov --workspace --ignore-filename-regex "main\.rs" --fail-under-lines 100
 
   build-matrix:
     name: Cross-Platform Build Matrix (${{ matrix.os }})

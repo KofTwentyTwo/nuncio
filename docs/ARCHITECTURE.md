@@ -31,8 +31,8 @@ Nuncio decouples application state management, network protocol engines, cryptog
 └──────────────────────────┘  └──────────────────────────┘  └──────────────────────────┘
 ```
 
-- **Headless Engine Core**: `nuncio-core`, `nuncio-mail`, `nuncio-cal`, and `nuncio-store` contain 100% of domain rules, protocol parsing, offline caching, search indexing, and secret key encryption.
-- **Thin Presentation Shells**: `nuncio-cli` (command line), `nuncio-tui` (terminal), and `nuncio-gui` (desktop) are stateless interfaces consuming unidirectional state streams (`tokio::sync::watch`) and dispatching command enums (`tokio::sync::mpsc`).
+- **Headless Engine Core**: `nuncio-core`, `nuncio-mail`, `nuncio-cal`, `nuncio-store`, and `nunciod` contain 100% of domain rules, protocol parsing, offline caching, search indexing, and secret key encryption.
+- **Thin Presentation Shells**: `nuncio-cli` (POSIX CLI), `nuncio-tui` (Ratatui TUI), `nuncio-gui` (Tauri v2 Desktop GUI), and `nuncio-mcp` (Native MCP Server) are stateless interfaces communicating over 4-byte length-prefixed JSON-RPC 2.0 IPC streams (`IpcClient`) with the central `nunciod` background daemon.
 
 ---
 

@@ -13,8 +13,8 @@ Tagging a commit with `vX.Y.Z` triggers [.github/workflows/release.yml](file:///
 
 ## Architecture Decoupling Rules
 
-1. **Library-First Model**: Business logic, protocol parsing, offline caching, search indexing, and cryptographic key management MUST reside strictly inside headless Rust crates: `crates/nuncio-core`, `crates/nuncio-mail`, `crates/nuncio-cal`, and `crates/nuncio-store`.
-2. **Skinny Shells**: Presentation shells (`crates/nuncio-cli`, `crates/nuncio-tui`, `crates/nuncio-gui`) MUST remain thin UI layers interacting with `nuncio-core` via async Tokio channels.
+2. **Thin Presentation Shells**: Presentation shells (`crates/nuncio-cli`, `crates/nuncio-tui`, `crates/nuncio-gui`, `crates/nuncio-mcp`) MUST remain thin UI layers interacting with `nunciod` over length-prefixed IPC streams.
+3. **100% Multi-Shell Feature Parity Rule**: Any new feature or command added to one presentation shell MUST be implemented simultaneously across ALL FOUR presentation shells.
 
 ## Code Quality Gates
 

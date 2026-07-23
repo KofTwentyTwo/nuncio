@@ -12,7 +12,7 @@ Nuncio ([nuncio.mx](https://nuncio.mx)) is a cross-platform mail and calendar so
 ## JetBrains RustRover IDE Integration
 
 Nuncio is pre-configured for **JetBrains RustRover** out of the box:
-- **Workspace Cargo Resolution**: RustRover automatically recognizes all 7 workspace member crates (`crates/*`).
+- **Workspace Cargo Resolution**: RustRover automatically recognizes all 9 workspace member crates (`crates/*`).
 - **Pre-Configured Shared Run Configurations**: Located in `.idea/runConfigurations/`:
   - `Cargo Check All`: Executes `cargo check-all` with warnings treated as errors.
   - `Cargo Test All`: Executes `cargo test-all` for the full workspace.
