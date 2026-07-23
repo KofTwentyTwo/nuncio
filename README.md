@@ -37,6 +37,27 @@ Nuncio is fully pre-configured for **JetBrains RustRover**:
 ## Overview
 
 Nuncio follows a library-first architecture. All core business logic, protocol synchronization, offline storage, indexing, and state management are isolated within headless Rust libraries. Presentation layers remain lightweight shells driving a command line interface (CLI), terminal UI (TUI), or native desktop GUI.
+## CLI Usage (Noun + Verb Syntax)
+
+Nuncio CLI follows a standardized `<Noun> <Verb> [Flags]` command structure:
+
+```bash
+# Account Operations
+nuncio account add --email james.maes@kof22.com --imap-host mail.kof22.com --imap-port 993
+nuncio account list
+
+# Email Operations
+nuncio mail sync [--account <id>]
+nuncio mail list --folder INBOX
+nuncio mail read --id msg_123
+nuncio mail search --query "roadmap"
+nuncio mail send --to alice@nuncio.mx --subject "Update" --body "Message"
+
+# Folder & Calendar Operations
+nuncio folder list
+nuncio cal list
+nuncio system status
+```
 
 ## Workspace Architecture
 

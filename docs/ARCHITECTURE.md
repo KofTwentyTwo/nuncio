@@ -137,8 +137,13 @@ pub trait MailBackend: Send + Sync {
 ### 5.1 Command Line Interface (`nuncio-cli`)
 
 - **Execution Engine**: `clap` v4 derive macro.
-- **Subcommands**: Supports `nuncio mail list|read|send`, `nuncio cal list|add`, `nuncio sync`, and `nuncio status`.
-- **Pipeline Support**: Accepts `--json` flag to stream structured JSON outputs to stdout for processing with `jq`, `grep`, or shell automation scripts.
+- **Noun + Verb Command Standard**: Standardized `<Noun> <Verb> [Flags]` command hierarchy:
+  - `nuncio account list | add | show`
+  - `nuncio mail sync | list | read | send | search`
+  - `nuncio folder list`
+  - `nuncio cal list | sync`
+  - `nuncio system status`
+- **Pipeline & Scripting Support**: Accepts `--json` flag to stream machine-readable JSON payloads to stdout for processing with `jq`, `grep`, or automation pipelines. Global `--account <id>` flag allows targeting any specific account context.
 
 ### 5.2 Terminal UI Shell (`nuncio-tui`)
 
