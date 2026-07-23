@@ -35,9 +35,13 @@ Nuncio is pre-configured for **JetBrains RustRover** out of the box:
 
 1. **Library-First ("Ghost" Decoupled Model)**:
    - Business logic, protocol clients, offline state synchronization, SQLite FTS5 search indexing, and cryptographic key management MUST reside strictly inside headless Rust crates: `crates/nuncio-core`, `crates/nuncio-mail`, `crates/nuncio-cal`, and `crates/nuncio-store`.
-   - Presentation shells (`crates/nuncio-cli`, `crates/nuncio-tui`, `crates/nuncio-gui`) MUST remain thin UI layers interacting with `nuncio-core` via async Tokio state streams (`watch`) and command channels (`mpsc`).
+   - Presentation shells (`crates/nuncio-cli`, `crates/nuncio-tui`, `crates/nuncio-gui`, `crates/nuncio-mcp`) MUST remain thin UI layers interacting with `nuncio-core` via `IpcClient` and async Tokio channels.
 
-2. **Language & Code Quality Standards**:
+2. **Standing Rule: 100% Multi-Shell Feature Parity Equivalence**:
+   - **Mandatory 1:1 Parity**: Any feature, action, search query, configuration setting, or workflow exposed in one presentation shell MUST be fully implemented and accessible across ALL FOUR presentation shells (`nuncio-cli`, `nuncio-tui`, `nuncio-gui`, `nuncio-mcp`).
+   - Adding a new feature to V1, V2, or V3 automatically requires implementing its CLI subcommand (`--json`), TUI keyboard shortcut/modal, GUI React component, and MCP LLM tool handler.
+
+3. **Language & Code Quality Standards**:
    - **Rust Edition**: 2021 edition across all workspace crates.
    - **Compiler & Linter Gates**: `rustflags = ["-D", "warnings"]` configured in `.cargo/config.toml`. All compiler and clippy warnings MUST be treated as hard build errors during normal development.
    - **Formatting**: `cargo fmt` enforced. No unformatted code allowed.
