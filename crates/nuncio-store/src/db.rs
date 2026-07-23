@@ -101,6 +101,150 @@ impl DatabaseEngine {
 
         Ok(())
     }
+
+    /// Save an [`nuncio_core::model::Email`] to SQLite (INSERT OR REPLACE).
+    pub async fn save_email(&self, email: &nuncio_core::model::Email) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO messages
+            (id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&email.id)
+        .bind(&email.account_id)
+        .bind(&email.folder_id)
+        .bind(&email.subject)
+        .bind(&email.sender)
+        .bind(&email.recipient)
+        .bind(email.received_at)
+        .bind(if email.read { 1i64 } else { 0i64 })
+        .bind(&email.body_plain)
+        .bind(&email.body_html)
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(())
+    }
+
+    /// Query synced email messages for a specific folder.
+    pub async fn list_messages(
+        &self,
+        folder_id: &str,
+        limit: usize,
+    ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html
+            FROM messages
+            WHERE folder_id = ?
+            ORDER BY received_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(folder_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html)| {
+                    nuncio_core::model::Email {
+                        id,
+                        account_id,
+                        folder_id,
+                        subject,
+                        sender,
+                        recipient,
+                        received_at,
+                        read: read_flag != 0,
+                        body_plain,
+                        body_html,
+                        attachments: Vec::new(),
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// Retrieve a single message by ID.
+    pub async fn get_message(&self, message_id: &str) -> Result<nuncio_core::model::Email, DatabaseError> {
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            r#"
+            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html
+            FROM messages
+            WHERE id = ?
+            "#,
+        )
+        .bind(message_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(nuncio_core::model::Email {
+            id: row.0,
+            account_id: row.1,
+            folder_id: row.2,
+            subject: row.3,
+            sender: row.4,
+            recipient: row.5,
+            received_at: row.6,
+            read: row.7 != 0,
+            body_plain: row.8,
+            body_html: row.9,
+            attachments: Vec::new(),
+        })
+    }
+
+    /// Query available folders with message counts.
+    pub async fn list_folders(&self) -> Result<Vec<nuncio_core::model::Folder>, DatabaseError> {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT folder_id, COUNT(*) as total, SUM(CASE WHEN read_flag = 0 THEN 1 ELSE 0 END) as unread
+            FROM messages
+            GROUP BY folder_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(folder_id, total, unread)| nuncio_core::model::Folder {
+                id: folder_id.clone(),
+                name: folder_id,
+                total_messages: total as usize,
+                unread_messages: unread as usize,
+            })
+            .collect())
+    }
 }
 
 trait ToNullStr {
@@ -156,6 +300,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(subject.0, "Hello");
+    }
+
+    #[tokio::test]
+    async fn test_save_get_list_email_and_folders() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let email = nuncio_core::model::Email {
+            id: "msg-db-100".to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "INBOX".to_string(),
+            subject: "Database Sync Test".to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1700000000,
+            read: false,
+            body_plain: Some("Plaintext content".to_string()),
+            body_html: Some("<p>HTML content</p>".to_string()),
+            attachments: Vec::new(),
+        };
+
+        engine.save_email(&email).await.expect("save email succeeds");
+
+        let fetched = engine.get_message("msg-db-100").await.expect("get message succeeds");
+        assert_eq!(fetched.subject, "Database Sync Test");
+        assert!(!fetched.read);
+
+        let msgs = engine.list_messages("INBOX", 10).await.expect("list messages succeeds");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].id, "msg-db-100");
+
+        let folders = engine.list_folders().await.expect("list folders succeeds");
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].id, "INBOX");
+        assert_eq!(folders[0].unread_messages, 1);
     }
 
     #[test]

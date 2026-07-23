@@ -54,8 +54,17 @@ pub enum Commands {
         #[arg(short, long)]
         query: String,
     },
+    /// List available local mailbox folders.
+    Folders,
+    /// Read a specific message by ID.
+    Read {
+        /// Unique message identifier.
+        #[arg(short, long)]
+        id: String,
+    },
     /// Display or validate CLI account configuration.
     Config,
+
 }
 
 #[cfg(test)]
@@ -118,5 +127,19 @@ mod tests {
     fn parse_config_command() {
         let cli = Cli::parse_from(["nuncio", "config"]);
         assert_eq!(cli.command, Commands::Config);
+    }
+
+    #[test]
+    fn parse_folders_and_read_commands() {
+        let cli_folders = Cli::parse_from(["nuncio", "folders"]);
+        assert_eq!(cli_folders.command, Commands::Folders);
+
+        let cli_read = Cli::parse_from(["nuncio", "read", "--id", "msg-123"]);
+        assert_eq!(
+            cli_read.command,
+            Commands::Read {
+                id: "msg-123".to_string()
+            }
+        );
     }
 }

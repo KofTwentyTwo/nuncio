@@ -101,6 +101,39 @@ impl HeadlessRunner {
                     format!("Search complete for '{}' (0 matches)", query)
                 }
             }
+            Commands::Folders => {
+                let folders = self.db.list_folders().await.unwrap_or_default();
+                if json_mode {
+                    format_json(&json!({
+                        "folders": folders
+                    }))
+                } else {
+                    format!("Available Mailbox Folders: {} folders found", folders.len())
+                }
+            }
+            Commands::Read { id } => {
+                match self.db.get_message(id).await {
+                    Ok(msg) => {
+                        if json_mode {
+                            format_json(&json!({
+                                "message": msg
+                            }))
+                        } else {
+                            format!(
+                                "Message {}: Subject: '{}', From: {}, Date: {}",
+                                msg.id, msg.subject, msg.sender, msg.received_at
+                            )
+                        }
+                    }
+                    Err(_) => {
+                        if json_mode {
+                            format_json_error(&format!("message '{}' not found", id))
+                        } else {
+                            format!("Error: message '{}' not found", id)
+                        }
+                    }
+                }
+            }
             Commands::Config => {
                 let state = self.event_bus.current_state();
                 if json_mode {
@@ -162,6 +195,16 @@ mod tests {
         // Test Config
         let config_json = runner.execute_command(&Commands::Config, true).await;
         assert!(config_json.contains(r#""accounts_loaded":0"#));
+
+        // Test Folders
+        let folders_json = runner.execute_command(&Commands::Folders, true).await;
+        assert!(folders_json.contains(r#""folders":[]"#));
+
+        // Test Read non-existent
+        let read_err = runner
+            .execute_command(&Commands::Read { id: "msg-missing".to_string() }, true)
+            .await;
+        assert!(read_err.contains(r#""status":"error""#));
     }
 
     #[test]
