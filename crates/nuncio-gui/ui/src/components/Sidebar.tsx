@@ -19,7 +19,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   return (
     <aside className="sidebar">
       <div className="brand-header">
-        <div className="brand-logo">N</div>
+        <img src="/assets/logo.jpg" alt="Nuncio Logo" className="brand-logo-img" style={{ width: '28px', height: '28px', borderRadius: '6px', objectFit: 'cover' }} />
         <h1 className="brand-title">Nuncio</h1>
       </div>
 

@@ -1,8 +1,16 @@
 # Welcome to the Nuncio Wiki
 
+![Nuncio App Icon](../assets/nuncio_app_icon.jpg)
+
 Nuncio is a high-performance, library-first cross-platform mail and calendar suite for Windows, macOS, and Linux.
 
 Official Site: [nuncio.mx](https://nuncio.mx) | GitHub Repository: [KofTwentyTwo/nuncio](https://github.com/KofTwentyTwo/nuncio)
+
+---
+
+## Visual Application Preview
+
+![Nuncio Desktop Application UI Preview](../assets/nuncio_gui_hero.jpg)
 
 ---
 
@@ -13,6 +21,23 @@ Official Site: [nuncio.mx](https://nuncio.mx) | GitHub Repository: [KofTwentyTwo
 - **`nuncio-gui` (Tauri v2 Desktop GUI)**: Native desktop window with React 18 + Vite + TypeScript frontend.
 - **`nuncio-mcp` (Native LLM Agent UI)**: Model Context Protocol (MCP) JSON-RPC 2.0 stdio server for AI agents.
 - **`nunciod` (Central Daemon Binary)**: Standalone background process owning SQLite WAL storage, security enclaves, background protocol sync loops, and multi-client IPC socket streams.
+
+---
+
+## System Topology Diagram
+
+```mermaid
+graph TD
+    CLI[nuncio-cli] --> IPC[IpcClient]
+    TUI[nuncio-tui] --> IPC
+    GUI[nuncio-gui] --> IPC
+    MCP[nuncio-mcp] --> IPC
+    IPC --> Daemon[nunciod IPC Server]
+    Daemon --> Core[nuncio-core EventBus]
+    Core --> Mail[nuncio-mail]
+    Core --> Cal[nuncio-cal]
+    Core --> Store[nuncio-store]
+```
 
 ---
 

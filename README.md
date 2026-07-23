@@ -1,10 +1,27 @@
 # Nuncio
 
-> **High-Performance Library-First Mail & Calendar Suite for Developers, Power Users, and AI Agents**
+<p align="center">
+  <img src="assets/nuncio_app_icon.jpg" alt="Nuncio Application Icon" width="128" style="border-radius: 24px;" />
+</p>
 
-Official Site: [nuncio.mx](https://nuncio.mx) | Repository: [KofTwentyTwo/nuncio](https://github.com/KofTwentyTwo/nuncio)
+<h3 align="center">Nuncio Mail & Calendar Suite</h3>
+
+<p align="center">
+  <b>High-Performance Library-First Messenger and Calendar Courier for Developers, Power Users, and AI Agents</b>
+</p>
+
+<p align="center">
+  <a href="https://nuncio.mx">Official Site: nuncio.mx</a> •
+  <a href="https://github.com/KofTwentyTwo/nuncio">GitHub Repository</a>
+</p>
 
 > **Etymology**: Derived from the Latin verb ***nūntiō*** ("I announce", "I declare", "I deliver a message") and noun ***nūntius*** ("messenger", "courier", "bearer of tidings"). Nuncio is built as the ultimate cross-platform messenger and calendar courier across Linux, macOS, and Windows.
+
+---
+
+## Visual Application Preview
+
+![Nuncio Desktop Application UI Preview](assets/nuncio_gui_hero.jpg)
 
 ---
 
@@ -12,43 +29,53 @@ Official Site: [nuncio.mx](https://nuncio.mx) | Repository: [KofTwentyTwo/nuncio
 
 Nuncio operates on a **Hybrid Daemon-First Architecture**. Centralized state management, SQLite WAL persistence, credential security enclaves, and protocol synchronizers reside inside a standalone background daemon (`nunciod`). Four decoupled presentation interfaces communicate with `nunciod` over native IPC socket streams:
 
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                                  Presentation Shells                                   │
-│                                                                                        │
-│  ┌──────────────┐   ┌──────────────┐   ┌───────────────────┐   ┌────────────────────┐  │
-│  │  nuncio-cli  │   │  nuncio-tui  │   │nuncio-gui(Tauri v2│   │    nuncio-mcp      │  │
-│  │ (POSIX CLI)  │   │  (Ratatui)   │   │  Desktop GUI)     │   │ (MCP AI Interface) │  │
-│  └──────┬───────┘   └──────┬───────┘   └─────────┬─────────┘   └─────────┬──────────┘  │
-│         │                  │                     │                       │             │
-│         └──────────────────┴──────────┬──────────┴───────────────────────┘             │
-│                                       │                                                │
-│                                   IpcClient                                            │
-│                        (Auto-Spawn + Retry Loop + JSON-RPC)                            │
-└───────────────────────────────────────┼────────────────────────────────────────────────┘
-                                        │
-           ┌────────────────────────────┴────────────────────────────┐
-           │ POSIX: UNIX Domain Socket (`~/.nuncio/nuncio.sock`)     │
-           │ Windows: Named Pipe (`\\.\pipe\nuncio-ipc`)              │
-           └────────────────────────────┬────────────────────────────┘
-                                        │
-┌───────────────────────────────────────┼────────────────────────────────────────────────┐
-│                                       ▼                                                │
-│                                IpcDaemonServer                                         │
-│                               (Security Enclave)                                       │
-│                                                                                        │
-│                                  nunciod Daemon                                        │
-│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
-│  │                                 nuncio-core                                      │  │
-│  │       EventBus (mpsc command_tx | watch state_tx | broadcast event_tx)           │  │
-│  └──────────────┬──────────────────────────┬──────────────────────────┬─────────────┘  │
-│                 │                          │                          │                │
-│                 ▼                          ▼                          ▼                │
-│  ┌──────────────────────────┐┌──────────────────────────┐┌──────────────────────────┐  │
-│  │       nuncio-mail        ││        nuncio-cal        ││       nuncio-store       │  │
-│  │    JMAP / IMAP / SMTP    ││      CalDAV / iCal       ││     SQLite FTS5 / Age    │  │
-│  └──────────────────────────┘└──────────────────────────┘└──────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph Presentation Shells
+        CLI["nuncio-cli (POSIX CLI)"]
+        TUI["nuncio-tui (Ratatui TUI)"]
+        GUI["nuncio-gui (Tauri v2 Desktop GUI)"]
+        MCP["nuncio-mcp (Native MCP LLM Agent Interface)"]
+    end
+
+    subgraph IPC Client Engine
+        Client["IpcClient (Auto-Spawn + Retry Loop + JSON-RPC 2.0 Framing)"]
+    end
+
+    subgraph Native OS Sockets
+        UnixSocket["POSIX: UNIX Domain Socket (~/.nuncio/nuncio.sock)"]
+        WinPipe["Windows: Named Pipe (\\\\.\\pipe\\nuncio-ipc)"]
+    end
+
+    subgraph Central Background Daemon
+        DaemonServer["IpcDaemonServer (Security Enclave)"]
+        DaemonProcess["nunciod Daemon Process"]
+        EventBus["nuncio-core EventBus"]
+    end
+
+    subgraph Core Engine & Protocol Libraries
+        MailEngine["nuncio-mail (IMAP / SMTP / JMAP)"]
+        CalEngine["nuncio-cal (CalDAV / iCal / rrule)"]
+        StoreEngine["nuncio-store (SQLite WAL / FTS5 Trigram / Age Cipher)"]
+    end
+
+    CLI --> Client
+    TUI --> Client
+    GUI --> Client
+    MCP --> Client
+
+    Client --> UnixSocket
+    Client --> WinPipe
+
+    UnixSocket --> DaemonServer
+    WinPipe --> DaemonServer
+
+    DaemonServer --> DaemonProcess
+    DaemonProcess --> EventBus
+
+    EventBus --> MailEngine
+    EventBus --> CalEngine
+    EventBus --> StoreEngine
 ```
 
 1. **`nuncio-cli` (POSIX CLI)**: Scriptable `<Noun> <Verb>` commands with deterministic `--json` output and offline-resilient local SQLite reads.
