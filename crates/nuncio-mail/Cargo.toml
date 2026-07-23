@@ -21,6 +21,11 @@ mail-parser.workspace = true
 bytes.workspace = true
 lettre.workspace = true
 async-imap.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+rustls-pki-types.workspace = true
+tokio-stream.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
