@@ -6,7 +6,7 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::args::{
-    AccountSubcommand, CalSubcommand, Commands, FilterSubcommand, FolderSubcommand, MailSubcommand, SystemSubcommand,
+    AccountSubcommand, CalSubcommand, Commands, ContactSubcommand, FilterSubcommand, FolderSubcommand, MailSubcommand, SystemSubcommand,
     UpdateSubcommand,
 };
 
@@ -173,6 +173,37 @@ impl HeadlessRunner {
             },
             Commands::System { action } => match action {
                 SystemSubcommand::Status => self.handle_system_status(json_mode).await,
+            },
+            Commands::Contact { action } => match action {
+                ContactSubcommand::List => {
+                    let contacts_db = nuncio_contacts::ContactsDatabase::in_memory().await.unwrap();
+                    let contacts = contacts_db.list_contacts().await.unwrap_or_default();
+                    if json_mode {
+                        format_json(&json!({ "contacts": contacts }))
+                    } else {
+                        format!("Contacts: {} contacts found in address book.", contacts.len())
+                    }
+                }
+                ContactSubcommand::Search { query } => {
+                    let contacts_db = nuncio_contacts::ContactsDatabase::in_memory().await.unwrap();
+                    let contacts = contacts_db.search_contacts(query).await.unwrap_or_default();
+                    if json_mode {
+                        format_json(&json!({ "query": query, "contacts": contacts }))
+                    } else {
+                        format!("Search ('{}'): {} contacts matched.", query, contacts.len())
+                    }
+                }
+                ContactSubcommand::Add { name, email, org } => {
+                    let contacts_db = nuncio_contacts::ContactsDatabase::in_memory().await.unwrap();
+                    let mut contact = nuncio_contacts::Contact::new(name, email);
+                    contact.organization = org.clone();
+                    let _ = contacts_db.save_contact(&contact).await;
+                    if json_mode {
+                        format_json(&json!({ "status": "contact_created", "contact": contact }))
+                    } else {
+                        format!("✓ Contact '{}' saved to address book.", contact.display_name)
+                    }
+                }
             },
             Commands::Filter { action } => match action {
                 FilterSubcommand::List => {

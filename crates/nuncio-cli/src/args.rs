@@ -82,11 +82,42 @@ pub enum Commands {
         #[command(subcommand)]
         action: UpdateSubcommand,
     },
+    /// Contact & address book operations (`nuncio contact <verb>`).
+    Contact {
+        #[command(subcommand)]
+        action: ContactSubcommand,
+    },
     /// Launch centralized local background server daemon (`nuncio daemon`).
     Daemon {
         /// TCP port to bind IPC daemon server to (default: 9422).
         #[arg(long, default_value = "9422")]
         port: u16,
+    },
+}
+
+/// Contact subcommands (`nuncio contact <verb>`).
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContactSubcommand {
+    /// List contacts from local address book.
+    List,
+    /// Search contacts by name, email, or organization.
+    Search {
+        /// Search query string.
+        #[arg(short, long, help = "Search query string")]
+        query: String,
+    },
+    /// Add a new contact entry to address book.
+    Add {
+        /// Contact display name.
+        #[arg(short, long, help = "Display name")]
+        name: String,
+        /// Primary email address.
+        #[arg(short, long, help = "Primary email address")]
+        email: String,
+        /// Optional organization.
+        #[arg(short, long, help = "Organization")]
+        org: Option<String>,
     },
 }
 

@@ -1,0 +1,23 @@
+[package]
+name = "nuncio-contacts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nuncio-core = { path = "../nuncio-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+sqlx = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+reqwest = { workspace = true }
+quick-xml = { workspace = true }
+regex = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

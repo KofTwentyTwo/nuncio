@@ -12,6 +12,7 @@ members = [
     "crates/nuncio-mcp",
     "crates/nunciod",
     "crates/nuncio-filter",
+    "crates/nuncio-contacts",
 ]
 
 [workspace.package]
