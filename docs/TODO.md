@@ -89,3 +89,20 @@
 - [ ] `#283`: Build glassmorphic React `<FilterRulesModal />` component in `nuncio-gui` with "Visual Builder" vs "NSQL Query Editor" tabs, live syntax diagnostics, dry-run split pane, and execution log inspector tab.
 - [ ] `#284`: Register Native MCP (`nuncio-mcp`) `nuncio_filter_*` tools and stream `nuncio://filters` resource.
 - [ ] `#285`: Create end-to-end integration test suite verifying 1,000,000 message batch performance, zero-warning compiler build, zero-clippy lints, and 100% test pass rate across workspace crates.
+
+### Epic 9: Database Corruption Self-Healing & Recovery Engine (#286 – #300) - `PLANNED`
+- [ ] `#286`: Implement `DatabaseEngine::check_integrity()` executing `PRAGMA quick_check(10);` on database open.
+- [ ] `#287`: Implement SQLite error code trap catching `SQLITE_CORRUPT` (11), `SQLITE_NOTADB` (26), and `SQLITE_CANTOPEN` (14) during runtime query execution.
+- [ ] `#288`: Implement `CorruptedBackupManager` isolating damaged `.db`, `.db-wal`, and `.db-shm` files to `~/.nuncio/corrupted_backups/nuncio_corrupted_<timestamp>.db`.
+- [ ] `#289`: Implement `SqliteRecoveryEngine` executing stream salvage to extract valid `accounts`, `filter_rules`, `filter_conditions`, and `filter_actions` records into a fresh SQLite file (`nuncio_main.db`).
+- [ ] `#290`: Implement cryptographic hash-chain audit ledger verification (`verify_chain_integrity()`) to detect log tampering or corrupted `filter_execution_logs`.
+- [ ] `#291`: Implement `SelfHealingSyncOrchestrator` in `nunciod` triggering clean background IMAP/JMAP resync when local email caches are reset.
+- [ ] `#292`: Connect OS Keyring vault credentials to re-initialize authenticated protocol connections seamlessly post-recovery.
+- [ ] `#293`: Implement `CoreEvent::DatabaseRecovered` event payload and broadcast it over IPC sockets.
+- [ ] `#294`: Add POSIX CLI (`nuncio-cli`) database recovery status notice on `CoreEvent::DatabaseRecovered`.
+- [ ] `#295`: Render Terminal TUI (`nuncio-tui`) top menu recovery banner and status indicator.
+- [ ] `#296`: Render Desktop GUI (`nuncio-gui`) toast notification and resync status badge in React frontend.
+- [ ] `#297`: Expose Native MCP (`nuncio-mcp`) database health and recovery diagnostic status in `nuncio://system/status`.
+- [ ] `#298`: Create unit test simulating database header corruption and verifying Stage 1 detection.
+- [ ] `#299`: Create integration test verifying Stage 2 backup creation and Stage 3 table salvage.
+- [ ] `#300`: Verify zero warnings (`cargo check --workspace`), zero clippy lints (`cargo clippy --workspace -- -D warnings`), and 100% passing tests.
