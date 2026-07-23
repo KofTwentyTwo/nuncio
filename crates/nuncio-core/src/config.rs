@@ -90,7 +90,7 @@ impl AccountConfig {
             });
         }
         if !self.email_address.contains('@')
-            || !self.email_address.split_once('@').map_or(false, |(_, domain)| domain.contains('.'))
+            || !self.email_address.split_once('@').is_some_and(|(_, domain)| domain.contains('.'))
         {
             return Err(ConfigError::InvalidEmailFormat);
         }
