@@ -212,25 +212,7 @@ impl TuiApp {
         // Render body area based on AppMode
         match self.mode {
             AppMode::SplashScreen => {
-                let splash_text = r#"
- ╔═════════════════════════════════════════════════════════════════════════════════╗
- ║  ███╗   ██╗██╗   ██╗███╗   ██╗██████╗██╗ ██████╗                                ║
- ║  ████╗  ██║██║   ██║████╗  ██║██╔════╝██║██╔═══██╗                              ║
- ║  ██╔██╗ ██║██║   ██║██╔██╗ ██║██║     ██║██║   ██║                              ║
- ║  ██║╚██╗██║██║   ██║██║╚██╗██║██║     ██║██║   ██║                              ║
- ║  ██║ ╚████║╚██████╔╝██║ ╚████║╚██████╗██║╚██████╔╝                              ║
- ║  ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚═╝ ╚═════╝                               ║
- ║                                                                                 ║
- ║           Nuncio Mail & Calendar Suite — Official Site: https://nuncio.mx       ║
- ║      Latin: nūntiō ("I announce", "I declare", "I deliver a message")           ║
- ╠═════════════════════════════════════════════════════════════════════════════════╣
- ║  4 Shells: POSIX CLI │ Ratatui TUI │ Tauri v2 Desktop GUI │ Native MCP Stdio   ║
- ║  Engine: SQLite WAL FTS5 Trigram (<3.2ms) │ AES-256-GCM │ age Stream Cipher   ║
- ╠═════════════════════════════════════════════════════════════════════════════════╣
- ║  [?] Keybinding Help Menu           [a] Account Configuration & Switching       ║
- ║  [Tab / h j k l] Navigate Panes     [q] Exit Nuncio Terminal Interface          ║
- ╚═════════════════════════════════════════════════════════════════════════════════╝
-"#;
+                let splash_text = get_splash_screen_text();
                 let splash_block = Block::default()
                     .title(" Welcome to Nuncio ")
                     .borders(Borders::ALL)
@@ -431,4 +413,46 @@ mod tests {
         app.quit();
         assert!(!app.is_running());
     }
+
+    #[test]
+    fn tui_splash_screen_borders_perfectly_aligned() {
+        let text = get_splash_screen_text();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert!(!lines.is_empty());
+
+        let expected_len = lines[0].chars().count();
+        for (idx, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.chars().count(),
+                expected_len,
+                "TUI Splash line {} width mismatch! Expected {}, got {}. Line: '{}'",
+                idx + 1,
+                expected_len,
+                line.chars().count(),
+                line
+            );
+        }
+    }
+}
+
+/// Retrieve exact formatted TUI splash screen text block with mathematically aligned borders.
+pub fn get_splash_screen_text() -> &'static str {
+    r#"
+ ╔═════════════════════════════════════════════════════════════════════════════════╗
+ ║  ███╗   ██╗██╗   ██╗███╗   ██╗██████╗██╗ ██████╗                                ║
+ ║  ████╗  ██║██║   ██║████╗  ██║██╔════╝██║██╔═══██╗                              ║
+ ║  ██╔██╗ ██║██║   ██║██╔██╗ ██║██║     ██║██║   ██║                              ║
+ ║  ██║╚██╗██║██║   ██║██║╚██╗██║██║     ██║██║   ██║                              ║
+ ║  ██║ ╚████║╚██████╔╝██║ ╚████║╚██████╗██║╚██████╔╝                              ║
+ ║  ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚═╝ ╚═════╝                               ║
+ ║                                                                                 ║
+ ║           Nuncio Mail & Calendar Suite — Official Site: https://nuncio.mx       ║
+ ║      Latin: nūntiō ("I announce", "I declare", "I deliver a message")           ║
+ ╠═════════════════════════════════════════════════════════════════════════════════╣
+ ║  4 Shells: POSIX CLI │ Ratatui TUI │ Tauri v2 Desktop GUI │ Native MCP Stdio    ║
+ ║  Engine: SQLite WAL FTS5 Trigram (<3.2ms) │ AES-256-GCM │ age Stream Cipher     ║
+ ╠═════════════════════════════════════════════════════════════════════════════════╣
+ ║  [?] Keybinding Help Menu           [a] Account Configuration & Switching       ║
+ ║  [Tab / h j k l] Navigate Panes     [q] Exit Nuncio Terminal Interface          ║
+ ╚═════════════════════════════════════════════════════════════════════════════════╝"#
 }

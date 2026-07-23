@@ -53,23 +53,27 @@ pub fn format_json_error(message: &str) -> String {
 
 /// Print ANSI color ASCII art splash banner for CLI startup.
 pub fn print_splash_banner() {
-    let banner = r#"
+    let banner = get_splash_banner_text();
+    println!("{banner}");
+}
+
+/// Retrieve exact formatted splash banner string with aligned vertical borders.
+pub fn get_splash_banner_text() -> &'static str {
+    r#"
  ╔═════════════════════════════════════════════════════════════════════╗
  ║  ███╗   ██╗██╗   ██╗███╗   ██╗██████╗██╗ ██████╗                    ║
- ║  ████╗  ██║██║   ██║████╗  ██║██╔════╝██║██╔═══██╗                   ║
- ║  ██╔██╗ ██║██║   ██║██╔██╗ ██║██║     ██║██║   ██║                   ║
- ║  ██║╚██╗██║██║   ██║██║╚██╗██║██║     ██║██║   ██║                   ║
- ║  ██║ ╚████║╚██████╔╝██║ ╚████║╚██████╗██║╚██████╔╝                   ║
- ║  ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚═╝ ╚═════╝                    ║
+ ║  ████╗  ██║██║   ██║████╗  ██║██╔════╝██║██╔═══██╗                  ║
+ ║  ██╔██╗ ██║██║   ██║██╔██╗ ██║██║     ██║██║   ██║                  ║
+ ║  ██║╚██╗██║██║   ██║██║╚██╗██║██║     ██║██║   ██║                  ║
+ ║  ██║ ╚████║╚██████╔╝██║ ╚████║╚██████╗██║╚██████╔╝                  ║
+ ║  ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚═╝ ╚═════╝                   ║
  ║                                                                     ║
- ║        Nuncio Mail & Calendar Suite — https://nuncio.mx            ║
+ ║        Nuncio Mail & Calendar Suite — https://nuncio.mx             ║
  ║   Latin: nūntiō ("I announce, I declare, I deliver a message")      ║
  ╠═════════════════════════════════════════════════════════════════════╣
- ║  4 Presentation Shells: POSIX CLI │ Ratatui TUI │ GUI │ MCP AI Stdio ║
+ ║  4 Presentation Shells: POSIX CLI │ Ratatui TUI │ GUI │ MCP AI Stdio║
  ║  Engine: SQLite WAL FTS5 Trigram │ AES-256-GCM │ age Stream Cipher  ║
- ╚═════════════════════════════════════════════════════════════════════╝
-"#;
-    println!("{banner}");
+ ╚═════════════════════════════════════════════════════════════════════╝"#
 }
 
 #[cfg(test)]
@@ -79,10 +83,10 @@ mod tests {
 
     #[test]
     fn format_json_success_payload() {
-        let payload = json!({"count": 42, "user": "alice"});
-        let json_str = format_json(&payload);
-        assert!(json_str.contains(r#""status":"ok""#));
-        assert!(json_str.contains(r#""count":42"#));
+        let payload = json!({ "key": "value" });
+        let out = format_json(&payload);
+        assert!(out.contains(r#""status":"ok""#));
+        assert!(out.contains(r#""key":"value""#));
     }
 
     #[test]
@@ -90,5 +94,25 @@ mod tests {
         let err_str = format_json_error("account not found");
         assert!(err_str.contains(r#""status":"error""#));
         assert!(err_str.contains(r#""error":"account not found""#));
+    }
+
+    #[test]
+    fn splash_banner_vertical_borders_perfectly_aligned() {
+        let banner = get_splash_banner_text();
+        let lines: Vec<&str> = banner.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert!(!lines.is_empty());
+
+        let expected_len = lines[0].chars().count();
+        for (idx, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.chars().count(),
+                expected_len,
+                "Banner line {} width mismatch! Expected {}, got {}. Line: '{}'",
+                idx + 1,
+                expected_len,
+                line.chars().count(),
+                line
+            );
+        }
     }
 }
