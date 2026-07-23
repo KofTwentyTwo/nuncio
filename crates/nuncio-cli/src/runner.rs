@@ -523,7 +523,13 @@ impl HeadlessRunner {
             sync_interval_secs: 300,
         };
 
-        let _ = self.db.save_account(&acct).await;
+        if let Err(e) = self.db.save_account(&acct).await {
+            if json_mode {
+                return format_json_error(&e.to_string());
+            } else {
+                return format!("Failed to save account: {e}");
+            }
+        }
 
         if json_mode {
             format_json(&json!({
