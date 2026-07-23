@@ -29,54 +29,7 @@
 
 Nuncio operates on a **Hybrid Daemon-First Architecture**. Centralized state management, SQLite WAL persistence, credential security enclaves, and protocol synchronizers reside inside a standalone background daemon (`nunciod`). Four decoupled interfaces communicate with `nunciod` over native IPC socket streams:
 
-```mermaid
-graph TD
-    subgraph Four Great Interfaces
-        CLI["nuncio-cli (POSIX CLI)"]
-        TUI["nuncio-tui (Ratatui TUI)"]
-        GUI["nuncio-gui (Tauri v2 Desktop GUI)"]
-        MCP["nuncio-mcp (Native MCP LLM Agent Interface)"]
-    end
-
-    subgraph IPC Client Engine
-        Client["IpcClient (Auto-Spawn + Retry Loop + JSON-RPC 2.0 Framing)"]
-    end
-
-    subgraph Native OS Sockets
-        UnixSocket["POSIX: UNIX Domain Socket (~/.nuncio/nuncio.sock)"]
-        WinPipe["Windows: Named Pipe (\\\\.\\pipe\\nuncio-ipc)"]
-    end
-
-    subgraph Central Background Daemon
-        DaemonServer["IpcDaemonServer (Security Enclave)"]
-        DaemonProcess["nunciod Daemon Process"]
-        EventBus["nuncio-core EventBus"]
-    end
-
-    subgraph Core Engine & Protocol Libraries
-        MailEngine["nuncio-mail (IMAP / SMTP / JMAP)"]
-        CalEngine["nuncio-cal (CalDAV / iCal / rrule)"]
-        StoreEngine["nuncio-store (SQLite WAL / FTS5 Trigram / Age Cipher)"]
-    end
-
-    CLI --> Client
-    TUI --> Client
-    GUI --> Client
-    MCP --> Client
-
-    Client --> UnixSocket
-    Client --> WinPipe
-
-    UnixSocket --> DaemonServer
-    WinPipe --> DaemonServer
-
-    DaemonServer --> DaemonProcess
-    DaemonProcess --> EventBus
-
-    EventBus --> MailEngine
-    EventBus --> CalEngine
-    EventBus --> StoreEngine
-```
+![Nuncio Central Daemon Topology & Multi-Shell Architecture](docs/architecture.png)
 
 1. **`nuncio-cli` (POSIX CLI)**: Scriptable `<Noun> <Verb>` commands with deterministic `--json` output and offline-resilient local SQLite reads.
 2. **`nuncio-tui` (Terminal TUI)**: Keyboard-first 3-pane split view built in Ratatui with Vim navigation (`j`/`k`/`h`/`l`) and live `CoreEvent` push updates.
