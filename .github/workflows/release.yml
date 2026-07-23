@@ -1,0 +1,93 @@
+name: Release Production Binaries & Artifacts
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  draft-release:
+    name: Create GitHub Release Draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "Nuncio ${{ github.ref_name }}" \
+            --generate-notes \
+            --draft
+
+  build-release-artifacts:
+    name: Build Artifacts (${{ matrix.target }})
+    needs: draft-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: nuncio-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: nuncio-macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: nuncio-windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Production Workspace Binaries
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+
+      - name: Package Windows Artifacts
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/nuncio-cli.exe" -DestinationPath "nuncio-cli-${tag}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/nuncio-tui.exe" -DestinationPath "nuncio-tui-${tag}-${{ matrix.target }}.zip"
+
+      - name: Package Unix Artifacts
+        if: matrix.os != 'windows-latest'
+        run: |
+          TAG="${{ github.ref_name }}"
+          tar -czvf "nuncio-cli-${TAG}-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" nuncio-cli
+          tar -czvf "nuncio-tui-${TAG}-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" nuncio-tui
+
+      - name: Upload Release Artifacts to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            gh release upload "${TAG}" "nuncio-cli-${TAG}-${{ matrix.target }}.zip" "nuncio-tui-${TAG}-${{ matrix.target }}.zip"
+          else
+            gh release upload "${TAG}" "nuncio-cli-${TAG}-${{ matrix.target }}.tar.gz" "nuncio-tui-${TAG}-${{ matrix.target }}.tar.gz"
+          fi
+
+  publish-release:
+    name: Publish Release & SHA256 Checksums
+    needs: build-release-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Finalize GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release edit "${TAG}" --draft=false

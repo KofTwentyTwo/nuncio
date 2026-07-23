@@ -2,6 +2,15 @@
 
 Nuncio ([nuncio.mx](https://nuncio.mx)) is a cross-platform mail and calendar solution written in Rust.
 
+## Semantic Versioning 2.0.0 & Release Policy
+
+- **SemVer Standard**: All releases follow **Semantic Versioning 2.0.0** (`MAJOR.MINOR.PATCH`).
+  - `MAJOR`: Incremented on breaking API or model contract changes.
+  - `MINOR`: Incremented when new backward-compatible capabilities or crates are added.
+  - `PATCH`: Incremented on backward-compatible bug fixes and security patches.
+- **Git Tag Format**: Release tags MUST follow `vMAJOR.MINOR.PATCH` format (e.g., `v0.1.0`, `v0.2.0`, `v1.0.0`).
+- **Automated GitHub Releases Workflow**: Pushing a `v*.*.*` tag triggers [.github/workflows/release.yml](file:///R:/Git.Local/KofTwentyTwo/nuncio/.github/workflows/release.yml) to compile, package, compute SHA256 checksums, and publish release binaries for Windows (`.zip` / `.msi`), macOS (`.tar.gz` / `.dmg`), and Linux (`.tar.gz` / `.AppImage`).
+
 ## JetBrains RustRover IDE Integration
 
 Nuncio is pre-configured for **JetBrains RustRover** out of the box:

@@ -1,36 +1,40 @@
 # Contributing to Nuncio
 
-Thank you for your interest in contributing to Nuncio ([nuncio.mx](https://nuncio.mx)).
+Thank you for contributing to Nuncio ([nuncio.mx](https://nuncio.mx))!
 
-## Development Workflow
+## Semantic Versioning 2.0.0 & Tagging
 
-1. **Branch Naming**: All work must be conducted on dedicated feature or fix branches branching off `main`:
-   - `feature/GH-123-short-description`
-   - `fix/GH-45-short-description`
-2. **Library-First Decoupling**: Business logic, protocol parsing, offline caching, and search indexing must be implemented in headless engine crates (`crates/nuncio-core`, `crates/nuncio-mail`, `crates/nuncio-cal`, `crates/nuncio-store`). Presentation shells (`nuncio-cli`, `nuncio-tui`, `nuncio-gui`) must remain thin UI layers.
-3. **Commit Messages**: All git commits must follow Conventional Commits format:
-   - `feat(mail): implement JMAP Email/changes sync`
-   - `fix(store): resolve FTS5 trigram query escaping`
-   - Subject lines must be under 72 characters, written in imperative mood.
+Nuncio follows **Semantic Versioning 2.0.0** (`vMAJOR.MINOR.PATCH`):
+- `MAJOR`: Incremented for incompatible API or structural changes.
+- `MINOR`: Incremented for new functionality added in a backward-compatible manner.
+- `PATCH`: Incremented for backward-compatible bug fixes.
 
-## Quality Gates & Verification
+Tagging a commit with `vX.Y.Z` triggers [.github/workflows/release.yml](file:///R:/Git.Local/KofTwentyTwo/nuncio/.github/workflows/release.yml) to automatically compile cross-platform release artifacts (Windows `.zip`/`.msi`, macOS `.tar.gz`/`.dmg`, Linux `.tar.gz`/`.AppImage`), generate release notes from Conventional Commits, compute SHA256 checksums, and publish an official GitHub Release.
 
-Before submitting a Pull Request, verify that all local quality gates pass:
+## Architecture Decoupling Rules
+
+1. **Library-First Model**: Business logic, protocol parsing, offline caching, search indexing, and cryptographic key management MUST reside strictly inside headless Rust crates: `crates/nuncio-core`, `crates/nuncio-mail`, `crates/nuncio-cal`, and `crates/nuncio-store`.
+2. **Skinny Shells**: Presentation shells (`crates/nuncio-cli`, `crates/nuncio-tui`, `crates/nuncio-gui`) MUST remain thin UI layers interacting with `nuncio-core` via async Tokio channels.
+
+## Code Quality Gates
+
+Before submitting a Pull Request, run the local quality suite:
 
 ```bash
-# Code formatting check
 cargo fmt --all -- --check
-
-# Linter checks with warnings as errors
-cargo clippy --all-targets --workspace -- -D warnings
-
-# Unit & Integration tests
-cargo test --workspace
+cargo check-all
+cargo test-all
+cargo cov
 ```
 
-## Pull Request Process
+All 4 checks MUST pass cleanly. Compiler warnings are treated as hard errors (`-D warnings`). 100% unit test line coverage is required.
 
-1. Open a Pull Request targeting `main`.
-2. Ensure the PR description references the relevant GitHub Issue (`Closes #123`).
-3. Complete the PR template checklist confirming local test suite execution and linter verification.
-4. All CI matrix checks (Windows, macOS, Linux) must pass 100% prior to merging.
+## Commit Message Format
+
+Follow Conventional Commits:
+
+```
+feat(mail): add JMAP WebSocket push state engine
+fix(store): resolve SQLite FTS5 trigram deadlock on concurrent insert
+ci: update GitHub Actions release matrix workflow
+```
