@@ -25,13 +25,13 @@
 
 ---
 
-## 4 Presentation Interfaces + Central Daemon Topology
+## 4 Great Interfaces + Central Daemon Topology
 
-Nuncio operates on a **Hybrid Daemon-First Architecture**. Centralized state management, SQLite WAL persistence, credential security enclaves, and protocol synchronizers reside inside a standalone background daemon (`nunciod`). Four decoupled presentation interfaces communicate with `nunciod` over native IPC socket streams:
+Nuncio operates on a **Hybrid Daemon-First Architecture**. Centralized state management, SQLite WAL persistence, credential security enclaves, and protocol synchronizers reside inside a standalone background daemon (`nunciod`). Four decoupled interfaces communicate with `nunciod` over native IPC socket streams:
 
 ```mermaid
 graph TD
-    subgraph Presentation Shells
+    subgraph Four Great Interfaces
         CLI["nuncio-cli (POSIX CLI)"]
         TUI["nuncio-tui (Ratatui TUI)"]
         GUI["nuncio-gui (Tauri v2 Desktop GUI)"]
