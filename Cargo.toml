@@ -51,7 +51,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 zeroize = { version = "1.8", features = ["derive"] }
 tempfile = "3.10"
 keyring = "2.3"
-age = "0.10"
+age = "0.12"
 aes-gcm = "0.10"
 mail-parser = "0.9"
 bytes = "1.6"
