@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod backend;
 pub mod caldav;
 pub mod carddav;
 pub mod mock;
@@ -11,7 +12,8 @@ pub mod parser;
 pub mod rrule;
 pub mod scheduling;
 
-pub use caldav::CalDavClient;
+pub use backend::CalendarBackend;
+pub use caldav::{CalDavAccountConfig, CalDavClient};
 pub use carddav::{CardDavClient, Contact};
 pub use mock::MockCalendarBackend;
 pub use nlp::{NaturalLanguageScheduler, NlpError, ParsedSchedulingIntent};

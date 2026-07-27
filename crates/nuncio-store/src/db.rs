@@ -159,7 +159,14 @@ impl DatabaseEngine {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(std::time::Duration::from_millis(5000))
-            .foreign_keys(true);
+            .foreign_keys(true)
+            // SQLite only fires a table's AFTER DELETE trigger for the implicit delete an
+            // `INSERT OR REPLACE` performs on a primary-key conflict when `recursive_triggers`
+            // is enabled -- otherwise the delete half is silent. `calendar_events`'s
+            // `events_ad`/`events_au` triggers (see `migrate`) rely on exactly this to keep
+            // `events_fts` from accumulating a stale row every time `save_calendar_event`
+            // upserts an existing event.
+            .pragma("recursive_triggers", "ON");
 
         let pool = SqlitePoolOptions::new()
             .max_connections(Self::MAX_CONNECTIONS)
@@ -898,6 +905,132 @@ impl DatabaseEngine {
             body_plain: dec_plain,
             body_html: dec_html,
             attachments: Vec::new(),
+        })
+    }
+
+    /// Save a [`nuncio_core::model::CalendarEvent`] to SQLite (INSERT OR REPLACE).
+    ///
+    /// Unlike [`Self::save_email`], calendar event summary/location are never encrypted at
+    /// rest (see the confidentiality note above the `events_fts` `CREATE VIRTUAL TABLE`
+    /// statement in [`Self::migrate`]), so the `events_ai`/`events_ad`/`events_au` triggers
+    /// created there keep `events_fts` in sync automatically -- there is no separate manual
+    /// FTS write here the way there is for messages.
+    pub async fn save_calendar_event(
+        &self,
+        event: &nuncio_core::model::CalendarEvent,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO calendar_events
+            (id, account_id, calendar_id, summary, start_time, end_time, rrule, location)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&event.id)
+        .bind(&event.account_id)
+        .bind(&event.calendar_id)
+        .bind(&event.summary)
+        .bind(event.start_time)
+        .bind(event.end_time)
+        .bind(&event.rrule)
+        .bind(&event.location)
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(())
+    }
+
+    /// Query persisted calendar events for `account_id` whose `[start_time, end_time]` window
+    /// overlaps `[start_window, end_window]` (inclusive, unix seconds) -- standard interval
+    /// overlap, not "fully contained": an event that starts before `start_window` but is still
+    /// ongoing, or one that starts within the window but ends after it, is still returned.
+    #[allow(clippy::type_complexity)]
+    pub async fn list_calendar_events(
+        &self,
+        account_id: &str,
+        start_window: i64,
+        end_window: i64,
+    ) -> Result<Vec<nuncio_core::model::CalendarEvent>, DatabaseError> {
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, account_id, calendar_id, summary, start_time, end_time, rrule, location
+            FROM calendar_events
+            WHERE account_id = ? AND start_time <= ? AND end_time >= ?
+            ORDER BY start_time ASC
+            "#,
+        )
+        .bind(account_id)
+        .bind(end_window)
+        .bind(start_window)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, account_id, calendar_id, summary, start_time, end_time, rrule, location)| {
+                    nuncio_core::model::CalendarEvent {
+                        id,
+                        account_id,
+                        calendar_id,
+                        summary,
+                        start_time,
+                        end_time,
+                        rrule,
+                        location,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// Retrieve a single calendar event by ID.
+    #[allow(clippy::type_complexity)]
+    pub async fn get_calendar_event(
+        &self,
+        event_id: &str,
+    ) -> Result<nuncio_core::model::CalendarEvent, DatabaseError> {
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            r#"
+            SELECT id, account_id, calendar_id, summary, start_time, end_time, rrule, location
+            FROM calendar_events
+            WHERE id = ?
+            "#,
+        )
+        .bind(event_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(nuncio_core::model::CalendarEvent {
+            id: row.0,
+            account_id: row.1,
+            calendar_id: row.2,
+            summary: row.3,
+            start_time: row.4,
+            end_time: row.5,
+            rrule: row.6,
+            location: row.7,
         })
     }
 
@@ -1784,6 +1917,113 @@ mod tests {
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].id, "INBOX");
         assert_eq!(folders[0].unread_messages, 1);
+    }
+
+    fn sample_calendar_event(id: &str, account_id: &str) -> nuncio_core::model::CalendarEvent {
+        nuncio_core::model::CalendarEvent {
+            id: id.to_string(),
+            account_id: account_id.to_string(),
+            calendar_id: "cal-work".to_string(),
+            summary: "Architecture Sync".to_string(),
+            start_time: 1_700_000_000,
+            end_time: 1_700_003_600,
+            rrule: None,
+            location: Some("Conference Room B".to_string()),
+        }
+    }
+
+    /// A saved event is retrievable by both `get_calendar_event` and `list_calendar_events`,
+    /// and shows up in `SearchEngine::search_events` -- proving the real write path (not a
+    /// raw-SQL test insert) keeps the `events_fts` trigger-populated index in sync.
+    #[tokio::test]
+    async fn save_get_list_and_search_calendar_event() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let event = sample_calendar_event("evt-db-100", "acct-1");
+        engine
+            .save_calendar_event(&event)
+            .await
+            .expect("save calendar event succeeds");
+
+        let fetched = engine
+            .get_calendar_event("evt-db-100")
+            .await
+            .expect("get calendar event succeeds");
+        assert_eq!(fetched, event);
+
+        let listed = engine
+            .list_calendar_events("acct-1", 1_699_000_000, 1_701_000_000)
+            .await
+            .expect("list calendar events succeeds");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0], event);
+
+        // Outside the queried window entirely -> no match.
+        let out_of_window = engine
+            .list_calendar_events("acct-1", 1_800_000_000, 1_801_000_000)
+            .await
+            .expect("list calendar events succeeds");
+        assert!(out_of_window.is_empty());
+
+        // Different account -> no match, even within the same window.
+        let other_account = engine
+            .list_calendar_events("acct-other", 1_699_000_000, 1_701_000_000)
+            .await
+            .expect("list calendar events succeeds");
+        assert!(other_account.is_empty());
+
+        let search = crate::search::SearchEngine::new(&engine);
+        let hits = search
+            .search_events("Architecture")
+            .await
+            .expect("search events succeeds");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "evt-db-100");
+    }
+
+    /// Re-saving an event with the same ID (an update, not a fresh insert) replaces both the
+    /// row and its FTS entry rather than duplicating either.
+    #[tokio::test]
+    async fn save_calendar_event_upserts_existing_row_and_fts_entry() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let mut event = sample_calendar_event("evt-db-200", "acct-1");
+        engine.save_calendar_event(&event).await.unwrap();
+
+        event.summary = "Renamed Planning Session".to_string();
+        event.start_time = 1_750_000_000;
+        event.end_time = 1_750_003_600;
+        engine.save_calendar_event(&event).await.unwrap();
+
+        let fetched = engine.get_calendar_event("evt-db-200").await.unwrap();
+        assert_eq!(fetched.summary, "Renamed Planning Session");
+        assert_eq!(fetched.start_time, 1_750_000_000);
+
+        let search = crate::search::SearchEngine::new(&engine);
+        assert!(search
+            .search_events("Architecture")
+            .await
+            .unwrap()
+            .is_empty());
+        let hits = search.search_events("Renamed").await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "evt-db-200");
+    }
+
+    /// `get_calendar_event` for an ID that was never saved reports
+    /// `sqlx::Error::RowNotFound` rather than silently fabricating an empty/default event.
+    #[tokio::test]
+    async fn get_calendar_event_reports_not_found_for_missing_event() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let err = engine
+            .get_calendar_event("evt-does-not-exist")
+            .await
+            .expect_err("missing event must be a real error");
+        assert!(matches!(
+            err,
+            DatabaseError::Query(sqlx::Error::RowNotFound)
+        ));
     }
 
     /// `set_message_read` flips the persisted
