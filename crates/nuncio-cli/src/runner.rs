@@ -1531,10 +1531,24 @@ impl HeadlessRunner {
                         .collect();
                     format_json(&json!({ "accounts": accounts_json }))
                 } else {
-                    format!(
+                    let mut out = format!(
                         "Configured Accounts: {} account(s) registered",
                         accounts.len()
-                    )
+                    );
+                    for a in &accounts {
+                        out.push_str(&format!(
+                            "\n  [{}] {} <{}>  IMAP {}:{}  SMTP {}:{}  TLS={}",
+                            a.id,
+                            a.name,
+                            a.email_address,
+                            a.server_host,
+                            a.server_port,
+                            a.smtp_host,
+                            a.smtp_port,
+                            a.use_tls,
+                        ));
+                    }
+                    out
                 }
             }
             Err(status) => Self::render_error(
@@ -2087,6 +2101,9 @@ mod tests {
             )
             .await;
         assert!(list_out_text.contains("1 account(s) registered"));
+        // Plain output must show each account's details, not just the count.
+        assert!(list_out_text.contains("stub@nuncio.mx"));
+        assert!(list_out_text.contains("imap.nuncio.mx"));
     }
 
     /// Reference-client proof for backlog stories 1.C.4 / 1.C.6 (GH #159 /
