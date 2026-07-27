@@ -7,14 +7,22 @@
 //! (`nuncio_core::ipc::IpcDaemonServer`); migrating callers off the JSON-RPC
 //! transport is out of scope here and lands in a later story.
 
-use nuncio_core::EventBus;
+use nuncio_core::{CoreEvent, EventBus};
+use nuncio_proto::v1::event::Kind;
 use nuncio_proto::v1::system_server::{System, SystemServer};
-use nuncio_proto::v1::{GetStatusRequest, GetStatusResponse};
+use nuncio_proto::v1::{
+    BatchFilterProgress, DatabaseRecovered, Event, EventError, FilterExecuted, GetStatusRequest,
+    GetStatusResponse, MessageFlagsChanged, ShuttingDown, SubscribeRequest, SyncCompleted,
+    SyncStarted, UpdateAvailable,
+};
+use std::pin::Pin;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::wrappers::{BroadcastStream, TcpListenerStream};
+use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
@@ -43,6 +51,64 @@ pub enum GrpcServeError {
     Transport(#[from] tonic::transport::Error),
 }
 
+/// Maps a `nuncio_core::CoreEvent` domain event onto its wire-format
+/// `nuncio.v1.Event` representation, faithfully carrying every variant's
+/// fields into the matching `oneof` case (see `proto/nuncio/v1/nuncio.proto`
+/// for the wire contract, backlog story 1.A.4 / GH-151).
+///
+/// `usize` fields (`processed`, `total`, `matched`, `salvaged_rules_count`)
+/// are narrowed to `u64` for the wire; these are in-process counters that
+/// cannot realistically approach `u64::MAX`, and protobuf has no native
+/// `usize` type.
+fn map_core_event(event: CoreEvent) -> Event {
+    let kind = match event {
+        CoreEvent::SyncStarted { account_id } => Kind::SyncStarted(SyncStarted { account_id }),
+        CoreEvent::SyncCompleted { account_id } => {
+            Kind::SyncCompleted(SyncCompleted { account_id })
+        }
+        CoreEvent::MessageFlagsChanged { message_id, read } => {
+            Kind::MessageFlagsChanged(MessageFlagsChanged { message_id, read })
+        }
+        CoreEvent::FilterExecuted {
+            rule_id,
+            message_id,
+            action_taken,
+        } => Kind::FilterExecuted(FilterExecuted {
+            rule_id,
+            message_id,
+            action_taken,
+        }),
+        CoreEvent::BatchFilterProgress {
+            processed,
+            total,
+            matched,
+        } => Kind::BatchFilterProgress(BatchFilterProgress {
+            processed: processed as u64,
+            total: total as u64,
+            matched: matched as u64,
+        }),
+        CoreEvent::DatabaseRecovered {
+            backup_path,
+            salvaged_rules_count,
+            resync_triggered,
+        } => Kind::DatabaseRecovered(DatabaseRecovered {
+            backup_path,
+            salvaged_rules_count: salvaged_rules_count as u64,
+            resync_triggered,
+        }),
+        CoreEvent::UpdateAvailable {
+            version,
+            release_notes,
+        } => Kind::UpdateAvailable(UpdateAvailable {
+            version,
+            release_notes,
+        }),
+        CoreEvent::Error { message } => Kind::Error(EventError { message }),
+        CoreEvent::ShuttingDown => Kind::ShuttingDown(ShuttingDown {}),
+    };
+    Event { kind: Some(kind) }
+}
+
 /// `nuncio.v1.System` gRPC service implementation backed by the daemon's live
 /// [`EventBus`] state.
 struct SystemGrpcService {
@@ -60,6 +126,47 @@ impl System for SystemGrpcService {
             engine_status: format!("{:?}", state.status),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }))
+    }
+
+    /// Server-streaming push feed of daemon domain events (backlog story
+    /// 1.A.4 / GH-151). Defined on `System` (not a separate service) so this
+    /// RPC is automatically covered by the same `BearerAuthInterceptor` that
+    /// guards `GetStatus`, rather than risking a second, un-intercepted
+    /// service being mounted by mistake (see GH #165).
+    ///
+    /// The subscription is registered (`event_bus.subscribe_events()`)
+    /// synchronously before this method returns, so once a client's
+    /// `subscribe` call resolves, any event published afterwards is
+    /// guaranteed to be observed on the returned stream — no fixed sleep is
+    /// needed by callers to avoid a race between "start subscribing" and
+    /// "event published".
+    ///
+    /// A lagging subscriber (`BroadcastStreamRecvError::Lagged`) is handled
+    /// by logging a warning and skipping to the next available event rather
+    /// than terminating the stream or panicking; the daemon's event bus is
+    /// a best-effort broadcast feed, not a durable log, so a slow subscriber
+    /// missing some events is preferable to it never recovering. The stream
+    /// ends (returns `None`) only when the event bus itself is closed (all
+    /// `EventBus` senders dropped) or the client disconnects.
+    type SubscribeStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send + 'static>>;
+
+    async fn subscribe(
+        &self,
+        _request: Request<SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        let receiver = self.event_bus.subscribe_events();
+        let mapped = BroadcastStream::new(receiver).filter_map(|item| match item {
+            Ok(core_event) => Some(Ok(map_core_event(core_event))),
+            Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                tracing::warn!(
+                    "gRPC Subscribe stream lagged behind the daemon event bus; skipped {} \
+                     event(s); resuming from the next available event",
+                    skipped
+                );
+                None
+            }
+        });
+        Ok(Response::new(Box::pin(mapped)))
     }
 }
 
@@ -309,5 +416,156 @@ mod tests {
             .await
             .expect_err("invalid bind address must fail");
         assert!(matches!(err, GrpcServeError::Bind { .. }));
+    }
+
+    fn authed_bearer_request<T>(payload: T) -> Request<T> {
+        let mut request = Request::new(payload);
+        request.metadata_mut().insert(
+            "authorization",
+            "Bearer correct-token"
+                .parse()
+                .expect("valid ascii metadata value"),
+        );
+        request
+    }
+
+    #[tokio::test]
+    async fn subscribe_streams_mapped_core_events_from_the_live_event_bus() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus.clone(), "correct-token").await;
+
+        let mut client = SystemClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        // `client.subscribe(..).await` only resolves once the server-side
+        // `subscribe` method has returned `Response::new(stream)`, and that
+        // method registers `event_bus.subscribe_events()` before returning.
+        // So once this `.await` completes, the subscription is guaranteed
+        // to already be live: publishing an event afterwards cannot race
+        // ahead of the subscriber registering, and no fixed sleep is
+        // needed to make this deterministic.
+        let mut stream = client
+            .subscribe(authed_bearer_request(SubscribeRequest {}))
+            .await
+            .expect("subscribe is accepted for a valid bearer token")
+            .into_inner();
+
+        event_bus.process_command(CoreCommand::SyncAccount {
+            account_id: "acct-42".to_string(),
+        });
+
+        let event = stream
+            .message()
+            .await
+            .expect("stream yields without a transport error")
+            .expect("stream produces an event rather than ending");
+
+        match event.kind {
+            Some(Kind::SyncStarted(SyncStarted { account_id })) => {
+                assert_eq!(account_id, Some("acct-42".to_string()));
+            }
+            other => panic!("expected a mapped SyncStarted event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_rejects_missing_bearer_token() {
+        // Confirms `Subscribe` inherits the same `BearerAuthInterceptor` as
+        // `GetStatus` because both are defined on the single `System`
+        // service (GH #165: no separate, un-intercepted service).
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = SystemClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .subscribe(SubscribeRequest {})
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn concurrent_unary_and_streaming_calls_do_not_interleave_or_corrupt() {
+        // Regression test for the property the old hand-rolled JSON-RPC IPC
+        // transport lacked: a response/notification demux race that could
+        // corrupt reads when a streamed notification and a unary response
+        // were in flight at the same time. gRPC/HTTP2 multiplexes streaming
+        // and unary calls on independent logical streams, so this asserts
+        // both an active event subscription and many concurrent unary
+        // `GetStatus` calls complete correctly and without corrupting one
+        // another.
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus.clone(), "correct-token").await;
+
+        // Open (and await) the subscription first, on its own connection,
+        // so the server-side registration has deterministically happened
+        // before any event below is published (see the comment in the
+        // single-event test above for why this ordering is race-free).
+        let mut sub_client = SystemClient::connect(format!("http://{addr}"))
+            .await
+            .expect("subscribe client connects");
+        let mut stream = sub_client
+            .subscribe(authed_bearer_request(SubscribeRequest {}))
+            .await
+            .expect("subscribe is accepted for a valid bearer token")
+            .into_inner();
+
+        const ROUNDS: usize = 20;
+        let mut unary_client = SystemClient::connect(format!("http://{addr}"))
+            .await
+            .expect("unary client connects");
+        let unary_task = tokio::spawn(async move {
+            let mut responses = Vec::with_capacity(ROUNDS);
+            for _ in 0..ROUNDS {
+                let response = unary_client
+                    .get_status(authed_bearer_request(GetStatusRequest {}))
+                    .await
+                    .expect("unary call succeeds")
+                    .into_inner();
+                responses.push(response);
+            }
+            responses
+        });
+
+        for i in 0..ROUNDS {
+            event_bus.process_command(CoreCommand::SyncAccount {
+                account_id: format!("acct-{i}"),
+            });
+        }
+
+        let unary_responses = unary_task.await.expect("unary task does not panic");
+        assert_eq!(unary_responses.len(), ROUNDS);
+        for response in &unary_responses {
+            // Every unary response must be a well-formed, uncorrupted
+            // `GetStatusResponse`: the correct build version, and a status
+            // string matching a real `EngineStatus` variant -- never bytes
+            // bled in from the concurrently-running event stream.
+            assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
+            assert!(
+                matches!(
+                    response.engine_status.as_str(),
+                    "Idle" | "Syncing" | "ShuttingDown"
+                ),
+                "unexpected/corrupted engine_status: {:?}",
+                response.engine_status
+            );
+        }
+
+        for i in 0..ROUNDS {
+            let event = stream
+                .message()
+                .await
+                .expect("stream yields without a transport error")
+                .expect("stream produces an event rather than ending early");
+            match event.kind {
+                Some(Kind::SyncStarted(SyncStarted { account_id })) => {
+                    assert_eq!(account_id, Some(format!("acct-{i}")));
+                }
+                other => panic!("expected mapped SyncStarted(acct-{i}) event, got {other:?}"),
+            }
+        }
     }
 }

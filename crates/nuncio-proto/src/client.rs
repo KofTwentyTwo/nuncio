@@ -10,7 +10,9 @@
 //! server-side interceptor in `nunciod::grpc`.
 
 use crate::v1::system_client::SystemClient;
+use crate::v1::{Event, SubscribeRequest};
 use thiserror::Error;
+use tonic::codec::Streaming;
 use tonic::metadata::errors::InvalidMetadataValue;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::service::interceptor::InterceptedService;
@@ -108,6 +110,24 @@ pub async fn connect_system(
         })?;
 
     Ok(SystemClient::with_interceptor(channel, interceptor))
+}
+
+/// Opens the `nuncio.v1.System/Subscribe` server-streaming RPC on an already
+/// authenticated client (as returned by [`connect_system`]), reusing the
+/// bearer-token interceptor already attached to `client` rather than
+/// requiring callers to re-authenticate. Returns the live event stream;
+/// callers pull events with `Streaming::message` (or the `Stream`/`StreamExt`
+/// combinators) until the daemon closes the stream or the connection drops.
+///
+/// This is the client-side counterpart of `nunciod::grpc`'s `Subscribe`
+/// implementation (backlog story 1.A.4 / GH-151) and keeps thin
+/// presentation-shell clients free of any dependency on the `nunciod`
+/// binary crate itself.
+pub async fn subscribe_events(
+    client: &mut AuthenticatedSystemClient,
+) -> Result<Streaming<Event>, Status> {
+    let response = client.subscribe(SubscribeRequest {}).await?;
+    Ok(response.into_inner())
 }
 
 #[cfg(test)]

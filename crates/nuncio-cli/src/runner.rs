@@ -1084,7 +1084,7 @@ mod tests {
     #[tokio::test]
     async fn system_status_reports_live_daemon_status_over_grpc_when_reachable() {
         use nuncio_proto::v1::system_server::{System as SystemService, SystemServer};
-        use nuncio_proto::v1::{GetStatusRequest, GetStatusResponse};
+        use nuncio_proto::v1::{Event, GetStatusRequest, GetStatusResponse, SubscribeRequest};
 
         /// Minimal test-only stub of the `nuncio.v1.System` service: no
         /// auth interceptor, just a fixed status. Bearer-token acceptance
@@ -1103,6 +1103,25 @@ mod tests {
                     engine_status: "Ready".to_string(),
                     version: "9.9.9".to_string(),
                 }))
+            }
+
+            // `Subscribe` streaming is exercised by `nunciod`'s own
+            // `grpc::tests` (backlog story 1.A.4 / GH-151); this stub only
+            // needs to satisfy the trait so the CLI's `GetStatus` happy
+            // path above can compile against the real `System` service
+            // definition, so it deliberately returns `unimplemented` rather
+            // than fabricating stream behavior no test here relies on.
+            type SubscribeStream = std::pin::Pin<
+                Box<dyn tokio_stream::Stream<Item = Result<Event, tonic::Status>> + Send + 'static>,
+            >;
+
+            async fn subscribe(
+                &self,
+                _request: tonic::Request<SubscribeRequest>,
+            ) -> Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
+                Err(tonic::Status::unimplemented(
+                    "subscribe is not exercised by this stub",
+                ))
             }
         }
 

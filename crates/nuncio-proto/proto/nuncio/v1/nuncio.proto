@@ -9,9 +9,19 @@ package nuncio.v1;
 // RPCs will be added under the `nuncio.v1` package as later stories land;
 // breaking changes will be introduced under a new `nuncio.v2` package rather
 // than mutating this one.
+//
+// `Subscribe` is deliberately defined on THIS service (rather than a separate
+// one) so that it is automatically covered by the same server-side bearer
+// auth interceptor that guards `GetStatus`, instead of risking a second,
+// un-intercepted service being mounted by mistake (see GH #165).
 service System {
   // GetStatus reports basic daemon/engine health information.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  // Subscribe opens a live, server-streaming push feed of daemon domain
+  // events (see `nuncio_core::CoreEvent`) for the lifetime of the call. The
+  // stream ends when the client disconnects or the daemon's event bus is
+  // shut down.
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
 }
 
 // GetStatusRequest currently carries no parameters. Fields may be added
@@ -26,3 +36,96 @@ message GetStatusResponse {
   // The nunciod build/crate version serving this response.
   string version = 2;
 }
+
+// SubscribeRequest currently carries no parameters. Fields may be added
+// here in future stories (e.g. event-kind filtering).
+message SubscribeRequest {}
+
+// Event faithfully mirrors `nuncio_core::CoreEvent`: exactly one variant
+// message is populated per event, carrying that variant's fields. New
+// `CoreEvent` variants MUST be added here as a new oneof case (never by
+// repurposing an existing field number) to keep the wire contract stable.
+message Event {
+  oneof kind {
+    SyncStarted sync_started = 1;
+    SyncCompleted sync_completed = 2;
+    MessageFlagsChanged message_flags_changed = 3;
+    FilterExecuted filter_executed = 4;
+    BatchFilterProgress batch_filter_progress = 5;
+    DatabaseRecovered database_recovered = 6;
+    UpdateAvailable update_available = 7;
+    EventError error = 8;
+    ShuttingDown shutting_down = 9;
+  }
+}
+
+// Mirrors `CoreEvent::SyncStarted`.
+message SyncStarted {
+  // Account ID if scoped to a specific account; absent when synchronizing
+  // all accounts.
+  optional string account_id = 1;
+}
+
+// Mirrors `CoreEvent::SyncCompleted`.
+message SyncCompleted {
+  // Account ID if scoped to a specific account; absent when synchronizing
+  // all accounts.
+  optional string account_id = 1;
+}
+
+// Mirrors `CoreEvent::MessageFlagsChanged`.
+message MessageFlagsChanged {
+  // Message identifier.
+  string message_id = 1;
+  // New read state.
+  bool read = 2;
+}
+
+// Mirrors `CoreEvent::FilterExecuted`.
+message FilterExecuted {
+  // Filter rule identifier.
+  string rule_id = 1;
+  // Email message identifier.
+  string message_id = 2;
+  // Action description.
+  string action_taken = 3;
+}
+
+// Mirrors `CoreEvent::BatchFilterProgress`.
+message BatchFilterProgress {
+  // Messages processed so far in the batch.
+  uint64 processed = 1;
+  // Total message count in batch.
+  uint64 total = 2;
+  // Total matching rule executions.
+  uint64 matched = 3;
+}
+
+// Mirrors `CoreEvent::DatabaseRecovered`.
+message DatabaseRecovered {
+  // Forensic backup path.
+  string backup_path = 1;
+  // Number of filter rules salvaged from corrupted DB.
+  uint64 salvaged_rules_count = 2;
+  // Whether automated resync was triggered.
+  bool resync_triggered = 3;
+}
+
+// Mirrors `CoreEvent::UpdateAvailable`.
+message UpdateAvailable {
+  // Latest available release version (e.g. "0.2.0").
+  string version = 1;
+  // Release notes / changelog.
+  string release_notes = 2;
+}
+
+// Mirrors `CoreEvent::Error`. Named `EventError` (rather than `Error`) to
+// avoid colliding with the `Error` trait/derive macro name that is
+// ubiquitous in hand-written Rust using this generated module.
+message EventError {
+  // Error message text.
+  string message = 1;
+}
+
+// Mirrors `CoreEvent::ShuttingDown`, which carries no fields.
+message ShuttingDown {}
