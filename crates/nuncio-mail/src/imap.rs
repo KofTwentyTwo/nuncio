@@ -27,6 +27,20 @@ use crate::parser::{MailError, MimeParserAdapter};
 /// wrong port) must fail fast and visibly, not stall the caller forever.
 const IMAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Upper bound on how long a single `FETCH` response item may take to
+/// arrive once the `UID FETCH` command has been acknowledged. A real
+/// mailbox with many/large messages fetching a full body for everything in
+/// one unbatched command can legitimately take a while overall, but a
+/// single item that never arrives (dead socket, server-side hang) must
+/// still surface as an honest timeout instead of hanging the whole sync
+/// indefinitely.
+const IMAP_FETCH_ITEM_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How often (in fetched-message count) to log sync progress, so a
+/// genuinely slow-but-progressing sync against a large real mailbox is
+/// visibly distinguishable from a stalled one.
+const IMAP_FETCH_PROGRESS_LOG_INTERVAL: usize = 25;
+
 /// State of the dedicated IMAP IDLE socket listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleSocketState {
@@ -409,22 +423,75 @@ impl ImapEngine {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
-        session.select(folder_id).await.map_err(|e| {
+        let select_started = std::time::Instant::now();
+        let mailbox = session.select(folder_id).await.map_err(|e| {
             MailError::ImapError(format!("failed to select folder '{}': {}", folder_id, e))
         })?;
+        tracing::info!(
+            folder_id,
+            exists = mailbox.exists,
+            elapsed_ms = select_started.elapsed().as_millis() as u64,
+            "IMAP SELECT completed"
+        );
 
         let query = build_fetch_command_query();
+        let fetch_started = std::time::Instant::now();
         let mut fetch_stream = session.uid_fetch("1:*", query).await.map_err(|e| {
             MailError::ImapError(format!(
                 "UID FETCH failed for folder '{}': {}",
                 folder_id, e
             ))
         })?;
+        tracing::info!(
+            folder_id,
+            elapsed_ms = fetch_started.elapsed().as_millis() as u64,
+            "IMAP UID FETCH command acknowledged; reading response stream"
+        );
 
         let mut emails = Vec::new();
-        while let Some(fetch_res) = fetch_stream.next().await {
+        let stream_started = std::time::Instant::now();
+        loop {
+            // Bound EVERY individual item read, not just the connect phase:
+            // a real mailbox with many/large messages fetching
+            // `BODY.PEEK[]` for everything in one unbatched command can be
+            // legitimately slow, but a single stalled read (dead socket,
+            // server-side hang) must still surface as an honest timeout
+            // error rather than hanging the whole sync forever.
+            let next_item =
+                match tokio::time::timeout(IMAP_FETCH_ITEM_TIMEOUT, fetch_stream.next()).await {
+                    Ok(item) => item,
+                    Err(_) => {
+                        tracing::warn!(
+                            folder_id,
+                            fetched_so_far = emails.len(),
+                            elapsed_ms = stream_started.elapsed().as_millis() as u64,
+                            "IMAP FETCH stream stalled: no response within {}s",
+                            IMAP_FETCH_ITEM_TIMEOUT.as_secs()
+                        );
+                        return Err(MailError::ImapError(format!(
+                            "UID FETCH for folder '{}' stalled after {} messages ({}s with no \
+                         server response)",
+                            folder_id,
+                            emails.len(),
+                            IMAP_FETCH_ITEM_TIMEOUT.as_secs()
+                        )));
+                    }
+                };
+            let Some(fetch_res) = next_item else {
+                break;
+            };
+
             let fetch_data = fetch_res
                 .map_err(|e| MailError::ImapError(format!("failed reading fetch item: {}", e)))?;
+
+            if emails.len() % IMAP_FETCH_PROGRESS_LOG_INTERVAL == 0 {
+                tracing::info!(
+                    folder_id,
+                    fetched_so_far = emails.len(),
+                    elapsed_ms = stream_started.elapsed().as_millis() as u64,
+                    "IMAP FETCH progress"
+                );
+            }
 
             let uid_num = fetch_data.uid.unwrap_or(0);
             let email_id = format!("imap-uid-{}", uid_num);
