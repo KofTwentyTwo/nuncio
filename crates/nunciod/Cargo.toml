@@ -31,6 +31,7 @@ tonic.workspace = true
 async-trait.workspace = true
 subtle.workspace = true
 hex.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 nuncio-cli = { path = "../nuncio-cli" }

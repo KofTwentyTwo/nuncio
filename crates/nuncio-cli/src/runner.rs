@@ -149,8 +149,8 @@ impl HeadlessRunner {
                     email,
                     imap_host,
                     imap_port,
-                    smtp_host: _,
-                    smtp_port: _,
+                    smtp_host,
+                    smtp_port,
                     imap_mode,
                     smtp_mode,
                     password,
@@ -159,6 +159,8 @@ impl HeadlessRunner {
                         email,
                         imap_host,
                         *imap_port,
+                        smtp_host,
+                        *smtp_port,
                         imap_mode,
                         smtp_mode,
                         &password.0,
@@ -773,6 +775,13 @@ impl HeadlessRunner {
         }
     }
 
+    /// `mail send`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Mail/SendMessage` API (backlog story 1.C.5, GH
+    /// #160). The daemon builds a real SMTP transport from the configured
+    /// account's SMTP endpoint (backlog story #168) and keyring password,
+    /// and only reports success when the transport genuinely accepted the
+    /// message -- this NEVER prints a fabricated "Message sent" without a
+    /// real send actually happening.
     async fn handle_send_email(
         &self,
         to: &str,
@@ -780,15 +789,43 @@ impl HeadlessRunner {
         body: &str,
         json_mode: bool,
     ) -> String {
-        if json_mode {
-            format_json(&json!({
-                "sent": true,
-                "to": to,
-                "subject": subject,
-                "bytes": body.len()
-            }))
-        } else {
-            format!("Message sent to {} ('{}')", to, subject)
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .send_message(nuncio_proto::v1::SendMessageRequest {
+                to: to.to_string(),
+                cc: None,
+                subject: subject.to_string(),
+                body_text: body.to_string(),
+                body_html: None,
+                attachments: Vec::new(),
+            })
+            .await
+        {
+            Ok(response) => {
+                let message_id = response.into_inner().message_id;
+                if json_mode {
+                    format_json(&json!({
+                        "sent": true,
+                        "message_id": message_id,
+                        "to": to,
+                        "subject": subject,
+                        "bytes": body.len()
+                    }))
+                } else {
+                    format!(
+                        "Message sent to {} ('{}') [id: {}]",
+                        to, subject, message_id
+                    )
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected send_message: {status}"),
+                json_mode,
+            ),
         }
     }
 
@@ -981,6 +1018,8 @@ impl HeadlessRunner {
         email: &str,
         imap_host: &str,
         imap_port: u16,
+        smtp_host: &str,
+        smtp_port: u16,
         imap_mode: &str,
         smtp_mode: &str,
         password: &str,
@@ -1010,6 +1049,8 @@ impl HeadlessRunner {
             smtp_tls_mode: map_tls_mode_to_proto(smtp_tls_mode).into(),
             keyring_secret_key: keyring_key.clone(),
             sync_interval_secs: 300,
+            smtp_host: smtp_host.to_string(),
+            smtp_port: u32::from(smtp_port),
         };
 
         let mut client = match self.connect_accounts_client().await {
@@ -1034,13 +1075,15 @@ impl HeadlessRunner {
                         "imap_host": imap_host,
                         "imap_port": imap_port,
                         "imap_mode": imap_mode,
+                        "smtp_host": smtp_host,
+                        "smtp_port": smtp_port,
                         "smtp_mode": smtp_mode,
                         "keyring_key": keyring_key
                     }))
                 } else {
                     format!(
-                        "Account '{}' (ID: {}) added via nunciod daemon and configured for IMAP ({}:{}, mode: {}) and SMTP (mode: {})",
-                        email, account_id, imap_host, imap_port, imap_mode, smtp_mode
+                        "Account '{}' (ID: {}) added via nunciod daemon and configured for IMAP ({}:{}, mode: {}) and SMTP ({}:{}, mode: {})",
+                        email, account_id, imap_host, imap_port, imap_mode, smtp_host, smtp_port, smtp_mode
                     )
                 }
             }
@@ -1079,6 +1122,8 @@ impl HeadlessRunner {
                                 "protocol": a.protocol().as_str_name(),
                                 "server_host": a.server_host,
                                 "server_port": a.server_port,
+                                "smtp_host": a.smtp_host,
+                                "smtp_port": a.smtp_port,
                                 "use_tls": a.use_tls,
                                 "imap_tls_mode": a.imap_tls_mode().as_str_name(),
                                 "smtp_tls_mode": a.smtp_tls_mode().as_str_name(),
@@ -1323,16 +1368,16 @@ mod tests {
             .await;
         assert!(acct_show.contains("Account 'missing' not found"));
 
-        // Mail Noun Commands: `Sync` and `Send` do not talk to the daemon
-        // (yet), so they are safe to exercise against this ephemeral local
-        // runner. `List`/`Read`/`Search`/`Mark` (and `Folder::List`) are now
+        // Mail Noun Commands: `Sync` does not talk to the daemon (yet), so
+        // it is safe to exercise against this ephemeral local runner.
+        // `List`/`Read`/`Search`/`Mark`/`Send` (and `Folder::List`) are now
         // real gRPC clients of the `nunciod` daemon's `Mail` API (backlog
-        // story 1.C.4, GH #159) -- exactly like `Account::Add`/`List` and
-        // `System::Status` above, they must never run against this
-        // `ephemeral()`-constructed runner's production `SecretManager` or
-        // its (unreachable in CI) default gRPC address. They are exercised
-        // separately below via `ephemeral_with` + `SecretManager::mock()`
-        // against a live stub `Mail` gRPC server
+        // stories 1.C.4 / 1.C.5, GH #159 / GH #160) -- exactly like
+        // `Account::Add`/`List` and `System::Status` above, they must never
+        // run against this `ephemeral()`-constructed runner's production
+        // `SecretManager` or its (unreachable in CI) default gRPC address.
+        // They are exercised separately below via `ephemeral_with` +
+        // `SecretManager::mock()` against a live stub `Mail` gRPC server
         // (`mail_rpcs_round_trip_over_grpc_to_a_stub_daemon`).
         let mail_sync = runner
             .execute_command(
@@ -1343,20 +1388,6 @@ mod tests {
             )
             .await;
         assert!(mail_sync.contains(r#""status":"sync_started""#));
-
-        let mail_send = runner
-            .execute_command(
-                &Commands::Mail {
-                    action: MailSubcommand::Send {
-                        to: "alice@nuncio.mx".to_string(),
-                        subject: "Test".to_string(),
-                        body: "Body".to_string(),
-                    },
-                },
-                false,
-            )
-            .await;
-        assert!(mail_send.contains("alice@nuncio.mx"));
 
         // Cal Noun Commands
         let cal_list = runner
@@ -1584,6 +1615,8 @@ mod tests {
                         smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
                         keyring_secret_key: "nuncio/acct-stub-1".to_string(),
                         sync_interval_secs: 300,
+                        smtp_host: "smtp.nuncio.mx".to_string(),
+                        smtp_port: 465,
                     }],
                 }))
             }
@@ -1689,7 +1722,7 @@ mod tests {
             Folder as FolderProto, GetMessageRequest, GetMessageResponse, ListFoldersRequest,
             ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, MarkReadRequest,
             MarkReadResponse, Message as MessageProto, MessageSearchHit, SearchMessagesRequest,
-            SearchMessagesResponse,
+            SearchMessagesResponse, SendMessageRequest, SendMessageResponse,
         };
         use std::sync::Mutex;
 
@@ -1716,6 +1749,7 @@ mod tests {
         #[derive(Default)]
         struct StubMail {
             last_mark_read: Arc<Mutex<Option<MarkReadRequest>>>,
+            last_send_message: Arc<Mutex<Option<SendMessageRequest>>>,
         }
 
         #[tonic::async_trait]
@@ -1788,10 +1822,25 @@ mod tests {
                     }],
                 }))
             }
+
+            async fn send_message(
+                &self,
+                request: tonic::Request<SendMessageRequest>,
+            ) -> Result<tonic::Response<SendMessageResponse>, tonic::Status> {
+                let req = request.into_inner();
+                *self
+                    .last_send_message
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(req);
+                Ok(tonic::Response::new(SendMessageResponse {
+                    message_id: "sent-stub-1".to_string(),
+                }))
+            }
         }
 
         let stub = StubMail::default();
         let probe = stub.last_mark_read.clone();
+        let send_probe = stub.last_send_message.clone();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1916,6 +1965,36 @@ mod tests {
             )
             .await;
         assert!(mark_no_flag.contains("exactly one of --read or --unread"));
+
+        // `mail send`: proves the CLI is a real gRPC client of
+        // `Mail/SendMessage` (backlog story 1.C.5, GH #160) -- the exact
+        // recipient/subject/body the caller supplied reaches the daemon
+        // over the wire, and the daemon's returned message id (NOT a
+        // fabricated "Message sent") appears in the CLI's output.
+        let mail_send = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Send {
+                        to: "alice@nuncio.mx".to_string(),
+                        subject: "Quarterly Roadmap".to_string(),
+                        body: "Let's discuss the roadmap.".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mail_send.contains(r#""sent":true"#));
+        assert!(mail_send.contains("sent-stub-1"));
+        assert!(mail_send.contains("alice@nuncio.mx"));
+
+        let recorded_send = send_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received a send_message request");
+        assert_eq!(recorded_send.to, "alice@nuncio.mx");
+        assert_eq!(recorded_send.subject, "Quarterly Roadmap");
+        assert_eq!(recorded_send.body_text, "Let's discuss the roadmap.");
     }
 
     #[test]

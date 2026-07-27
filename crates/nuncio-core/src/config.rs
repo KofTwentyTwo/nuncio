@@ -56,10 +56,16 @@ pub struct AccountConfig {
     pub email_address: String,
     /// Protocol engine type.
     pub protocol: AccountProtocol,
-    /// Server hostname or IP address.
+    /// Server hostname or IP address (IMAP/JMAP).
     pub server_host: String,
-    /// Server port number.
+    /// Server port number (IMAP/JMAP).
     pub server_port: u16,
+    /// SMTP server hostname or IP address, used for outbound mail (backlog
+    /// story #168). Distinct from `server_host` because a mail provider's
+    /// inbound (IMAP/JMAP) and outbound (SMTP) endpoints commonly differ.
+    pub smtp_host: String,
+    /// SMTP server port number, used for outbound mail (backlog story #168).
+    pub smtp_port: u16,
     /// Whether TLS connection encryption is enabled.
     pub use_tls: bool,
     /// IMAP connection security transport mode.
@@ -105,6 +111,12 @@ impl AccountConfig {
         if self.server_port == 0 {
             return Err(ConfigError::InvalidPort);
         }
+        if self.smtp_host.trim().is_empty() {
+            return Err(ConfigError::EmptyField { field: "smtp_host" });
+        }
+        if self.smtp_port == 0 {
+            return Err(ConfigError::InvalidPort);
+        }
         if self.keyring_secret_key.trim().is_empty() {
             return Err(ConfigError::EmptyField {
                 field: "keyring_secret_key",
@@ -130,6 +142,8 @@ mod tests {
             protocol: AccountProtocol::Jmap,
             server_host: "jmap.nuncio.mx".to_string(),
             server_port: 443,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
             use_tls: true,
             imap_tls_mode: TlsMode::ImplicitTls,
             smtp_tls_mode: TlsMode::ImplicitTls,
@@ -208,6 +222,23 @@ mod tests {
     fn zero_port_fails_validation() {
         let mut config = valid_account();
         config.server_port = 0;
+        assert_eq!(config.validate().unwrap_err(), ConfigError::InvalidPort);
+    }
+
+    #[test]
+    fn empty_smtp_host_fails_validation() {
+        let mut config = valid_account();
+        config.smtp_host = " ".to_string();
+        assert_eq!(
+            config.validate().unwrap_err(),
+            ConfigError::EmptyField { field: "smtp_host" }
+        );
+    }
+
+    #[test]
+    fn zero_smtp_port_fails_validation() {
+        let mut config = valid_account();
+        config.smtp_port = 0;
         assert_eq!(config.validate().unwrap_err(), ConfigError::InvalidPort);
     }
 

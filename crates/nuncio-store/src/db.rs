@@ -1,7 +1,7 @@
 //! SQLite database engine initialization, connection pooling, and migrations.
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::path::Path;
 use std::str::FromStr;
 use tempfile::TempDir;
@@ -348,7 +348,9 @@ impl DatabaseEngine {
                 server_port INTEGER NOT NULL,
                 use_tls INTEGER NOT NULL,
                 keyring_secret_key TEXT NOT NULL,
-                sync_interval_secs INTEGER NOT NULL
+                sync_interval_secs INTEGER NOT NULL,
+                smtp_host TEXT,
+                smtp_port INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS filter_rules (
@@ -491,7 +493,48 @@ impl DatabaseEngine {
         .await
         .map_err(DatabaseError::Query)?;
 
+        self.ensure_accounts_smtp_columns().await?;
         self.backfill_message_fts().await?;
+
+        Ok(())
+    }
+
+    /// Additive, backfill-safe migration for backlog story #168: adds the
+    /// `smtp_host` / `smtp_port` columns to a pre-existing `accounts` table
+    /// that predates the SMTP account-endpoint feature.
+    ///
+    /// A fresh database already gets these columns from `CREATE TABLE IF NOT
+    /// EXISTS accounts` above, so on a fresh database this is a no-op (the
+    /// `PRAGMA table_info` check below finds both columns already present).
+    /// For a pre-existing database file, `CREATE TABLE IF NOT EXISTS` is
+    /// itself a no-op (the table already exists), so this is what actually
+    /// adds the new columns -- as `NULL`-able columns, so every existing row
+    /// keeps loading successfully (see [`Self::list_accounts`], which falls
+    /// back to `server_host`/`server_port` for any row where `smtp_host` /
+    /// `smtp_port` is still `NULL`). SQLite has no `ADD COLUMN IF NOT
+    /// EXISTS`, so column presence is checked explicitly via `PRAGMA
+    /// table_info` first, making this safe to run on every daemon startup.
+    async fn ensure_accounts_smtp_columns(&self) -> Result<(), DatabaseError> {
+        let existing_columns: Vec<String> = sqlx::query("PRAGMA table_info(accounts)")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+
+        if !existing_columns.iter().any(|c| c == "smtp_host") {
+            sqlx::query("ALTER TABLE accounts ADD COLUMN smtp_host TEXT")
+                .execute(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+        }
+        if !existing_columns.iter().any(|c| c == "smtp_port") {
+            sqlx::query("ALTER TABLE accounts ADD COLUMN smtp_port INTEGER")
+                .execute(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+        }
 
         Ok(())
     }
@@ -545,8 +588,8 @@ impl DatabaseEngine {
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO accounts
-            (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&config.id)
@@ -558,6 +601,8 @@ impl DatabaseEngine {
         .bind(if config.use_tls { 1i64 } else { 0i64 })
         .bind(&config.keyring_secret_key)
         .bind(config.sync_interval_secs as i64)
+        .bind(&config.smtp_host)
+        .bind(config.smtp_port as i64)
         .execute(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
@@ -578,9 +623,11 @@ impl DatabaseEngine {
             i64,
             String,
             i64,
+            Option<String>,
+            Option<i64>,
         )> = sqlx::query_as(
             r#"
-            SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs
+            SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port
             FROM accounts
             "#,
         )
@@ -601,9 +648,22 @@ impl DatabaseEngine {
                     use_tls,
                     keyring_secret_key,
                     sync_interval_secs,
+                    smtp_host,
+                    smtp_port,
                 )| {
                     let protocol = serde_json::from_str(&protocol_str)
                         .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
+                    // Backfill-safe fallback (backlog story #168): a row
+                    // written before `smtp_host`/`smtp_port` existed has
+                    // `NULL` in both columns (see
+                    // `Self::ensure_accounts_smtp_columns`). Rather than
+                    // surface an incomplete/invalid config, fall back to the
+                    // same host/port already used for IMAP/JMAP -- the best
+                    // available default for an account configured before
+                    // outbound mail had its own endpoint.
+                    let resolved_smtp_host = smtp_host.unwrap_or_else(|| server_host.clone());
+                    let resolved_smtp_port =
+                        smtp_port.map(|p| p as u16).unwrap_or(server_port as u16);
                     nuncio_core::AccountConfig {
                         id,
                         name,
@@ -611,6 +671,8 @@ impl DatabaseEngine {
                         protocol,
                         server_host,
                         server_port: server_port as u16,
+                        smtp_host: resolved_smtp_host,
+                        smtp_port: resolved_smtp_port,
                         use_tls: use_tls != 0,
                         imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                         smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
@@ -1427,6 +1489,8 @@ mod tests {
                 protocol: nuncio_core::AccountProtocol::ImapSmtp,
                 server_host: "imap.nuncio.mx".to_string(),
                 server_port: 993,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
                 use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
@@ -1637,6 +1701,8 @@ mod tests {
             protocol: nuncio_core::AccountProtocol::ImapSmtp,
             server_host: "imap.nuncio.mx".to_string(),
             server_port: 993,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
             use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
@@ -1655,6 +1721,129 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "acct-test-1");
         assert_eq!(accounts[0].email_address, "work@nuncio.mx");
+        assert_eq!(accounts[0].smtp_host, "smtp.nuncio.mx");
+        assert_eq!(accounts[0].smtp_port, 465);
+    }
+
+    /// Backlog story #168: proves the additive `smtp_host`/`smtp_port`
+    /// migration is backfill-safe. Simulates a database created BEFORE this
+    /// feature existed (an `accounts` table with no `smtp_host`/`smtp_port`
+    /// columns at all, populated via a direct `INSERT` bypassing
+    /// `save_account`), then opens it through `DatabaseEngine::connect_file`
+    /// (which runs `migrate()`, including `ensure_accounts_smtp_columns`)
+    /// and confirms: (1) opening an old-schema database never errors, (2)
+    /// the pre-existing row still loads, falling back to `server_host`/
+    /// `server_port` for the missing SMTP endpoint, and (3) re-running
+    /// `migrate()` a second time (simulating a daemon restart) is a no-op
+    /// that does not error or duplicate columns.
+    #[tokio::test]
+    async fn migrate_backfills_smtp_columns_for_a_pre_existing_accounts_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("pre_smtp_migration.db");
+        let secrets = crate::vault::SecretManager::mock();
+
+        // Step 1: create an OLD-schema `accounts` table (no smtp_host/smtp_port
+        // columns) directly, bypassing `DatabaseEngine::migrate` entirely, and
+        // insert one pre-existing row -- exactly what a database created
+        // before backlog story #168 would look like on disk.
+        {
+            let url = format!("sqlite://{}", db_path.to_string_lossy());
+            let options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
+                .expect("valid sqlite url")
+                .create_if_missing(true);
+            let pool = sqlx::SqlitePool::connect_with(options)
+                .await
+                .expect("connect to fresh old-schema db");
+
+            sqlx::query(
+                r#"
+                CREATE TABLE accounts (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    email_address TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    server_host TEXT NOT NULL,
+                    server_port INTEGER NOT NULL,
+                    use_tls INTEGER NOT NULL,
+                    keyring_secret_key TEXT NOT NULL,
+                    sync_interval_secs INTEGER NOT NULL
+                )
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .expect("create old-schema accounts table");
+
+            sqlx::query(
+                r#"
+                INSERT INTO accounts
+                (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs)
+                VALUES ('acct-pre-migration', 'Pre-Migration Account', 'pre@nuncio.mx', '"imap-smtp"', 'imap.nuncio.mx', 993, 1, 'nuncio/acct-pre-migration', 60)
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .expect("insert pre-existing row");
+
+            pool.close().await;
+        }
+
+        // Step 2: open through the real production path -- this is what
+        // actually runs `migrate()` / `ensure_accounts_smtp_columns`.
+        let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+            .await
+            .expect("opening an old-schema database must never error");
+
+        let accounts = engine
+            .list_accounts()
+            .await
+            .expect("list accounts succeeds on a migrated old-schema table");
+        assert_eq!(accounts.len(), 1);
+        let acct = &accounts[0];
+        assert_eq!(acct.id, "acct-pre-migration");
+        // Falls back to the IMAP/JMAP endpoint since smtp_host/smtp_port
+        // were NULL for this pre-existing row.
+        assert_eq!(acct.smtp_host, "imap.nuncio.mx");
+        assert_eq!(acct.smtp_port, 993);
+
+        // Step 3: re-running migrate() (e.g. a second daemon startup against
+        // the same file) must be a no-op, not an error.
+        engine
+            .migrate()
+            .await
+            .expect("re-running migrate on an already-migrated table must not error");
+
+        // A newly saved account (going through the real `save_account` path)
+        // now gets its own genuine smtp_host/smtp_port persisted, proving
+        // the migrated columns are fully writable/readable going forward.
+        let new_acct = nuncio_core::AccountConfig {
+            id: "acct-post-migration".to_string(),
+            name: "Post Migration Account".to_string(),
+            email_address: "post@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 587,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::StartTls,
+            keyring_secret_key: "nuncio/acct-post-migration".to_string(),
+            sync_interval_secs: 60,
+        };
+        engine
+            .save_account(&new_acct)
+            .await
+            .expect("save account succeeds after migration");
+        let accounts = engine.list_accounts().await.expect("list accounts");
+        let post = accounts
+            .iter()
+            .find(|a| a.id == "acct-post-migration")
+            .expect("newly saved account present");
+        assert_eq!(post.smtp_host, "smtp.nuncio.mx");
+        assert_eq!(post.smtp_port, 587);
+
+        engine.close().await;
     }
 
     #[test]

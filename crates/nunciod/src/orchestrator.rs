@@ -155,6 +155,8 @@ mod tests {
                 protocol: nuncio_core::AccountProtocol::ImapSmtp,
                 server_host: "imap.nuncio.mx".to_string(),
                 server_port: 993,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
                 use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,

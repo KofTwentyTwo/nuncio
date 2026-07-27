@@ -175,9 +175,9 @@ message AccountConfig {
   string email_address = 3;
   // Protocol engine type.
   AccountProtocol protocol = 4;
-  // Server hostname or IP address.
+  // Server hostname or IP address (IMAP/JMAP).
   string server_host = 5;
-  // Server port number (1..=65535).
+  // Server port number (1..=65535) (IMAP/JMAP).
   uint32 server_port = 6;
   // Whether TLS connection encryption is enabled.
   bool use_tls = 7;
@@ -189,6 +189,13 @@ message AccountConfig {
   string keyring_secret_key = 10;
   // Background sync polling interval in seconds (minimum 10s).
   uint64 sync_interval_secs = 11;
+  // SMTP server hostname or IP address, used for outbound mail (backlog
+  // story #168). Distinct from `server_host` because a mail provider's
+  // inbound (IMAP/JMAP) and outbound (SMTP) endpoints commonly differ.
+  string smtp_host = 12;
+  // SMTP server port number (1..=65535), used for outbound mail (backlog
+  // story #168).
+  uint32 smtp_port = 13;
 }
 
 // AddAccountRequest carries the full account configuration plus the raw
@@ -239,6 +246,15 @@ service Mail {
   // SearchMessages runs a full-text (FTS5) search over cached message
   // subjects, senders, and bodies.
   rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+  // SendMessage composes and sends a real outbound email over SMTP
+  // (backlog story 1.C.5, GH #160), built from the configured account's
+  // SMTP endpoint (`AccountConfig.smtp_host`/`smtp_port`, backlog story
+  // #168) and its keyring-stored password. Returns successfully ONLY when
+  // the SMTP transport genuinely accepted the message for delivery --
+  // never a fabricated success. A transport/authentication failure surfaces
+  // as a `Status::internal` (or `Status::invalid_argument` for a malformed
+  // request) error, never a fabricated `SendMessageResponse`.
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
 }
 
 // Mirrors `nuncio_core::model::Attachment`.
@@ -355,4 +371,33 @@ message MessageSearchHit {
 // SearchMessagesResponse.
 message SearchMessagesResponse {
   repeated MessageSearchHit hits = 1;
+}
+
+// SendMessageRequest carries a composed outbound email (backlog story
+// 1.C.5, GH #160). The sending account's own address is used as the
+// `From:` header -- it is resolved server-side from the configured
+// account, never supplied by the caller.
+message SendMessageRequest {
+  // Recipient email address.
+  string to = 1;
+  // Optional CC recipient email address.
+  optional string cc = 2;
+  // Message subject line.
+  string subject = 3;
+  // Plaintext message body.
+  string body_text = 4;
+  // Optional HTML message body.
+  optional string body_html = 5;
+  // Optional file attachments.
+  repeated Attachment attachments = 6;
+}
+
+// SendMessageResponse. A successful response means the SMTP transport
+// genuinely accepted the message for delivery -- never a fabricated
+// success (see `Mail.SendMessage`'s doc comment).
+message SendMessageResponse {
+  // Daemon-generated identifier for the sent message, for reference in
+  // logs/output. NOT a persisted message id -- outbound sends are not
+  // written back into the synced message store by this RPC.
+  string message_id = 1;
 }

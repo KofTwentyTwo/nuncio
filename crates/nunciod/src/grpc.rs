@@ -20,8 +20,8 @@ use nuncio_proto::v1::{
     ListAccountsResponse, ListFoldersRequest, ListFoldersResponse, ListMessagesRequest,
     ListMessagesResponse, MarkReadRequest, MarkReadResponse, Message as MessageProto,
     MessageFlagsChanged, MessageSearchHit, SearchMessagesRequest, SearchMessagesResponse,
-    ShuttingDown, SubscribeRequest, SyncCompleted, SyncStarted, TlsMode as TlsModeProto,
-    UpdateAvailable,
+    SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
+    SyncStarted, TlsMode as TlsModeProto, UpdateAvailable,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -246,6 +246,8 @@ fn map_account_config_to_proto(config: nuncio_core::AccountConfig) -> AccountCon
         smtp_tls_mode: map_tls_mode_to_proto(config.smtp_tls_mode).into(),
         keyring_secret_key: config.keyring_secret_key,
         sync_interval_secs: config.sync_interval_secs,
+        smtp_host: config.smtp_host,
+        smtp_port: u32::from(config.smtp_port),
     }
 }
 
@@ -260,6 +262,8 @@ fn map_account_config_from_proto(
     let smtp_tls_mode = map_tls_mode_from_proto(config.smtp_tls_mode())?;
     let server_port = u16::try_from(config.server_port)
         .map_err(|_| Status::invalid_argument("server_port must be in range 1..=65535"))?;
+    let smtp_port = u16::try_from(config.smtp_port)
+        .map_err(|_| Status::invalid_argument("smtp_port must be in range 1..=65535"))?;
 
     Ok(nuncio_core::AccountConfig {
         id: config.id,
@@ -268,6 +272,8 @@ fn map_account_config_from_proto(
         protocol,
         server_host: config.server_host,
         server_port,
+        smtp_host: config.smtp_host,
+        smtp_port,
         use_tls: config.use_tls,
         imap_tls_mode,
         smtp_tls_mode,
@@ -356,6 +362,17 @@ fn map_attachment_to_proto(attachment: nuncio_core::model::Attachment) -> Attach
     }
 }
 
+/// Maps a wire-format `nuncio.v1.Attachment` request payload back onto
+/// `nuncio_core::model::Attachment` (backlog story 1.C.5, GH #160, used by
+/// `SendMessage`).
+fn map_attachment_from_proto(attachment: AttachmentProto) -> nuncio_core::model::Attachment {
+    nuncio_core::model::Attachment {
+        filename: attachment.filename,
+        mime_type: attachment.mime_type,
+        content: bytes::Bytes::from(attachment.content),
+    }
+}
+
 /// Maps a `nuncio_core::model::Email` onto its wire-format `nuncio.v1.Message`
 /// representation. The store (`DatabaseEngine::get_message` /
 /// `list_messages`) already returns `body_plain`/`body_html` decrypted, so
@@ -396,16 +413,21 @@ fn map_folder_to_proto(folder: nuncio_core::model::Folder) -> FolderProto {
 
 /// `nuncio.v1.Mail` gRPC service implementation backed by the daemon's live
 /// [`DatabaseEngine`] read/mark methods and [`SearchEngine`] FTS index
-/// (backlog story 1.C.4, GH #159).
+/// (backlog story 1.C.4, GH #159), and (backlog story 1.C.5, GH #160) the
+/// live [`SecretManager`] vault used to build a real outbound SMTP
+/// transport for `SendMessage`.
 ///
 /// This exposes the mail READ path (list folders, list messages, read a
 /// message, mark read/unread, search) over the real, persistent store that
-/// backlog story 1.C.3 (GH #158) syncs into -- as opposed to the CLI's
-/// previous local ephemeral `HeadlessRunner` database, which was thrown away
-/// when the CLI process exited.
+/// backlog story 1.C.3 (GH #158) syncs into, AND the outbound SEND path
+/// (`SendMessage`) -- as opposed to the CLI's previous local ephemeral
+/// `HeadlessRunner` database, which was thrown away when the CLI process
+/// exited, and its previous fabricated "Message sent" output, which never
+/// actually dialed an SMTP server.
 struct MailGrpcService {
     db: Arc<DatabaseEngine>,
     event_bus: Arc<EventBus>,
+    secrets: Arc<SecretManager>,
 }
 
 #[tonic::async_trait]
@@ -522,6 +544,46 @@ impl Mail for MailGrpcService {
 
         Ok(Response::new(SearchMessagesResponse { hits }))
     }
+
+    /// SendMessage (backlog story 1.C.5, GH #160): composes and sends a real
+    /// outbound email over SMTP via [`crate::send::send_message_for_account`],
+    /// which resolves the sending account, its keyring password, and builds
+    /// a real [`nuncio_mail::SmtpTransportEngine`] from the account's SMTP
+    /// endpoint (backlog story #168). Returns `Ok` ONLY when the transport
+    /// genuinely accepted the message -- a resolution or transport failure
+    /// surfaces as `Status::internal`/`Status::invalid_argument`, never a
+    /// fabricated `SendMessageResponse`.
+    async fn send_message(
+        &self,
+        request: Request<SendMessageRequest>,
+    ) -> Result<Response<SendMessageResponse>, Status> {
+        let req = request.into_inner();
+        if req.to.trim().is_empty() {
+            return Err(Status::invalid_argument("to is required"));
+        }
+        if req.subject.trim().is_empty() {
+            return Err(Status::invalid_argument("subject is required"));
+        }
+
+        let compose = crate::send::ComposeRequest {
+            to: req.to,
+            cc: req.cc,
+            subject: req.subject,
+            body_text: Some(req.body_text),
+            body_html: req.body_html,
+            attachments: req
+                .attachments
+                .into_iter()
+                .map(map_attachment_from_proto)
+                .collect(),
+        };
+
+        let message_id = crate::send::send_message_for_account(&self.db, &self.secrets, compose)
+            .await
+            .map_err(|e| Status::internal(format!("failed to send message: {e}")))?;
+
+        Ok(Response::new(SendMessageResponse { message_id }))
+    }
 }
 
 /// Bearer-token authentication interceptor for the loopback `nuncio.v1` gRPC
@@ -628,16 +690,20 @@ pub async fn serve_on_listener(
 
     let accounts_service = AccountsGrpcService {
         db: db.clone(),
-        secrets,
+        secrets: secrets.clone(),
     };
     let accounts_interceptor = BearerAuthInterceptor::new(token.clone());
     let accounts_svc = AccountsServer::with_interceptor(accounts_service, accounts_interceptor);
 
-    // Mail (backlog story 1.C.4, GH #159): mounted behind its own
-    // `BearerAuthInterceptor`, exactly like `System` and `Accounts` above --
-    // see the hard invariant documented on this function's doc comment
-    // (GH #165).
-    let mail_service = MailGrpcService { db, event_bus };
+    // Mail (backlog story 1.C.4, GH #159; SendMessage: 1.C.5, GH #160):
+    // mounted behind its own `BearerAuthInterceptor`, exactly like `System`
+    // and `Accounts` above -- see the hard invariant documented on this
+    // function's doc comment (GH #165).
+    let mail_service = MailGrpcService {
+        db,
+        event_bus,
+        secrets,
+    };
     let mail_interceptor = BearerAuthInterceptor::new(token);
     let mail_svc = MailServer::with_interceptor(mail_service, mail_interceptor);
 
@@ -1008,6 +1074,8 @@ mod tests {
             smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
             keyring_secret_key: keyring_secret_key.to_string(),
             sync_interval_secs: 60,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
         }
     }
 
@@ -1266,7 +1334,7 @@ mod tests {
     use nuncio_proto::v1::mail_client::MailClient;
     use nuncio_proto::v1::{
         GetMessageRequest, ListFoldersRequest, ListMessagesRequest, MarkReadRequest,
-        SearchMessagesRequest,
+        SearchMessagesRequest, SendMessageRequest,
     };
 
     fn sample_email(
@@ -1337,6 +1405,19 @@ mod tests {
         let err = client
             .search_messages(SearchMessagesRequest {
                 query: "hello".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .send_message(SendMessageRequest {
+                to: "bob@nuncio.mx".to_string(),
+                cc: None,
+                subject: "Hi".to_string(),
+                body_text: "Body".to_string(),
+                body_html: None,
+                attachments: Vec::new(),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -1524,5 +1605,120 @@ mod tests {
                 read: true,
             }
         );
+    }
+
+    // ---- SendMessage (backlog story 1.C.5, GH #160) ----
+
+    fn valid_send_message_request() -> SendMessageRequest {
+        SendMessageRequest {
+            to: "bob@nuncio.mx".to_string(),
+            cc: None,
+            subject: "Quarterly Roadmap".to_string(),
+            body_text: "Let's discuss the roadmap.".to_string(),
+            body_html: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_empty_to() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let mut req = valid_send_message_request();
+        req.to = String::new();
+        let err = client
+            .send_message(authed_bearer_request(req))
+            .await
+            .expect_err("empty to must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_empty_subject() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let mut req = valid_send_message_request();
+        req.subject = String::new();
+        let err = client
+            .send_message(authed_bearer_request(req))
+            .await
+            .expect_err("empty subject must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    /// Backlog story 1.C.5 (GH #160): proves `SendMessage` never fabricates
+    /// success -- with no account configured at all, the daemon has nothing
+    /// to send from, and this surfaces as `Status::internal` rather than a
+    /// fabricated `SendMessageResponse`.
+    #[tokio::test]
+    async fn send_message_reports_honest_error_when_no_account_configured() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .send_message(authed_bearer_request(valid_send_message_request()))
+            .await
+            .expect_err("no configured account must be rejected");
+        assert_eq!(err.code(), Code::Internal);
+    }
+
+    /// Proves `SendMessage` genuinely builds a real SMTP transport from the
+    /// account's `smtp_host`/`smtp_port` (backlog story #168) and its
+    /// keyring password, and surfaces a real transport failure honestly --
+    /// WITHOUT any live network dependency: `smtp_host`/`smtp_port` point at
+    /// a reserved loopback port nothing is listening on, so the connection
+    /// attempt fails fast and deterministically (mirroring
+    /// `nuncio_mail::smtp`'s own unreachable-server test).
+    #[tokio::test]
+    async fn send_message_builds_real_smtp_transport_and_fails_honestly_when_unreachable() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let secrets = Arc::new(SecretManager::mock());
+
+        let config = nuncio_core::AccountConfig {
+            id: "acct-send-1".to_string(),
+            name: "Send Test Account".to_string(),
+            email_address: "sender@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            smtp_host: "127.0.0.1".to_string(),
+            smtp_port: 1,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: "nuncio/acct-send-1".to_string(),
+            sync_interval_secs: 60,
+        };
+        db.save_account(&config).await.expect("save account");
+        secrets
+            .set_secret(&config.keyring_secret_key, "irrelevant-password")
+            .expect("store credential in mock vault");
+
+        let (addr, _handle) =
+            spawn_test_server_with(Arc::new(EventBus::new()), db, secrets, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .send_message(authed_bearer_request(valid_send_message_request()))
+            .await
+            .expect_err("delivery to an unreachable SMTP host must fail");
+        assert_eq!(err.code(), Code::Internal);
+        assert!(err.message().contains("failed to send message"));
     }
 }

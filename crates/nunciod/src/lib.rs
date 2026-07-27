@@ -4,6 +4,7 @@
 
 pub mod grpc;
 pub mod orchestrator;
+pub mod send;
 pub mod sync;
 pub use orchestrator::SelfHealingSyncOrchestrator;
 

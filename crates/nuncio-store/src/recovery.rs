@@ -16,6 +16,8 @@ type SalvagedAccountRow = (
     i64,
     String,
     i64,
+    Option<String>,
+    Option<i64>,
 );
 
 /// Summary report of database self-healing recovery output.
@@ -300,7 +302,7 @@ impl SqliteRecoveryEngine {
 
     async fn salvage_accounts(pool: &sqlx::SqlitePool) -> Vec<nuncio_core::AccountConfig> {
         let rows: Result<Vec<SalvagedAccountRow>, _> = sqlx::query_as(
-            "SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs FROM accounts"
+            "SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port FROM accounts"
         )
         .fetch_all(pool)
         .await;
@@ -319,9 +321,20 @@ impl SqliteRecoveryEngine {
                         use_tls,
                         keyring_secret_key,
                         sync_interval_secs,
+                        smtp_host,
+                        smtp_port,
                     )| {
                         let protocol = serde_json::from_str(&protocol_str)
                             .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
+                        // Backfill-safe fallback (backlog story #168): see
+                        // `DatabaseEngine::list_accounts` for the matching
+                        // rationale -- a salvaged row written before
+                        // `smtp_host`/`smtp_port` existed falls back to the
+                        // IMAP/JMAP endpoint rather than salvaging an
+                        // incomplete config.
+                        let resolved_smtp_host = smtp_host.unwrap_or_else(|| server_host.clone());
+                        let resolved_smtp_port =
+                            smtp_port.map(|p| p as u16).unwrap_or(server_port as u16);
                         nuncio_core::AccountConfig {
                             id,
                             name,
@@ -329,6 +342,8 @@ impl SqliteRecoveryEngine {
                             protocol,
                             server_host,
                             server_port: server_port as u16,
+                            smtp_host: resolved_smtp_host,
+                            smtp_port: resolved_smtp_port,
                             use_tls: use_tls != 0,
                             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
@@ -441,6 +456,8 @@ mod tests {
                 protocol: nuncio_core::AccountProtocol::ImapSmtp,
                 server_host: "imap.nuncio.mx".to_string(),
                 server_port: 993,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
                 use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
@@ -500,6 +517,8 @@ mod tests {
                 protocol: nuncio_core::AccountProtocol::ImapSmtp,
                 server_host: "imap.nuncio.mx".to_string(),
                 server_port: 993,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
                 use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
