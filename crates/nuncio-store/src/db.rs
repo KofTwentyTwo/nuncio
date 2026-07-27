@@ -358,11 +358,114 @@ impl DatabaseEngine {
             CREATE INDEX IF NOT EXISTS idx_filter_logs_rule ON filter_execution_logs(rule_id, matched_at DESC);
             CREATE INDEX IF NOT EXISTS idx_pending_mutations_status ON pending_remote_mutations(status, created_at ASC);
             CREATE INDEX IF NOT EXISTS idx_worm_audit_seq ON worm_audit_records(sequence ASC);
+
+            -- Full-text search indexes are created eagerly at migration time (not lazily on
+            -- first search) so no message or event saved before the first search call is ever
+            -- permanently unindexed.
+            --
+            -- CONFIDENTIALITY TRADEOFF: `messages.body_plain` / `messages.body_html` are
+            -- encrypted at rest (AES-256-GCM, see `PayloadCipher`). `messages_fts` is a
+            -- standalone FTS5 table -- deliberately NOT an external-content table or trigger
+            -- mirror of the `messages` columns -- because the stored body columns hold
+            -- ciphertext and a trigger-based mirror would index that ciphertext verbatim
+            -- (defeating search entirely). Instead `messages_fts` is populated explicitly from
+            -- the plaintext body in application code, at the moment of encryption in
+            -- `DatabaseEngine::save_email` (see there) and via `backfill_message_fts` below for
+            -- any pre-existing rows. This means the trigram index now contains
+            -- plaintext-derived body text: the FTS index itself is NOT encrypted, so message
+            -- body content is recoverable from `messages_fts` by anyone with filesystem access
+            -- to the SQLite database, even though the `messages.body_plain` column remains
+            -- ciphertext. Column-level body encryption therefore provides only limited
+            -- confidentiality while search is enabled -- full body confidentiality (an
+            -- encrypted search index, or whole-database encryption) is future work and is NOT
+            -- provided today.
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                id UNINDEXED,
+                subject,
+                sender,
+                body_plain,
+                tokenize = 'trigram'
+            );
+
+            -- Subject/sender are never encrypted in `messages`, so a delete-only trigger is
+            -- sufficient here: it just keeps the FTS index free of orphaned rows. Insertion and
+            -- update of `messages_fts` content happens explicitly in `save_email`, never via an
+            -- AFTER INSERT/UPDATE trigger, because such a trigger would only ever see the
+            -- ciphertext body column.
+            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                DELETE FROM messages_fts WHERE id = old.id;
+            END;
+
+            -- Calendar event summary/location are never encrypted at rest, so trigger-based
+            -- mirroring (unlike the message body) introduces no confidentiality regression.
+            CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+                id UNINDEXED,
+                summary,
+                location,
+                tokenize = 'trigram'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS events_ai AFTER INSERT ON calendar_events BEGIN
+                INSERT INTO events_fts(id, summary, location)
+                VALUES (new.id, new.summary, COALESCE(new.location, ''));
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS events_ad AFTER DELETE ON calendar_events BEGIN
+                DELETE FROM events_fts WHERE id = old.id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS events_au AFTER UPDATE ON calendar_events BEGIN
+                DELETE FROM events_fts WHERE id = old.id;
+                INSERT INTO events_fts(id, summary, location)
+                VALUES (new.id, new.summary, COALESCE(new.location, ''));
+            END;
             "#,
         )
         .execute(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
+
+        self.backfill_message_fts().await?;
+
+        Ok(())
+    }
+
+    /// Backfill `messages_fts` for any `messages` row that does not yet have a matching FTS
+    /// entry -- e.g. rows written before the FTS5 index existed, or written directly by a
+    /// process that bypassed `save_email`'s explicit index population. Run automatically as
+    /// part of [`DatabaseEngine::migrate`] (idempotent: a fully-indexed database performs no
+    /// work). The stored `body_plain` column holds AES-256-GCM ciphertext, so each candidate
+    /// row is decrypted with this engine's storage key before being written into the
+    /// plaintext-derived trigram index -- see the confidentiality tradeoff documented above
+    /// `messages_fts`'s `CREATE VIRTUAL TABLE` statement in [`DatabaseEngine::migrate`].
+    async fn backfill_message_fts(&self) -> Result<(), DatabaseError> {
+        let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT m.id, m.subject, m.sender, m.body_plain
+            FROM messages m
+            WHERE NOT EXISTS (SELECT 1 FROM messages_fts f WHERE f.id = m.id)
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        for (id, subject, sender, body_plain) in rows {
+            let dec_plain = body_plain
+                .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
+                .unwrap_or_default();
+
+            sqlx::query(
+                "INSERT INTO messages_fts (id, subject, sender, body_plain) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&subject)
+            .bind(&sender)
+            .bind(&dec_plain)
+            .execute(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+        }
 
         Ok(())
     }
@@ -454,6 +557,15 @@ impl DatabaseEngine {
     }
 
     /// Save an [`nuncio_core::model::Email`] to SQLite (INSERT OR REPLACE).
+    ///
+    /// The message body is encrypted (AES-256-GCM) before being written to the `messages`
+    /// table, but the *plaintext* body is also indexed into the standalone `messages_fts`
+    /// FTS5 table at this same write, before the plaintext is discarded. This is what makes
+    /// body search functional at all: a trigger mirroring the encrypted column would only ever
+    /// index ciphertext. See the confidentiality tradeoff documented above the `messages_fts`
+    /// `CREATE VIRTUAL TABLE` statement in [`DatabaseEngine::migrate`] -- the FTS index itself
+    /// is not encrypted, so this intentionally trades some body confidentiality for working
+    /// search.
     pub async fn save_email(&self, email: &nuncio_core::model::Email) -> Result<(), DatabaseError> {
         let enc_plain = email
             .body_plain
@@ -463,6 +575,8 @@ impl DatabaseEngine {
             .body_html
             .as_ref()
             .map(|h| crate::cipher::PayloadCipher::encrypt_text_at_rest(&self.storage_key, h));
+
+        let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
 
         sqlx::query(
             r#"
@@ -481,9 +595,32 @@ impl DatabaseEngine {
         .bind(if email.read { 1i64 } else { 0i64 })
         .bind(&enc_plain)
         .bind(&enc_html)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(DatabaseError::Query)?;
+
+        // Re-indexing: delete any prior FTS row for this message id, then insert the fresh
+        // plaintext-derived row. FTS5 has no natural "INSERT OR REPLACE" semantics for a
+        // standalone (non-external-content) table, so this is done explicitly rather than via
+        // trigger.
+        sqlx::query("DELETE FROM messages_fts WHERE id = ?")
+            .bind(&email.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        sqlx::query(
+            "INSERT INTO messages_fts (id, subject, sender, body_plain) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&email.id)
+        .bind(&email.subject)
+        .bind(&email.sender)
+        .bind(email.body_plain.as_deref().unwrap_or(""))
+        .execute(&mut *tx)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        tx.commit().await.map_err(DatabaseError::Query)?;
 
         Ok(())
     }
