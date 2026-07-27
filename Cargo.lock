@@ -2619,6 +2619,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "bytes",
  "hex",
  "nuncio-cal",
  "nuncio-cli",
@@ -2629,6 +2630,7 @@ dependencies = [
  "nuncio-store",
  "serde",
  "serde_json",
+ "sqlx",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",
