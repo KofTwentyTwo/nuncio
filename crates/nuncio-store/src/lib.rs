@@ -1,6 +1,7 @@
 //! Local storage, full-text search indexing, and credential security for Nuncio.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod cipher;
 pub mod db;

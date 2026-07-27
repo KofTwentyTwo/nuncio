@@ -113,12 +113,14 @@ mod tests {
     fn json_rpc_request_response_serde_roundtrip() {
         let req = JsonRpcRequest::new(42, "system.ping", json!({ "client": "tui" }));
         let serialized = serde_json::to_string(&req).expect("serialize request");
-        let deserialized: JsonRpcRequest = serde_json::from_str(&serialized).expect("deserialize request");
+        let deserialized: JsonRpcRequest =
+            serde_json::from_str(&serialized).expect("deserialize request");
         assert_eq!(req, deserialized);
 
         let resp = JsonRpcResponse::success(42, json!("pong"));
         let resp_serialized = serde_json::to_string(&resp).expect("serialize response");
-        let resp_deserialized: JsonRpcResponse = serde_json::from_str(&resp_serialized).expect("deserialize response");
+        let resp_deserialized: JsonRpcResponse =
+            serde_json::from_str(&resp_serialized).expect("deserialize response");
         assert_eq!(resp, resp_deserialized);
     }
 }

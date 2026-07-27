@@ -94,11 +94,7 @@ impl IpcClient {
     }
 
     /// Execute a JSON-RPC request against running daemon and return result payload.
-    pub async fn call_rpc(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, IpcClientError> {
+    pub async fn call_rpc(&self, method: &str, params: Value) -> Result<Value, IpcClientError> {
         let mut stream = self.connect_or_spawn().await?;
         let req_id = self.request_id_counter.fetch_add(1, Ordering::SeqCst);
         let req = JsonRpcRequest::new(req_id, method, params);
@@ -129,7 +125,11 @@ impl IpcClient {
         match cmd {
             CoreCommand::SyncAll => self.call_rpc("mail.sync_all", json!({})).await,
             CoreCommand::MarkRead { message_id, read } => {
-                self.call_rpc("mail.mark_read", json!({ "message_id": message_id, "read": read })).await
+                self.call_rpc(
+                    "mail.mark_read",
+                    json!({ "message_id": message_id, "read": read }),
+                )
+                .await
             }
             _ => self.call_rpc("mail.sync_all", json!({})).await,
         }
@@ -146,7 +146,12 @@ impl IpcClient {
     }
 
     /// Create a new filter rule in running daemon.
-    pub async fn filter_create(&self, name: &str, nsql: &str, priority: i32) -> Result<Value, IpcClientError> {
+    pub async fn filter_create(
+        &self,
+        name: &str,
+        nsql: &str,
+        priority: i32,
+    ) -> Result<Value, IpcClientError> {
         self.call_rpc(
             "filter.create",
             json!({ "name": name, "nsql": nsql, "priority": priority }),
@@ -155,7 +160,13 @@ impl IpcClient {
     }
 
     /// Edit an existing filter rule in running daemon.
-    pub async fn filter_edit(&self, id: &str, name: &str, nsql: &str, priority: i32) -> Result<Value, IpcClientError> {
+    pub async fn filter_edit(
+        &self,
+        id: &str,
+        name: &str,
+        nsql: &str,
+        priority: i32,
+    ) -> Result<Value, IpcClientError> {
         self.call_rpc(
             "filter.edit",
             json!({ "id": id, "name": name, "nsql": nsql, "priority": priority }),
@@ -169,18 +180,25 @@ impl IpcClient {
     }
 
     /// Dry-run preview evaluation of an email against filter rules.
-    pub async fn filter_preview(&self, email: &crate::model::Email) -> Result<Value, IpcClientError> {
+    pub async fn filter_preview(
+        &self,
+        email: &crate::model::Email,
+    ) -> Result<Value, IpcClientError> {
         let email_json = serde_json::to_value(email)?;
-        self.call_rpc("filter.preview", json!({ "email": email_json })).await
+        self.call_rpc("filter.preview", json!({ "email": email_json }))
+            .await
     }
 
     /// Query filter execution logs from running daemon.
     pub async fn filter_logs(&self, limit: usize) -> Result<Value, IpcClientError> {
-        self.call_rpc("filter.logs", json!({ "limit": limit })).await
+        self.call_rpc("filter.logs", json!({ "limit": limit }))
+            .await
     }
 
     /// Subscribe to real-time `events.notify` server push stream.
-    pub async fn subscribe_events(&self) -> Result<mpsc::Receiver<JsonRpcNotification>, IpcClientError> {
+    pub async fn subscribe_events(
+        &self,
+    ) -> Result<mpsc::Receiver<JsonRpcNotification>, IpcClientError> {
         let stream = self.connect_or_spawn().await?;
         let (tx, rx) = mpsc::channel(100);
 
@@ -192,7 +210,9 @@ impl IpcClient {
                     Err(_) => break,
                 };
 
-                if let Ok(notification) = serde_json::from_slice::<JsonRpcNotification>(&frame_bytes) {
+                if let Ok(notification) =
+                    serde_json::from_slice::<JsonRpcNotification>(&frame_bytes)
+                {
                     if tx.send(notification).await.is_err() {
                         break;
                     }

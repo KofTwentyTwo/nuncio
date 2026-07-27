@@ -46,7 +46,8 @@ mod tests {
         assert!(generated_nsql.contains("subject CONTAINS 'Urgent'"));
         assert!(generated_nsql.contains("ACTION MOVE TO 'Priority', MARK READ"));
 
-        let re_parsed = NsqlParser::parse_rule("Urgent Rule", 1, &generated_nsql).expect("re-parse generated nsql");
+        let re_parsed = NsqlParser::parse_rule("Urgent Rule", 1, &generated_nsql)
+            .expect("re-parse generated nsql");
         assert_eq!(rule.conditions, re_parsed.conditions);
         assert_eq!(rule.actions, re_parsed.actions);
     }

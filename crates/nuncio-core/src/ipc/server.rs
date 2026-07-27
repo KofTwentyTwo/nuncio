@@ -11,10 +11,7 @@ use tokio::net::TcpListener;
 
 /// Async handler callback signature for custom RPC extensions (e.g. `filter.*` handlers).
 pub type CustomRpcHandler = Arc<
-    dyn Fn(
-            &str,
-            serde_json::Value,
-        ) -> BoxFuture<'static, Option<Result<serde_json::Value, String>>>
+    dyn Fn(&str, serde_json::Value) -> BoxFuture<'static, Option<Result<serde_json::Value, String>>>
         + Send
         + Sync,
 >;

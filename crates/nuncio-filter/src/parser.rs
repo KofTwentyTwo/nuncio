@@ -47,7 +47,11 @@ impl NsqlParser {
     pub const MAX_AST_DEPTH: usize = 10;
 
     /// Parse complete NSQL statement into a `FilterRule`.
-    pub fn parse_rule(name: impl Into<String>, priority: i32, nsql: &str) -> Result<FilterRule, ParseError> {
+    pub fn parse_rule(
+        name: impl Into<String>,
+        priority: i32,
+        nsql: &str,
+    ) -> Result<FilterRule, ParseError> {
         let name_str = name.into();
         let (target_account, body_nsql) = Self::extract_on_account(nsql);
         let (where_str, actions) = Self::split_where_and_actions(&body_nsql)?;
@@ -80,15 +84,23 @@ impl NsqlParser {
             let prefix = nsql_trim[..idx].trim();
             let after = nsql_trim[idx + 10..].trim();
 
-            let (target, rest) = if after.starts_with('\'') {
-                let end_quote = after[1..].find('\'').map(|i| i + 1).unwrap_or(after.len());
-                let t = &after[1..end_quote];
-                let r = if end_quote + 1 < after.len() { &after[end_quote + 1..] } else { "" };
+            let (target, rest) = if let Some(stripped) = after.strip_prefix('\'') {
+                let end_quote = stripped.find('\'').unwrap_or(stripped.len());
+                let t = &stripped[..end_quote];
+                let r = if end_quote + 1 < stripped.len() {
+                    &stripped[end_quote + 1..]
+                } else {
+                    ""
+                };
                 (t, r)
-            } else if after.starts_with('"') {
-                let end_quote = after[1..].find('"').map(|i| i + 1).unwrap_or(after.len());
-                let t = &after[1..end_quote];
-                let r = if end_quote + 1 < after.len() { &after[end_quote + 1..] } else { "" };
+            } else if let Some(stripped) = after.strip_prefix('"') {
+                let end_quote = stripped.find('"').unwrap_or(stripped.len());
+                let t = &stripped[..end_quote];
+                let r = if end_quote + 1 < stripped.len() {
+                    &stripped[end_quote + 1..]
+                } else {
+                    ""
+                };
                 (t, r)
             } else {
                 let mut parts = after.split_whitespace();
@@ -165,10 +177,14 @@ impl NsqlParser {
                     if let Some(selection) = &select.selection {
                         Self::convert_expr(selection, 1)
                     } else {
-                        Err(ParseError::Syntax("missing WHERE selection clause".to_string()))
+                        Err(ParseError::Syntax(
+                            "missing WHERE selection clause".to_string(),
+                        ))
                     }
                 } else {
-                    Err(ParseError::Syntax("expected SELECT query statement".to_string()))
+                    Err(ParseError::Syntax(
+                        "expected SELECT query statement".to_string(),
+                    ))
                 }
             }
             _ => Err(ParseError::Syntax("expected SELECT statement".to_string())),
@@ -184,7 +200,10 @@ impl NsqlParser {
         match expr {
             Expr::Nested(inner) => Self::convert_expr(inner, depth),
 
-            Expr::UnaryOp { op: UnaryOperator::Not, expr: inner } => {
+            Expr::UnaryOp {
+                op: UnaryOperator::Not,
+                expr: inner,
+            } => {
                 let node = Self::convert_expr(inner, depth + 1)?;
                 Ok(ConditionNode::Not(Box::new(node)))
             }
@@ -204,34 +223,74 @@ impl NsqlParser {
                 BinaryOperator::NotEq => Self::convert_leaf(left, FilterOperator::NotEquals, right),
                 BinaryOperator::Gt => Self::convert_leaf(left, FilterOperator::GreaterThan, right),
                 BinaryOperator::Lt => Self::convert_leaf(left, FilterOperator::LessThan, right),
-                BinaryOperator::GtEq => Self::convert_leaf(left, FilterOperator::GreaterThanOrEqual, right),
-                BinaryOperator::LtEq => Self::convert_leaf(left, FilterOperator::LessThanOrEqual, right),
-                BinaryOperator::PGLikeMatch => Self::convert_leaf(left, FilterOperator::Contains, right),
-                BinaryOperator::PGILikeMatch => Self::convert_leaf(left, FilterOperator::Contains, right),
-                BinaryOperator::PGNotLikeMatch => Self::convert_leaf(left, FilterOperator::NotContains, right),
-                BinaryOperator::PGRegexMatch | BinaryOperator::PGRegexIMatch => Self::convert_leaf(left, FilterOperator::Matches, right),
+                BinaryOperator::GtEq => {
+                    Self::convert_leaf(left, FilterOperator::GreaterThanOrEqual, right)
+                }
+                BinaryOperator::LtEq => {
+                    Self::convert_leaf(left, FilterOperator::LessThanOrEqual, right)
+                }
+                BinaryOperator::PGLikeMatch => {
+                    Self::convert_leaf(left, FilterOperator::Contains, right)
+                }
+                BinaryOperator::PGILikeMatch => {
+                    Self::convert_leaf(left, FilterOperator::Contains, right)
+                }
+                BinaryOperator::PGNotLikeMatch => {
+                    Self::convert_leaf(left, FilterOperator::NotContains, right)
+                }
+                BinaryOperator::PGRegexMatch | BinaryOperator::PGRegexIMatch => {
+                    Self::convert_leaf(left, FilterOperator::Matches, right)
+                }
                 BinaryOperator::Custom(custom_op) => {
                     let op_upper = custom_op.to_uppercase();
                     match op_upper.as_str() {
                         "CONTAINS" => Self::convert_leaf(left, FilterOperator::Contains, right),
-                        "MATCHES" | "REGEX" => Self::convert_leaf(left, FilterOperator::Matches, right),
-                        _ => Err(ParseError::InvalidExpression(format!("unsupported operator: {custom_op}"))),
+                        "MATCHES" | "REGEX" => {
+                            Self::convert_leaf(left, FilterOperator::Matches, right)
+                        }
+                        _ => Err(ParseError::InvalidExpression(format!(
+                            "unsupported operator: {custom_op}"
+                        ))),
                     }
                 }
-                _ => Err(ParseError::InvalidExpression(format!("unsupported binary operator: {op:?}"))),
+                _ => Err(ParseError::InvalidExpression(format!(
+                    "unsupported binary operator: {op:?}"
+                ))),
             },
 
-            Expr::Like { expr: left, pattern: right, negated, .. } => {
-                let op = if *negated { FilterOperator::NotContains } else { FilterOperator::Contains };
+            Expr::Like {
+                expr: left,
+                pattern: right,
+                negated,
+                ..
+            } => {
+                let op = if *negated {
+                    FilterOperator::NotContains
+                } else {
+                    FilterOperator::Contains
+                };
                 Self::convert_leaf(left, op, right)
             }
 
-            Expr::ILike { expr: left, pattern: right, negated, .. } => {
-                let op = if *negated { FilterOperator::NotContains } else { FilterOperator::Contains };
+            Expr::ILike {
+                expr: left,
+                pattern: right,
+                negated,
+                ..
+            } => {
+                let op = if *negated {
+                    FilterOperator::NotContains
+                } else {
+                    FilterOperator::Contains
+                };
                 Self::convert_leaf(left, op, right)
             }
 
-            Expr::InList { expr: left, list, negated } => {
+            Expr::InList {
+                expr: left,
+                list,
+                negated,
+            } => {
                 let field = Self::extract_field(left)?;
                 let mut values = Vec::new();
                 for item in list {
@@ -240,10 +299,16 @@ impl NsqlParser {
                     } else if let Expr::Identifier(ident) = item {
                         values.push(ident.value.clone());
                     } else {
-                        return Err(ParseError::InvalidExpression("IN list elements must be strings or identifiers".to_string()));
+                        return Err(ParseError::InvalidExpression(
+                            "IN list elements must be strings or identifiers".to_string(),
+                        ));
                     }
                 }
-                let op = if *negated { FilterOperator::NotEquals } else { FilterOperator::In };
+                let op = if *negated {
+                    FilterOperator::NotEquals
+                } else {
+                    FilterOperator::In
+                };
                 Ok(ConditionNode::Leaf(ConditionLeaf {
                     field,
                     operator: op,
@@ -259,32 +324,49 @@ impl NsqlParser {
                         value: FilterValue::Boolean(true),
                     }))
                 } else {
-                    Err(ParseError::InvalidExpression(format!("unknown field identifier: {}", ident.value)))
+                    Err(ParseError::InvalidExpression(format!(
+                        "unknown field identifier: {}",
+                        ident.value
+                    )))
                 }
             }
 
             _ => Self::extract_field(expr)
-                .map(|f| ConditionNode::Leaf(ConditionLeaf {
-                    field: f,
-                    operator: FilterOperator::Equals,
-                    value: FilterValue::Boolean(true),
-                }))
-                .map_err(|_| ParseError::InvalidExpression(format!("unsupported expression structure: {expr:?}"))),
+                .map(|f| {
+                    ConditionNode::Leaf(ConditionLeaf {
+                        field: f,
+                        operator: FilterOperator::Equals,
+                        value: FilterValue::Boolean(true),
+                    })
+                })
+                .map_err(|_| {
+                    ParseError::InvalidExpression(format!(
+                        "unsupported expression structure: {expr:?}"
+                    ))
+                }),
         }
     }
 
     /// Extract `FilterField` and `FilterValue` for leaf condition.
-    fn convert_leaf(left: &Expr, op: FilterOperator, right: &Expr) -> Result<ConditionNode, ParseError> {
+    fn convert_leaf(
+        left: &Expr,
+        op: FilterOperator,
+        right: &Expr,
+    ) -> Result<ConditionNode, ParseError> {
         let field = Self::extract_field(left)?;
         let value = Self::extract_value(right)?;
-        Ok(ConditionNode::Leaf(ConditionLeaf { field, operator: op, value }))
+        Ok(ConditionNode::Leaf(ConditionLeaf {
+            field,
+            operator: op,
+            value,
+        }))
     }
 
     /// Extract `FilterField` from SQL expression.
     fn extract_field(expr: &Expr) -> Result<FilterField, ParseError> {
         let expr_str = expr.to_string();
-        if expr_str.starts_with("header__") {
-            let key = expr_str[8..].replace('_', "-");
+        if let Some(stripped) = expr_str.strip_prefix("header__") {
+            let key = stripped.replace('_', "-");
             return Ok(FilterField::Header(key));
         }
 
@@ -298,22 +380,32 @@ impl NsqlParser {
                     let key = ident.value[8..].replace('_', "-");
                     Ok(FilterField::Header(key))
                 } else {
-                    FilterField::parse_str(&ident.value)
-                        .ok_or_else(|| ParseError::InvalidExpression(format!("unknown field: {}", ident.value)))
+                    FilterField::parse_str(&ident.value).ok_or_else(|| {
+                        ParseError::InvalidExpression(format!("unknown field: {}", ident.value))
+                    })
                 }
             }
             Expr::CompoundIdentifier(idents) => {
-                let name = idents.iter().map(|i| i.value.as_str()).collect::<Vec<_>>().join(".");
+                let name = idents
+                    .iter()
+                    .map(|i| i.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
                 FilterField::parse_str(&name)
                     .ok_or_else(|| ParseError::InvalidExpression(format!("unknown field: {name}")))
             }
             _ => {
                 let lower = expr_str.to_lowercase();
                 if lower.starts_with("header[") && lower.ends_with(']') {
-                    let key_str = expr_str[7..expr_str.len() - 1].trim_matches('\'').trim_matches('"').to_string();
+                    let key_str = expr_str[7..expr_str.len() - 1]
+                        .trim_matches('\'')
+                        .trim_matches('"')
+                        .to_string();
                     Ok(FilterField::Header(key_str))
                 } else {
-                    Err(ParseError::InvalidExpression(format!("expected field identifier, got: {expr_str}")))
+                    Err(ParseError::InvalidExpression(format!(
+                        "expected field identifier, got: {expr_str}"
+                    )))
                 }
             }
         }
@@ -325,8 +417,9 @@ impl NsqlParser {
             Expr::Value(SqlValue::SingleQuotedString(s))
             | Expr::Value(SqlValue::DoubleQuotedString(s)) => Ok(FilterValue::String(s.clone())),
             Expr::Value(SqlValue::Number(num, _)) => {
-                let parsed = num.parse::<i64>()
-                    .map_err(|_| ParseError::InvalidExpression(format!("invalid integer number: {num}")))?;
+                let parsed = num.parse::<i64>().map_err(|_| {
+                    ParseError::InvalidExpression(format!("invalid integer number: {num}"))
+                })?;
                 Ok(FilterValue::Number(parsed))
             }
             Expr::Value(SqlValue::Boolean(b)) => Ok(FilterValue::Boolean(*b)),
@@ -351,7 +444,9 @@ impl NsqlParser {
                 }
                 Ok(FilterValue::List(strings))
             }
-            _ => Err(ParseError::InvalidExpression(format!("unsupported value literal: {expr:?}"))),
+            _ => Err(ParseError::InvalidExpression(format!(
+                "unsupported value literal: {expr:?}"
+            ))),
         }
     }
 
@@ -380,29 +475,39 @@ impl NsqlParser {
             } else if upper.starts_with("MOVE TO") {
                 let target = trimmed[7..].trim().trim_matches('\'').trim_matches('"');
                 if target.is_empty() {
-                    return Err(ParseError::InvalidAction("MOVE TO missing target folder".to_string()));
+                    return Err(ParseError::InvalidAction(
+                        "MOVE TO missing target folder".to_string(),
+                    ));
                 }
                 actions.push(RuleAction::MoveTo(target.to_string()));
             } else if upper.starts_with("COPY TO") {
                 let target = trimmed[7..].trim().trim_matches('\'').trim_matches('"');
                 if target.is_empty() {
-                    return Err(ParseError::InvalidAction("COPY TO missing target folder".to_string()));
+                    return Err(ParseError::InvalidAction(
+                        "COPY TO missing target folder".to_string(),
+                    ));
                 }
                 actions.push(RuleAction::CopyTo(target.to_string()));
             } else if upper.starts_with("FORWARD TO") {
                 let target = trimmed[10..].trim().trim_matches('\'').trim_matches('"');
                 if target.is_empty() {
-                    return Err(ParseError::InvalidAction("FORWARD TO missing target email".to_string()));
+                    return Err(ParseError::InvalidAction(
+                        "FORWARD TO missing target email".to_string(),
+                    ));
                 }
                 actions.push(RuleAction::ForwardTo(target.to_string()));
             } else if upper.starts_with("CALL WEBHOOK") {
                 let url = trimmed[12..].trim().trim_matches('\'').trim_matches('"');
                 if url.is_empty() {
-                    return Err(ParseError::InvalidAction("CALL WEBHOOK missing target URL".to_string()));
+                    return Err(ParseError::InvalidAction(
+                        "CALL WEBHOOK missing target URL".to_string(),
+                    ));
                 }
                 actions.push(RuleAction::CallWebhook(url.to_string()));
             } else {
-                return Err(ParseError::InvalidAction(format!("unknown action clause: {trimmed}")));
+                return Err(ParseError::InvalidAction(format!(
+                    "unknown action clause: {trimmed}"
+                )));
             }
         }
 
@@ -413,16 +518,24 @@ impl NsqlParser {
 fn preprocess_nsql_where(input: &str) -> String {
     let mut result = input.to_string();
 
-    let re_header = regex::Regex::new(r"(?i)header\s*\[\s*[']([^']+)[']\s*\]").expect("regex");
-    result = re_header.replace_all(&result, |caps: &regex::Captures| {
-        let key = &caps[1].replace('-', "_");
-        format!("header__{key}")
-    }).to_string();
+    let Ok(re_header) = regex::Regex::new(r"(?i)header\s*\[\s*[']([^']+)[']\s*\]") else {
+        return result;
+    };
+    result = re_header
+        .replace_all(&result, |caps: &regex::Captures| {
+            let key = &caps[1].replace('-', "_");
+            format!("header__{key}")
+        })
+        .to_string();
 
-    let re_contains = regex::Regex::new(r"(?i)\bCONTAINS\b").expect("regex");
+    let Ok(re_contains) = regex::Regex::new(r"(?i)\bCONTAINS\b") else {
+        return result;
+    };
     result = re_contains.replace_all(&result, "LIKE").to_string();
 
-    let re_matches = regex::Regex::new(r"(?i)\bMATCHES\b").expect("regex");
+    let Ok(re_matches) = regex::Regex::new(r"(?i)\bMATCHES\b") else {
+        return result;
+    };
     result = re_matches.replace_all(&result, "~").to_string();
 
     result
@@ -440,19 +553,17 @@ fn find_keyword_outside_quotes(text: &str, keyword: &str) -> Option<usize> {
             in_single_quote = !in_single_quote;
         } else if c == '"' && !in_single_quote {
             in_double_quote = !in_double_quote;
-        } else if !in_single_quote && !in_double_quote {
-            if i + kw_chars.len() <= chars.len() {
-                let is_match = chars[i..i + kw_chars.len()]
-                    .iter()
-                    .zip(kw_chars.iter())
-                    .all(|(a, b)| a.to_ascii_uppercase() == b.to_ascii_uppercase());
-                if is_match {
-                    let prev_ok = i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == ')';
-                    let next_idx = i + kw_chars.len();
-                    let next_ok = next_idx == chars.len() || chars[next_idx].is_whitespace();
-                    if prev_ok && next_ok {
-                        return Some(i);
-                    }
+        } else if !in_single_quote && !in_double_quote && i + kw_chars.len() <= chars.len() {
+            let is_match = chars[i..i + kw_chars.len()]
+                .iter()
+                .zip(kw_chars.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b));
+            if is_match {
+                let prev_ok = i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == ')';
+                let next_idx = i + kw_chars.len();
+                let next_ok = next_idx == chars.len() || chars[next_idx].is_whitespace();
+                if prev_ok && next_ok {
+                    return Some(i);
                 }
             }
         }

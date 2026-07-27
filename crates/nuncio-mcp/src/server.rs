@@ -21,7 +21,10 @@ impl McpServer {
         let (db_engine, dir) = DatabaseEngine::connect_ephemeral().await?;
         let db = Arc::new(db_engine);
         Ok(Self {
-            tools: McpToolHandler::with_policy(db.clone(), nuncio_core::McpAgentPolicy::unrestricted("stdio-agent")),
+            tools: McpToolHandler::with_policy(
+                db.clone(),
+                nuncio_core::McpAgentPolicy::unrestricted("stdio-agent"),
+            ),
             resources: McpResourceHandler::new(db),
             _tempdir: Some(Arc::new(dir)),
         })
@@ -30,7 +33,10 @@ impl McpServer {
     /// Create a new `McpServer` wrapping shared `DatabaseEngine`.
     pub fn new(db: Arc<DatabaseEngine>) -> Self {
         Self {
-            tools: McpToolHandler::with_policy(db.clone(), nuncio_core::McpAgentPolicy::unrestricted("stdio-agent")),
+            tools: McpToolHandler::with_policy(
+                db.clone(),
+                nuncio_core::McpAgentPolicy::unrestricted("stdio-agent"),
+            ),
             resources: McpResourceHandler::new(db),
             _tempdir: None,
         }

@@ -49,7 +49,9 @@ impl std::str::FromStr for ExportFormat {
             "eml" | "eml.zip" | "zip" => Ok(ExportFormat::EmlZip),
             "json" => Ok(ExportFormat::Json),
             "jsonl" | "jsonlines" => Ok(ExportFormat::JsonLines),
-            _ => Err(format!("Unknown export format '{s}'. Valid formats: mbox, eml, zip, json, jsonl")),
+            _ => Err(format!(
+                "Unknown export format '{s}'. Valid formats: mbox, eml, zip, json, jsonl"
+            )),
         }
     }
 }
@@ -108,9 +110,13 @@ impl ExportEngine {
     }
 
     /// Export a slice of [`Email`] messages to a ZIP archive containing `.eml` files.
-    pub fn export_eml_zip<W: Write + std::io::Seek>(messages: &[Email], writer: W) -> Result<u64, ExportError> {
+    pub fn export_eml_zip<W: Write + std::io::Seek>(
+        messages: &[Email],
+        writer: W,
+    ) -> Result<u64, ExportError> {
         let mut zip = zip::ZipWriter::new(writer);
-        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         for (idx, email) in messages.iter().enumerate() {
             let filename = format!("messages/{:05}_{}.eml", idx + 1, email.id);

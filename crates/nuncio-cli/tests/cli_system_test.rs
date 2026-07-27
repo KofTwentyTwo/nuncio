@@ -1,5 +1,7 @@
 //! E2E System Test Suite for nuncio-cli.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use nuncio_cli::{
     AccountSubcommand, CalSubcommand, Commands, FolderSubcommand, HeadlessRunner, MailSubcommand,
     SystemSubcommand,

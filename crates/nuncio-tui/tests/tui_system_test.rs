@@ -1,5 +1,7 @@
 //! E2E System Test Suite for nuncio-tui.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use nuncio_core::EventBus;
 use nuncio_tui::{ActivePane, AppMode, TuiApp};
 use ratatui::backend::TestBackend;

@@ -187,24 +187,48 @@ mod tests {
         let mut sm = VimLeaderStateMachine::new();
 
         // Single 'g' puts state machine in PendingG
-        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::None);
+        assert_eq!(
+            sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            UserAction::None
+        );
         assert_eq!(sm.state(), LeaderState::PendingG);
 
         // 'g' + 'g' -> JumpTop
-        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::JumpTop);
+        assert_eq!(
+            sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            UserAction::JumpTop
+        );
         assert_eq!(sm.state(), LeaderState::Idle);
 
         // 'g' + 'i' -> JumpInbox
-        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::None);
-        assert_eq!(sm.process_key(make_key(KeyCode::Char('i'), KeyModifiers::NONE)), UserAction::JumpInbox);
+        assert_eq!(
+            sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            UserAction::None
+        );
+        assert_eq!(
+            sm.process_key(make_key(KeyCode::Char('i'), KeyModifiers::NONE)),
+            UserAction::JumpInbox
+        );
 
         // 'g' + 's' -> JumpSent
-        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::None);
-        assert_eq!(sm.process_key(make_key(KeyCode::Char('s'), KeyModifiers::NONE)), UserAction::JumpSent);
+        assert_eq!(
+            sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            UserAction::None
+        );
+        assert_eq!(
+            sm.process_key(make_key(KeyCode::Char('s'), KeyModifiers::NONE)),
+            UserAction::JumpSent
+        );
 
         // 'g' + 'a' -> JumpArchive
-        assert_eq!(sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)), UserAction::None);
-        assert_eq!(sm.process_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE)), UserAction::JumpArchive);
+        assert_eq!(
+            sm.process_key(make_key(KeyCode::Char('g'), KeyModifiers::NONE)),
+            UserAction::None
+        );
+        assert_eq!(
+            sm.process_key(make_key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            UserAction::JumpArchive
+        );
     }
 
     #[test]

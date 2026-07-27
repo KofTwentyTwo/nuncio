@@ -7,6 +7,9 @@ use std::str::FromStr;
 use tempfile::TempDir;
 use thiserror::Error;
 
+/// Raw row shape for a pending remote mutation record fetched from SQLite.
+type PendingMutationRow = (String, String, String, String, String, String, i64, i64);
+
 /// Database errors emitted by `nuncio-store`.
 #[derive(Error, Debug)]
 pub enum DatabaseError {
@@ -36,7 +39,9 @@ impl DatabaseError {
         match self {
             DatabaseError::Corrupted(_) => true,
             DatabaseError::Query(sqlx_err) => crate::recovery::is_sqlite_corruption_error(sqlx_err),
-            DatabaseError::PoolCreation(msg) | DatabaseError::Migration(msg) | DatabaseError::RecoveryFailed(msg) => {
+            DatabaseError::PoolCreation(msg)
+            | DatabaseError::Migration(msg)
+            | DatabaseError::RecoveryFailed(msg) => {
                 let lower = msg.to_lowercase();
                 lower.contains("not a database")
                     || lower.contains("malformed")
@@ -89,7 +94,9 @@ impl DatabaseEngine {
 
     /// Open database at `path` executing pre-flight Stage 1 integrity check.
     /// If corruption is detected, automatically triggers backup isolation and stream recovery salvage.
-    pub async fn open(path: &Path) -> Result<(Self, Option<crate::recovery::RecoverySummary>), DatabaseError> {
+    pub async fn open(
+        path: &Path,
+    ) -> Result<(Self, Option<crate::recovery::RecoverySummary>), DatabaseError> {
         let backup_dir = crate::recovery::CorruptedBackupManager::default_backup_dir();
         Self::open_with_backup_dir(path, &backup_dir).await
     }
@@ -107,14 +114,18 @@ impl DatabaseEngine {
                 } else {
                     engine.close().await;
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    let summary = crate::recovery::SqliteRecoveryEngine::salvage(path, path, backup_dir).await?;
+                    let summary =
+                        crate::recovery::SqliteRecoveryEngine::salvage(path, path, backup_dir)
+                            .await?;
                     let fresh_engine = Self::connect_file(path).await?;
                     Ok((fresh_engine, Some(summary)))
                 }
             }
             Err(err) => {
                 if err.is_corrupt() {
-                    let summary = crate::recovery::SqliteRecoveryEngine::salvage(path, path, backup_dir).await?;
+                    let summary =
+                        crate::recovery::SqliteRecoveryEngine::salvage(path, path, backup_dir)
+                            .await?;
                     let fresh_engine = Self::connect_file(path).await?;
                     Ok((fresh_engine, Some(summary)))
                 } else {
@@ -594,7 +605,9 @@ impl DatabaseEngine {
 
         let mut rules = Vec::new();
         for (id, name, priority, enabled, nsql_text, created_at, updated_at) in rows {
-            if let Ok(mut parsed) = nuncio_filter::NsqlParser::parse_rule(&name, priority as i32, &nsql_text) {
+            if let Ok(mut parsed) =
+                nuncio_filter::NsqlParser::parse_rule(&name, priority as i32, &nsql_text)
+            {
                 parsed.id = id;
                 parsed.enabled = enabled != 0;
                 parsed.created_at = created_at;
@@ -646,7 +659,7 @@ impl DatabaseEngine {
         &self,
         limit: usize,
     ) -> Result<Vec<nuncio_filter::PendingRemoteMutation>, DatabaseError> {
-        let rows: Vec<(String, String, String, String, String, String, i64, i64)> = sqlx::query_as(
+        let rows: Vec<PendingMutationRow> = sqlx::query_as(
             r#"
             SELECT id, rule_id, message_id, mutation_type, payload, status, retry_count, created_at
             FROM pending_remote_mutations
@@ -662,18 +675,29 @@ impl DatabaseEngine {
 
         Ok(rows
             .into_iter()
-            .map(|(id, rule_id, message_id, mutation_type, payload, status, retry_count, created_at)| {
-                nuncio_filter::PendingRemoteMutation {
+            .map(
+                |(
                     id,
                     rule_id,
                     message_id,
                     mutation_type,
                     payload,
                     status,
-                    retry_count: retry_count as i32,
+                    retry_count,
                     created_at,
-                }
-            })
+                )| {
+                    nuncio_filter::PendingRemoteMutation {
+                        id,
+                        rule_id,
+                        message_id,
+                        mutation_type,
+                        payload,
+                        status,
+                        retry_count: retry_count as i32,
+                        created_at,
+                    }
+                },
+            )
             .collect())
     }
 
@@ -702,16 +726,24 @@ impl DatabaseEngine {
         action_taken: &str,
         secret_key: &str,
     ) -> Result<nuncio_filter::FilterExecutionLog, DatabaseError> {
-        let latest_hash: Option<(String,)> = sqlx::query_as(
-            "SELECT hash FROM filter_execution_logs ORDER BY id DESC LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(DatabaseError::Query)?;
+        let latest_hash: Option<(String,)> =
+            sqlx::query_as("SELECT hash FROM filter_execution_logs ORDER BY id DESC LIMIT 1")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
 
-        let prev_hash = latest_hash.map(|r| r.0).unwrap_or_else(|| "GENESIS".to_string());
+        let prev_hash = latest_hash
+            .map(|r| r.0)
+            .unwrap_or_else(|| "GENESIS".to_string());
         let matched_at = chrono::Utc::now().timestamp();
-        let hash = compute_log_hash(&prev_hash, rule_id, message_id, action_taken, matched_at, secret_key);
+        let hash = compute_log_hash(
+            &prev_hash,
+            rule_id,
+            message_id,
+            action_taken,
+            matched_at,
+            secret_key,
+        );
 
         let id = sqlx::query(
             r#"
@@ -761,22 +793,27 @@ impl DatabaseEngine {
 
         Ok(rows
             .into_iter()
-            .map(|(id, rule_id, message_id, action_taken, matched_at, prev_hash, hash)| {
-                nuncio_filter::FilterExecutionLog {
-                    id,
-                    rule_id,
-                    message_id,
-                    action_taken,
-                    matched_at,
-                    prev_hash,
-                    hash,
-                }
-            })
+            .map(
+                |(id, rule_id, message_id, action_taken, matched_at, prev_hash, hash)| {
+                    nuncio_filter::FilterExecutionLog {
+                        id,
+                        rule_id,
+                        message_id,
+                        action_taken,
+                        matched_at,
+                        prev_hash,
+                        hash,
+                    }
+                },
+            )
             .collect())
     }
 
     /// Verify cryptographic hash-chain ledger integrity for filter execution logs.
-    pub async fn verify_execution_log_chain(&self, secret_key: &str) -> Result<bool, DatabaseError> {
+    pub async fn verify_execution_log_chain(
+        &self,
+        secret_key: &str,
+    ) -> Result<bool, DatabaseError> {
         let rows: Vec<(i64, String, String, String, i64, String, String)> = sqlx::query_as(
             r#"
             SELECT id, rule_id, message_id, action_taken, matched_at, prev_hash, hash
@@ -793,7 +830,14 @@ impl DatabaseEngine {
             if prev_hash != expected_prev {
                 return Ok(false);
             }
-            let computed = compute_log_hash(&prev_hash, &rule_id, &message_id, &action_taken, matched_at, secret_key);
+            let computed = compute_log_hash(
+                &prev_hash,
+                &rule_id,
+                &message_id,
+                &action_taken,
+                matched_at,
+                secret_key,
+            );
             if computed != hash {
                 return Ok(false);
             }
@@ -832,13 +876,18 @@ impl DatabaseEngine {
             Option<String>,
         )>();
 
-        let rows = query.fetch_all(&self.pool).await.map_err(DatabaseError::Query)?;
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
 
         Ok(rows
             .into_iter()
             .map(|r| {
-                let dec_plain = r.8.map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&p));
-                let dec_html = r.9.map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&h));
+                let dec_plain =
+                    r.8.map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&p));
+                let dec_html =
+                    r.9.map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&h));
                 nuncio_core::model::Email {
                     id: r.0,
                     account_id: r.1,
@@ -938,10 +987,7 @@ impl DatabaseEngine {
     }
 
     /// Verify the entire WORM cryptographic audit log chain.
-    pub async fn verify_worm_audit_chain(
-        &self,
-        secret_key: &[u8],
-    ) -> Result<(), DatabaseError> {
+    pub async fn verify_worm_audit_chain(&self, secret_key: &[u8]) -> Result<(), DatabaseError> {
         let records = self.list_worm_audit_records(100_000, 0).await?;
         nuncio_core::verify_worm_chain(&records, secret_key)
             .map_err(|e| DatabaseError::ChainIntegrityFailed(e.to_string()))
@@ -954,8 +1000,9 @@ impl DatabaseEngine {
         format: nuncio_core::ExportFormat,
         output_path: &Path,
     ) -> Result<nuncio_core::ExportSummary, DatabaseError> {
-        let file = std::fs::File::create(output_path)
-            .map_err(|e| DatabaseError::RecoveryFailed(format!("failed to create output file: {e}")))?;
+        let file = std::fs::File::create(output_path).map_err(|e| {
+            DatabaseError::RecoveryFailed(format!("failed to create output file: {e}"))
+        })?;
 
         let bytes_written = match format {
             nuncio_core::ExportFormat::Mbox => {
@@ -977,12 +1024,14 @@ impl DatabaseEngine {
         };
 
         // Record WORM audit log for this data export
-        let _ = self.append_worm_audit_record(
-            "system.export",
-            "data.export",
-            output_path.to_string_lossy().as_bytes(),
-            nuncio_core::DEFAULT_WORM_KEY,
-        ).await;
+        let _ = self
+            .append_worm_audit_record(
+                "system.export",
+                "data.export",
+                output_path.to_string_lossy().as_bytes(),
+                nuncio_core::DEFAULT_WORM_KEY,
+            )
+            .await;
 
         Ok(nuncio_core::ExportSummary {
             output_path: output_path.to_string_lossy().to_string(),
@@ -1004,8 +1053,10 @@ fn compute_log_hash(
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())
-        .unwrap_or_else(|_| HmacSha256::new_from_slice(b"nuncio_ledger_secret").expect("valid key"));
+    // HMAC accepts keys of any length (RFC 2104), so this never fails in practice.
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret_key.as_bytes()) else {
+        return String::new();
+    };
     let payload = format!("{prev_hash}:{rule_id}:{message_id}:{action_taken}:{matched_at}");
     mac.update(payload.as_bytes());
     hex::encode(mac.finalize().into_bytes())
@@ -1152,15 +1203,24 @@ mod tests {
         let nsql = "SELECT * FROM emails WHERE subject CONTAINS 'Spam' ACTION DELETE";
         let rule = nuncio_filter::NsqlParser::parse_rule("Spam Filter", 1, nsql).unwrap();
 
-        engine.save_filter_rule(&rule).await.expect("save filter rule");
+        engine
+            .save_filter_rule(&rule)
+            .await
+            .expect("save filter rule");
         let rules = engine.list_filter_rules().await.expect("list filter rules");
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name, "Spam Filter");
 
         // Hash-chained logs
         let secret = "test_secret_key";
-        let log1 = engine.save_filter_execution_log(&rule.id, "msg-100", "DELETE", secret).await.unwrap();
-        let log2 = engine.save_filter_execution_log(&rule.id, "msg-101", "DELETE", secret).await.unwrap();
+        let log1 = engine
+            .save_filter_execution_log(&rule.id, "msg-100", "DELETE", secret)
+            .await
+            .unwrap();
+        let log2 = engine
+            .save_filter_execution_log(&rule.id, "msg-101", "DELETE", secret)
+            .await
+            .unwrap();
 
         assert_eq!(log1.prev_hash, "GENESIS");
         assert_eq!(log2.prev_hash, log1.hash);
@@ -1205,16 +1265,23 @@ mod tests {
         assert_eq!(chunk2[0].id, "msg-004");
         assert_eq!(chunk2[1].id, "msg-005");
 
-        let mutation = nuncio_filter::OutboxManager::create_mutation("rule-1", "msg-001", "MOVE", Some("Archive".to_string()));
+        let mutation = nuncio_filter::OutboxManager::create_mutation(
+            "rule-1",
+            "msg-001",
+            "MOVE",
+            Some("Archive".to_string()),
+        );
         engine.save_pending_mutation(&mutation).await.unwrap();
 
         let pending = engine.list_pending_mutations(10).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, mutation.id);
 
-        engine.update_mutation_status(&mutation.id, "completed", 1).await.unwrap();
+        engine
+            .update_mutation_status(&mutation.id, "completed", 1)
+            .await
+            .unwrap();
         let pending_after = engine.list_pending_mutations(10).await.unwrap();
         assert_eq!(pending_after.len(), 0);
     }
 }
-

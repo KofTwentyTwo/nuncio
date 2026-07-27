@@ -150,7 +150,8 @@ impl McpAgentPolicy {
         }
         for pattern in &self.allowed_accounts {
             if pattern.contains('*') {
-                let regex_pattern = format!("(?i)^{}$", regex::escape(pattern).replace("\\*", ".*"));
+                let regex_pattern =
+                    format!("(?i)^{}$", regex::escape(pattern).replace("\\*", ".*"));
                 if let Ok(re) = regex::Regex::new(&regex_pattern) {
                     if re.is_match(account_id) {
                         return true;
@@ -166,15 +167,16 @@ impl McpAgentPolicy {
     /// Check if the agent is allowed to access a specific mailbox folder ID.
     pub fn is_folder_allowed(&self, folder_id: &str) -> bool {
         for pattern in &self.allowed_folders {
-            if pattern.starts_with('!') {
-                let forbidden = &pattern[1..];
+            if let Some(forbidden) = pattern.strip_prefix('!') {
                 if forbidden.eq_ignore_ascii_case(folder_id) {
                     return false;
                 }
             }
         }
         for pattern in &self.allowed_folders {
-            if !pattern.starts_with('!') && (pattern == "*" || pattern.eq_ignore_ascii_case(folder_id)) {
+            if !pattern.starts_with('!')
+                && (pattern == "*" || pattern.eq_ignore_ascii_case(folder_id))
+            {
                 return true;
             }
         }
@@ -193,11 +195,15 @@ impl McpAgentPolicy {
         }
 
         // Mask credit cards
-        let cc_regex = regex::Regex::new(r"\b(?:\d[ -]*?){13,16}\b").unwrap();
+        let Ok(cc_regex) = regex::Regex::new(r"\b(?:\d[ -]*?){13,16}\b") else {
+            return text.to_string();
+        };
         let redacted_cc = cc_regex.replace_all(text, "[REDACTED-CREDIT-CARD]");
 
         // Mask US SSNs
-        let ssn_regex = regex::Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap();
+        let Ok(ssn_regex) = regex::Regex::new(r"\b\d{3}-\d{2}-\d{4}\b") else {
+            return redacted_cc.to_string();
+        };
         let redacted_ssn = ssn_regex.replace_all(&redacted_cc, "[REDACTED-SSN]");
 
         redacted_ssn.to_string()
@@ -220,8 +226,10 @@ mod tests {
 
     #[test]
     fn account_filtering_wildcards_and_exact() {
-        let mut policy = McpAgentPolicy::default();
-        policy.allowed_accounts = vec!["acct-work".to_string(), "*@kof22.com".to_string()];
+        let policy = McpAgentPolicy {
+            allowed_accounts: vec!["acct-work".to_string(), "*@kof22.com".to_string()],
+            ..McpAgentPolicy::default()
+        };
 
         assert!(policy.is_account_allowed("acct-work"));
         assert!(policy.is_account_allowed("user@kof22.com"));
@@ -230,8 +238,14 @@ mod tests {
 
     #[test]
     fn folder_filtering_exclusions() {
-        let mut policy = McpAgentPolicy::default();
-        policy.allowed_folders = vec!["*".to_string(), "!archive".to_string(), "!trash".to_string()];
+        let policy = McpAgentPolicy {
+            allowed_folders: vec![
+                "*".to_string(),
+                "!archive".to_string(),
+                "!trash".to_string(),
+            ],
+            ..McpAgentPolicy::default()
+        };
 
         assert!(policy.is_folder_allowed("inbox"));
         assert!(policy.is_folder_allowed("sent"));

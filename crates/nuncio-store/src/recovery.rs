@@ -5,6 +5,19 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
+/// Raw row shape for an account configuration record fetched from SQLite during salvage.
+type SalvagedAccountRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    String,
+    i64,
+);
+
 /// Summary report of database self-healing recovery output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoverySummary {
@@ -53,7 +66,9 @@ impl CorruptedBackupManager {
     /// Default root backup directory (`~/.nuncio/corrupted_backups`).
     pub fn default_backup_dir() -> PathBuf {
         if let Ok(home_str) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-            PathBuf::from(home_str).join(".nuncio").join("corrupted_backups")
+            PathBuf::from(home_str)
+                .join(".nuncio")
+                .join("corrupted_backups")
         } else {
             PathBuf::from(".nuncio").join("corrupted_backups")
         }
@@ -66,9 +81,13 @@ impl CorruptedBackupManager {
     }
 
     /// Isolate damaged database file and companion WAL/SHM files to a target backup directory.
-    pub fn backup_corrupted_db_to(db_path: &Path, backup_dir: &Path) -> Result<PathBuf, DatabaseError> {
-        std::fs::create_dir_all(backup_dir)
-            .map_err(|e| DatabaseError::RecoveryFailed(format!("failed to create backup dir: {e}")))?;
+    pub fn backup_corrupted_db_to(
+        db_path: &Path,
+        backup_dir: &Path,
+    ) -> Result<PathBuf, DatabaseError> {
+        std::fs::create_dir_all(backup_dir).map_err(|e| {
+            DatabaseError::RecoveryFailed(format!("failed to create backup dir: {e}"))
+        })?;
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -79,8 +98,9 @@ impl CorruptedBackupManager {
         let target_path = backup_dir.join(&filename);
 
         if db_path.exists() {
-            std::fs::copy(db_path, &target_path)
-                .map_err(|e| DatabaseError::RecoveryFailed(format!("failed to copy db file: {e}")))?;
+            std::fs::copy(db_path, &target_path).map_err(|e| {
+                DatabaseError::RecoveryFailed(format!("failed to copy db file: {e}"))
+            })?;
         }
 
         // Copy companion WAL file if present
@@ -97,7 +117,10 @@ impl CorruptedBackupManager {
             let _ = std::fs::copy(shm_path, target_shm);
         }
 
-        info!("Corrupted database isolated to forensic backup: {}", target_path.display());
+        info!(
+            "Corrupted database isolated to forensic backup: {}",
+            target_path.display()
+        );
         Ok(target_path)
     }
 }
@@ -114,24 +137,34 @@ impl SqliteRecoveryEngine {
         backup_dir: &Path,
     ) -> Result<RecoverySummary, DatabaseError> {
         // Step 1: Preserve raw corrupted database to forensic backup directory
-        let backup_path = CorruptedBackupManager::backup_corrupted_db_to(corrupted_db_path, backup_dir)?;
+        let backup_path =
+            CorruptedBackupManager::backup_corrupted_db_to(corrupted_db_path, backup_dir)?;
 
         // Step 2: Attempt reading valid records from preserved backup file
         let backup_url = format!("sqlite://{}", backup_path.to_string_lossy());
-        let (salvaged_accounts, salvaged_rules, salvaged_conditions, salvaged_actions) =
-            if let Ok(pool) = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect(&backup_url).await {
-                let accounts = Self::salvage_accounts(&pool).await;
-                let (rules, conditions, actions) = Self::salvage_filter_tables(&pool).await;
-                pool.close().await;
-                (accounts, rules, conditions, actions)
-            } else {
-                warn!("Failed to open backup connection for salvage; proceeding with clean database reset.");
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-            };
+        let (salvaged_accounts, salvaged_rules, salvaged_conditions, salvaged_actions) = if let Ok(
+            pool,
+        ) =
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&backup_url)
+                .await
+        {
+            let accounts = Self::salvage_accounts(&pool).await;
+            let (rules, conditions, actions) = Self::salvage_filter_tables(&pool).await;
+            pool.close().await;
+            (accounts, rules, conditions, actions)
+        } else {
+            warn!("Failed to open backup connection for salvage; proceeding with clean database reset.");
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        };
 
         // Step 3: Remove or truncate damaged database files at target_db_path
         let _ = std::fs::remove_file(target_db_path);
-        let _ = std::fs::OpenOptions::new().write(true).truncate(true).open(target_db_path);
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(target_db_path);
         let _ = std::fs::remove_file(format!("{}-wal", target_db_path.to_string_lossy()));
         let _ = std::fs::remove_file(format!("{}-shm", target_db_path.to_string_lossy()));
         let _ = std::fs::remove_file(format!("{}-wal", target_db_path.to_string_lossy()));
@@ -149,7 +182,9 @@ impl SqliteRecoveryEngine {
         }
 
         let mut restored_rules_count = 0;
-        for (id, name, desc, enabled, match_all, priority, created_at, updated_at) in &salvaged_rules {
+        for (id, name, desc, enabled, match_all, priority, created_at, updated_at) in
+            &salvaged_rules
+        {
             let res = sqlx::query(
                 "INSERT INTO filter_rules (id, name, description, enabled, match_all, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             )
@@ -188,7 +223,7 @@ impl SqliteRecoveryEngine {
         let mut restored_actions_count = 0;
         for (id, rule_id, action_type, value) in &salvaged_actions {
             let res = sqlx::query(
-                "INSERT INTO filter_actions (id, rule_id, action_type, value) VALUES (?, ?, ?, ?)"
+                "INSERT INTO filter_actions (id, rule_id, action_type, value) VALUES (?, ?, ?, ?)",
             )
             .bind(id)
             .bind(rule_id)
@@ -215,7 +250,7 @@ impl SqliteRecoveryEngine {
     }
 
     async fn salvage_accounts(pool: &sqlx::SqlitePool) -> Vec<nuncio_core::AccountConfig> {
-        let rows: Result<Vec<(String, String, String, String, String, i64, i64, String, i64)>, _> = sqlx::query_as(
+        let rows: Result<Vec<SalvagedAccountRow>, _> = sqlx::query_as(
             "SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs FROM accounts"
         )
         .fetch_all(pool)
@@ -224,23 +259,35 @@ impl SqliteRecoveryEngine {
         match rows {
             Ok(vec) => vec
                 .into_iter()
-                .map(|(id, name, email_address, protocol_str, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs)| {
-                    let protocol = serde_json::from_str(&protocol_str)
-                        .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
-                    nuncio_core::AccountConfig {
+                .map(
+                    |(
                         id,
                         name,
                         email_address,
-                        protocol,
+                        protocol_str,
                         server_host,
-                        server_port: server_port as u16,
-                        use_tls: use_tls != 0,
-                        imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-                        smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                        server_port,
+                        use_tls,
                         keyring_secret_key,
-                        sync_interval_secs: sync_interval_secs as u64,
-                    }
-                })
+                        sync_interval_secs,
+                    )| {
+                        let protocol = serde_json::from_str(&protocol_str)
+                            .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
+                        nuncio_core::AccountConfig {
+                            id,
+                            name,
+                            email_address,
+                            protocol,
+                            server_host,
+                            server_port: server_port as u16,
+                            use_tls: use_tls != 0,
+                            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                            keyring_secret_key,
+                            sync_interval_secs: sync_interval_secs as u64,
+                        }
+                    },
+                )
                 .collect(),
             Err(_) => Vec::new(),
         }
@@ -262,14 +309,14 @@ impl SqliteRecoveryEngine {
         .unwrap_or_default();
 
         let conditions = sqlx::query_as::<_, (String, String, String, String, String)>(
-            "SELECT id, rule_id, field, operator, value FROM filter_conditions"
+            "SELECT id, rule_id, field, operator, value FROM filter_conditions",
         )
         .fetch_all(pool)
         .await
         .unwrap_or_default();
 
         let actions = sqlx::query_as::<_, (String, String, String, Option<String>)>(
-            "SELECT id, rule_id, action_type, value FROM filter_actions"
+            "SELECT id, rule_id, action_type, value FROM filter_actions",
         )
         .fetch_all(pool)
         .await
@@ -334,9 +381,10 @@ mod tests {
 
         // Step C: Verify Stage 1 integrity check / open handles corruption
         let backup_dir = dir.path().join("backups");
-        let (recovered_engine, summary) = DatabaseEngine::open_with_backup_dir(&db_path, &backup_dir)
-            .await
-            .expect("open_with_backup_dir auto-recovers");
+        let (recovered_engine, summary) =
+            DatabaseEngine::open_with_backup_dir(&db_path, &backup_dir)
+                .await
+                .expect("open_with_backup_dir auto-recovers");
 
         assert!(summary.is_some());
         let sum = summary.unwrap();

@@ -1,6 +1,7 @@
 //! iCalendar (RFC 5545), CalDAV (RFC 4791), and recurrence engine for Nuncio.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod caldav;
 pub mod carddav;

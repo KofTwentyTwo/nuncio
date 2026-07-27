@@ -2,6 +2,8 @@
 //! Exposes a 4th presentation shell ("Native LLM Agent UI") allowing AI models
 //! full access to email, calendar, search, and storage features.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 pub mod resources;
 pub mod server;
 pub mod tools;

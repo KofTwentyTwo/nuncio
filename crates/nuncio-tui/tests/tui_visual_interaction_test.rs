@@ -2,6 +2,8 @@
 //! Renders Ratatui interface onto TestBackend, simulates keyboard navigation,
 //! and verifies terminal buffer visual text snapshot representations.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use nuncio_core::{CoreEvent, EventBus};
 use nuncio_tui::{ActivePane, AppMode, TuiApp};
 use ratatui::backend::TestBackend;
@@ -35,7 +37,9 @@ async fn automated_tui_visual_and_keyboard_interaction_matrix() {
     // ------------------------------------------------------------------------
     // Step 1: Initial Render & Visual Snapshot Verification (Main 3-Pane View)
     // ------------------------------------------------------------------------
-    terminal.draw(|f| app.render_frame(f)).expect("render frame");
+    terminal
+        .draw(|f| app.render_frame(f))
+        .expect("render frame");
     let snapshot_main = buffer_to_snapshot(terminal.backend().buffer());
 
     // Verify brand header and main pane borders exist in visual snapshot
@@ -49,27 +53,38 @@ async fn automated_tui_visual_and_keyboard_interaction_matrix() {
 
     // Simulate Tab / 'l' to focus Message List
     app.set_active_pane(ActivePane::MessageList);
-    terminal.draw(|f| app.render_frame(f)).expect("render list frame");
+    terminal
+        .draw(|f| app.render_frame(f))
+        .expect("render list frame");
     assert_eq!(app.active_pane(), ActivePane::MessageList);
 
     // Simulate Tab / 'l' to focus Reader
     app.set_active_pane(ActivePane::Reader);
-    terminal.draw(|f| app.render_frame(f)).expect("render reader frame");
+    terminal
+        .draw(|f| app.render_frame(f))
+        .expect("render reader frame");
     assert_eq!(app.active_pane(), ActivePane::Reader);
 
     // ------------------------------------------------------------------------
     // Step 3: Event Stream Interaction - CoreEvent::SyncStarted Push Update
     // ------------------------------------------------------------------------
-    let evt = core_events_rx.recv().await.expect("receive published core event");
+    let evt = core_events_rx
+        .recv()
+        .await
+        .expect("receive published core event");
     assert!(matches!(evt, CoreEvent::SyncStarted { .. }));
 
-    terminal.draw(|f| app.render_frame(f)).expect("render syncing frame");
+    terminal
+        .draw(|f| app.render_frame(f))
+        .expect("render syncing frame");
 
     // ------------------------------------------------------------------------
     // Step 4: Modal Navigation - Help Overlay Visual Snapshot
     // ------------------------------------------------------------------------
     app.set_mode(AppMode::HelpModal);
-    terminal.draw(|f| app.render_frame(f)).expect("render help modal");
+    terminal
+        .draw(|f| app.render_frame(f))
+        .expect("render help modal");
     let snapshot_help = buffer_to_snapshot(terminal.backend().buffer());
 
     assert!(snapshot_help.contains("NUNCIO TUI KEYBINDINGS HELP"));
@@ -80,7 +95,9 @@ async fn automated_tui_visual_and_keyboard_interaction_matrix() {
     // Step 5: Modal Navigation - Account Settings Visual Snapshot
     // ------------------------------------------------------------------------
     app.set_mode(AppMode::AccountSettings);
-    terminal.draw(|f| app.render_frame(f)).expect("render account settings");
+    terminal
+        .draw(|f| app.render_frame(f))
+        .expect("render account settings");
     let snapshot_accounts = buffer_to_snapshot(terminal.backend().buffer());
 
     assert!(snapshot_accounts.contains("Account Settings"));
@@ -90,7 +107,9 @@ async fn automated_tui_visual_and_keyboard_interaction_matrix() {
     // Step 6: Modal Navigation - Splash Screen Visual Snapshot
     // ------------------------------------------------------------------------
     app.set_mode(AppMode::SplashScreen);
-    terminal.draw(|f| app.render_frame(f)).expect("render splash screen");
+    terminal
+        .draw(|f| app.render_frame(f))
+        .expect("render splash screen");
     let snapshot_splash = buffer_to_snapshot(terminal.backend().buffer());
 
     assert!(snapshot_splash.contains("Welcome to Nuncio"));

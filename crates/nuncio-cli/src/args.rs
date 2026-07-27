@@ -131,7 +131,6 @@ pub enum UpdateSubcommand {
     Apply,
 }
 
-
 /// Account subcommands (`nuncio account <verb>`).
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -416,4 +415,3 @@ mod tests {
         );
     }
 }
-

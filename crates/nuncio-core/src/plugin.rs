@@ -52,7 +52,9 @@ impl PluginRuntime {
     /// Register a new sandboxed plugin manifest.
     pub fn register_plugin(&mut self, manifest: PluginManifest) -> Result<(), PluginError> {
         if manifest.id.is_empty() {
-            return Err(PluginError::InvalidManifest("missing plugin id".to_string()));
+            return Err(PluginError::InvalidManifest(
+                "missing plugin id".to_string(),
+            ));
         }
         self.installed_plugins.push(manifest);
         Ok(())
@@ -64,7 +66,11 @@ impl PluginRuntime {
     }
 
     /// Execute subscribed plugins for a specific event hook.
-    pub fn trigger_hook(&self, hook: PluginHook, event_payload_json: &str) -> Vec<Result<String, PluginError>> {
+    pub fn trigger_hook(
+        &self,
+        hook: PluginHook,
+        event_payload_json: &str,
+    ) -> Vec<Result<String, PluginError>> {
         self.installed_plugins
             .iter()
             .filter(|p| p.hooks.contains(&hook))
@@ -72,7 +78,10 @@ impl PluginRuntime {
                 if event_payload_json.is_empty() {
                     Err(PluginError::ExecutionFailed("empty payload".to_string()))
                 } else {
-                    Ok(format!("plugin {} executed successfully for hook {:?}", p.id, hook))
+                    Ok(format!(
+                        "plugin {} executed successfully for hook {:?}",
+                        p.id, hook
+                    ))
                 }
             })
             .collect()

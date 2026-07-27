@@ -1,5 +1,7 @@
 //! System integration test suite for nuncio-core IPC client-server framing & JSON-RPC protocol.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use nuncio_core::ipc::{IpcClient, IpcDaemonServer};
 use nuncio_core::{CoreCommand, EventBus};
 use std::sync::Arc;
@@ -34,7 +36,13 @@ async fn system_test_ipc_daemon_ping_state_and_commands() {
     assert_eq!(state_res["status"].as_str().unwrap(), "Idle");
 
     // 3. Dispatch CoreCommand over IPC
-    let sync_res = client.send_command(CoreCommand::SyncAll).await.expect("send command success");
+    let sync_res = client
+        .send_command(CoreCommand::SyncAll)
+        .await
+        .expect("send command success");
     assert_eq!(sync_res["status"], "dispatched");
-    assert_eq!(event_bus.current_state().status, nuncio_core::EngineStatus::Syncing);
+    assert_eq!(
+        event_bus.current_state().status,
+        nuncio_core::EngineStatus::Syncing
+    );
 }

@@ -67,17 +67,30 @@ mod tests {
 
     #[test]
     fn generate_1on1_link_format() {
-        let link = SchedulingLinkGenerator::generate_1on1_link("james.maes@kof22.com", 30, "Architecture Review");
+        let link = SchedulingLinkGenerator::generate_1on1_link(
+            "james.maes@kof22.com",
+            30,
+            "Architecture Review",
+        );
         assert_eq!(link.host_email, "james.maes@kof22.com");
         assert_eq!(link.duration_mins, 30);
-        assert_eq!(link.booking_url, "https://nuncio.mx/meet/james.maes@kof22.com/architecture-review?dur=30");
+        assert_eq!(
+            link.booking_url,
+            "https://nuncio.mx/meet/james.maes@kof22.com/architecture-review?dur=30"
+        );
     }
 
     #[test]
     fn parse_duration_minutes_variations() {
         assert_eq!(SchedulingLinkGenerator::parse_duration_minutes("30m"), 30);
         assert_eq!(SchedulingLinkGenerator::parse_duration_minutes("1h"), 60);
-        assert_eq!(SchedulingLinkGenerator::parse_duration_minutes("45 mins"), 45);
-        assert_eq!(SchedulingLinkGenerator::parse_duration_minutes("2 hours"), 120);
+        assert_eq!(
+            SchedulingLinkGenerator::parse_duration_minutes("45 mins"),
+            45
+        );
+        assert_eq!(
+            SchedulingLinkGenerator::parse_duration_minutes("2 hours"),
+            120
+        );
     }
 }

@@ -74,8 +74,7 @@ impl E2eeEngine {
         }
 
         // Simulating Sequoia / OpenPGP verification verification logic
-        let valid = signature.contains("BEGIN PGP SIGNATURE")
-            && expected_fingerprint.len() >= 8;
+        let valid = signature.contains("BEGIN PGP SIGNATURE") && expected_fingerprint.len() >= 8;
 
         if valid {
             Ok(SecurityBadge {
@@ -139,7 +138,10 @@ mod tests {
         let badge = E2eeEngine::verify_openpgp_signature(payload, sig, fp).unwrap();
         assert_eq!(badge.encryption_type, EncryptionType::OpenPGP);
         assert!(badge.is_encrypted);
-        assert!(matches!(badge.signature_status, SignatureStatus::Valid { .. }));
+        assert!(matches!(
+            badge.signature_status,
+            SignatureStatus::Valid { .. }
+        ));
     }
 
     #[test]

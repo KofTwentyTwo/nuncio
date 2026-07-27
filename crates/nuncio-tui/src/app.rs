@@ -66,19 +66,25 @@ pub struct TuiApp {
 impl TuiApp {
     /// Create a new `TuiApp` wrapping an `EventBus`.
     pub fn new(event_bus: EventBus) -> Self {
-        let sample_rule1 = NsqlParser::parse_rule(
+        // Sample demo rules use fixed, known-valid NSQL text; if parsing ever
+        // fails (e.g. a future NSQL grammar change), fall back to no sample
+        // rules rather than panicking.
+        let mut sample_filter_rules = Vec::new();
+        if let Ok(sample_rule1) = NsqlParser::parse_rule(
             "Priority Boss Filter",
             0,
             "WHERE (from = 'boss@nuncio.mx' AND size > 1024) ACTION MOVE TO 'Priority', FLAG",
-        )
-        .expect("parse sample rule");
+        ) {
+            sample_filter_rules.push(sample_rule1);
+        }
 
-        let sample_rule2 = NsqlParser::parse_rule(
+        if let Ok(sample_rule2) = NsqlParser::parse_rule(
             "Spam Auto Cleaner",
             1,
             "WHERE folder IN ('spam', 'junk') ACTION DELETE",
-        )
-        .expect("parse sample rule");
+        ) {
+            sample_filter_rules.push(sample_rule2);
+        }
 
         Self {
             event_bus,
@@ -123,7 +129,7 @@ impl TuiApp {
             messages: Vec::new(),
             selected_message_idx: 0,
 
-            filter_rules: vec![sample_rule1, sample_rule2],
+            filter_rules: sample_filter_rules,
             selected_filter_idx: 0,
             filter_editor_mode: FilterEditorSubMode::VisualBuilder,
             filter_preview_active: false,
@@ -131,13 +137,18 @@ impl TuiApp {
             filter_logs_drawer_open: false,
             filter_logs: Vec::new(),
             recovery_banner: None,
-            update_banner: Some("[UPDATE AVAILABLE] Nuncio v0.2.0 is available — Press [u] to Update & Restart".to_string()),
+            update_banner: Some(
+                "[UPDATE AVAILABLE] Nuncio v0.2.0 is available — Press [u] to Update & Restart"
+                    .to_string(),
+            ),
         }
     }
 
     /// Trigger database recovery alert notification on top header menu.
     pub fn trigger_recovery_alert(&mut self, backup_path: &str) {
-        self.recovery_banner = Some(format!("[NOTICE] Database Auto-Healed ({backup_path}) — Resynchronizing Inbox..."));
+        self.recovery_banner = Some(format!(
+            "[NOTICE] Database Auto-Healed ({backup_path}) — Resynchronizing Inbox..."
+        ));
     }
 
     /// Trigger software update download and application workflow (`[u]`).
@@ -149,23 +160,29 @@ impl TuiApp {
     pub fn move_selection_down(&mut self) {
         match self.mode {
             AppMode::FilterRules => {
-                if !self.filter_rules.is_empty() && self.selected_filter_idx + 1 < self.filter_rules.len() {
+                if !self.filter_rules.is_empty()
+                    && self.selected_filter_idx + 1 < self.filter_rules.len()
+                {
                     self.selected_filter_idx += 1;
                 }
             }
             AppMode::AccountSettings => {
-                if !self.accounts.is_empty() && self.selected_account_idx + 1 < self.accounts.len() {
+                if !self.accounts.is_empty() && self.selected_account_idx + 1 < self.accounts.len()
+                {
                     self.selected_account_idx += 1;
                 }
             }
             AppMode::MainView => match self.active_pane {
                 ActivePane::Sidebar => {
-                    if !self.folders.is_empty() && self.selected_folder_idx + 1 < self.folders.len() {
+                    if !self.folders.is_empty() && self.selected_folder_idx + 1 < self.folders.len()
+                    {
                         self.selected_folder_idx += 1;
                     }
                 }
                 ActivePane::MessageList => {
-                    if !self.messages.is_empty() && self.selected_message_idx + 1 < self.messages.len() {
+                    if !self.messages.is_empty()
+                        && self.selected_message_idx + 1 < self.messages.len()
+                    {
                         self.selected_message_idx += 1;
                     }
                 }
@@ -208,7 +225,8 @@ impl TuiApp {
     /// Re-order rule priority up (`[K]`).
     pub fn reorder_filter_priority_up(&mut self) {
         if self.mode == AppMode::FilterRules && self.selected_filter_idx > 0 {
-            self.filter_rules.swap(self.selected_filter_idx, self.selected_filter_idx - 1);
+            self.filter_rules
+                .swap(self.selected_filter_idx, self.selected_filter_idx - 1);
             self.selected_filter_idx -= 1;
             for (idx, rule) in self.filter_rules.iter_mut().enumerate() {
                 rule.priority = idx as i32;
@@ -218,8 +236,11 @@ impl TuiApp {
 
     /// Re-order rule priority down (`[J]`).
     pub fn reorder_filter_priority_down(&mut self) {
-        if self.mode == AppMode::FilterRules && self.selected_filter_idx + 1 < self.filter_rules.len() {
-            self.filter_rules.swap(self.selected_filter_idx, self.selected_filter_idx + 1);
+        if self.mode == AppMode::FilterRules
+            && self.selected_filter_idx + 1 < self.filter_rules.len()
+        {
+            self.filter_rules
+                .swap(self.selected_filter_idx, self.selected_filter_idx + 1);
             self.selected_filter_idx += 1;
             for (idx, rule) in self.filter_rules.iter_mut().enumerate() {
                 rule.priority = idx as i32;
@@ -324,7 +345,8 @@ impl TuiApp {
                 Color::Blue,
             )
         };
-        let header = Paragraph::new(header_text).style(Style::default().bg(bg_color).fg(Color::Black));
+        let header =
+            Paragraph::new(header_text).style(Style::default().bg(bg_color).fg(Color::Black));
         frame.render_widget(header, main_chunks[0]);
 
         // Render body area based on AppMode
@@ -341,7 +363,11 @@ impl TuiApp {
                     .iter()
                     .enumerate()
                     .map(|(idx, rule)| {
-                        let prefix = if idx == self.selected_filter_idx { " > " } else { "   " };
+                        let prefix = if idx == self.selected_filter_idx {
+                            " > "
+                        } else {
+                            "   "
+                        };
                         ListItem::new(format!("{}[P{}] {}", prefix, rule.priority, rule.name))
                     })
                     .collect();
@@ -355,19 +381,34 @@ impl TuiApp {
                 // Right: Editor & Details Pane
                 let mut right_text = String::new();
                 if let Some(rule) = self.filter_rules.get(self.selected_filter_idx) {
-                    right_text.push_str(&format!("Rule ID: {}\nName: {}\nPriority: {}\n\n", rule.id, rule.name, rule.priority));
-                    right_text.push_str(&format!("Active Sub-Mode [s]: {:?}\n\n", self.filter_editor_mode));
+                    right_text.push_str(&format!(
+                        "Rule ID: {}\nName: {}\nPriority: {}\n\n",
+                        rule.id, rule.name, rule.priority
+                    ));
+                    right_text.push_str(&format!(
+                        "Active Sub-Mode [s]: {:?}\n\n",
+                        self.filter_editor_mode
+                    ));
                     right_text.push_str(&format!("NSQL Query:\n{}\n\n", rule.nsql_text));
 
                     if self.filter_preview_active {
-                        right_text.push_str("── DRY-RUN PREVIEW RESULTS [t] ───────────────────────\n");
+                        right_text
+                            .push_str("── DRY-RUN PREVIEW RESULTS [t] ───────────────────────\n");
                         if let Some(prev) = &self.filter_preview_result {
-                            right_text.push_str(&format!("Matched: {}\nMatched Rule: {:?}\nActions: {:?}\nTime: {}us\n", prev.matched, prev.matched_rule_name, prev.actions_evaluated, prev.execution_time_us));
+                            right_text.push_str(&format!(
+                                "Matched: {}\nMatched Rule: {:?}\nActions: {:?}\nTime: {}us\n",
+                                prev.matched,
+                                prev.matched_rule_name,
+                                prev.actions_evaluated,
+                                prev.execution_time_us
+                            ));
                         }
                     }
 
                     if self.filter_logs_drawer_open {
-                        right_text.push_str("\n── EXECUTION LOG DRAWER [l] ───────────────────────────\n");
+                        right_text.push_str(
+                            "\n── EXECUTION LOG DRAWER [l] ───────────────────────────\n",
+                        );
                         right_text.push_str("Log chain verified OK (Genesis hash linked).\n");
                     }
                 }
@@ -470,7 +511,10 @@ impl TuiApp {
                 let sidebar_block = Block::default()
                     .title(" Folders (20%) ")
                     .borders(Borders::ALL)
-                    .border_style(AppLayout::border_style(ActivePane::Sidebar, self.active_pane));
+                    .border_style(AppLayout::border_style(
+                        ActivePane::Sidebar,
+                        self.active_pane,
+                    ));
                 let sidebar_list = List::new(sidebar_items).block(sidebar_block);
                 frame.render_widget(sidebar_list, sidebar_area);
 
@@ -486,14 +530,18 @@ impl TuiApp {
                             "   "
                         };
                         let status = if msg.read { " " } else { "●" };
-                        let text = format!("{} {} {:<15} {}", prefix, status, msg.sender, msg.subject);
+                        let text =
+                            format!("{} {} {:<15} {}", prefix, status, msg.sender, msg.subject);
                         ListItem::new(text)
                     })
                     .collect();
                 let msg_block = Block::default()
                     .title(" Messages (35%) ")
                     .borders(Borders::ALL)
-                    .border_style(AppLayout::border_style(ActivePane::MessageList, self.active_pane));
+                    .border_style(AppLayout::border_style(
+                        ActivePane::MessageList,
+                        self.active_pane,
+                    ));
                 let msg_list = List::new(msg_items).block(msg_block);
                 frame.render_widget(msg_list, list_area);
 
@@ -508,7 +556,10 @@ impl TuiApp {
                 let reader_block = Block::default()
                     .title(" Email Reader (45%) ")
                     .borders(Borders::ALL)
-                    .border_style(AppLayout::border_style(ActivePane::Reader, self.active_pane));
+                    .border_style(AppLayout::border_style(
+                        ActivePane::Reader,
+                        self.active_pane,
+                    ));
                 let reader_p = Paragraph::new(body_text).block(reader_block);
                 frame.render_widget(reader_p, reader_area);
             }
@@ -516,7 +567,8 @@ impl TuiApp {
 
         // Footer navigation bar
         let footer_text = " [?] Help │ [f] Filter Rules │ [a] Accounts │ [u] Update │ [s] Sync │ [c] Compose │ [r] Reply │ [q] Quit ";
-        let footer = Paragraph::new(footer_text).style(Style::default().bg(Color::DarkGray).fg(Color::White));
+        let footer = Paragraph::new(footer_text)
+            .style(Style::default().bg(Color::DarkGray).fg(Color::White));
         frame.render_widget(footer, main_chunks[2]);
     }
 }

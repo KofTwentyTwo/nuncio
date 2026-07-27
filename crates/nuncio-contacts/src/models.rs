@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Contact {
@@ -86,10 +86,18 @@ impl Contact {
             vcard.push_str(&format!("TITLE:{}\r\n", title));
         }
         for email in &self.emails {
-            vcard.push_str(&format!("EMAIL;TYPE={}:{}\r\n", email.label.to_uppercase(), email.email));
+            vcard.push_str(&format!(
+                "EMAIL;TYPE={}:{}\r\n",
+                email.label.to_uppercase(),
+                email.email
+            ));
         }
         for phone in &self.phones {
-            vcard.push_str(&format!("TEL;TYPE={}:{}\r\n", phone.label.to_uppercase(), phone.phone));
+            vcard.push_str(&format!(
+                "TEL;TYPE={}:{}\r\n",
+                phone.label.to_uppercase(),
+                phone.phone
+            ));
         }
         vcard.push_str("END:VCARD\r\n");
         vcard

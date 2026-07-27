@@ -1,5 +1,7 @@
 //! E2E System Test Suite for nuncio-gui.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use nuncio_core::{EngineStatus, EventBus};
 use nuncio_gui::{GuiViewState, HtmlSanitizer, IpcBridge, IpcCommandPayload};
 

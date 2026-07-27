@@ -37,7 +37,8 @@ impl CompiledFilter {
             ConditionNode::Leaf(leaf) => {
                 if leaf.operator == FilterOperator::Matches {
                     if let FilterValue::String(pat) = &leaf.value {
-                        let re = Regex::new(pat).map_err(|e| format!("regex compile error: {e}"))?;
+                        let re =
+                            Regex::new(pat).map_err(|e| format!("regex compile error: {e}"))?;
                         acc.push((pat.clone(), re));
                     }
                 }
@@ -61,22 +62,38 @@ impl CompiledFilter {
     fn eval_node(node: &ConditionNode, email: &Email, regexes: &[(String, Regex)]) -> bool {
         match node {
             ConditionNode::Leaf(leaf) => Self::eval_leaf(leaf, email, regexes),
-            ConditionNode::And(children) => children.iter().all(|c| Self::eval_node(c, email, regexes)),
-            ConditionNode::Or(children) => children.iter().any(|c| Self::eval_node(c, email, regexes)),
+            ConditionNode::And(children) => {
+                children.iter().all(|c| Self::eval_node(c, email, regexes))
+            }
+            ConditionNode::Or(children) => {
+                children.iter().any(|c| Self::eval_node(c, email, regexes))
+            }
             ConditionNode::Not(inner) => !Self::eval_node(inner, email, regexes),
         }
     }
 
     fn eval_leaf(leaf: &ConditionLeaf, email: &Email, regexes: &[(String, Regex)]) -> bool {
         match &leaf.field {
-            FilterField::Subject => Self::eval_string_op(&email.subject, &leaf.operator, &leaf.value, regexes),
-            FilterField::From => Self::eval_string_op(&email.sender, &leaf.operator, &leaf.value, regexes),
-            FilterField::To => Self::eval_string_op(&email.recipient, &leaf.operator, &leaf.value, regexes),
+            FilterField::Subject => {
+                Self::eval_string_op(&email.subject, &leaf.operator, &leaf.value, regexes)
+            }
+            FilterField::From => {
+                Self::eval_string_op(&email.sender, &leaf.operator, &leaf.value, regexes)
+            }
+            FilterField::To => {
+                Self::eval_string_op(&email.recipient, &leaf.operator, &leaf.value, regexes)
+            }
             FilterField::Body => {
-                let body = email.body_plain.as_deref().or(email.body_html.as_deref()).unwrap_or("");
+                let body = email
+                    .body_plain
+                    .as_deref()
+                    .or(email.body_html.as_deref())
+                    .unwrap_or("");
                 Self::eval_string_op(body, &leaf.operator, &leaf.value, regexes)
             }
-            FilterField::Folder | FilterField::Account => Self::eval_string_op(&email.folder_id, &leaf.operator, &leaf.value, regexes),
+            FilterField::Folder | FilterField::Account => {
+                Self::eval_string_op(&email.folder_id, &leaf.operator, &leaf.value, regexes)
+            }
             FilterField::HasAttachment => {
                 let has = !email.attachments.is_empty();
                 if let FilterValue::Boolean(b) = leaf.value {
@@ -90,7 +107,11 @@ impl CompiledFilter {
                 }
             }
             FilterField::Size => {
-                let size = email.body_plain.as_ref().map(|b| b.len() as i64).unwrap_or(0);
+                let size = email
+                    .body_plain
+                    .as_ref()
+                    .map(|b| b.len() as i64)
+                    .unwrap_or(0);
                 if let FilterValue::Number(target) = leaf.value {
                     match leaf.operator {
                         FilterOperator::Equals => size == target,
@@ -127,7 +148,12 @@ impl CompiledFilter {
         }
     }
 
-    fn eval_string_op(haystack: &str, op: &FilterOperator, val: &FilterValue, regexes: &[(String, Regex)]) -> bool {
+    fn eval_string_op(
+        haystack: &str,
+        op: &FilterOperator,
+        val: &FilterValue,
+        regexes: &[(String, Regex)],
+    ) -> bool {
         match op {
             FilterOperator::Equals => match val {
                 FilterValue::String(s) => haystack.eq_ignore_ascii_case(s),
@@ -150,7 +176,9 @@ impl CompiledFilter {
                     if let Some((_, re)) = regexes.iter().find(|(p, _)| p == pat) {
                         re.is_match(haystack)
                     } else {
-                        Regex::new(pat).map(|re| re.is_match(haystack)).unwrap_or(false)
+                        Regex::new(pat)
+                            .map(|re| re.is_match(haystack))
+                            .unwrap_or(false)
                     }
                 }
                 _ => false,
@@ -220,7 +248,11 @@ impl FilterEngine {
     }
 
     /// Evaluate with Tokio 50ms hard timeout for ReDoS safety (#277).
-    pub async fn evaluate_with_timeout(&self, email: &Email, timeout_duration: Duration) -> Vec<(FilterRule, Vec<RuleAction>)> {
+    pub async fn evaluate_with_timeout(
+        &self,
+        email: &Email,
+        timeout_duration: Duration,
+    ) -> Vec<(FilterRule, Vec<RuleAction>)> {
         let email_clone = email.clone();
         let engine_cache = self.cache.clone();
 
@@ -250,7 +282,12 @@ impl FilterEngine {
 
         for filter in &guard.filters {
             let is_match = filter.evaluate_condition(email);
-            traces.push(format!("Rule '{}' (priority {}): {}", filter.rule.name, filter.rule.priority, if is_match { "MATCH" } else { "NO MATCH" }));
+            traces.push(format!(
+                "Rule '{}' (priority {}): {}",
+                filter.rule.name,
+                filter.rule.priority,
+                if is_match { "MATCH" } else { "NO MATCH" }
+            ));
             if is_match && !matched {
                 matched = true;
                 matched_rule_id = Some(filter.rule.id.clone());
@@ -275,7 +312,10 @@ impl FilterEngine {
     /// Generate HMAC-SHA256 signature for outbound webhooks (#280).
     pub fn sign_webhook_payload(secret: &str, timestamp: i64, payload: &str) -> String {
         type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key length");
+        // HMAC accepts keys of any length (RFC 2104), so this never fails in practice.
+        let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
+            return String::new();
+        };
         let data = format!("{timestamp}.{payload}");
         mac.update(data.as_bytes());
         let hash = hex::encode(mac.finalize().into_bytes());
@@ -319,7 +359,8 @@ mod tests {
 
     #[test]
     fn test_webhook_signature() {
-        let sig = FilterEngine::sign_webhook_payload("secret123", 1700000000, "{\"event\":\"mail\"}");
+        let sig =
+            FilterEngine::sign_webhook_payload("secret123", 1700000000, "{\"event\":\"mail\"}");
         assert!(sig.starts_with("t=1700000000,v1="));
     }
 }

@@ -1,5 +1,7 @@
 //! Nuncio Terminal UI library.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 pub mod app;
 pub mod html;
 pub mod keybindings;

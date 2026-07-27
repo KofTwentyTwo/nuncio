@@ -1,6 +1,7 @@
 //! Protocol engines for IMAP4rev1, JMAP (RFC 8620/8621), and SMTP.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod backend;
 pub mod imap;

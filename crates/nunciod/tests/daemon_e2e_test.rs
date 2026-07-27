@@ -1,5 +1,7 @@
 //! End-to-End multi-interface daemon integration test suite.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use nuncio_core::ipc::{IpcClient, IpcDaemonServer};
 use nuncio_core::{CoreCommand, EventBus};
 use std::sync::Arc;
@@ -35,7 +37,10 @@ async fn e2e_multi_shell_daemon_concurrency_test() {
     assert!(client_mcp.ping().await.expect("mcp ping"));
 
     // 2. MCP shell issues sync command
-    let sync_res = client_mcp.send_command(CoreCommand::SyncAll).await.expect("mcp sync command");
+    let sync_res = client_mcp
+        .send_command(CoreCommand::SyncAll)
+        .await
+        .expect("mcp sync command");
     assert_eq!(sync_res["status"], "dispatched");
 
     // 3. CLI shell fetches state and verifies status is Syncing
@@ -43,6 +48,12 @@ async fn e2e_multi_shell_daemon_concurrency_test() {
     assert_eq!(state_res["status"].as_str().unwrap(), "Syncing");
 
     // 4. TUI shell marks message read
-    let mark_res = client_tui.send_command(CoreCommand::MarkRead { message_id: "msg-1".to_string(), read: true }).await.expect("tui mark read");
+    let mark_res = client_tui
+        .send_command(CoreCommand::MarkRead {
+            message_id: "msg-1".to_string(),
+            read: true,
+        })
+        .await
+        .expect("tui mark read");
     assert_eq!(mark_res["status"], "marked");
 }

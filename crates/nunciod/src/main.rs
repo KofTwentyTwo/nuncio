@@ -5,9 +5,7 @@
 use nuncio_core::ipc::server::CustomRpcHandler;
 use nuncio_core::ipc::IpcDaemonServer;
 use nuncio_core::{CoreEvent, EventBus};
-use nuncio_filter::{
-    FilterEngine, NsqlParser, NsqlValidator, OutboxManager, ValidationOptions,
-};
+use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, OutboxManager, ValidationOptions};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -19,16 +17,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let event_bus = Arc::new(EventBus::new());
     let db_path = std::env::var("NUNCIO_DB_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::temp_dir().join("nuncio_main.db")
-        });
+        .unwrap_or_else(|_| std::env::temp_dir().join("nuncio_main.db"));
 
     let orchestrator = nunciod::SelfHealingSyncOrchestrator::new(&db_path, event_bus.clone());
     let (db, _summary) = orchestrator.initialize_and_recover().await?;
 
     // Load active rules from SQLite
     let initial_rules = db.list_filter_rules().await.unwrap_or_default();
-    let filter_engine = Arc::new(FilterEngine::new(initial_rules).expect("initialize filter engine"));
+    let filter_engine = Arc::new(FilterEngine::new(initial_rules)?);
 
     // Background Outbox Worker Task (#273)
     let db_outbox = db.clone();
@@ -40,13 +36,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 for item in pending {
                     let next_retry = item.retry_count + 1;
                     if next_retry > OutboxManager::MAX_RETRIES {
-                        let _ = db_outbox.update_mutation_status(&item.id, "failed", next_retry).await;
+                        let _ = db_outbox
+                            .update_mutation_status(&item.id, "failed", next_retry)
+                            .await;
                         continue;
                     }
                     let backoff_ms = OutboxManager::calculate_backoff_ms(item.retry_count);
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     // Simulate remote IMAP/JMAP mutation execution
-                    let _ = db_outbox.update_mutation_status(&item.id, "completed", next_retry).await;
+                    let _ = db_outbox
+                        .update_mutation_status(&item.id, "completed", next_retry)
+                        .await;
                 }
             }
         }
@@ -88,16 +88,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         Box::pin(async move {
             match method_str.as_str() {
-                "filter.list" => {
-                    match db.list_filter_rules().await {
-                        Ok(rules) => Some(Ok(json!(rules))),
-                        Err(e) => Some(Err(e.to_string())),
-                    }
-                }
+                "filter.list" => match db.list_filter_rules().await {
+                    Ok(rules) => Some(Ok(json!(rules))),
+                    Err(e) => Some(Err(e.to_string())),
+                },
                 "filter.create" => {
-                    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled Rule");
+                    let name = params
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Untitled Rule");
                     let nsql = params.get("nsql").and_then(|v| v.as_str()).unwrap_or("");
-                    let priority = params.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let priority =
+                        params.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
                     match NsqlParser::parse_rule(name, priority, nsql) {
                         Ok(rule) => {
@@ -121,9 +123,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         Some(id) => id,
                         None => return Some(Err("missing rule id".to_string())),
                     };
-                    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("Updated Rule");
+                    let name = params
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Updated Rule");
                     let nsql = params.get("nsql").and_then(|v| v.as_str()).unwrap_or("");
-                    let priority = params.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let priority =
+                        params.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
                     match NsqlParser::parse_rule(name, priority, nsql) {
                         Ok(mut rule) => {
@@ -158,7 +164,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
                 "filter.preview" => {
                     if let Some(email_val) = params.get("email") {
-                        if let Ok(email) = serde_json::from_value::<nuncio_core::model::Email>(email_val.clone()) {
+                        if let Ok(email) =
+                            serde_json::from_value::<nuncio_core::model::Email>(email_val.clone())
+                        {
                             let preview = engine.preview(&email);
                             return Some(Ok(json!(preview)));
                         }
@@ -174,7 +182,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
                 "filter.triage_keyset" => {
                     // Keyset Chunking Triage Engine (#272)
-                    let batch_size = params.get("batch_size").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
+                    let batch_size = params
+                        .get("batch_size")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1000) as usize;
                     let mut last_id = String::new();
                     let mut processed = 0;
                     let mut matched_count = 0;
@@ -184,10 +195,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             Ok(c) => c,
                             Err(e) => return Some(Err(e.to_string())),
                         };
-                        if chunk.is_empty() {
+                        let Some(last) = chunk.last() else {
                             break;
-                        }
-                        last_id = chunk.last().unwrap().id.clone();
+                        };
+                        last_id = last.id.clone();
                         for email in &chunk {
                             processed += 1;
                             let matches = engine.evaluate(email);
@@ -195,8 +206,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 matched_count += 1;
                                 for action in actions {
                                     let action_str = action.to_nsql();
-                                    let _ = db.save_filter_execution_log(&rule.id, &email.id, &action_str, "secret_ledger_key").await;
-                                    let outbox_item = OutboxManager::create_mutation(&rule.id, &email.id, &action_str, None);
+                                    let _ = db
+                                        .save_filter_execution_log(
+                                            &rule.id,
+                                            &email.id,
+                                            &action_str,
+                                            "secret_ledger_key",
+                                        )
+                                        .await;
+                                    let outbox_item = OutboxManager::create_mutation(
+                                        &rule.id,
+                                        &email.id,
+                                        &action_str,
+                                        None,
+                                    );
                                     let _ = db.save_pending_mutation(&outbox_item).await;
 
                                     event_bus.publish_event(CoreEvent::FilterExecuted {
@@ -214,40 +237,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         });
                     }
 
-                    Some(Ok(json!({ "processed": processed, "matched": matched_count })))
+                    Some(Ok(
+                        json!({ "processed": processed, "matched": matched_count }),
+                    ))
                 }
-                "update.check" => {
-                    match nuncio_core::UpdateEngine::new() {
-                        Ok(updater) => match updater.check_for_updates().await {
-                            Ok(res) => Some(Ok(json!(res))),
-                            Err(e) => Some(Err(e.to_string())),
-                        },
+                "update.check" => match nuncio_core::UpdateEngine::new() {
+                    Ok(updater) => match updater.check_for_updates().await {
+                        Ok(res) => Some(Ok(json!(res))),
                         Err(e) => Some(Err(e.to_string())),
-                    }
-                }
-                "update.apply" => {
-                    match nuncio_core::UpdateEngine::new() {
-                        Ok(updater) => match updater.check_for_updates().await {
-                            Ok(res) => {
-                                if let Some(info) = res.release_info {
-                                    match updater.apply_update(&info).await {
-                                        Ok(msg) => Some(Ok(json!({ "status": "updated", "message": msg }))),
-                                        Err(e) => Some(Err(e.to_string())),
+                    },
+                    Err(e) => Some(Err(e.to_string())),
+                },
+                "update.apply" => match nuncio_core::UpdateEngine::new() {
+                    Ok(updater) => match updater.check_for_updates().await {
+                        Ok(res) => {
+                            if let Some(info) = res.release_info {
+                                match updater.apply_update(&info).await {
+                                    Ok(msg) => {
+                                        Some(Ok(json!({ "status": "updated", "message": msg })))
                                     }
-                                } else {
-                                    Some(Ok(json!({ "status": "already_up_to_date", "message": "Already up to date" })))
+                                    Err(e) => Some(Err(e.to_string())),
                                 }
+                            } else {
+                                Some(Ok(
+                                    json!({ "status": "already_up_to_date", "message": "Already up to date" }),
+                                ))
                             }
-                            Err(e) => Some(Err(e.to_string())),
-                        },
+                        }
                         Err(e) => Some(Err(e.to_string())),
-                    }
-                }
+                    },
+                    Err(e) => Some(Err(e.to_string())),
+                },
                 _ => None,
             }
         })
     });
-
 
     let addr = std::env::var("NUNCIO_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:9422".to_string());
     let server = IpcDaemonServer::with_handler(event_bus.clone(), &addr, handler);
