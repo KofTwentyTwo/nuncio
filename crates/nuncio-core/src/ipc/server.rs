@@ -150,7 +150,23 @@ impl IpcDaemonServer {
                     )
                 }
                 "mail.sync_all" => {
+                    // Flip status to `Syncing` and publish `SyncStarted`
+                    // synchronously so a caller polling `system.state` right
+                    // after this RPC returns observes it deterministically.
                     event_bus.process_command(CoreCommand::SyncAll);
+                    // ALSO enqueue the command onto the async command
+                    // channel so whichever real `CoreCommand` consumer owns
+                    // `take_command_receiver()` (e.g. `nunciod`'s real
+                    // inbound-sync command loop, backlog story 1.C.3 / GH
+                    // #158) performs the actual fetch/persist work and later
+                    // flips status back to `Idle` + publishes
+                    // `SyncCompleted`. Best-effort: if no consumer is
+                    // currently running (some test harnesses only exercise
+                    // this transport in isolation), the command is simply
+                    // queued and never drained, which is harmless -- the
+                    // synchronous status flip above already satisfies this
+                    // RPC's own contract.
+                    let _ = event_bus.send_command(CoreCommand::SyncAll).await;
                     JsonRpcResponse::success(req.id, json!({ "status": "dispatched" }))
                 }
                 "mail.mark_read" => {

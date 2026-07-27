@@ -4,7 +4,7 @@
 
 use nuncio_core::ipc::server::CustomRpcHandler;
 use nuncio_core::ipc::IpcDaemonServer;
-use nuncio_core::{CoreEvent, EventBus};
+use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, OutboxManager, ValidationOptions};
 use serde_json::json;
 use std::sync::Arc;
@@ -14,7 +14,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
     tracing::info!("Starting Nuncio Central Daemon Service (nunciod)...");
 
-    let event_bus = Arc::new(EventBus::new());
+    // The `CoreCommand` receiver must be claimed BEFORE the `EventBus` is
+    // wrapped in an `Arc` (`take_command_receiver` needs `&mut self`, which
+    // an `Arc<EventBus>` shared across every subsystem below cannot offer).
+    let mut event_bus_owned = EventBus::new();
+    let command_rx = event_bus_owned.take_command_receiver();
+    let event_bus = Arc::new(event_bus_owned);
     // PERSISTENT database path (backlog stories 1.C.1 / 1.C.2, GH #156 /
     // GH #157): defaults to `~/.nuncio/nuncio.db` -- NOT a temp/ephemeral
     // path -- so accounts (and everything else) survive a daemon restart.
@@ -27,9 +32,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let orchestrator = nunciod::SelfHealingSyncOrchestrator::new(&db_path, event_bus.clone());
     let (db, _summary) = orchestrator.initialize_and_recover().await?;
 
+    // Shared OS keyring vault (backlog stories 1.C.1 / 1.C.2 / 1.C.3, GH
+    // #156 / #157 / #158). ONE `SecretManager` instance is used for every
+    // subsystem that reads/writes account credentials in this process --
+    // the gRPC `Accounts` service below AND the real inbound-sync command
+    // loop -- rather than provisioning separate wrapper instances.
+    let account_secrets = Arc::new(nuncio_store::vault::SecretManager::production());
+
     // Load active rules from SQLite
     let initial_rules = db.list_filter_rules().await.unwrap_or_default();
     let filter_engine = Arc::new(FilterEngine::new(initial_rules)?);
+
+    // Real inbound-sync `CoreCommand` consumer (backlog story 1.C.3, GH
+    // #158). This is the ONE place that claims `EventBus`'s command
+    // receiver, so it is what finally makes `CoreCommand::SyncAll` /
+    // `CoreCommand::SyncAccount` do REAL work -- connecting a real mail
+    // backend, fetching folders/messages, and persisting them via
+    // `DatabaseEngine::save_email` -- instead of only flipping a status
+    // flag. It also finally gives `SelfHealingSyncOrchestrator::
+    // trigger_background_resync`'s post-recovery `send_command` calls a
+    // consumer: previously nothing read this channel, so that resync
+    // trigger was inert.
+    if let Some(mut command_rx) = command_rx {
+        let db_sync = db.clone();
+        let secrets_sync = account_secrets.clone();
+        let event_bus_sync = event_bus.clone();
+        let _sync_command_task = tokio::spawn(async move {
+            while let Some(cmd) = command_rx.recv().await {
+                match cmd {
+                    CoreCommand::SyncAll => {
+                        let synced = nunciod::sync::run_all_accounts_sync(
+                            &db_sync,
+                            &secrets_sync,
+                            &event_bus_sync,
+                        )
+                        .await;
+                        tracing::info!("SyncAll completed: {} message(s) synced", synced);
+                    }
+                    CoreCommand::SyncAccount { account_id } => {
+                        match nunciod::sync::run_account_sync(
+                            &db_sync,
+                            &secrets_sync,
+                            &event_bus_sync,
+                            &account_id,
+                        )
+                        .await
+                        {
+                            Ok(count) => tracing::info!(
+                                "SyncAccount({}) completed: {} message(s) synced",
+                                account_id,
+                                count
+                            ),
+                            Err(e) => {
+                                tracing::warn!("SyncAccount({}) failed: {}", account_id, e)
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    } else {
+        tracing::error!(
+            "EventBus command receiver was already taken; real sync command processing will not run"
+        );
+    }
 
     // Background Outbox Worker Task (#273)
     let db_outbox = db.clone();
@@ -48,9 +115,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     }
                     let backoff_ms = OutboxManager::calculate_backoff_ms(item.retry_count);
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    // Simulate remote IMAP/JMAP mutation execution
+                    // Outbound IMAP/JMAP remote mutation execution (actually
+                    // applying a filter action like move/delete/flag on the
+                    // real mail server) is NOT wired yet -- that is backlog
+                    // story 1.C.5. This worker deliberately does NOT mark
+                    // mutations "completed": doing so would fabricate
+                    // success for work that never happened. It only bumps
+                    // the retry counter (so an item that keeps failing still
+                    // eventually flips to "failed" once retries are
+                    // exhausted) and leaves the item "pending" so it is
+                    // retried on the next poll tick once 1.C.5 wires real
+                    // execution.
                     let _ = db_outbox
-                        .update_mutation_status(&item.id, "completed", next_retry)
+                        .update_mutation_status(&item.id, "pending", next_retry)
                         .await;
                 }
             }
@@ -289,13 +366,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Runs ALONGSIDE the existing JSON-RPC IPC server below; the migration
     // off the hand-rolled JSON-RPC transport happens in later stories. The
     // bearer token is minted (or loaded, on subsequent runs) from the real
-    // OS keyring vault via `SecretManager::production()`, fails closed if
-    // the keyring is unavailable, and is never logged. `Accounts` reuses
+    // OS keyring vault via the shared `account_secrets` `SecretManager`
+    // (same instance the real-sync command loop above uses), fails closed
+    // if the keyring is unavailable, and is never logged. `Accounts` reuses
     // this SAME `SecretManager` to write account password credentials to
     // the OS keyring (never to SQLite) -- see `nunciod::grpc`'s security
     // comment (GH #165) on why EVERY mounted service shares this one
     // `BearerAuthInterceptor`.
-    let grpc_secrets = Arc::new(nuncio_store::vault::SecretManager::production());
+    let grpc_secrets = account_secrets.clone();
     let grpc_token_bytes = grpc_secrets
         .get_or_create_key_bytes(nuncio_store::vault::GRPC_TOKEN_ACCOUNT, 32)
         .map_err(|e| format!("failed to provision gRPC bearer token from vault: {e}"))?;

@@ -4,6 +4,7 @@
 
 pub mod grpc;
 pub mod orchestrator;
+pub mod sync;
 pub use orchestrator::SelfHealingSyncOrchestrator;
 
 /// Default PERSISTENT database path for `nunciod`: `~/.nuncio/nuncio.db`
