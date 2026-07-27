@@ -15,4 +15,7 @@ pub use recovery::{
     is_sqlite_corruption_error, CorruptedBackupManager, RecoverySummary, SqliteRecoveryEngine,
 };
 pub use search::{SearchEngine, SearchHit};
-pub use vault::{MockKeyring, SecretManager, SecretVault, VaultError};
+pub use vault::{
+    MockKeyring, OsKeyring, SecretManager, SecretVault, VaultError, KEYRING_SERVICE,
+    LEDGER_KEY_ACCOUNT, STORAGE_KEY_ACCOUNT, WORM_KEY_ACCOUNT,
+};

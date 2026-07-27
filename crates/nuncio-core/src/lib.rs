@@ -22,7 +22,7 @@ pub use mcp_policy::{AgentPermissions, DataType, McpAgentPolicy};
 pub use model::{Attachment, CalendarEvent, Contact, DaemonTelemetry, Email, Folder};
 pub use plugin::{PluginError, PluginHook, PluginManifest, PluginRuntime};
 pub use update::{ReleaseInfo, UpdateCheckResult, UpdateEngine, UpdateError};
-pub use worm_audit::{verify_worm_chain, WormAuditError, WormAuditRecord, DEFAULT_WORM_KEY};
+pub use worm_audit::{verify_worm_chain, WormAuditError, WormAuditRecord};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

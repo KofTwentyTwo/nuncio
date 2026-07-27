@@ -31,6 +31,11 @@ pub enum DatabaseError {
     /// Audit chain verification failed.
     #[error("audit chain integrity error: {0}")]
     ChainIntegrityFailed(String),
+    /// Cryptographic key material could not be provisioned from the secret vault.
+    /// This is a fail-closed error: it is returned instead of ever substituting a
+    /// compiled-in default key.
+    #[error("cryptographic key provisioning failed: {0}")]
+    KeyProvisioning(String),
 }
 
 impl DatabaseError {
@@ -56,17 +61,63 @@ impl DatabaseError {
 }
 
 /// SQLite database storage engine managing WAL connection pools and migrations.
-#[derive(Debug, Clone)]
+///
+/// All cryptographic key material (at-rest storage encryption, WORM audit HMAC, filter
+/// execution ledger HMAC) is provisioned once at construction time from a
+/// [`crate::vault::SecretManager`]-backed vault and held for the lifetime of the engine.
+/// There is intentionally no way to construct a `DatabaseEngine` without a working key
+/// source: if the vault cannot supply key material, construction fails closed.
+#[derive(Clone)]
 pub struct DatabaseEngine {
     pool: SqlitePool,
+    storage_key: [u8; 32],
+    worm_key: Vec<u8>,
+    ledger_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for DatabaseEngine {
+    /// Manual `Debug` impl that never prints cryptographic key material.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseEngine")
+            .field("pool", &self.pool)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Resolve the storage/WORM/ledger key bundle for a `DatabaseEngine` from `secrets`,
+/// generating and persisting fresh CSPRNG-sourced key material on first use. Fails
+/// closed (returns `Err`) rather than ever substituting a compiled-in default.
+#[allow(clippy::type_complexity)]
+fn resolve_engine_keys(
+    secrets: &crate::vault::SecretManager,
+) -> Result<([u8; 32], Vec<u8>, Vec<u8>), DatabaseError> {
+    let storage_key_bytes = secrets
+        .get_or_create_key_bytes(crate::vault::STORAGE_KEY_ACCOUNT, 32)
+        .map_err(|e| DatabaseError::KeyProvisioning(e.to_string()))?;
+    let storage_key: [u8; 32] = storage_key_bytes.try_into().map_err(|_| {
+        DatabaseError::KeyProvisioning("storage key material must be exactly 32 bytes".to_string())
+    })?;
+    let worm_key = secrets
+        .get_or_create_key_bytes(crate::vault::WORM_KEY_ACCOUNT, 32)
+        .map_err(|e| DatabaseError::KeyProvisioning(e.to_string()))?;
+    let ledger_key = secrets
+        .get_or_create_key_bytes(crate::vault::LEDGER_KEY_ACCOUNT, 32)
+        .map_err(|e| DatabaseError::KeyProvisioning(e.to_string()))?;
+    Ok((storage_key, worm_key, ledger_key))
 }
 
 impl DatabaseEngine {
     /// Maximum concurrent read/write pool size.
     pub const MAX_CONNECTIONS: u32 = 16;
 
-    /// Connect to a local SQLite database file with production WAL pragmas.
-    pub async fn connect_file(path: &Path) -> Result<Self, DatabaseError> {
+    /// Connect to a local SQLite database file with production WAL pragmas, provisioning
+    /// cryptographic key material from `secrets`.
+    pub async fn connect_file(
+        path: &Path,
+        secrets: &crate::vault::SecretManager,
+    ) -> Result<Self, DatabaseError> {
+        let (storage_key, worm_key, ledger_key) = resolve_engine_keys(secrets)?;
+
         let url = format!("sqlite://{}", path.to_string_lossy());
         let options = SqliteConnectOptions::from_str(&url)
             .map_err(|e| DatabaseError::PoolCreation(e.to_string()))?
@@ -82,7 +133,12 @@ impl DatabaseEngine {
             .await
             .map_err(|e| DatabaseError::PoolCreation(e.to_string()))?;
 
-        let engine = Self { pool };
+        let engine = Self {
+            pool,
+            storage_key,
+            worm_key,
+            ledger_key,
+        };
         engine.migrate().await?;
         Ok(engine)
     }
@@ -92,21 +148,25 @@ impl DatabaseEngine {
         self.pool.close().await;
     }
 
-    /// Open database at `path` executing pre-flight Stage 1 integrity check.
+    /// Open database at `path` executing pre-flight Stage 1 integrity check, provisioning
+    /// cryptographic key material from `secrets`.
     /// If corruption is detected, automatically triggers backup isolation and stream recovery salvage.
     pub async fn open(
         path: &Path,
+        secrets: &crate::vault::SecretManager,
     ) -> Result<(Self, Option<crate::recovery::RecoverySummary>), DatabaseError> {
         let backup_dir = crate::recovery::CorruptedBackupManager::default_backup_dir();
-        Self::open_with_backup_dir(path, &backup_dir).await
+        Self::open_with_backup_dir(path, &backup_dir, secrets).await
     }
 
-    /// Open database at `path` specifying a custom backup directory.
+    /// Open database at `path` specifying a custom backup directory, provisioning
+    /// cryptographic key material from `secrets`.
     pub async fn open_with_backup_dir(
         path: &Path,
         backup_dir: &Path,
+        secrets: &crate::vault::SecretManager,
     ) -> Result<(Self, Option<crate::recovery::RecoverySummary>), DatabaseError> {
-        match Self::connect_file(path).await {
+        match Self::connect_file(path, secrets).await {
             Ok(engine) => {
                 let is_healthy = engine.check_integrity().await.unwrap_or(false);
                 if is_healthy {
@@ -114,19 +174,21 @@ impl DatabaseEngine {
                 } else {
                     engine.close().await;
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    let summary =
-                        crate::recovery::SqliteRecoveryEngine::salvage(path, path, backup_dir)
-                            .await?;
-                    let fresh_engine = Self::connect_file(path).await?;
+                    let summary = crate::recovery::SqliteRecoveryEngine::salvage(
+                        path, path, backup_dir, secrets,
+                    )
+                    .await?;
+                    let fresh_engine = Self::connect_file(path, secrets).await?;
                     Ok((fresh_engine, Some(summary)))
                 }
             }
             Err(err) => {
                 if err.is_corrupt() {
-                    let summary =
-                        crate::recovery::SqliteRecoveryEngine::salvage(path, path, backup_dir)
-                            .await?;
-                    let fresh_engine = Self::connect_file(path).await?;
+                    let summary = crate::recovery::SqliteRecoveryEngine::salvage(
+                        path, path, backup_dir, secrets,
+                    )
+                    .await?;
+                    let fresh_engine = Self::connect_file(path, secrets).await?;
                     Ok((fresh_engine, Some(summary)))
                 } else {
                     Err(err)
@@ -160,16 +222,22 @@ impl DatabaseEngine {
     }
 
     /// Cryptographic hash-chain audit ledger verification (`verify_chain_integrity()`)
-    /// detecting log tampering or corrupted `filter_execution_logs`.
-    pub async fn verify_chain_integrity(&self, secret_key: &str) -> Result<bool, DatabaseError> {
-        self.verify_execution_log_chain(secret_key).await
+    /// detecting log tampering or corrupted `filter_execution_logs`, using the ledger
+    /// HMAC key provisioned for this engine.
+    pub async fn verify_chain_integrity(&self) -> Result<bool, DatabaseError> {
+        self.verify_execution_log_chain().await
     }
 
-    /// Connect to an isolated ephemeral database for unit and integration testing.
+    /// Connect to an isolated ephemeral database for unit and integration testing (and for
+    /// the current single-process CLI/MCP shells, which do not yet persist across runs).
+    /// Cryptographic key material is generated fresh via [`crate::vault::MockKeyring`] for
+    /// the lifetime of the temporary database, so this NEVER touches the real OS keyring —
+    /// safe to call from headless CI.
     pub async fn connect_ephemeral() -> Result<(Self, TempDir), DatabaseError> {
         let dir = tempfile::tempdir().map_err(|e| DatabaseError::PoolCreation(e.to_string()))?;
         let db_path = dir.path().join("nuncio_test.sqlite");
-        let engine = Self::connect_file(&db_path).await?;
+        let secrets = crate::vault::SecretManager::mock();
+        let engine = Self::connect_file(&db_path, &secrets).await?;
         Ok((engine, dir))
     }
 
@@ -390,11 +458,11 @@ impl DatabaseEngine {
         let enc_plain = email
             .body_plain
             .as_ref()
-            .map(|p| crate::cipher::PayloadCipher::encrypt_text_at_rest(p));
+            .map(|p| crate::cipher::PayloadCipher::encrypt_text_at_rest(&self.storage_key, p));
         let enc_html = email
             .body_html
             .as_ref()
-            .map(|h| crate::cipher::PayloadCipher::encrypt_text_at_rest(h));
+            .map(|h| crate::cipher::PayloadCipher::encrypt_text_at_rest(&self.storage_key, h));
 
         sqlx::query(
             r#"
@@ -468,10 +536,12 @@ impl DatabaseEngine {
                     body_plain,
                     body_html,
                 )| {
-                    let dec_plain =
-                        body_plain.map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&p));
-                    let dec_html =
-                        body_html.map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&h));
+                    let dec_plain = body_plain.map(|p| {
+                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
+                    });
+                    let dec_html = body_html.map(|h| {
+                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
+                    });
                     nuncio_core::model::Email {
                         id,
                         account_id,
@@ -521,10 +591,10 @@ impl DatabaseEngine {
 
         let dec_plain = row
             .8
-            .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&p));
+            .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p));
         let dec_html = row
             .9
-            .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&h));
+            .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h));
 
         Ok(nuncio_core::model::Email {
             id: row.0,
@@ -718,13 +788,13 @@ impl DatabaseEngine {
         Ok(())
     }
 
-    /// Record a cryptographically hash-chained [`nuncio_filter::FilterExecutionLog`].
+    /// Record a cryptographically hash-chained [`nuncio_filter::FilterExecutionLog`], signed
+    /// with the ledger HMAC key provisioned for this engine from the secret vault.
     pub async fn save_filter_execution_log(
         &self,
         rule_id: &str,
         message_id: &str,
         action_taken: &str,
-        secret_key: &str,
     ) -> Result<nuncio_filter::FilterExecutionLog, DatabaseError> {
         let latest_hash: Option<(String,)> =
             sqlx::query_as("SELECT hash FROM filter_execution_logs ORDER BY id DESC LIMIT 1")
@@ -742,7 +812,7 @@ impl DatabaseEngine {
             message_id,
             action_taken,
             matched_at,
-            secret_key,
+            &self.ledger_key,
         );
 
         let id = sqlx::query(
@@ -809,11 +879,9 @@ impl DatabaseEngine {
             .collect())
     }
 
-    /// Verify cryptographic hash-chain ledger integrity for filter execution logs.
-    pub async fn verify_execution_log_chain(
-        &self,
-        secret_key: &str,
-    ) -> Result<bool, DatabaseError> {
+    /// Verify cryptographic hash-chain ledger integrity for filter execution logs, using
+    /// the ledger HMAC key provisioned for this engine.
+    pub async fn verify_execution_log_chain(&self) -> Result<bool, DatabaseError> {
         let rows: Vec<(i64, String, String, String, i64, String, String)> = sqlx::query_as(
             r#"
             SELECT id, rule_id, message_id, action_taken, matched_at, prev_hash, hash
@@ -836,7 +904,7 @@ impl DatabaseEngine {
                 &message_id,
                 &action_taken,
                 matched_at,
-                secret_key,
+                &self.ledger_key,
             );
             if computed != hash {
                 return Ok(false);
@@ -884,10 +952,12 @@ impl DatabaseEngine {
         Ok(rows
             .into_iter()
             .map(|r| {
-                let dec_plain =
-                    r.8.map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&p));
-                let dec_html =
-                    r.9.map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&h));
+                let dec_plain = r.8.map(|p| {
+                    crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
+                });
+                let dec_html = r.9.map(|h| {
+                    crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
+                });
                 nuncio_core::model::Email {
                     id: r.0,
                     account_id: r.1,
@@ -905,13 +975,13 @@ impl DatabaseEngine {
             .collect())
     }
 
-    /// Append a new immutable WORM audit record to the log ledger.
+    /// Append a new immutable WORM audit record to the log ledger, signed with the WORM
+    /// HMAC key provisioned for this engine from the secret vault.
     pub async fn append_worm_audit_record(
         &self,
         actor: &str,
         action: &str,
         data_payload: &[u8],
-        secret_key: &[u8],
     ) -> Result<nuncio_core::WormAuditRecord, DatabaseError> {
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -930,7 +1000,7 @@ impl DatabaseEngine {
         };
 
         let record = nuncio_core::WormAuditRecord::create_signed(
-            secret_key,
+            &self.worm_key,
             next_seq,
             now_ns,
             actor,
@@ -986,10 +1056,11 @@ impl DatabaseEngine {
             .collect())
     }
 
-    /// Verify the entire WORM cryptographic audit log chain.
-    pub async fn verify_worm_audit_chain(&self, secret_key: &[u8]) -> Result<(), DatabaseError> {
+    /// Verify the entire WORM cryptographic audit log chain, using the WORM HMAC key
+    /// provisioned for this engine.
+    pub async fn verify_worm_audit_chain(&self) -> Result<(), DatabaseError> {
         let records = self.list_worm_audit_records(100_000, 0).await?;
-        nuncio_core::verify_worm_chain(&records, secret_key)
+        nuncio_core::verify_worm_chain(&records, &self.worm_key)
             .map_err(|e| DatabaseError::ChainIntegrityFailed(e.to_string()))
     }
 
@@ -1029,7 +1100,6 @@ impl DatabaseEngine {
                 "system.export",
                 "data.export",
                 output_path.to_string_lossy().as_bytes(),
-                nuncio_core::DEFAULT_WORM_KEY,
             )
             .await;
 
@@ -1048,13 +1118,13 @@ fn compute_log_hash(
     message_id: &str,
     action_taken: &str,
     matched_at: i64,
-    secret_key: &str,
+    secret_key: &[u8],
 ) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
     // HMAC accepts keys of any length (RFC 2104), so this never fails in practice.
-    let Ok(mut mac) = HmacSha256::new_from_slice(secret_key.as_bytes()) else {
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret_key) else {
         return String::new();
     };
     let payload = format!("{prev_hash}:{rule_id}:{message_id}:{action_taken}:{matched_at}");
@@ -1211,21 +1281,21 @@ mod tests {
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name, "Spam Filter");
 
-        // Hash-chained logs
-        let secret = "test_secret_key";
+        // Hash-chained logs, signed with the ledger key this ephemeral engine provisioned
+        // for itself from `MockKeyring` (no hardcoded secret involved).
         let log1 = engine
-            .save_filter_execution_log(&rule.id, "msg-100", "DELETE", secret)
+            .save_filter_execution_log(&rule.id, "msg-100", "DELETE")
             .await
             .unwrap();
         let log2 = engine
-            .save_filter_execution_log(&rule.id, "msg-101", "DELETE", secret)
+            .save_filter_execution_log(&rule.id, "msg-101", "DELETE")
             .await
             .unwrap();
 
         assert_eq!(log1.prev_hash, "GENESIS");
         assert_eq!(log2.prev_hash, log1.hash);
 
-        let is_valid = engine.verify_execution_log_chain(secret).await.unwrap();
+        let is_valid = engine.verify_execution_log_chain().await.unwrap();
         assert!(is_valid);
 
         engine.delete_filter_rule(&rule.id).await.unwrap();
@@ -1283,5 +1353,69 @@ mod tests {
             .unwrap();
         let pending_after = engine.list_pending_mutations(10).await.unwrap();
         assert_eq!(pending_after.len(), 0);
+    }
+
+    /// Proves that `DatabaseEngine` sources its WORM HMAC key from the injected
+    /// `SecretManager` vault rather than any compiled-in default: an engine backed by one
+    /// (mock) vault can sign and verify its own WORM chain, but a second engine backed by an
+    /// *independent* mock vault -- and therefore holding different randomly-generated key
+    /// material -- must fail to verify records signed under the first vault's key.
+    #[tokio::test]
+    async fn worm_audit_key_is_vault_sourced_not_a_shared_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("worm_vault_isolation_test.sqlite");
+
+        let secrets_a = crate::vault::SecretManager::mock();
+        let engine_a = DatabaseEngine::connect_file(&db_path, &secrets_a)
+            .await
+            .expect("engine_a connects");
+        engine_a
+            .append_worm_audit_record("system.test", "test.action", b"payload")
+            .await
+            .expect("record signed with engine_a's vault key");
+        assert!(engine_a.verify_worm_audit_chain().await.is_ok());
+        engine_a.close().await;
+
+        let secrets_b = crate::vault::SecretManager::mock();
+        let engine_b = DatabaseEngine::connect_file(&db_path, &secrets_b)
+            .await
+            .expect("engine_b connects to the same file with an independent vault");
+        let result = engine_b.verify_worm_audit_chain().await;
+        assert!(
+            result.is_err(),
+            "an independently-vaulted engine must not validate another vault's WORM chain \
+             (would indicate a shared/hardcoded key instead of real vault-sourced material)"
+        );
+    }
+
+    /// Same proof as above, for the filter execution log ledger HMAC key.
+    #[tokio::test]
+    async fn ledger_key_is_vault_sourced_not_a_shared_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("ledger_vault_isolation_test.sqlite");
+
+        let secrets_a = crate::vault::SecretManager::mock();
+        let engine_a = DatabaseEngine::connect_file(&db_path, &secrets_a)
+            .await
+            .expect("engine_a connects");
+        engine_a
+            .save_filter_execution_log("rule-1", "msg-1", "DELETE")
+            .await
+            .expect("log signed with engine_a's vault key");
+        assert!(engine_a.verify_execution_log_chain().await.unwrap());
+        engine_a.close().await;
+
+        let secrets_b = crate::vault::SecretManager::mock();
+        let engine_b = DatabaseEngine::connect_file(&db_path, &secrets_b)
+            .await
+            .expect("engine_b connects to the same file with an independent vault");
+        let is_valid = engine_b
+            .verify_execution_log_chain()
+            .await
+            .expect("verification query succeeds");
+        assert!(
+            !is_valid,
+            "an independently-vaulted engine must not validate another vault's ledger chain"
+        );
     }
 }

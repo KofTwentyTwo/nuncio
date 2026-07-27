@@ -3,6 +3,7 @@
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::recovery::{CorruptedBackupManager, RecoverySummary};
+use nuncio_store::vault::SecretManager;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -12,29 +13,37 @@ pub struct SelfHealingSyncOrchestrator {
     db_path: PathBuf,
     backup_dir: PathBuf,
     event_bus: Arc<EventBus>,
+    secrets: Arc<SecretManager>,
 }
 
 impl SelfHealingSyncOrchestrator {
-    /// Create a new `SelfHealingSyncOrchestrator`.
+    /// Create a new `SelfHealingSyncOrchestrator` backed by the real OS keyring
+    /// ([`SecretManager::production`]). This is the production entry point used by the
+    /// `nunciod` boot sequence.
     pub fn new(db_path: impl Into<PathBuf>, event_bus: Arc<EventBus>) -> Self {
         let backup_dir = CorruptedBackupManager::default_backup_dir();
         Self {
             db_path: db_path.into(),
             backup_dir,
             event_bus,
+            secrets: Arc::new(SecretManager::production()),
         }
     }
 
-    /// Create a new `SelfHealingSyncOrchestrator` with a custom backup directory.
+    /// Create a new `SelfHealingSyncOrchestrator` with a custom backup directory and an
+    /// explicit secret vault. Tests MUST pass a [`SecretManager::mock`]-backed instance so
+    /// they never touch the real OS keyring.
     pub fn with_backup_dir(
         db_path: impl Into<PathBuf>,
         backup_dir: impl Into<PathBuf>,
         event_bus: Arc<EventBus>,
+        secrets: Arc<SecretManager>,
     ) -> Self {
         Self {
             db_path: db_path.into(),
             backup_dir: backup_dir.into(),
             event_bus,
+            secrets,
         }
     }
 
@@ -46,7 +55,8 @@ impl SelfHealingSyncOrchestrator {
     ) -> Result<(Arc<DatabaseEngine>, Option<RecoverySummary>), nuncio_store::db::DatabaseError>
     {
         let (db_engine, recovery_summary) =
-            DatabaseEngine::open_with_backup_dir(&self.db_path, &self.backup_dir).await?;
+            DatabaseEngine::open_with_backup_dir(&self.db_path, &self.backup_dir, &self.secrets)
+                .await?;
         let engine = Arc::new(db_engine);
 
         if let Some(summary) = &recovery_summary {
@@ -111,9 +121,10 @@ mod tests {
         let db_path = dir.path().join("orchestrator_test.db");
         let backup_dir = dir.path().join("backups");
         let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
 
         let orchestrator =
-            SelfHealingSyncOrchestrator::with_backup_dir(&db_path, &backup_dir, event_bus);
+            SelfHealingSyncOrchestrator::with_backup_dir(&db_path, &backup_dir, event_bus, secrets);
         let (db, summary) = orchestrator
             .initialize_and_recover()
             .await
@@ -133,10 +144,13 @@ mod tests {
         let backup_dir = dir.path().join("backups");
         let event_bus = Arc::new(EventBus::new());
         let mut events = event_bus.subscribe_events();
+        let secrets = Arc::new(SecretManager::mock());
 
         // Populate valid DB first
         {
-            let engine = DatabaseEngine::connect_file(&db_path).await.unwrap();
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .unwrap();
             let acct = nuncio_core::AccountConfig {
                 id: "acct-orch-1".to_string(),
                 name: "Orch Account".to_string(),
@@ -164,8 +178,12 @@ mod tests {
         let _ = std::fs::remove_file(format!("{}-wal", db_path.to_string_lossy()));
         let _ = std::fs::remove_file(format!("{}-shm", db_path.to_string_lossy()));
 
-        let orchestrator =
-            SelfHealingSyncOrchestrator::with_backup_dir(&db_path, &backup_dir, event_bus.clone());
+        let orchestrator = SelfHealingSyncOrchestrator::with_backup_dir(
+            &db_path,
+            &backup_dir,
+            event_bus.clone(),
+            secrets,
+        );
         let (db, summary) = orchestrator
             .initialize_and_recover()
             .await

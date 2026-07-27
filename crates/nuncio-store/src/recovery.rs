@@ -130,11 +130,13 @@ pub struct SqliteRecoveryEngine;
 
 impl SqliteRecoveryEngine {
     /// Salvage readable accounts and filter rules from damaged database or backup file,
-    /// re-creating a fresh SQLite file at `target_db_path`.
+    /// re-creating a fresh SQLite file at `target_db_path`. Cryptographic key material for
+    /// the freshly re-created engine is provisioned from `secrets`.
     pub async fn salvage(
         corrupted_db_path: &Path,
         target_db_path: &Path,
         backup_dir: &Path,
+        secrets: &crate::vault::SecretManager,
     ) -> Result<RecoverySummary, DatabaseError> {
         // Step 1: Preserve raw corrupted database to forensic backup directory
         let backup_path =
@@ -171,7 +173,7 @@ impl SqliteRecoveryEngine {
         let _ = std::fs::remove_file(format!("{}-shm", target_db_path.to_string_lossy()));
 
         // Step 4: Create fresh SQLite database file and apply migrations
-        let fresh_engine = DatabaseEngine::connect_file(target_db_path).await?;
+        let fresh_engine = DatabaseEngine::connect_file(target_db_path, secrets).await?;
 
         // Step 5: Restore salvaged records into new database
         let mut restored_accounts_count = 0;
@@ -342,10 +344,13 @@ mod tests {
     async fn test_database_header_corruption_stage_1_detection() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("corrupt_test.db");
+        let secrets = crate::vault::SecretManager::mock();
 
         // Step A: Create and populate valid database
         {
-            let engine = DatabaseEngine::connect_file(&db_path).await.unwrap();
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .unwrap();
             let acct = AccountConfig {
                 id: "acct-test-1".to_string(),
                 name: "Work Account".to_string(),
@@ -382,7 +387,7 @@ mod tests {
         // Step C: Verify Stage 1 integrity check / open handles corruption
         let backup_dir = dir.path().join("backups");
         let (recovered_engine, summary) =
-            DatabaseEngine::open_with_backup_dir(&db_path, &backup_dir)
+            DatabaseEngine::open_with_backup_dir(&db_path, &backup_dir, &secrets)
                 .await
                 .expect("open_with_backup_dir auto-recovers");
 
@@ -397,10 +402,13 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("salvage_test.db");
         let backup_dir = dir.path().join("corrupted_backups");
+        let secrets = crate::vault::SecretManager::mock();
 
         // Step 1: Create DB with account & rule
         {
-            let engine = DatabaseEngine::connect_file(&db_path).await.unwrap();
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .unwrap();
             let acct = AccountConfig {
                 id: "acct-salvage-1".to_string(),
                 name: "Salvage Account".to_string(),
@@ -418,7 +426,7 @@ mod tests {
         }
 
         // Step 2: Perform salvage recovery
-        let summary = SqliteRecoveryEngine::salvage(&db_path, &db_path, &backup_dir)
+        let summary = SqliteRecoveryEngine::salvage(&db_path, &db_path, &backup_dir, &secrets)
             .await
             .expect("salvage succeeds");
 
@@ -426,7 +434,9 @@ mod tests {
         assert!(summary.backup_path.exists());
 
         // Step 3: Verify fresh DB contains salvaged account
-        let fresh = DatabaseEngine::connect_file(&db_path).await.unwrap();
+        let fresh = DatabaseEngine::connect_file(&db_path, &secrets)
+            .await
+            .unwrap();
         let accounts = fresh.list_accounts().await.unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "acct-salvage-1");

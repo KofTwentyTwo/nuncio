@@ -207,12 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 for action in actions {
                                     let action_str = action.to_nsql();
                                     let _ = db
-                                        .save_filter_execution_log(
-                                            &rule.id,
-                                            &email.id,
-                                            &action_str,
-                                            "secret_ledger_key",
-                                        )
+                                        .save_filter_execution_log(&rule.id, &email.id, &action_str)
                                         .await;
                                     let outbox_item = OutboxManager::create_mutation(
                                         &rule.id,

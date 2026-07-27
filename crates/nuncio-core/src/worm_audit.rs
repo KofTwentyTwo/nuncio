@@ -10,9 +10,6 @@ use thiserror::Error;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Default HMAC key used for WORM audit log block linking when no custom key is specified.
-pub const DEFAULT_WORM_KEY: &[u8] = b"nuncio-worm-cryptographic-audit-key-v1";
-
 /// Error types emitted during WORM audit log creation and verification.
 #[derive(Error, Debug, PartialEq, Eq, Clone)]
 pub enum WormAuditError {

@@ -767,11 +767,7 @@ impl McpToolHandler {
                 Ok(json!({ "records": records }))
             }
             "nuncio_audit_verify" => {
-                let is_valid = self
-                    .db
-                    .verify_worm_audit_chain(nuncio_core::DEFAULT_WORM_KEY)
-                    .await
-                    .is_ok();
+                let is_valid = self.db.verify_worm_audit_chain().await.is_ok();
                 Ok(json!({ "status": "verified", "chain_integrity_valid": is_valid }))
             }
             "nuncio_export_data" => {
