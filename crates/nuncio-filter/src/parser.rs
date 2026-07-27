@@ -307,7 +307,7 @@ impl NsqlParser {
                     }
                 }
                 let op = if *negated {
-                    FilterOperator::NotEquals
+                    FilterOperator::NotIn
                 } else {
                     FilterOperator::In
                 };
@@ -546,26 +546,35 @@ fn preprocess_nsql_where(input: &str) -> String {
 fn find_keyword_outside_quotes(text: &str, keyword: &str) -> Option<usize> {
     let mut in_single_quote = false;
     let mut in_double_quote = false;
-    let chars: Vec<char> = text.chars().collect();
+    // Pair each char with its byte offset in `text`. Callers slice `text`
+    // directly with the returned index, so the index must be a byte offset;
+    // a plain `chars().collect()` char count silently diverges from the byte
+    // offset (and can land mid-character) as soon as the text contains any
+    // multi-byte UTF-8 character, e.g. a non-ASCII subject/account literal.
+    let indexed_chars: Vec<(usize, char)> = text.char_indices().collect();
     let kw_chars: Vec<char> = keyword.chars().collect();
 
-    for i in 0..chars.len() {
-        let c = chars[i];
+    for i in 0..indexed_chars.len() {
+        let (byte_idx, c) = indexed_chars[i];
         if c == '\'' && !in_double_quote {
             in_single_quote = !in_single_quote;
         } else if c == '"' && !in_single_quote {
             in_double_quote = !in_double_quote;
-        } else if !in_single_quote && !in_double_quote && i + kw_chars.len() <= chars.len() {
-            let is_match = chars[i..i + kw_chars.len()]
+        } else if !in_single_quote && !in_double_quote && i + kw_chars.len() <= indexed_chars.len()
+        {
+            let is_match = indexed_chars[i..i + kw_chars.len()]
                 .iter()
                 .zip(kw_chars.iter())
-                .all(|(a, b)| a.eq_ignore_ascii_case(b));
+                .all(|((_, a), b)| a.eq_ignore_ascii_case(b));
             if is_match {
-                let prev_ok = i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == ')';
+                let prev_ok = i == 0
+                    || indexed_chars[i - 1].1.is_whitespace()
+                    || indexed_chars[i - 1].1 == ')';
                 let next_idx = i + kw_chars.len();
-                let next_ok = next_idx == chars.len() || chars[next_idx].is_whitespace();
+                let next_ok =
+                    next_idx == indexed_chars.len() || indexed_chars[next_idx].1.is_whitespace();
                 if prev_ok && next_ok {
-                    return Some(i);
+                    return Some(byte_idx);
                 }
             }
         }
@@ -629,5 +638,69 @@ mod tests {
         assert_eq!(rule.name, "Urgent Rule");
         assert_eq!(rule.target_account, "*");
         assert_eq!(rule.actions.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_not_in_operator() {
+        let nsql = "WHERE folder NOT IN ('Spam', 'Trash') ACTION DELETE";
+        let rule = NsqlParser::parse_rule("Not In Rule", 1, nsql).expect("parse rule");
+        match &rule.conditions {
+            ConditionNode::Leaf(leaf) => {
+                assert_eq!(leaf.operator, FilterOperator::NotIn);
+                assert_eq!(
+                    leaf.value,
+                    FilterValue::List(vec!["Spam".to_string(), "Trash".to_string()])
+                );
+            }
+            other => panic!("expected leaf condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_in_operator_still_distinct_from_not_in() {
+        let nsql = "WHERE folder IN ('Inbox', 'Priority') ACTION MARK READ";
+        let rule = NsqlParser::parse_rule("In Rule", 1, nsql).expect("parse rule");
+        match &rule.conditions {
+            ConditionNode::Leaf(leaf) => assert_eq!(leaf.operator, FilterOperator::In),
+            other => panic!("expected leaf condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_action_split_survives_multibyte_utf8_before_action_keyword() {
+        // Regression test: `find_keyword_outside_quotes` used to return a
+        // *char* index that callers then used as a *byte* index to slice the
+        // source text. Any multi-byte UTF-8 character ahead of the ACTION
+        // keyword desynchronized that offset, corrupting the WHERE/ACTION
+        // split (or panicking on a non-UTF-8-boundary slice).
+        let nsql = "WHERE subject = '日本語のテスト' ACTION MARK READ";
+        let rule = NsqlParser::parse_rule("Multibyte Subject", 1, nsql)
+            .expect("parse rule with multi-byte utf8 subject");
+
+        assert_eq!(rule.actions, vec![RuleAction::MarkRead]);
+        match &rule.conditions {
+            ConditionNode::Leaf(leaf) => {
+                assert_eq!(leaf.field, FilterField::Subject);
+                assert_eq!(
+                    leaf.value,
+                    FilterValue::String("日本語のテスト".to_string())
+                );
+            }
+            other => panic!("expected leaf condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_on_account_split_survives_multibyte_utf8_before_where_keyword() {
+        let nsql = "ON ACCOUNT 'jörg@kof22.com' WHERE subject = '日本語' ACTION MARK READ";
+        let rule = NsqlParser::parse_rule("Multibyte Account", 1, nsql).expect("parse rule");
+
+        assert_eq!(rule.target_account, "jörg@kof22.com");
+        match &rule.conditions {
+            ConditionNode::Leaf(leaf) => {
+                assert_eq!(leaf.value, FilterValue::String("日本語".to_string()));
+            }
+            other => panic!("expected leaf condition, got {other:?}"),
+        }
     }
 }

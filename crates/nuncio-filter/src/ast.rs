@@ -91,6 +91,8 @@ pub enum FilterOperator {
     LessThanOrEqual,
     /// In set (`IN`).
     In,
+    /// Not in set (`NOT IN`); the logical complement of `In`.
+    NotIn,
 }
 
 impl FilterOperator {
@@ -107,6 +109,7 @@ impl FilterOperator {
             Self::GreaterThanOrEqual => ">=",
             Self::LessThanOrEqual => "<=",
             Self::In => "IN",
+            Self::NotIn => "NOT IN",
         }
     }
 }
