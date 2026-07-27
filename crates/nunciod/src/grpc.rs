@@ -8,6 +8,7 @@
 //! transport is out of scope here and lands in a later story.
 
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
+use nuncio_mail::{MailBackend, MessageSender};
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::event::Kind;
 use nuncio_proto::v1::mail_server::{Mail, MailServer};
@@ -21,7 +22,7 @@ use nuncio_proto::v1::{
     ListMessagesResponse, MarkReadRequest, MarkReadResponse, Message as MessageProto,
     MessageFlagsChanged, MessageSearchHit, SearchMessagesRequest, SearchMessagesResponse,
     SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
-    SyncStarted, TlsMode as TlsModeProto, UpdateAvailable,
+    SyncRequest, SyncResponse, SyncStarted, TlsMode as TlsModeProto, UpdateAvailable,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -411,6 +412,43 @@ fn map_folder_to_proto(folder: nuncio_core::model::Folder) -> FolderProto {
     }
 }
 
+/// Test-only injection point for the daemon's inbound sync and outbound
+/// send engines, threaded through the daemon's runtime wiring (backlog
+/// story 1.C.6, GH #161: the full-daemon offline spine E2E test).
+///
+/// Production (`nunciod::main`, and every existing caller of [`serve`] /
+/// [`serve_on_listener`]) never constructs a non-default instance:
+/// [`Default`] yields every field `None`, which routes `Mail/Sync` and
+/// `Mail/SendMessage` through the exact same real production entry points
+/// (`nunciod::sync::run_all_accounts_sync` / `run_account_sync`,
+/// `nunciod::send::send_message_for_account`) as before this override
+/// existed. Production code depends only on the `nuncio_mail::{MailBackend,
+/// MessageSender}` trait objects here -- never on `nuncio_mail`'s mock
+/// types -- so this seam never makes production depend on a test double.
+///
+/// Only a full-daemon E2E test supplies `Some(..)`, standing in a
+/// [`nuncio_mail::MockMailBackend`] / [`nuncio_mail::MockMessageSender`]
+/// for real network I/O, and drives the override through the exact same
+/// authenticated gRPC API a real client uses.
+#[derive(Clone, Default)]
+pub struct MailEngineOverrides {
+    /// When `Some`, `Mail/Sync` fetches from this backend instead of
+    /// building a real per-account engine from keyring credentials.
+    pub mail_backend: Option<Arc<dyn MailBackend>>,
+    /// When `Some`, `Mail/SendMessage` sends through this sender instead of
+    /// building a real `SmtpTransportEngine` from keyring credentials.
+    pub message_sender: Option<Arc<dyn MessageSender>>,
+}
+
+impl std::fmt::Debug for MailEngineOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailEngineOverrides")
+            .field("mail_backend", &self.mail_backend.is_some())
+            .field("message_sender", &self.message_sender.is_some())
+            .finish()
+    }
+}
+
 /// `nuncio.v1.Mail` gRPC service implementation backed by the daemon's live
 /// [`DatabaseEngine`] read/mark methods and [`SearchEngine`] FTS index
 /// (backlog story 1.C.4, GH #159), and (backlog story 1.C.5, GH #160) the
@@ -423,11 +461,13 @@ fn map_folder_to_proto(folder: nuncio_core::model::Folder) -> FolderProto {
 /// (`SendMessage`) -- as opposed to the CLI's previous local ephemeral
 /// `HeadlessRunner` database, which was thrown away when the CLI process
 /// exited, and its previous fabricated "Message sent" output, which never
-/// actually dialed an SMTP server.
+/// actually dialed an SMTP server. `Sync` (backlog story 1.C.6, GH #161)
+/// triggers a real inbound sync over the same authenticated API.
 struct MailGrpcService {
     db: Arc<DatabaseEngine>,
     event_bus: Arc<EventBus>,
     secrets: Arc<SecretManager>,
+    overrides: MailEngineOverrides,
 }
 
 #[tonic::async_trait]
@@ -553,6 +593,13 @@ impl Mail for MailGrpcService {
     /// genuinely accepted the message -- a resolution or transport failure
     /// surfaces as `Status::internal`/`Status::invalid_argument`, never a
     /// fabricated `SendMessageResponse`.
+    ///
+    /// When [`MailEngineOverrides::message_sender`] is injected (backlog
+    /// story 1.C.6, GH #161), sends through it instead via
+    /// [`crate::send::send_message_with_injected_sender`] -- no keyring
+    /// lookup, no real SMTP transport -- so a full-daemon E2E test can
+    /// assert on the exact outbound message an injected
+    /// [`nuncio_mail::MockMessageSender`] captured.
     async fn send_message(
         &self,
         request: Request<SendMessageRequest>,
@@ -578,11 +625,50 @@ impl Mail for MailGrpcService {
                 .collect(),
         };
 
-        let message_id = crate::send::send_message_for_account(&self.db, &self.secrets, compose)
-            .await
-            .map_err(|e| Status::internal(format!("failed to send message: {e}")))?;
+        let message_id = if let Some(sender) = &self.overrides.message_sender {
+            crate::send::send_message_with_injected_sender(&self.db, sender.as_ref(), compose)
+                .await
+                .map_err(|e| Status::internal(format!("failed to send message: {e}")))?
+        } else {
+            crate::send::send_message_for_account(&self.db, &self.secrets, compose)
+                .await
+                .map_err(|e| Status::internal(format!("failed to send message: {e}")))?
+        };
 
         Ok(Response::new(SendMessageResponse { message_id }))
+    }
+
+    /// Sync (backlog story 1.C.6, GH #161): triggers a real inbound mail
+    /// synchronization and awaits full completion before returning, so a
+    /// successful response guarantees the synced messages are already
+    /// visible to `ListMessages`/`GetMessage`. `account_id` mirrors
+    /// `CoreCommand::SyncAccount`/`SyncAll`: `Some` scopes the sync to one
+    /// account, `None` syncs every configured account.
+    ///
+    /// When [`MailEngineOverrides::mail_backend`] is injected, fetches from
+    /// it via [`crate::sync::sync_with_backend`] instead of resolving a
+    /// real per-account engine from keyring credentials -- this is what
+    /// lets a full-daemon E2E test drive a real inbound sync entirely over
+    /// this authenticated gRPC API with no live network, exactly as a real
+    /// client would trigger it (GH #165: no un-intercepted back door).
+    async fn sync(&self, request: Request<SyncRequest>) -> Result<Response<SyncResponse>, Status> {
+        let account_id = request.into_inner().account_id;
+
+        let synced = if let Some(backend) = &self.overrides.mail_backend {
+            crate::sync::sync_with_backend(&self.db, &self.event_bus, backend.as_ref(), account_id)
+                .await
+                .map_err(|e| Status::internal(format!("sync failed: {e}")))?
+        } else if let Some(account_id) = account_id {
+            crate::sync::run_account_sync(&self.db, &self.secrets, &self.event_bus, &account_id)
+                .await
+                .map_err(|e| Status::internal(format!("sync failed: {e}")))?
+        } else {
+            crate::sync::run_all_accounts_sync(&self.db, &self.secrets, &self.event_bus).await
+        };
+
+        Ok(Response::new(SyncResponse {
+            synced_count: synced as u64,
+        }))
     }
 }
 
@@ -680,6 +766,32 @@ pub async fn serve_on_listener(
     secrets: Arc<SecretManager>,
     token: impl Into<Arc<str>>,
 ) -> Result<(), GrpcServeError> {
+    serve_on_listener_with_overrides(
+        listener,
+        event_bus,
+        db,
+        secrets,
+        token,
+        MailEngineOverrides::default(),
+    )
+    .await
+}
+
+/// Identical to [`serve_on_listener`], except the `nuncio.v1.Mail` service's
+/// inbound sync and outbound send engines can be overridden (backlog story
+/// 1.C.6, GH #161). [`serve_on_listener`] is simply this function called
+/// with `MailEngineOverrides::default()` (i.e. every field `None`, which is
+/// production's exact prior behavior); this function exists so a
+/// full-daemon offline E2E test can supply `Some(..)` without changing
+/// [`serve_on_listener`]'s signature for its many existing callers.
+pub async fn serve_on_listener_with_overrides(
+    listener: TcpListener,
+    event_bus: Arc<EventBus>,
+    db: Arc<DatabaseEngine>,
+    secrets: Arc<SecretManager>,
+    token: impl Into<Arc<str>>,
+    overrides: MailEngineOverrides,
+) -> Result<(), GrpcServeError> {
     let token: Arc<str> = token.into();
 
     let system_service = SystemGrpcService {
@@ -695,14 +807,15 @@ pub async fn serve_on_listener(
     let accounts_interceptor = BearerAuthInterceptor::new(token.clone());
     let accounts_svc = AccountsServer::with_interceptor(accounts_service, accounts_interceptor);
 
-    // Mail (backlog story 1.C.4, GH #159; SendMessage: 1.C.5, GH #160):
-    // mounted behind its own `BearerAuthInterceptor`, exactly like `System`
-    // and `Accounts` above -- see the hard invariant documented on this
-    // function's doc comment (GH #165).
+    // Mail (backlog story 1.C.4, GH #159; SendMessage: 1.C.5, GH #160;
+    // Sync: 1.C.6, GH #161): mounted behind its own `BearerAuthInterceptor`,
+    // exactly like `System` and `Accounts` above -- see the hard invariant
+    // documented on this function's doc comment (GH #165).
     let mail_service = MailGrpcService {
         db,
         event_bus,
         secrets,
+        overrides,
     };
     let mail_interceptor = BearerAuthInterceptor::new(token);
     let mail_svc = MailServer::with_interceptor(mail_service, mail_interceptor);
@@ -750,13 +863,39 @@ mod tests {
         secrets: Arc<SecretManager>,
         token: &str,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_test_server_with_overrides(
+            event_bus,
+            db,
+            secrets,
+            token,
+            MailEngineOverrides::default(),
+        )
+        .await
+    }
+
+    /// Spawns a test server on an ephemeral loopback port backed by the
+    /// given `db`/`secrets`/`overrides` (backlog story 1.C.6, GH #161): the
+    /// helper every test that injects a [`MailEngineOverrides::mail_backend`]
+    /// / [`MailEngineOverrides::message_sender`] uses to prove `Sync` /
+    /// `SendMessage` drive an injected test double over the real
+    /// authenticated gRPC API.
+    async fn spawn_test_server_with_overrides(
+        event_bus: Arc<EventBus>,
+        db: Arc<DatabaseEngine>,
+        secrets: Arc<SecretManager>,
+        token: &str,
+        overrides: MailEngineOverrides,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral loopback port");
         let addr = listener.local_addr().expect("listener has local addr");
         let token = token.to_string();
         let handle = tokio::spawn(async move {
-            let _ = serve_on_listener(listener, event_bus, db, secrets, token).await;
+            let _ = serve_on_listener_with_overrides(
+                listener, event_bus, db, secrets, token, overrides,
+            )
+            .await;
         });
         (addr, handle)
     }
@@ -1334,7 +1473,7 @@ mod tests {
     use nuncio_proto::v1::mail_client::MailClient;
     use nuncio_proto::v1::{
         GetMessageRequest, ListFoldersRequest, ListMessagesRequest, MarkReadRequest,
-        SearchMessagesRequest, SendMessageRequest,
+        SearchMessagesRequest, SendMessageRequest, SyncRequest,
     };
 
     fn sample_email(
@@ -1419,6 +1558,12 @@ mod tests {
                 body_html: None,
                 attachments: Vec::new(),
             })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .sync(SyncRequest { account_id: None })
             .await
             .expect_err("missing bearer token must be rejected");
         assert_eq!(err.code(), Code::Unauthenticated);
@@ -1718,6 +1863,285 @@ mod tests {
             .send_message(authed_bearer_request(valid_send_message_request()))
             .await
             .expect_err("delivery to an unreachable SMTP host must fail");
+        assert_eq!(err.code(), Code::Internal);
+        assert!(err.message().contains("failed to send message"));
+    }
+
+    // ---- Sync (backlog story 1.C.6, GH #161) ----
+
+    /// With no `MailEngineOverrides` and no configured accounts, `Sync`
+    /// exercises the real production `run_all_accounts_sync` path and
+    /// honestly reports zero messages synced (never fabricating a nonzero
+    /// count).
+    #[tokio::test]
+    async fn sync_without_override_and_without_accounts_reports_zero_synced() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let response = client
+            .sync(authed_bearer_request(SyncRequest { account_id: None }))
+            .await
+            .expect("sync succeeds")
+            .into_inner();
+        assert_eq!(response.synced_count, 0);
+    }
+
+    /// With no `MailEngineOverrides`, requesting a sync for an account_id
+    /// that is not configured exercises the real production
+    /// `run_account_sync` path and surfaces an honest `Status::internal`
+    /// error rather than a fabricated success.
+    #[tokio::test]
+    async fn sync_without_override_reports_error_for_unknown_account() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .sync(authed_bearer_request(SyncRequest {
+                account_id: Some("acct-does-not-exist".to_string()),
+            }))
+            .await
+            .expect_err("unknown account must be rejected");
+        assert_eq!(err.code(), Code::Internal);
+        assert!(err.message().contains("acct-does-not-exist"));
+    }
+
+    /// Backlog story 1.C.6 (GH #161): with a [`MailEngineOverrides::mail_backend`]
+    /// injected, `Sync` fetches from it (via `sync_with_backend`) instead of
+    /// resolving a real per-account engine from keyring credentials, and
+    /// awaits full completion before returning -- proving a caller can
+    /// immediately `ListMessages`/`GetMessage` the synced data with no
+    /// fixed sleep. This is the exact mechanism the full-daemon offline
+    /// spine E2E test (`spine_e2e_test.rs`) uses.
+    #[tokio::test]
+    async fn sync_with_injected_backend_persists_and_reports_count_deterministically() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let secrets = Arc::new(SecretManager::mock());
+
+        let mock_backend = nuncio_mail::MockMailBackend::new();
+        mock_backend.add_folder(nuncio_core::model::Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 1,
+            unread_messages: 1,
+        });
+        mock_backend.add_message(sample_email(
+            "msg-sync-injected-1",
+            "inbox",
+            "Injected Sync Subject",
+            "Injected sync body",
+        ));
+
+        let overrides = MailEngineOverrides {
+            mail_backend: Some(Arc::new(mock_backend)),
+            message_sender: None,
+        };
+        let (addr, _handle) = spawn_test_server_with_overrides(
+            Arc::new(EventBus::new()),
+            db,
+            secrets,
+            "correct-token",
+            overrides,
+        )
+        .await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let response = client
+            .sync(authed_bearer_request(SyncRequest { account_id: None }))
+            .await
+            .expect("sync succeeds")
+            .into_inner();
+        assert_eq!(response.synced_count, 1);
+
+        // Immediately visible, no fixed sleep: `Sync` only returns once the
+        // fetch-and-persist work has fully completed.
+        let fetched = client
+            .get_message(authed_bearer_request(GetMessageRequest {
+                message_id: "msg-sync-injected-1".to_string(),
+            }))
+            .await
+            .expect("get_message succeeds")
+            .into_inner()
+            .message
+            .expect("message present in response");
+        assert_eq!(fetched.subject, "Injected Sync Subject");
+        assert_eq!(fetched.body_plain.as_deref(), Some("Injected sync body"));
+    }
+
+    /// Backlog story 1.C.6 (GH #161): with a [`MailEngineOverrides::message_sender`]
+    /// injected, `SendMessage` sends through it (via
+    /// `send_message_with_injected_sender`) instead of building a real SMTP
+    /// transport, and the injected mock captures the EXACT outbound message
+    /// -- recipient, subject, and body -- the caller sent over the wire.
+    #[tokio::test]
+    async fn send_message_with_injected_sender_captures_exact_outbound_message() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let secrets = Arc::new(SecretManager::mock());
+
+        let config = nuncio_core::AccountConfig {
+            id: "acct-injected-send-1".to_string(),
+            name: "Injected Send Test Account".to_string(),
+            email_address: "sender@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: "nuncio/acct-injected-send-1".to_string(),
+            sync_interval_secs: 60,
+        };
+        // Deliberately never stores a keyring credential -- this path must
+        // never need one.
+        db.save_account(&config).await.expect("save account");
+
+        let mock_sender = nuncio_mail::MockMessageSender::new();
+        let sent_probe = mock_sender.clone();
+        let overrides = MailEngineOverrides {
+            mail_backend: None,
+            message_sender: Some(Arc::new(mock_sender)),
+        };
+        let (addr, _handle) = spawn_test_server_with_overrides(
+            Arc::new(EventBus::new()),
+            db,
+            secrets,
+            "correct-token",
+            overrides,
+        )
+        .await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let response = client
+            .send_message(authed_bearer_request(SendMessageRequest {
+                to: "alice@nuncio.mx".to_string(),
+                cc: Some("carol@nuncio.mx".to_string()),
+                subject: "Injected Send Subject".to_string(),
+                body_text: "Injected send body".to_string(),
+                body_html: None,
+                attachments: Vec::new(),
+            }))
+            .await
+            .expect("send_message succeeds")
+            .into_inner();
+        assert!(response.message_id.starts_with("sent-"));
+
+        let sent = sent_probe.sent_messages();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].from, "sender@nuncio.mx");
+        assert_eq!(sent[0].to, "alice@nuncio.mx");
+        assert_eq!(sent[0].cc.as_deref(), Some("carol@nuncio.mx"));
+        assert_eq!(sent[0].subject, "Injected Send Subject");
+        assert_eq!(sent[0].body_plain.as_deref(), Some("Injected send body"));
+    }
+
+    /// Backlog story 1.C.6 (GH #161): with a [`MailEngineOverrides::mail_backend`]
+    /// injected and configured to simulate a failure, `Sync` surfaces the
+    /// genuine `sync_with_backend` error as `Status::internal` rather than
+    /// a fabricated success.
+    #[tokio::test]
+    async fn sync_with_injected_backend_reports_error_when_backend_fails() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let secrets = Arc::new(SecretManager::mock());
+
+        let mock_backend = nuncio_mail::MockMailBackend::new();
+        mock_backend.set_should_fail(true);
+        let overrides = MailEngineOverrides {
+            mail_backend: Some(Arc::new(mock_backend)),
+            message_sender: None,
+        };
+        let (addr, _handle) = spawn_test_server_with_overrides(
+            Arc::new(EventBus::new()),
+            db,
+            secrets,
+            "correct-token",
+            overrides,
+        )
+        .await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .sync(authed_bearer_request(SyncRequest { account_id: None }))
+            .await
+            .expect_err("a failing injected backend must be rejected honestly");
+        assert_eq!(err.code(), Code::Internal);
+        assert!(err.message().contains("sync failed"));
+    }
+
+    /// Backlog story 1.C.6 (GH #161): with a [`MailEngineOverrides::message_sender`]
+    /// injected and configured to simulate a transport failure,
+    /// `SendMessage` surfaces the genuine `send_message_with_injected_sender`
+    /// error as `Status::internal` rather than a fabricated success.
+    #[tokio::test]
+    async fn send_message_with_injected_sender_reports_error_when_transport_fails() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let secrets = Arc::new(SecretManager::mock());
+
+        let config = nuncio_core::AccountConfig {
+            id: "acct-injected-send-fail-1".to_string(),
+            name: "Injected Send Failure Test Account".to_string(),
+            email_address: "sender@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: "nuncio/acct-injected-send-fail-1".to_string(),
+            sync_interval_secs: 60,
+        };
+        db.save_account(&config).await.expect("save account");
+
+        let mock_sender = nuncio_mail::MockMessageSender::new();
+        mock_sender.set_should_fail(true);
+        let overrides = MailEngineOverrides {
+            mail_backend: None,
+            message_sender: Some(Arc::new(mock_sender)),
+        };
+        let (addr, _handle) = spawn_test_server_with_overrides(
+            Arc::new(EventBus::new()),
+            db,
+            secrets,
+            "correct-token",
+            overrides,
+        )
+        .await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .send_message(authed_bearer_request(valid_send_message_request()))
+            .await
+            .expect_err("a failing injected sender must be rejected honestly");
         assert_eq!(err.code(), Code::Internal);
         assert!(err.message().contains("failed to send message"));
     }

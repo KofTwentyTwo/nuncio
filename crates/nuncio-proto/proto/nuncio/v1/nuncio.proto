@@ -255,6 +255,15 @@ service Mail {
   // as a `Status::internal` (or `Status::invalid_argument` for a malformed
   // request) error, never a fabricated `SendMessageResponse`.
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  // Sync triggers a real inbound mail synchronization (backlog story 1.C.6,
+  // GH #161): fetches folders and messages from the account's real mail
+  // backend and persists them via the store, exactly as `nunciod`'s
+  // internal sync command loop does, EXCEPT this awaits full completion
+  // before returning -- a successful response guarantees the synced
+  // messages are already visible to `ListMessages`/`GetMessage`. This is
+  // the authenticated, over-the-wire replacement for reaching into daemon
+  // internals to trigger a sync (see GH #165).
+  rpc Sync(SyncRequest) returns (SyncResponse);
 }
 
 // Mirrors `nuncio_core::model::Attachment`.
@@ -400,4 +409,16 @@ message SendMessageResponse {
   // logs/output. NOT a persisted message id -- outbound sends are not
   // written back into the synced message store by this RPC.
   string message_id = 1;
+}
+
+// SyncRequest. `account_id` mirrors `CoreCommand::SyncAccount`/`SyncAll`:
+// absent/empty means synchronize every configured account; set means
+// synchronize just that one account.
+message SyncRequest {
+  optional string account_id = 1;
+}
+
+// SyncResponse reports how many messages were synchronized.
+message SyncResponse {
+  uint64 synced_count = 1;
 }

@@ -171,6 +171,36 @@ pub async fn send_message_for_account(
     Ok(generate_message_id())
 }
 
+/// Test/E2E entry point for the `SendMessage` RPC when a
+/// [`nunciod::grpc::MailEngineOverrides::message_sender`] is injected
+/// (backlog story 1.C.6, GH #161): resolves ONLY the sending account's
+/// `From:` address from the store -- no keyring lookup, no real SMTP
+/// transport construction -- and sends `request` through the given
+/// `sender` (e.g. a [`nuncio_mail::MockMessageSender`] in a full-daemon
+/// offline E2E test). Mirrors [`send_message_for_account`] in every other
+/// respect: returns the generated message id ONLY on genuine acceptance by
+/// `sender`, never a fabricated success.
+pub async fn send_message_with_injected_sender(
+    db: &DatabaseEngine,
+    sender: &dyn MessageSender,
+    request: ComposeRequest,
+) -> Result<String, SendError> {
+    let config = resolve_sending_account(db).await?;
+
+    let outbound = OutboundMessage {
+        from: config.email_address,
+        to: request.to,
+        cc: request.cc,
+        subject: request.subject,
+        body_plain: request.body_text,
+        body_html: request.body_html,
+        attachments: request.attachments,
+    };
+
+    send_with_sender(sender, &outbound).await?;
+    Ok(generate_message_id())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +363,70 @@ mod tests {
         let id = generate_message_id();
         assert!(id.starts_with("sent-"));
         assert!(id.len() > "sent-".len());
+    }
+
+    /// Backlog story 1.C.6 (GH #161): proves `send_message_with_injected_sender`
+    /// resolves the `From:` address from the store and records the exact
+    /// outbound message on the injected sender, WITHOUT ever touching the
+    /// keyring (no credential is even stored for this account).
+    #[tokio::test]
+    async fn send_message_with_injected_sender_records_exact_message_without_touching_vault() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+
+        let config = sample_account("acct-injected-sender");
+        db.save_account(&config).await.expect("save account");
+        // Deliberately never stores a keyring credential -- this path must
+        // never need one.
+
+        let mock = MockMessageSender::new();
+        let message_id = send_message_with_injected_sender(
+            &db,
+            &mock,
+            ComposeRequest {
+                to: "bob@nuncio.mx".to_string(),
+                cc: Some("carol@nuncio.mx".to_string()),
+                subject: "Injected Sender Test".to_string(),
+                body_text: Some("Body via injected sender.".to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect("send succeeds via injected sender");
+        assert!(message_id.starts_with("sent-"));
+
+        let sent = mock.sent_messages();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].from, config.email_address);
+        assert_eq!(sent[0].to, "bob@nuncio.mx");
+        assert_eq!(sent[0].cc.as_deref(), Some("carol@nuncio.mx"));
+        assert_eq!(sent[0].subject, "Injected Sender Test");
+    }
+
+    #[tokio::test]
+    async fn send_message_with_injected_sender_reports_honest_error_when_no_account_configured() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let mock = MockMessageSender::new();
+
+        let err = send_message_with_injected_sender(
+            &db,
+            &mock,
+            ComposeRequest {
+                to: "bob@nuncio.mx".to_string(),
+                cc: None,
+                subject: "Hi".to_string(),
+                body_text: Some("Body".to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("no configured account must fail");
+        assert!(matches!(err, SendError::NoAccountConfigured));
+        assert!(mock.sent_messages().is_empty());
     }
 }

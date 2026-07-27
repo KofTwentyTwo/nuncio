@@ -722,18 +722,39 @@ impl HeadlessRunner {
         }
     }
 
+    /// `mail sync`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Mail/Sync` API (backlog story 1.C.6, GH #161).
+    /// Replaces this command's previous local-ephemeral behavior (flipping
+    /// this runner's own throwaway `EventBus` status flag, which never
+    /// fetched a single real message) with a real inbound sync against the
+    /// daemon's persistent store -- the RPC awaits full completion before
+    /// returning, so a successful response's `synced_count` reflects
+    /// messages that are already visible via `mail list`/`mail read`.
     async fn handle_sync(&self, json_mode: bool) -> String {
-        self.event_bus.process_command(CoreCommand::SyncAll);
-        if json_mode {
-            format_json(&json!({
-                "status": "sync_started",
-                "engine_status": format!("{:?}", self.event_bus.current_state().status)
-            }))
-        } else {
-            format!(
-                "Synchronization started. Engine status: {:?}",
-                self.event_bus.current_state().status
-            )
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .sync(nuncio_proto::v1::SyncRequest { account_id: None })
+            .await
+        {
+            Ok(response) => {
+                let synced_count = response.into_inner().synced_count;
+                if json_mode {
+                    format_json(&json!({
+                        "status": "sync_started",
+                        "synced_count": synced_count,
+                    }))
+                } else {
+                    format!("Synchronization complete: {synced_count} message(s) synced")
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected sync: {status}"),
+                json_mode,
+            ),
         }
     }
 
@@ -1368,26 +1389,16 @@ mod tests {
             .await;
         assert!(acct_show.contains("Account 'missing' not found"));
 
-        // Mail Noun Commands: `Sync` does not talk to the daemon (yet), so
-        // it is safe to exercise against this ephemeral local runner.
-        // `List`/`Read`/`Search`/`Mark`/`Send` (and `Folder::List`) are now
-        // real gRPC clients of the `nunciod` daemon's `Mail` API (backlog
-        // stories 1.C.4 / 1.C.5, GH #159 / GH #160) -- exactly like
+        // Mail Noun Commands: `Sync`/`List`/`Read`/`Search`/`Mark`/`Send`
+        // (and `Folder::List`) are all now real gRPC clients of the
+        // `nunciod` daemon's `Mail` API (backlog stories 1.C.4 / 1.C.5 /
+        // 1.C.6, GH #159 / GH #160 / GH #161) -- exactly like
         // `Account::Add`/`List` and `System::Status` above, they must never
         // run against this `ephemeral()`-constructed runner's production
         // `SecretManager` or its (unreachable in CI) default gRPC address.
         // They are exercised separately below via `ephemeral_with` +
         // `SecretManager::mock()` against a live stub `Mail` gRPC server
         // (`mail_rpcs_round_trip_over_grpc_to_a_stub_daemon`).
-        let mail_sync = runner
-            .execute_command(
-                &Commands::Mail {
-                    action: MailSubcommand::Sync,
-                },
-                true,
-            )
-            .await;
-        assert!(mail_sync.contains(r#""status":"sync_started""#));
 
         // Cal Noun Commands
         let cal_list = runner
@@ -1702,19 +1713,20 @@ mod tests {
         assert!(list_out_text.contains("1 account(s) registered"));
     }
 
-    /// Reference-client proof for backlog story 1.C.4 (GH #159): boots a
-    /// stub `nuncio.v1.Mail` gRPC server (mirroring the `Accounts` stub
-    /// pattern above) and drives the real `HeadlessRunner`'s `mail
-    /// list`/`mail read`/`mail mark`/`mail search`/`folder list` gRPC client
-    /// paths against it.
+    /// Reference-client proof for backlog stories 1.C.4 / 1.C.6 (GH #159 /
+    /// GH #161): boots a stub `nuncio.v1.Mail` gRPC server (mirroring the
+    /// `Accounts` stub pattern above) and drives the real `HeadlessRunner`'s
+    /// `mail sync`/`mail list`/`mail read`/`mail mark`/`mail search`/
+    /// `folder list` gRPC client paths against it.
     ///
-    /// Real persistence (`mark_read` actually flipping the flag in the
-    /// daemon's store, `list`/`get` returning REAL synced data,
-    /// `MessageFlagsChanged` streaming) is proven by `nunciod`'s own
-    /// `grpc::tests`; this test exists purely to prove the CLI's connect +
-    /// call + JSON-format happy path, its honest not-found error handling,
-    /// and that `mail mark` rejects an ambiguous `--read`/`--unread`
-    /// combination before ever dialing the daemon.
+    /// Real persistence (`sync` actually fetching and persisting messages,
+    /// `mark_read` actually flipping the flag in the daemon's store,
+    /// `list`/`get` returning REAL synced data, `MessageFlagsChanged`
+    /// streaming) is proven by `nunciod`'s own `grpc::tests`; this test
+    /// exists purely to prove the CLI's connect + call + JSON-format happy
+    /// path, its honest not-found error handling, and that `mail mark`
+    /// rejects an ambiguous `--read`/`--unread` combination before ever
+    /// dialing the daemon.
     #[tokio::test]
     async fn mail_rpcs_round_trip_over_grpc_to_a_stub_daemon() {
         use nuncio_proto::v1::mail_server::{Mail as MailService, MailServer};
@@ -1722,7 +1734,8 @@ mod tests {
             Folder as FolderProto, GetMessageRequest, GetMessageResponse, ListFoldersRequest,
             ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, MarkReadRequest,
             MarkReadResponse, Message as MessageProto, MessageSearchHit, SearchMessagesRequest,
-            SearchMessagesResponse, SendMessageRequest, SendMessageResponse,
+            SearchMessagesResponse, SendMessageRequest, SendMessageResponse, SyncRequest,
+            SyncResponse,
         };
         use std::sync::Mutex;
 
@@ -1743,13 +1756,14 @@ mod tests {
         }
 
         /// Minimal test-only stub of `nuncio.v1.Mail`: records the last
-        /// `MarkReadRequest` it received (so this test can assert on
-        /// exactly what the CLI sent over the wire) and otherwise returns
-        /// fixed responses.
+        /// `MarkReadRequest`/`SyncRequest` it received (so this test can
+        /// assert on exactly what the CLI sent over the wire) and otherwise
+        /// returns fixed responses.
         #[derive(Default)]
         struct StubMail {
             last_mark_read: Arc<Mutex<Option<MarkReadRequest>>>,
             last_send_message: Arc<Mutex<Option<SendMessageRequest>>>,
+            last_sync: Arc<Mutex<Option<SyncRequest>>>,
         }
 
         #[tonic::async_trait]
@@ -1836,11 +1850,21 @@ mod tests {
                     message_id: "sent-stub-1".to_string(),
                 }))
             }
+
+            async fn sync(
+                &self,
+                request: tonic::Request<SyncRequest>,
+            ) -> Result<tonic::Response<SyncResponse>, tonic::Status> {
+                let req = request.into_inner();
+                *self.last_sync.lock().unwrap_or_else(|e| e.into_inner()) = Some(req);
+                Ok(tonic::Response::new(SyncResponse { synced_count: 2 }))
+            }
         }
 
         let stub = StubMail::default();
         let probe = stub.last_mark_read.clone();
         let send_probe = stub.last_send_message.clone();
+        let sync_probe = stub.last_sync.clone();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1857,6 +1881,28 @@ mod tests {
             HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
                 .await
                 .expect("ephemeral runner initializes");
+
+        // `mail sync`: proves the CLI is a real gRPC client of `Mail/Sync`
+        // (backlog story 1.C.6, GH #161) -- it sends a `SyncRequest` with no
+        // `account_id` (sync every account) and reports the daemon's real
+        // `synced_count` in its output, rather than fabricating a status by
+        // only flipping this runner's own throwaway local `EventBus`.
+        let mail_sync = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Sync,
+                },
+                true,
+            )
+            .await;
+        assert!(mail_sync.contains(r#""status":"sync_started""#));
+        assert!(mail_sync.contains(r#""synced_count":2"#));
+        let recorded_sync = sync_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received a sync request");
+        assert_eq!(recorded_sync.account_id, None);
 
         // `folder list`
         let folder_list = runner
