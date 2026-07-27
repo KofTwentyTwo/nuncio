@@ -7,7 +7,8 @@ pub mod output;
 pub mod runner;
 
 pub use args::{
-    AccountSubcommand, CalSubcommand, Commands, FolderSubcommand, MailSubcommand, SystemSubcommand,
+    AccountSubcommand, CalSubcommand, Commands, FolderSubcommand, MailSubcommand, PasswordArg,
+    SystemSubcommand,
 };
 pub use output::JsonResponse;
 pub use runner::HeadlessRunner;

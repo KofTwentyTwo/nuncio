@@ -14,6 +14,7 @@
 use nuncio_cli::{Commands, HeadlessRunner, MailSubcommand, SystemSubcommand};
 use nuncio_core::ipc::{IpcClient, IpcDaemonServer};
 use nuncio_core::{CoreCommand, EventBus};
+use nuncio_store::db::DatabaseEngine;
 use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -143,8 +144,19 @@ async fn cli_system_status_round_trips_over_grpc_to_live_daemon() {
         .expect("bind ephemeral loopback port");
     let addr = listener.local_addr().expect("listener has local addr");
     let server_event_bus = event_bus.clone();
+    let (server_db, _server_db_dir) = DatabaseEngine::connect_ephemeral()
+        .await
+        .expect("connect ephemeral test db");
+    let server_secrets = secrets.clone();
     let _server_handle = tokio::spawn(async move {
-        let _ = nunciod::grpc::serve_on_listener(listener, server_event_bus, token).await;
+        let _ = nunciod::grpc::serve_on_listener(
+            listener,
+            server_event_bus,
+            Arc::new(server_db),
+            server_secrets,
+            token,
+        )
+        .await;
     });
 
     // 4. Drive the real `nuncio-cli` `HeadlessRunner`'s gRPC `system status`

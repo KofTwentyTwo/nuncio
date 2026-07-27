@@ -16,6 +16,7 @@
 use nuncio_core::{CoreCommand, EngineStatus, EventBus};
 use nuncio_proto::v1::system_client::SystemClient;
 use nuncio_proto::v1::GetStatusRequest;
+use nuncio_store::db::DatabaseEngine;
 use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
 use nunciod::grpc::serve_on_listener;
 use std::sync::Arc;
@@ -26,13 +27,21 @@ use tonic::{Code, Request};
 /// Because `TcpListener::bind` has already succeeded (the OS is accepting
 /// connections on the returned port) before this function returns, callers
 /// can dial `addr` immediately with no fixed sleep.
+///
+/// Backs the mounted `nuncio.v1.Accounts` service with its own fresh
+/// ephemeral database + mock keyring, since this test file only exercises
+/// `System` and doesn't care about account/keyring state.
 async fn start_server(event_bus: Arc<EventBus>, token: String) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral loopback port");
     let addr = listener.local_addr().expect("listener has local addr");
+    let (db, _dir) = DatabaseEngine::connect_ephemeral()
+        .await
+        .expect("connect ephemeral test db");
+    let secrets = Arc::new(SecretManager::mock());
     tokio::spawn(async move {
-        let _ = serve_on_listener(listener, event_bus, token).await;
+        let _ = serve_on_listener(listener, event_bus, Arc::new(db), secrets, token).await;
     });
     addr
 }

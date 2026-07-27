@@ -4,7 +4,7 @@
 
 use nuncio_cli::{
     AccountSubcommand, CalSubcommand, Commands, FolderSubcommand, HeadlessRunner, MailSubcommand,
-    SystemSubcommand,
+    PasswordArg, SystemSubcommand,
 };
 use nuncio_store::vault::SecretManager;
 use serde_json::Value;
@@ -31,36 +31,11 @@ async fn system_test_cli_noun_verb_execution_matrix() {
     let json: Value = serde_json::from_str(&out).expect("valid json");
     assert_eq!(json["status"], "ok");
 
-    // 2. Account list & add
-    let out: String = runner
-        .execute_command(
-            &Commands::Account {
-                action: AccountSubcommand::List,
-            },
-            true,
-        )
-        .await;
-    let json: Value = serde_json::from_str(&out).expect("valid json");
-    assert_eq!(json["status"], "ok");
-
-    let out: String = runner
-        .execute_command(
-            &Commands::Account {
-                action: AccountSubcommand::Add {
-                    email: "test@nuncio.mx".to_string(),
-                    imap_host: "mail.nuncio.mx".to_string(),
-                    imap_port: 993,
-                    smtp_host: "mail.nuncio.mx".to_string(),
-                    smtp_port: 465,
-                    imap_mode: "implicit_tls".to_string(),
-                    smtp_mode: "implicit_tls".to_string(),
-                },
-            },
-            true,
-        )
-        .await;
-    let json: Value = serde_json::from_str(&out).expect("valid json");
-    assert_eq!(json["status"], "ok");
+    // 2. Account list & add are real gRPC clients of the `nunciod` daemon's
+    // `Accounts` API (backlog stories 1.C.1 / 1.C.2, GH #156 / GH #157), so
+    // -- exactly like `system status` above -- they are exercised
+    // separately below via `ephemeral_with` + `SecretManager::mock()`
+    // rather than through this `ephemeral()`-constructed runner.
 
     // 3. Folder list
     let out: String = runner
@@ -144,4 +119,63 @@ async fn system_status_reports_honest_error_when_daemon_unreachable() {
         .as_str()
         .expect("error message present")
         .contains("unreachable"));
+}
+
+/// `account add` / `account list` are real gRPC clients of the `nunciod`
+/// daemon's `Accounts` API (backlog stories 1.C.1 / 1.C.2, GH #156 /
+/// GH #157). With no daemon reachable, both must report a clear, honest
+/// error rather than fabricating success or silently falling back to any
+/// local state.
+#[tokio::test]
+async fn account_add_and_list_report_honest_errors_when_daemon_unreachable() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral loopback port");
+    let addr = listener.local_addr().expect("listener has local addr");
+    drop(listener); // free the port; nothing is listening on it now
+
+    let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+        .await
+        .expect("runner init");
+
+    let list_out: String = runner
+        .execute_command(
+            &Commands::Account {
+                action: AccountSubcommand::List,
+            },
+            true,
+        )
+        .await;
+    let list_json: Value = serde_json::from_str(&list_out).expect("valid json");
+    assert_eq!(list_json["status"], "error");
+    assert!(list_json["error"]
+        .as_str()
+        .expect("error message present")
+        .contains("unreachable"));
+
+    let add_out: String = runner
+        .execute_command(
+            &Commands::Account {
+                action: AccountSubcommand::Add {
+                    email: "test@nuncio.mx".to_string(),
+                    imap_host: "mail.nuncio.mx".to_string(),
+                    imap_port: 993,
+                    smtp_host: "mail.nuncio.mx".to_string(),
+                    smtp_port: 465,
+                    imap_mode: "implicit_tls".to_string(),
+                    smtp_mode: "implicit_tls".to_string(),
+                    password: PasswordArg("irrelevant-unreachable-daemon".to_string()),
+                },
+            },
+            true,
+        )
+        .await;
+    let add_json: Value = serde_json::from_str(&add_out).expect("valid json");
+    assert_eq!(add_json["status"], "error");
+    assert!(add_json["error"]
+        .as_str()
+        .expect("error message present")
+        .contains("unreachable"));
+    // The password must never leak into an error message either.
+    assert!(!add_out.contains("irrelevant-unreachable-daemon"));
 }

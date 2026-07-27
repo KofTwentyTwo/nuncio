@@ -1,7 +1,53 @@
 //! Command-line argument hierarchy and Clap subcommand parsing.
 
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Carries an account password credential from an interactive `rpassword`
+/// prompt (see `nuncio-cli`'s `main`) through to `Accounts/AddAccount`
+/// without ever being reachable as a Clap CLI flag, printed by `Debug`, or
+/// carried by value through `Serialize`/`Deserialize` (backlog stories
+/// 1.C.1 / 1.C.2, GH #156 / GH #157).
+///
+/// `AccountSubcommand::Add`'s `password` field is `#[arg(skip)]`, so Clap
+/// never parses it from argv; `main` populates it exactly once, right after
+/// `Cli::parse()`, by prompting without echo. `Debug`, `Serialize` are
+/// hand-implemented below to redact the value on principle -- defense in
+/// depth in case a future caller logs or serializes a `Commands` value --
+/// and `Deserialize` always yields an empty password, since a password
+/// must never round-trip through a serialized command payload.
+#[derive(Clone, Default)]
+pub struct PasswordArg(pub String);
+
+impl std::fmt::Debug for PasswordArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PasswordArg(\"[REDACTED]\")")
+    }
+}
+
+impl PartialEq for PasswordArg {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for PasswordArg {}
+
+impl Serialize for PasswordArg {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str("[REDACTED]")
+    }
+}
+
+impl<'de> Deserialize<'de> for PasswordArg {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Discard whatever was serialized (see the redacting `Serialize`
+        // impl above) and always yield an empty password rather than ever
+        // reconstructing a real credential from a deserialized payload.
+        let _ = String::deserialize(deserializer);
+        Ok(PasswordArg(String::new()))
+    }
+}
 
 /// Nuncio CLI — Pure Noun + Verb Developer-First Mail & Calendar Automation.
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
@@ -160,6 +206,12 @@ pub enum AccountSubcommand {
         /// SMTP connection transport mode (implicit_tls, start_tls, plain).
         #[arg(long, default_value = "implicit_tls", help = "SMTP transport mode")]
         smtp_mode: String,
+        /// Account password credential. Never a CLI flag -- always read
+        /// interactively without echo (via `rpassword`) in `main` and
+        /// injected here immediately before dispatch to the daemon's
+        /// `Accounts/AddAccount` RPC. See [`PasswordArg`].
+        #[arg(skip)]
+        password: PasswordArg,
     },
     /// Display details for a specific configured account.
     Show {
@@ -368,6 +420,7 @@ mod tests {
                     smtp_port: 465,
                     imap_mode: "implicit_tls".to_string(),
                     smtp_mode: "implicit_tls".to_string(),
+                    password: PasswordArg::default(),
                 }
             }
         );
@@ -413,5 +466,54 @@ mod tests {
                 action: UpdateSubcommand::Apply
             }
         );
+    }
+
+    #[test]
+    fn account_add_password_is_never_parsed_from_argv() {
+        // `--password` is deliberately not a recognized flag: the password
+        // MUST always come from an interactive, non-echoing prompt in
+        // `main`, never from argv (which would land it in shell history and
+        // process listings).
+        let cli_add = Cli::parse_from([
+            "nuncio",
+            "account",
+            "add",
+            "--email",
+            "a@b.com",
+            "--imap-host",
+            "imap.b.com",
+        ]);
+        match cli_add.command {
+            Commands::Account {
+                action: AccountSubcommand::Add { password, .. },
+            } => assert_eq!(password, PasswordArg::default()),
+            other => panic!("expected Account::Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn password_arg_debug_and_serialize_always_redact_the_value() {
+        let secret = PasswordArg("super-secret-value".to_string());
+        assert_eq!(format!("{secret:?}"), "PasswordArg(\"[REDACTED]\")");
+
+        let json = serde_json::to_string(&secret).expect("serializes");
+        assert_eq!(json, "\"[REDACTED]\"");
+        assert!(!json.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn password_arg_deserialize_never_reconstructs_a_real_credential() {
+        let deserialized: PasswordArg =
+            serde_json::from_str("\"super-secret-value\"").expect("deserializes");
+        assert_eq!(deserialized, PasswordArg::default());
+        assert_eq!(deserialized.0, "");
+    }
+
+    #[test]
+    fn password_arg_equality_and_default() {
+        assert_eq!(PasswordArg::default(), PasswordArg(String::new()));
+        assert_ne!(PasswordArg("a".to_string()), PasswordArg("b".to_string()));
+        let cloned = PasswordArg("clone-me".to_string()).clone();
+        assert_eq!(cloned.0, "clone-me");
     }
 }

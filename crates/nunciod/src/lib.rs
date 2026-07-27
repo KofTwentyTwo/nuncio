@@ -6,6 +6,30 @@ pub mod grpc;
 pub mod orchestrator;
 pub use orchestrator::SelfHealingSyncOrchestrator;
 
+/// Default PERSISTENT database path for `nunciod`: `~/.nuncio/nuncio.db`
+/// (or `%USERPROFILE%\.nuncio\nuncio.db` on Windows, since `USERPROFILE` is
+/// checked first). This is deliberately NOT a temp/ephemeral path -- it is
+/// what makes accounts (backlog stories 1.C.1 / 1.C.2, GH #156 / GH #157)
+/// and every other piece of daemon state survive a daemon restart.
+///
+/// Mirrors `nuncio_store::recovery::CorruptedBackupManager::default_backup_dir`'s
+/// existing `~/.nuncio/...` convention so all of `nunciod`'s on-disk state
+/// lives under the same root directory.
+///
+/// Callers that need a different (e.g. isolated, ephemeral) path -- tests,
+/// CI, multiple daemon instances on one machine -- MUST set the
+/// `NUNCIO_DB_PATH` environment variable instead of calling this directly;
+/// see `main`'s boot sequence.
+pub fn default_db_path() -> std::path::PathBuf {
+    if let Ok(home_str) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+        std::path::PathBuf::from(home_str)
+            .join(".nuncio")
+            .join("nuncio.db")
+    } else {
+        std::path::PathBuf::from(".nuncio").join("nuncio.db")
+    }
+}
+
 /// Environment variable that opts `nunciod` in to its autonomous
 /// background auto-update-check loop.
 ///
@@ -61,5 +85,32 @@ mod tests {
         assert!(!auto_update_task_enabled());
         std::env::remove_var(AUTO_UPDATE_ENV_VAR);
         assert!(!auto_update_task_enabled());
+    }
+
+    #[test]
+    fn default_db_path_is_persistent_under_dot_nuncio_directory() {
+        // Deliberately does not mutate `USERPROFILE`/`HOME` (real env vars
+        // many other things -- `tempfile`, `keyring`, etc. -- may also
+        // read); instead this asserts the path SHAPE holds regardless of
+        // which of the two branches the current process environment takes,
+        // proving the default is a stable `.nuncio/nuncio.db` layout and
+        // never a bare OS temp directory.
+        let path = default_db_path();
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("nuncio.db"),
+            "default db path must end in nuncio.db, got {path:?}"
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str()),
+            Some(".nuncio"),
+            "default db path must live under a .nuncio directory, got {path:?}"
+        );
+        assert!(
+            !path.starts_with(std::env::temp_dir()),
+            "default db path must never be an ephemeral temp path, got {path:?}"
+        );
     }
 }

@@ -15,9 +15,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Starting Nuncio Central Daemon Service (nunciod)...");
 
     let event_bus = Arc::new(EventBus::new());
+    // PERSISTENT database path (backlog stories 1.C.1 / 1.C.2, GH #156 /
+    // GH #157): defaults to `~/.nuncio/nuncio.db` -- NOT a temp/ephemeral
+    // path -- so accounts (and everything else) survive a daemon restart.
+    // `NUNCIO_DB_PATH` overrides it, which tests/CI use to point at an
+    // isolated temp path instead of touching a real user's home directory.
     let db_path = std::env::var("NUNCIO_DB_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("nuncio_main.db"));
+        .unwrap_or_else(|_| nunciod::default_db_path());
 
     let orchestrator = nunciod::SelfHealingSyncOrchestrator::new(&db_path, event_bus.clone());
     let (db, _summary) = orchestrator.initialize_and_recover().await?;
@@ -278,26 +283,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
     });
 
-    // gRPC `nuncio.v1.System` server (backlog story 1.A.2 / GH-149).
+    // gRPC `nuncio.v1.System` + `nuncio.v1.Accounts` server (backlog
+    // stories 1.A.2 / GH-149 and 1.C.1 + 1.C.2 / GH-156 + GH-157).
     //
     // Runs ALONGSIDE the existing JSON-RPC IPC server below; the migration
     // off the hand-rolled JSON-RPC transport happens in later stories. The
     // bearer token is minted (or loaded, on subsequent runs) from the real
     // OS keyring vault via `SecretManager::production()`, fails closed if
-    // the keyring is unavailable, and is never logged.
-    let grpc_secrets = nuncio_store::vault::SecretManager::production();
+    // the keyring is unavailable, and is never logged. `Accounts` reuses
+    // this SAME `SecretManager` to write account password credentials to
+    // the OS keyring (never to SQLite) -- see `nunciod::grpc`'s security
+    // comment (GH #165) on why EVERY mounted service shares this one
+    // `BearerAuthInterceptor`.
+    let grpc_secrets = Arc::new(nuncio_store::vault::SecretManager::production());
     let grpc_token_bytes = grpc_secrets
         .get_or_create_key_bytes(nuncio_store::vault::GRPC_TOKEN_ACCOUNT, 32)
         .map_err(|e| format!("failed to provision gRPC bearer token from vault: {e}"))?;
     let grpc_token = hex::encode(grpc_token_bytes);
     let grpc_addr = nunciod::grpc::grpc_addr_from_env();
     tracing::info!(
-        "nunciod gRPC (nuncio.v1.System) starting on {} (loopback only)",
+        "nunciod gRPC (nuncio.v1.System, nuncio.v1.Accounts) starting on {} (loopback only)",
         grpc_addr
     );
     let grpc_event_bus = event_bus.clone();
+    let grpc_db = db.clone();
     let _grpc_task = tokio::spawn(async move {
-        if let Err(e) = nunciod::grpc::serve(&grpc_addr, grpc_event_bus, grpc_token).await {
+        if let Err(e) = nunciod::grpc::serve(
+            &grpc_addr,
+            grpc_event_bus,
+            grpc_db,
+            grpc_secrets,
+            grpc_token,
+        )
+        .await
+        {
             tracing::error!("nunciod gRPC server failed: {}", e);
         }
     });

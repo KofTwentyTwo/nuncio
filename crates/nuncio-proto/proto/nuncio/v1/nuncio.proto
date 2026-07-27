@@ -129,3 +129,88 @@ message EventError {
 
 // Mirrors `CoreEvent::ShuttingDown`, which carries no fields.
 message ShuttingDown {}
+
+// Accounts manages persisted mail/calendar account configurations
+// (backlog stories 1.C.1 / 1.C.2, GH #156 / GH #157).
+//
+// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards `System` -- every gRPC service `nunciod`
+// exposes MUST be authenticated, with no exceptions carved out for "just one
+// more" unauthenticated service. See `nunciod::grpc::serve_on_listener`.
+service Accounts {
+  // AddAccount persists a new account configuration to the daemon's
+  // database and stores its password credential in the OS keyring vault.
+  // The password is NEVER written to the database and NEVER echoed back.
+  rpc AddAccount(AddAccountRequest) returns (AddAccountResponse);
+  // ListAccounts returns every persisted account configuration. Password
+  // credentials are NEVER included in this response.
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+}
+
+// Mirrors `nuncio_core::AccountProtocol`.
+enum AccountProtocol {
+  ACCOUNT_PROTOCOL_UNSPECIFIED = 0;
+  ACCOUNT_PROTOCOL_JMAP = 1;
+  ACCOUNT_PROTOCOL_IMAP_SMTP = 2;
+}
+
+// Mirrors `nuncio_core::TlsMode`.
+enum TlsMode {
+  TLS_MODE_UNSPECIFIED = 0;
+  TLS_MODE_IMPLICIT_TLS = 1;
+  TLS_MODE_START_TLS = 2;
+  TLS_MODE_PLAIN = 3;
+}
+
+// Mirrors `nuncio_core::AccountConfig` field-for-field, MINUS the password
+// credential: this message is used both as the request payload (alongside
+// a separate `password` field) and as the response payload of
+// `ListAccounts`, and the password MUST NEVER appear in the latter.
+message AccountConfig {
+  // Unique identifier for the account configuration.
+  string id = 1;
+  // User-friendly display name (e.g. "Work Mail").
+  string name = 2;
+  // Primary email address associated with the account.
+  string email_address = 3;
+  // Protocol engine type.
+  AccountProtocol protocol = 4;
+  // Server hostname or IP address.
+  string server_host = 5;
+  // Server port number (1..=65535).
+  uint32 server_port = 6;
+  // Whether TLS connection encryption is enabled.
+  bool use_tls = 7;
+  // IMAP connection security transport mode.
+  TlsMode imap_tls_mode = 8;
+  // SMTP connection security transport mode.
+  TlsMode smtp_tls_mode = 9;
+  // Keyring entry key used to retrieve OS vault credentials.
+  string keyring_secret_key = 10;
+  // Background sync polling interval in seconds (minimum 10s).
+  uint64 sync_interval_secs = 11;
+}
+
+// AddAccountRequest carries the full account configuration plus the raw
+// password credential. `password` is written ONLY to the OS keyring vault
+// (under `config.keyring_secret_key`) by the daemon -- it is never persisted
+// to SQLite, never logged, and never echoed back in `AddAccountResponse`.
+message AddAccountRequest {
+  AccountConfig config = 1;
+  string password = 2;
+}
+
+// AddAccountResponse deliberately carries only the persisted account's id,
+// never the password nor the full config (callers already have both).
+message AddAccountResponse {
+  string id = 1;
+}
+
+// ListAccountsRequest currently carries no parameters.
+message ListAccountsRequest {}
+
+// ListAccountsResponse. `accounts` MUST NEVER contain password credentials
+// -- see `AccountConfig`'s doc comment.
+message ListAccountsResponse {
+  repeated AccountConfig accounts = 1;
+}

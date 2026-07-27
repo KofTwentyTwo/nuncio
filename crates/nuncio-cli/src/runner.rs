@@ -14,6 +14,31 @@ use crate::args::{
 
 use crate::output::{format_json, format_json_error};
 
+/// Parses a `--imap-mode`/`--smtp-mode` CLI string into `nuncio_core::TlsMode`.
+/// Rejects anything else rather than silently defaulting, since silently
+/// falling back to e.g. `Plain` for a typo'd mode would be a serious
+/// transport-security footgun.
+fn parse_tls_mode(mode: &str) -> Result<nuncio_core::TlsMode, String> {
+    match mode {
+        "implicit_tls" => Ok(nuncio_core::TlsMode::ImplicitTls),
+        "start_tls" => Ok(nuncio_core::TlsMode::StartTls),
+        "plain" => Ok(nuncio_core::TlsMode::Plain),
+        other => Err(format!(
+            "invalid tls mode '{other}' (expected implicit_tls, start_tls, or plain)"
+        )),
+    }
+}
+
+/// Maps a `nuncio_core::TlsMode` onto its wire-format `nuncio.v1.TlsMode`
+/// enum value, mirroring `nunciod::grpc`'s server-side mapping.
+fn map_tls_mode_to_proto(mode: nuncio_core::TlsMode) -> nuncio_proto::v1::TlsMode {
+    match mode {
+        nuncio_core::TlsMode::ImplicitTls => nuncio_proto::v1::TlsMode::ImplicitTls,
+        nuncio_core::TlsMode::StartTls => nuncio_proto::v1::TlsMode::StartTls,
+        nuncio_core::TlsMode::Plain => nuncio_proto::v1::TlsMode::Plain,
+    }
+}
+
 /// Errors emitted by the CLI headless runner.
 #[derive(Error, Debug)]
 pub enum RunnerError {
@@ -29,11 +54,19 @@ pub enum RunnerError {
 ///
 /// Most commands operate against an ephemeral local engine (database +
 /// event bus) for now. `system status` (see [`Self::handle_system_status`])
-/// is the exception: it is a thin gRPC client of the real `nunciod` daemon's
-/// `nuncio.v1.System` API (backlog story 1.A.3 / GH-150), authenticated by a
-/// bearer token read from an injected [`SecretManager`] — production code
-/// uses [`SecretManager::production`] (the real OS keyring), while tests
-/// inject [`SecretManager::mock`] so no test ever touches the real vault.
+/// and `account add` / `account list` (backlog stories 1.C.1 / 1.C.2,
+/// GH #156 / GH #157, see [`Self::handle_add_account`] /
+/// [`Self::handle_accounts_list`]) are the exceptions: they are thin gRPC
+/// clients of the real `nunciod` daemon's `nuncio.v1.System` and
+/// `nuncio.v1.Accounts` APIs, authenticated by a bearer token read from an
+/// injected [`SecretManager`] — production code uses
+/// [`SecretManager::production`] (the real OS keyring), while tests inject
+/// [`SecretManager::mock`] so no test ever touches the real vault.
+///
+/// `account add` persists through the daemon so the account (and its
+/// password, stored ONLY in the daemon's OS keyring vault) survives past
+/// this CLI process exiting -- unlike this runner's own ephemeral local
+/// `db`, which is thrown away when the process exits.
 pub struct HeadlessRunner {
     event_bus: EventBus,
     db: DatabaseEngine,
@@ -102,9 +135,16 @@ impl HeadlessRunner {
                     smtp_port: _,
                     imap_mode,
                     smtp_mode,
+                    password,
                 } => {
                     self.handle_add_account(
-                        email, imap_host, *imap_port, imap_mode, smtp_mode, json_mode,
+                        email,
+                        imap_host,
+                        *imap_port,
+                        imap_mode,
+                        smtp_mode,
+                        &password.0,
+                        json_mode,
                     )
                     .await
                 }
@@ -757,6 +797,17 @@ impl HeadlessRunner {
         }
     }
 
+    /// `account add`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Accounts` API (backlog story 1.C.1 / 1.C.2,
+    /// GH #156 / GH #157).
+    ///
+    /// The account configuration AND `password` are sent to the daemon in a
+    /// single `AddAccount` RPC; the daemon is solely responsible for
+    /// writing the password to the OS keyring vault and the config to its
+    /// persistent database -- this runner's own ephemeral local `db` is
+    /// never touched for this command, so the account survives this CLI
+    /// process exiting. `password` is never logged here, only forwarded.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_add_account(
         &self,
         email: &str,
@@ -764,63 +815,149 @@ impl HeadlessRunner {
         imap_port: u16,
         imap_mode: &str,
         smtp_mode: &str,
+        password: &str,
         json_mode: bool,
     ) -> String {
+        let imap_tls_mode = match parse_tls_mode(imap_mode) {
+            Ok(mode) => mode,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+        let smtp_tls_mode = match parse_tls_mode(smtp_mode) {
+            Ok(mode) => mode,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
         let keyring_key = format!("nuncio/{}", email);
         let account_id = format!("acct-{}", email.replace('@', "-at-").replace('.', "-"));
 
-        let acct = nuncio_core::AccountConfig {
+        let proto_config = nuncio_proto::v1::AccountConfig {
             id: account_id.clone(),
             name: email.to_string(),
             email_address: email.to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            protocol: nuncio_proto::v1::AccountProtocol::ImapSmtp.into(),
             server_host: imap_host.to_string(),
-            server_port: imap_port,
+            server_port: u32::from(imap_port),
             use_tls: true,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            imap_tls_mode: map_tls_mode_to_proto(imap_tls_mode).into(),
+            smtp_tls_mode: map_tls_mode_to_proto(smtp_tls_mode).into(),
             keyring_secret_key: keyring_key.clone(),
             sync_interval_secs: 300,
         };
 
-        if let Err(e) = self.db.save_account(&acct).await {
-            if json_mode {
-                return format_json_error(&e.to_string());
-            } else {
-                return format!("Failed to save account: {e}");
-            }
-        }
+        let mut client = match self.connect_accounts_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
 
-        if json_mode {
-            format_json(&json!({
-                "configured": true,
-                "account_id": account_id,
-                "email": email,
-                "imap_host": imap_host,
-                "imap_port": imap_port,
-                "imap_mode": imap_mode,
-                "smtp_mode": smtp_mode,
-                "keyring_key": keyring_key
-            }))
-        } else {
-            format!(
-                "Account '{}' (ID: {}) saved to SQLite database and configured for IMAP ({}:{}, mode: {}) and SMTP (mode: {})",
-                email, account_id, imap_host, imap_port, imap_mode, smtp_mode
-            )
+        match client
+            .add_account(nuncio_proto::v1::AddAccountRequest {
+                config: Some(proto_config),
+                password: password.to_string(),
+            })
+            .await
+        {
+            Ok(response) => {
+                let account_id = response.into_inner().id;
+                if json_mode {
+                    format_json(&json!({
+                        "configured": true,
+                        "account_id": account_id,
+                        "email": email,
+                        "imap_host": imap_host,
+                        "imap_port": imap_port,
+                        "imap_mode": imap_mode,
+                        "smtp_mode": smtp_mode,
+                        "keyring_key": keyring_key
+                    }))
+                } else {
+                    format!(
+                        "Account '{}' (ID: {}) added via nunciod daemon and configured for IMAP ({}:{}, mode: {}) and SMTP (mode: {})",
+                        email, account_id, imap_host, imap_port, imap_mode, smtp_mode
+                    )
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected add_account: {status}"),
+                json_mode,
+            ),
         }
     }
 
+    /// `account list`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Accounts` API (backlog story 1.C.1 / 1.C.2,
+    /// GH #156 / GH #157). The daemon's `ListAccounts` response never
+    /// contains password credentials (see `nunciod::grpc`'s `Accounts`
+    /// implementation), so there is nothing to scrub here.
     async fn handle_accounts_list(&self, json_mode: bool) -> String {
-        let accounts = self.db.list_accounts().await.unwrap_or_default();
+        let mut client = match self.connect_accounts_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .list_accounts(nuncio_proto::v1::ListAccountsRequest {})
+            .await
+        {
+            Ok(response) => {
+                let accounts = response.into_inner().accounts;
+                if json_mode {
+                    let accounts_json: Vec<serde_json::Value> = accounts
+                        .iter()
+                        .map(|a| {
+                            json!({
+                                "id": a.id,
+                                "name": a.name,
+                                "email_address": a.email_address,
+                                "protocol": a.protocol().as_str_name(),
+                                "server_host": a.server_host,
+                                "server_port": a.server_port,
+                                "use_tls": a.use_tls,
+                                "imap_tls_mode": a.imap_tls_mode().as_str_name(),
+                                "smtp_tls_mode": a.smtp_tls_mode().as_str_name(),
+                                "keyring_secret_key": a.keyring_secret_key,
+                                "sync_interval_secs": a.sync_interval_secs,
+                            })
+                        })
+                        .collect();
+                    format_json(&json!({ "accounts": accounts_json }))
+                } else {
+                    format!(
+                        "Configured Accounts: {} account(s) registered",
+                        accounts.len()
+                    )
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected list_accounts: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// `nuncio.v1.Accounts` service at `self.grpc_addr`, shared by
+    /// [`Self::handle_add_account`] and [`Self::handle_accounts_list`].
+    async fn connect_accounts_client(
+        &self,
+    ) -> Result<nuncio_proto::client::AuthenticatedAccountsClient, String> {
+        let token_bytes = self
+            .secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
+        let token = hex::encode(token_bytes);
+
+        nuncio_proto::client::connect_accounts(&self.grpc_addr, &token)
+            .await
+            .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
+    }
+
+    /// Formats an error message consistently for both JSON and human-text
+    /// output modes.
+    fn render_error(message: &str, json_mode: bool) -> String {
         if json_mode {
-            format_json(&json!({
-                "accounts": accounts
-            }))
+            format_json_error(message)
         } else {
-            format!(
-                "Configured Accounts: {} account(s) registered",
-                accounts.len()
-            )
+            format!("Error: {message}")
         }
     }
 
@@ -887,41 +1024,108 @@ impl HeadlessRunner {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_tls_mode_accepts_all_valid_modes_and_rejects_garbage() {
+        assert_eq!(
+            parse_tls_mode("implicit_tls").expect("valid mode"),
+            nuncio_core::TlsMode::ImplicitTls
+        );
+        assert_eq!(
+            parse_tls_mode("start_tls").expect("valid mode"),
+            nuncio_core::TlsMode::StartTls
+        );
+        assert_eq!(
+            parse_tls_mode("plain").expect("valid mode"),
+            nuncio_core::TlsMode::Plain
+        );
+
+        let err = parse_tls_mode("not-a-real-mode").expect_err("garbage mode must be rejected");
+        assert!(err.contains("invalid tls mode"));
+    }
+
+    #[test]
+    fn map_tls_mode_to_proto_mirrors_every_variant() {
+        assert_eq!(
+            map_tls_mode_to_proto(nuncio_core::TlsMode::ImplicitTls),
+            nuncio_proto::v1::TlsMode::ImplicitTls
+        );
+        assert_eq!(
+            map_tls_mode_to_proto(nuncio_core::TlsMode::StartTls),
+            nuncio_proto::v1::TlsMode::StartTls
+        );
+        assert_eq!(
+            map_tls_mode_to_proto(nuncio_core::TlsMode::Plain),
+            nuncio_proto::v1::TlsMode::Plain
+        );
+    }
+
+    /// `account add` must reject an invalid `--imap-mode`/`--smtp-mode`
+    /// string BEFORE ever dialing the daemon -- proven here by pointing at
+    /// an address nothing is listening on and confirming the failure is the
+    /// validation error, not a connection error.
+    #[tokio::test]
+    async fn account_add_rejects_invalid_tls_mode_before_dialing_the_daemon() {
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), "127.0.0.1:1".into())
+                .await
+                .expect("runner init");
+
+        let bad_imap_mode = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::Add {
+                        email: "x@y.com".to_string(),
+                        imap_host: "imap.y.com".to_string(),
+                        imap_port: 993,
+                        smtp_host: "smtp.y.com".to_string(),
+                        smtp_port: 465,
+                        imap_mode: "not-a-real-mode".to_string(),
+                        smtp_mode: "implicit_tls".to_string(),
+                        password: crate::args::PasswordArg("pw".to_string()),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(bad_imap_mode.contains("invalid tls mode"));
+        assert!(!bad_imap_mode.contains("unreachable"));
+
+        let bad_smtp_mode = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::Add {
+                        email: "x@y.com".to_string(),
+                        imap_host: "imap.y.com".to_string(),
+                        imap_port: 993,
+                        smtp_host: "smtp.y.com".to_string(),
+                        smtp_port: 465,
+                        imap_mode: "implicit_tls".to_string(),
+                        smtp_mode: "also-not-real".to_string(),
+                        password: crate::args::PasswordArg("pw".to_string()),
+                    },
+                },
+                false,
+            )
+            .await;
+        assert!(bad_smtp_mode.starts_with("Error: invalid tls mode"));
+    }
+
     #[tokio::test]
     async fn headless_runner_executes_all_pure_noun_verb_commands() {
         let runner = HeadlessRunner::ephemeral()
             .await
             .expect("ephemeral runner initializes");
 
-        // Account Noun Commands
-        let acct_add = runner
-            .execute_command(
-                &Commands::Account {
-                    action: AccountSubcommand::Add {
-                        email: "james.maes@kof22.com".to_string(),
-                        imap_host: "mail.kof22.com".to_string(),
-                        imap_port: 993,
-                        smtp_host: "mail.kof22.com".to_string(),
-                        smtp_port: 465,
-                        imap_mode: "implicit_tls".to_string(),
-                        smtp_mode: "implicit_tls".to_string(),
-                    },
-                },
-                true,
-            )
-            .await;
-        assert!(acct_add.contains(r#""email":"james.maes@kof22.com""#));
-
-        let acct_list = runner
-            .execute_command(
-                &Commands::Account {
-                    action: AccountSubcommand::List,
-                },
-                true,
-            )
-            .await;
-        assert!(acct_list.contains("acct-james-maes-at-kof22-com"));
-
+        // Account Noun Commands: `Add`/`List` are exercised separately
+        // below via `ephemeral_with` + `SecretManager::mock()` against a
+        // live test gRPC server, for the exact same reason `system status`
+        // is (backlog stories 1.C.1 / 1.C.2, GH #156 / GH #157): they are
+        // now real gRPC clients of the `nunciod` daemon's `Accounts` API,
+        // so they must never run against this `ephemeral()`-constructed
+        // runner's production `SecretManager` or its (unreachable in CI)
+        // default gRPC address. `Show` still reads this runner's own
+        // ephemeral local `db` (out of scope for this backlog story), so it
+        // is safe to exercise here.
         let acct_show = runner
             .execute_command(
                 &Commands::Account {
@@ -1163,6 +1367,158 @@ mod tests {
             .await;
         assert!(text_out.contains("Ready"));
         assert!(text_out.contains("9.9.9"));
+    }
+
+    /// Reference-client proof for backlog stories 1.C.1 / 1.C.2 (GH #156 /
+    /// GH #157): boots a stub `nuncio.v1.Accounts` gRPC server (mirroring
+    /// `system_status_reports_live_daemon_status_over_grpc_when_reachable`'s
+    /// `StubSystem` pattern above) and drives the real `HeadlessRunner`'s
+    /// `account add` / `account list` gRPC client paths against it.
+    ///
+    /// Real persistence-across-restart and credential-secrecy (never in
+    /// SQLite, never in `ListAccounts`) are proven by `nunciod`'s own
+    /// `grpc::tests`; this test exists purely to prove the CLI's connect +
+    /// call + JSON-format happy path, AND that the password the CLI sends
+    /// over the wire is exactly what the caller supplied (never mangled,
+    /// dropped, or substituted).
+    #[tokio::test]
+    async fn account_add_and_list_round_trip_over_grpc_to_a_stub_daemon() {
+        use nuncio_proto::v1::accounts_server::{Accounts as AccountsService, AccountsServer};
+        use nuncio_proto::v1::{
+            AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
+            AddAccountRequest, AddAccountResponse, ListAccountsRequest, ListAccountsResponse,
+            TlsMode as TlsModeProto,
+        };
+        use std::sync::Mutex;
+
+        /// Minimal test-only stub of `nuncio.v1.Accounts`: records the last
+        /// `AddAccountRequest` it received (so this test can assert on
+        /// exactly what the CLI sent over the wire, including the
+        /// password) and returns a fixed `ListAccounts` response.
+        #[derive(Default)]
+        struct StubAccounts {
+            last_add_request: Arc<Mutex<Option<AddAccountRequest>>>,
+        }
+
+        #[tonic::async_trait]
+        impl AccountsService for StubAccounts {
+            async fn add_account(
+                &self,
+                request: tonic::Request<AddAccountRequest>,
+            ) -> Result<tonic::Response<AddAccountResponse>, tonic::Status> {
+                let req = request.into_inner();
+                let id = req
+                    .config
+                    .as_ref()
+                    .map(|c| c.id.clone())
+                    .unwrap_or_default();
+                *self
+                    .last_add_request
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(req);
+                Ok(tonic::Response::new(AddAccountResponse { id }))
+            }
+
+            async fn list_accounts(
+                &self,
+                _request: tonic::Request<ListAccountsRequest>,
+            ) -> Result<tonic::Response<ListAccountsResponse>, tonic::Status> {
+                Ok(tonic::Response::new(ListAccountsResponse {
+                    accounts: vec![AccountConfigProto {
+                        id: "acct-stub-1".to_string(),
+                        name: "Stub Account".to_string(),
+                        email_address: "stub@nuncio.mx".to_string(),
+                        protocol: AccountProtocolProto::ImapSmtp.into(),
+                        server_host: "imap.nuncio.mx".to_string(),
+                        server_port: 993,
+                        use_tls: true,
+                        imap_tls_mode: TlsModeProto::ImplicitTls.into(),
+                        smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
+                        keyring_secret_key: "nuncio/acct-stub-1".to_string(),
+                        sync_interval_secs: 300,
+                    }],
+                }))
+            }
+        }
+
+        let stub = StubAccounts::default();
+        let probe = stub.last_add_request.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(AccountsServer::new(stub))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+                .await
+                .expect("ephemeral runner initializes");
+
+        let add_out = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::Add {
+                        email: "james.maes@kof22.com".to_string(),
+                        imap_host: "mail.kof22.com".to_string(),
+                        imap_port: 993,
+                        smtp_host: "mail.kof22.com".to_string(),
+                        smtp_port: 465,
+                        imap_mode: "implicit_tls".to_string(),
+                        smtp_mode: "implicit_tls".to_string(),
+                        password: crate::args::PasswordArg("s3cr3t-cli-password".to_string()),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(add_out.contains(r#""email":"james.maes@kof22.com""#));
+        assert!(add_out.contains("acct-james-maes-at-kof22-com"));
+        // The password must never be echoed back in the CLI's own output.
+        assert!(!add_out.contains("s3cr3t-cli-password"));
+
+        // ...but it MUST have been sent to the daemon intact, exactly as
+        // the caller supplied it.
+        let recorded = probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received an add_account request");
+        assert_eq!(recorded.password, "s3cr3t-cli-password");
+        assert_eq!(
+            recorded
+                .config
+                .expect("config present on the request")
+                .keyring_secret_key,
+            "nuncio/james.maes@kof22.com"
+        );
+
+        let list_out = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::List,
+                },
+                true,
+            )
+            .await;
+        assert!(list_out.contains("acct-stub-1"));
+        assert!(list_out.contains("stub@nuncio.mx"));
+        assert!(list_out.contains(r#""protocol":"ACCOUNT_PROTOCOL_IMAP_SMTP""#));
+
+        let list_out_text = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::List,
+                },
+                false,
+            )
+            .await;
+        assert!(list_out_text.contains("1 account(s) registered"));
     }
 
     #[test]
