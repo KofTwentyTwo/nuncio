@@ -117,8 +117,8 @@ impl MailBackend for MockMailBackend {
 }
 
 /// Deterministic mock [`MessageSender`] for offline testing of the outbound
-/// send RPC (backlog story 1.C.5, GH #160): records every [`OutboundMessage`]
-/// it is given, rather than touching a real SMTP transport, and can be
+/// send RPC: records every [`OutboundMessage`] it is given, rather than
+/// touching a real SMTP transport, and can be
 /// configured to simulate a transport failure so callers can prove a failed
 /// send surfaces as a genuine error rather than a fabricated success.
 #[derive(Debug, Clone, Default)]

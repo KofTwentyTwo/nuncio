@@ -6,14 +6,14 @@ package nuncio.v1;
 //
 // This is the foundation of the versioned gRPC API (see
 // docs/adr/0001-engine-first-grpc-architecture.md). Additional services and
-// RPCs will be added under the `nuncio.v1` package as later stories land;
-// breaking changes will be introduced under a new `nuncio.v2` package rather
-// than mutating this one.
+// RPCs will be added under the `nuncio.v1` package incrementally; breaking
+// changes will be introduced under a new `nuncio.v2` package rather than
+// mutating this one.
 //
 // `Subscribe` is deliberately defined on THIS service (rather than a separate
 // one) so that it is automatically covered by the same server-side bearer
 // auth interceptor that guards `GetStatus`, instead of risking a second,
-// un-intercepted service being mounted by mistake (see GH #165).
+// un-intercepted service being mounted by mistake.
 service System {
   // GetStatus reports basic daemon/engine health information.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
@@ -25,7 +25,7 @@ service System {
 }
 
 // GetStatusRequest currently carries no parameters. Fields may be added
-// here in future stories (e.g. requested detail level).
+// here later (e.g. requested detail level).
 message GetStatusRequest {}
 
 // GetStatusResponse reports the current health and build identity of the
@@ -38,7 +38,7 @@ message GetStatusResponse {
 }
 
 // SubscribeRequest currently carries no parameters. Fields may be added
-// here in future stories (e.g. event-kind filtering).
+// here later (e.g. event-kind filtering).
 message SubscribeRequest {}
 
 // Event faithfully mirrors `nuncio_core::CoreEvent`: exactly one variant
@@ -130,10 +130,9 @@ message EventError {
 // Mirrors `CoreEvent::ShuttingDown`, which carries no fields.
 message ShuttingDown {}
 
-// Accounts manages persisted mail/calendar account configurations
-// (backlog stories 1.C.1 / 1.C.2, GH #156 / GH #157).
+// Accounts manages persisted mail/calendar account configurations.
 //
-// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// SECURITY: this service MUST be mounted behind the SAME
 // `BearerAuthInterceptor` that guards `System` -- every gRPC service `nunciod`
 // exposes MUST be authenticated, with no exceptions carved out for "just one
 // more" unauthenticated service. See `nunciod::grpc::serve_on_listener`.
@@ -189,12 +188,11 @@ message AccountConfig {
   string keyring_secret_key = 10;
   // Background sync polling interval in seconds (minimum 10s).
   uint64 sync_interval_secs = 11;
-  // SMTP server hostname or IP address, used for outbound mail (backlog
-  // story #168). Distinct from `server_host` because a mail provider's
-  // inbound (IMAP/JMAP) and outbound (SMTP) endpoints commonly differ.
+  // SMTP server hostname or IP address, used for outbound mail. Distinct
+  // from `server_host` because a mail provider's inbound (IMAP/JMAP) and
+  // outbound (SMTP) endpoints commonly differ.
   string smtp_host = 12;
-  // SMTP server port number (1..=65535), used for outbound mail (backlog
-  // story #168).
+  // SMTP server port number (1..=65535), used for outbound mail.
   uint32 smtp_port = 13;
 }
 
@@ -223,10 +221,9 @@ message ListAccountsResponse {
 }
 
 // Mail exposes the READ path over the daemon's real, persistent message
-// store (the data backlog story 1.C.3 / GH #158 syncs in via
-// `DatabaseEngine::save_email`) -- backlog story 1.C.4, GH #159.
+// store (the data that syncs in via `DatabaseEngine::save_email`).
 //
-// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// SECURITY: this service MUST be mounted behind the SAME
 // `BearerAuthInterceptor` that guards `System` and `Accounts` -- every gRPC
 // service `nunciod` exposes MUST be authenticated, with no exceptions
 // carved out for "just one more" unauthenticated service. See
@@ -246,23 +243,22 @@ service Mail {
   // SearchMessages runs a full-text (FTS5) search over cached message
   // subjects, senders, and bodies.
   rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
-  // SendMessage composes and sends a real outbound email over SMTP
-  // (backlog story 1.C.5, GH #160), built from the configured account's
-  // SMTP endpoint (`AccountConfig.smtp_host`/`smtp_port`, backlog story
-  // #168) and its keyring-stored password. Returns successfully ONLY when
+  // SendMessage composes and sends a real outbound email over SMTP, built
+  // from the configured account's SMTP endpoint
+  // (`AccountConfig.smtp_host`/`smtp_port`) and its keyring-stored
+  // password. Returns successfully ONLY when
   // the SMTP transport genuinely accepted the message for delivery --
   // never a fabricated success. A transport/authentication failure surfaces
   // as a `Status::internal` (or `Status::invalid_argument` for a malformed
   // request) error, never a fabricated `SendMessageResponse`.
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
-  // Sync triggers a real inbound mail synchronization (backlog story 1.C.6,
-  // GH #161): fetches folders and messages from the account's real mail
-  // backend and persists them via the store, exactly as `nunciod`'s
-  // internal sync command loop does, EXCEPT this awaits full completion
-  // before returning -- a successful response guarantees the synced
-  // messages are already visible to `ListMessages`/`GetMessage`. This is
-  // the authenticated, over-the-wire replacement for reaching into daemon
-  // internals to trigger a sync (see GH #165).
+  // Sync triggers a real inbound mail synchronization: fetches folders and
+  // messages from the account's real mail backend and persists them via
+  // the store, exactly as `nunciod`'s internal sync command loop does,
+  // EXCEPT this awaits full completion before returning -- a successful
+  // response guarantees the synced messages are already visible to
+  // `ListMessages`/`GetMessage`. This is the authenticated, over-the-wire
+  // replacement for reaching into daemon internals to trigger a sync.
   rpc Sync(SyncRequest) returns (SyncResponse);
 }
 
@@ -382,10 +378,9 @@ message SearchMessagesResponse {
   repeated MessageSearchHit hits = 1;
 }
 
-// SendMessageRequest carries a composed outbound email (backlog story
-// 1.C.5, GH #160). The sending account's own address is used as the
-// `From:` header -- it is resolved server-side from the configured
-// account, never supplied by the caller.
+// SendMessageRequest carries a composed outbound email. The sending
+// account's own address is used as the `From:` header -- it is resolved
+// server-side from the configured account, never supplied by the caller.
 message SendMessageRequest {
   // Recipient email address.
   string to = 1;
@@ -424,17 +419,17 @@ message SyncResponse {
 }
 
 // Filters exposes the NSQL filter engine's rule CRUD, validation, and
-// dry-run preview operations over gRPC (backlog story 2.A, GH #171) -- the
-// authenticated replacement for the existing hand-rolled `filter.*` JSON-RPC
-// IPC methods (`nunciod::main`'s `CustomRpcHandler`), which remain in place
-// (both transports coexist) until they are retired in a later story (2.C).
+// dry-run preview operations over gRPC -- the authenticated replacement
+// for the existing hand-rolled `filter.*` JSON-RPC IPC methods
+// (`nunciod::main`'s `CustomRpcHandler`), which remain in place (both
+// transports coexist) until they are retired.
 //
 // This faithfully exposes the filter engine as it exists today, including
 // its known correctness gaps (e.g. `target_account`/`ON ACCOUNT` matching
 // against `folder_id` rather than the message's actual account field) --
-// fixing those is out of scope here (Phase 3).
+// fixing those is out of scope here.
 //
-// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// SECURITY: this service MUST be mounted behind the SAME
 // `BearerAuthInterceptor` that guards `System`/`Accounts`/`Mail` -- every
 // gRPC service `nunciod` exposes MUST be authenticated, with no exceptions
 // carved out for "just one more" unauthenticated service. See
@@ -584,14 +579,13 @@ message PreviewRuleResponse {
 
 // Export exposes the daemon's real mailbox export engine
 // (`nuncio_core::export`, via `DatabaseEngine::export_messages_to_file`)
-// over authenticated gRPC (backlog story 2.B, GH #172). The daemon and its
-// caller run on the SAME host (a local, single-machine deployment), so
-// writing the export to a filesystem path on that shared host -- rather
-// than streaming potentially very large export bytes back over the RPC
-// itself -- is both simpler and honest about where the data actually ends
-// up.
+// over authenticated gRPC. The daemon and its caller run on the SAME host
+// (a local, single-machine deployment), so writing the export to a
+// filesystem path on that shared host -- rather than streaming potentially
+// very large export bytes back over the RPC itself -- is both simpler and
+// honest about where the data actually ends up.
 //
-// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// SECURITY: this service MUST be mounted behind the SAME
 // `BearerAuthInterceptor` that guards `System`/`Accounts`/`Mail`/`Filters`
 // -- every gRPC service `nunciod` exposes MUST be authenticated, with no
 // exceptions carved out for "just one more" unauthenticated service. See
@@ -652,14 +646,14 @@ message ExportResponse {
 
 // Audit exposes the daemon's real WORM (Write Once, Read Many) HMAC-chained
 // tamper-evident audit ledger (`nuncio_core::worm_audit`, via
-// `DatabaseEngine`'s `worm_audit_records` table) over authenticated gRPC
-// (backlog story 2.B, GH #172). This is a read/verify-only surface --
-// there is deliberately no RPC to create or mutate records here, since the
-// ledger is written internally by the daemon as a side effect of other
-// operations (e.g. `Export.ExportMailbox`) and the underlying SQLite table
-// itself rejects `UPDATE`/`DELETE` at the schema level.
+// `DatabaseEngine`'s `worm_audit_records` table) over authenticated gRPC.
+// This is a read/verify-only surface -- there is deliberately no RPC to
+// create or mutate records here, since the ledger is written internally by
+// the daemon as a side effect of other operations (e.g.
+// `Export.ExportMailbox`) and the underlying SQLite table itself rejects
+// `UPDATE`/`DELETE` at the schema level.
 //
-// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// SECURITY: this service MUST be mounted behind the SAME
 // `BearerAuthInterceptor` that guards every other service `nunciod`
 // exposes -- see `nunciod::grpc::serve_on_listener`.
 service Audit {

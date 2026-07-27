@@ -1,5 +1,5 @@
 //! Integration test for the `nuncio.v1.System` gRPC server wired into
-//! `nunciod` (backlog story 1.A.2 / GH-149).
+//! `nunciod`.
 //!
 //! Starts a real `nunciod::grpc` server on an ephemeral loopback port and
 //! drives it with the generated `nuncio-proto` tonic client to prove:

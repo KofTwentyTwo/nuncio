@@ -3,10 +3,9 @@
 //!
 //! This crate holds the `.proto` sources under `proto/nuncio/v1/` and the
 //! `tonic`-generated client + server stubs for the `nuncio.v1` package. It is
-//! the foundation laid by backlog story 1.A.1 (GH-148): a compiling skeleton
-//! with a single minimal `System.GetStatus` RPC. Real server wiring, auth,
-//! and business logic are intentionally out of scope here and land in later
-//! stories (1.A.2 / 1.A.3).
+//! a compiling skeleton with a single minimal `System.GetStatus` RPC. Real
+//! server wiring, auth, and business logic are intentionally out of scope
+//! here and are added incrementally as the daemon grows.
 //!
 //! Consumers (e.g. `nunciod`, `nuncio-cli`, and future client repos) should
 //! depend on this crate and use the generated client/server types under
@@ -17,7 +16,7 @@
 //! connection helper ([`client::connect_system`]), so that thin
 //! presentation-shell clients (e.g. `nuncio-cli`) can talk to the `nunciod`
 //! daemon's `nuncio.v1.System` API without depending on the `nunciod`
-//! binary crate itself (backlog story 1.A.3 / GH-150).
+//! binary crate itself.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 

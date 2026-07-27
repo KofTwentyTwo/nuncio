@@ -43,7 +43,9 @@ impl Dialect for NuncioSqlDialect {
 pub struct NsqlParser;
 
 impl NsqlParser {
-    /// Maximum permitted AST recursion depth (Requirement #276).
+    /// Maximum permitted AST recursion depth, bounding how deeply
+    /// `AND`/`OR`/`NOT` conditions may nest so a pathologically nested NSQL
+    /// expression cannot exhaust the stack during parsing or evaluation.
     pub const MAX_AST_DEPTH: usize = 10;
 
     /// Parse complete NSQL statement into a `FilterRule`.

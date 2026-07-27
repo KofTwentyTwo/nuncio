@@ -157,9 +157,9 @@ impl IpcDaemonServer {
                     // ALSO enqueue the command onto the async command
                     // channel so whichever real `CoreCommand` consumer owns
                     // `take_command_receiver()` (e.g. `nunciod`'s real
-                    // inbound-sync command loop, backlog story 1.C.3 / GH
-                    // #158) performs the actual fetch/persist work and later
-                    // flips status back to `Idle` + publishes
+                    // inbound-sync command loop) performs the actual
+                    // fetch/persist work and later flips status back to
+                    // `Idle` + publishes
                     // `SyncCompleted`. Best-effort: if no consumer is
                     // currently running (some test harnesses only exercise
                     // this transport in isolation), the command is simply

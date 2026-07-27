@@ -9,7 +9,7 @@
 //! protobuf compiler being present on PATH, nor on a C/C++ toolchain or
 //! `cmake` to build one from source (unlike source-vendoring alternatives
 //! such as `protobuf-src`). This is required for reproducible builds in CI
-//! across all three platforms (see backlog story 1.A.1 / GH-148).
+//! across all three platforms.
 
 fn main() {
     let protoc_path = match protoc_bin_vendored::protoc_bin_path() {

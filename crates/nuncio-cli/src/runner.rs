@@ -59,7 +59,7 @@ fn message_proto_to_json(message: &nuncio_proto::v1::Message) -> serde_json::Val
 
 /// Maps a `nuncio_core::export::ExportFormat` onto its wire-format
 /// `nuncio.v1.ExportFormat` enum value, mirroring `nunciod::grpc`'s
-/// server-side mapping (backlog story 2.B, GH #172).
+/// server-side mapping.
 fn map_export_format_to_proto(format: nuncio_core::ExportFormat) -> nuncio_proto::v1::ExportFormat {
     match format {
         nuncio_core::ExportFormat::Mbox => nuncio_proto::v1::ExportFormat::Mbox,
@@ -70,7 +70,7 @@ fn map_export_format_to_proto(format: nuncio_core::ExportFormat) -> nuncio_proto
 }
 
 /// Renders a `nuncio.v1.AuditRecord` (as returned by the daemon's `Audit`
-/// gRPC service, backlog story 2.B / GH #172) into the JSON shape used by
+/// gRPC service) into the JSON shape used by
 /// `system audit list`'s `--json` output. `record_hmac` is a verification
 /// MAC output, never secret key material, so it is safe to include here.
 fn audit_record_proto_to_json(record: &nuncio_proto::v1::AuditRecord) -> serde_json::Value {
@@ -86,7 +86,7 @@ fn audit_record_proto_to_json(record: &nuncio_proto::v1::AuditRecord) -> serde_j
 }
 
 /// Renders a `nuncio.v1.FilterRule` (as returned by the daemon's `Filters`
-/// gRPC service, backlog story 2.A / GH #171) into the JSON shape used by
+/// gRPC service) into the JSON shape used by
 /// `filter list`/`filter create`'s `--json` output.
 fn filter_rule_proto_to_json(rule: &nuncio_proto::v1::FilterRule) -> serde_json::Value {
     json!({
@@ -117,8 +117,7 @@ pub enum RunnerError {
 ///
 /// Most commands operate against an ephemeral local engine (database +
 /// event bus) for now. `system status` (see [`Self::handle_system_status`])
-/// and `account add` / `account list` (backlog stories 1.C.1 / 1.C.2,
-/// GH #156 / GH #157, see [`Self::handle_add_account`] /
+/// and `account add` / `account list` (see [`Self::handle_add_account`] /
 /// [`Self::handle_accounts_list`]) are the exceptions: they are thin gRPC
 /// clients of the real `nunciod` daemon's `nuncio.v1.System` and
 /// `nuncio.v1.Accounts` APIs, authenticated by a bearer token read from an
@@ -451,9 +450,9 @@ impl HeadlessRunner {
                     self.handle_filter_test(sql, message_id.as_deref(), json_mode)
                         .await
                 }
-                // `filter edit`/`export`/`import`/`logs` are NOT part of
-                // backlog story 2.A (GH #171)'s required `Filters` gRPC
-                // surface (`CreateRule`/`ListRules`/`DeleteRule`/
+                // `filter edit`/`export`/`import`/`logs` are NOT part of the
+                // `Filters` gRPC surface this runner implements
+                // (`CreateRule`/`ListRules`/`DeleteRule`/
                 // `ValidateRule`/`PreviewRule`); they still read/write this
                 // runner's own ephemeral local `db` below, exactly as
                 // before. Because `List`/`Create`/`Delete` above now go
@@ -461,7 +460,7 @@ impl HeadlessRunner {
                 // rule created via `filter create` will NOT show up in
                 // `filter export`/`filter logs` (which only see this
                 // process's throwaway `db`) until these are migrated too --
-                // a known gap tracked for a later story, not a regression
+                // a known, intentional gap, not a regression
                 // introduced silently here.
                 FilterSubcommand::Edit {
                     id,
@@ -690,7 +689,7 @@ impl HeadlessRunner {
     }
 
     /// `mail sync`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Mail/Sync` API (backlog story 1.C.6, GH #161).
+    /// daemon's `nuncio.v1.Mail/Sync` API.
     /// Replaces this command's previous local-ephemeral behavior (flipping
     /// this runner's own throwaway `EventBus` status flag, which never
     /// fetched a single real message) with a real inbound sync against the
@@ -726,7 +725,7 @@ impl HeadlessRunner {
     }
 
     /// `mail list`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159). Lists
+    /// daemon's `nuncio.v1.Mail` API. Lists
     /// messages in `folder`, newest first, from the daemon's real,
     /// persistent store -- NOT this runner's own ephemeral local `db`, which
     /// is thrown away when this CLI process exits.
@@ -764,10 +763,10 @@ impl HeadlessRunner {
     }
 
     /// `mail send`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Mail/SendMessage` API (backlog story 1.C.5, GH
-    /// #160). The daemon builds a real SMTP transport from the configured
-    /// account's SMTP endpoint (backlog story #168) and keyring password,
-    /// and only reports success when the transport genuinely accepted the
+    /// daemon's `nuncio.v1.Mail/SendMessage` API. The daemon builds a real
+    /// SMTP transport from the configured account's SMTP endpoint and
+    /// keyring password, and only reports success when the transport
+    /// genuinely accepted the
     /// message -- this NEVER prints a fabricated "Message sent" without a
     /// real send actually happening.
     async fn handle_send_email(
@@ -818,7 +817,7 @@ impl HeadlessRunner {
     }
 
     /// `mail search`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159). Runs a
+    /// daemon's `nuncio.v1.Mail` API. Runs a
     /// full-text (FTS5) search over the daemon's real, persistent store.
     async fn handle_search(&self, query: &str, json_mode: bool) -> String {
         let mut client = match self.connect_mail_client().await {
@@ -861,7 +860,7 @@ impl HeadlessRunner {
     }
 
     /// `folder list`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159).
+    /// daemon's `nuncio.v1.Mail` API.
     async fn handle_folders_list(&self, json_mode: bool) -> String {
         let mut client = match self.connect_mail_client().await {
             Ok(client) => client,
@@ -899,7 +898,7 @@ impl HeadlessRunner {
     }
 
     /// `mail read`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159). Returns
+    /// daemon's `nuncio.v1.Mail` API. Returns
     /// the full message, including its (decrypted) body, from the daemon's
     /// real, persistent store.
     async fn handle_read_message(&self, id: &str, json_mode: bool) -> String {
@@ -938,7 +937,7 @@ impl HeadlessRunner {
     }
 
     /// `mail mark`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159). Exactly
+    /// daemon's `nuncio.v1.Mail` API. Exactly
     /// one of `read`/`unread` must be set (enforced both by Clap's
     /// `conflicts_with` and this runtime check, so a caller invoking this
     /// programmatically without going through Clap still cannot request an
@@ -991,7 +990,7 @@ impl HeadlessRunner {
     }
 
     /// `mail export`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Export` API (backlog story 2.B, GH #172). The
+    /// daemon's `nuncio.v1.Export` API. The
     /// daemon writes the export to `out` on ITS OWN host filesystem (the
     /// same host this CLI runs on, in this local deployment) using the real
     /// `nuncio_core::export::ExportEngine`, and reports back the real
@@ -1058,8 +1057,8 @@ impl HeadlessRunner {
     }
 
     /// Resolves the gRPC bearer token from the injected vault and dials the
-    /// `nuncio.v1.Export` service at `self.grpc_addr` (backlog story 2.B,
-    /// GH #172), shared by [`Self::handle_mail_export`].
+    /// `nuncio.v1.Export` service at `self.grpc_addr`, shared by
+    /// [`Self::handle_mail_export`].
     async fn connect_export_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedExportClient, String> {
@@ -1075,9 +1074,8 @@ impl HeadlessRunner {
     }
 
     /// `system audit list`: a real thin gRPC client of the running
-    /// `nunciod` daemon's `nuncio.v1.Audit` API (backlog story 2.B,
-    /// GH #172). Lists a page of the daemon's real, persisted WORM audit
-    /// ledger, sequence ascending.
+    /// `nunciod` daemon's `nuncio.v1.Audit` API. Lists a page of the
+    /// daemon's real, persisted WORM audit ledger, sequence ascending.
     async fn handle_audit_list(&self, limit: u32, offset: u32, json_mode: bool) -> String {
         let mut client = match self.connect_audit_client().await {
             Ok(client) => client,
@@ -1117,8 +1115,8 @@ impl HeadlessRunner {
     }
 
     /// `system audit verify`: a real thin gRPC client of the running
-    /// `nunciod` daemon's `nuncio.v1.Audit` API (backlog story 2.B,
-    /// GH #172). Re-verifies the ENTIRE persisted WORM audit ledger's
+    /// `nunciod` daemon's `nuncio.v1.Audit` API. Re-verifies the ENTIRE
+    /// persisted WORM audit ledger's
     /// HMAC hash-chain integrity server-side, using the ledger's real WORM
     /// HMAC key -- never fabricates a `valid` verdict.
     async fn handle_audit_verify(&self, json_mode: bool) -> String {
@@ -1158,9 +1156,8 @@ impl HeadlessRunner {
     }
 
     /// Resolves the gRPC bearer token from the injected vault and dials the
-    /// `nuncio.v1.Audit` service at `self.grpc_addr` (backlog story 2.B,
-    /// GH #172), shared by [`Self::handle_audit_list`] /
-    /// [`Self::handle_audit_verify`].
+    /// `nuncio.v1.Audit` service at `self.grpc_addr`, shared by
+    /// [`Self::handle_audit_list`] / [`Self::handle_audit_verify`].
     async fn connect_audit_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedAuditClient, String> {
@@ -1176,7 +1173,7 @@ impl HeadlessRunner {
     }
 
     /// `filter list`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171). Lists
+    /// daemon's `nuncio.v1.Filters` API. Lists
     /// every persisted filter rule from the daemon's real, persistent
     /// store -- NOT this runner's own ephemeral local `db`, which is thrown
     /// away when this CLI process exits.
@@ -1218,8 +1215,8 @@ impl HeadlessRunner {
     }
 
     /// `filter create`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171). The
-    /// daemon parses, validates (6-pass `NsqlValidator`), and persists the
+    /// daemon's `nuncio.v1.Filters` API. The daemon parses, validates
+    /// (6-pass `NsqlValidator`), and persists the
     /// rule, then reloads its own live `FilterEngine` -- this runner's own
     /// ephemeral local `db` is never touched, so the rule survives this CLI
     /// process exiting.
@@ -1267,8 +1264,8 @@ impl HeadlessRunner {
     }
 
     /// `filter delete`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171). The
-    /// daemon deletes the persisted rule and reloads its own live
+    /// daemon's `nuncio.v1.Filters` API. The daemon deletes the persisted
+    /// rule and reloads its own live
     /// `FilterEngine` so the removal takes effect immediately.
     async fn handle_filter_delete(&self, id: &str, json_mode: bool) -> String {
         let mut client = match self.connect_filters_client().await {
@@ -1295,8 +1292,8 @@ impl HeadlessRunner {
     }
 
     /// `filter validate`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171). Unlike
-    /// `filter create`, an invalid rule is never a connection/RPC failure
+    /// daemon's `nuncio.v1.Filters` API. Unlike `filter create`, an invalid
+    /// rule is never a connection/RPC failure
     /// here -- it is the daemon's honestly reported `valid: false` result,
     /// which this renders as a validation error without ever suggesting
     /// the daemon itself was unreachable or misbehaving.
@@ -1330,8 +1327,8 @@ impl HeadlessRunner {
     }
 
     /// `filter test`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171).
-    /// Dry-run evaluates the given NSQL rule against a stored message (by
+    /// daemon's `nuncio.v1.Filters` API. Dry-run evaluates the given NSQL
+    /// rule against a stored message (by
     /// `message_id`, read from the daemon's real, persistent store) or a
     /// fixed synthetic sample when none is given/resolvable -- the rule is
     /// never persisted and no action is ever executed.
@@ -1383,8 +1380,8 @@ impl HeadlessRunner {
     }
 
     /// Resolves the gRPC bearer token from the injected vault and dials the
-    /// `nuncio.v1.Filters` service at `self.grpc_addr` (backlog story 2.A,
-    /// GH #171), shared by every `filter` handler above.
+    /// `nuncio.v1.Filters` service at `self.grpc_addr`, shared by every
+    /// `filter` handler above.
     async fn connect_filters_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedFiltersClient, String> {
@@ -1400,8 +1397,7 @@ impl HeadlessRunner {
     }
 
     /// `account add`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Accounts` API (backlog story 1.C.1 / 1.C.2,
-    /// GH #156 / GH #157).
+    /// daemon's `nuncio.v1.Accounts` API.
     ///
     /// The account configuration AND `password` are sent to the daemon in a
     /// single `AddAccount` RPC; the daemon is solely responsible for
@@ -1492,8 +1488,8 @@ impl HeadlessRunner {
     }
 
     /// `account list`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.Accounts` API (backlog story 1.C.1 / 1.C.2,
-    /// GH #156 / GH #157). The daemon's `ListAccounts` response never
+    /// daemon's `nuncio.v1.Accounts` API. The daemon's `ListAccounts`
+    /// response never
     /// contains password credentials (see `nunciod::grpc`'s `Accounts`
     /// implementation), so there is nothing to scrub here.
     async fn handle_accounts_list(&self, json_mode: bool) -> String {
@@ -1576,8 +1572,8 @@ impl HeadlessRunner {
     }
 
     /// Resolves the gRPC bearer token from the injected vault and dials the
-    /// `nuncio.v1.Mail` service at `self.grpc_addr` (backlog story 1.C.4,
-    /// GH #159), shared by every `mail`/`folder` read-path handler above.
+    /// `nuncio.v1.Mail` service at `self.grpc_addr`, shared by every
+    /// `mail`/`folder` read-path handler above.
     async fn connect_mail_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedMailClient, String> {
@@ -1603,7 +1599,7 @@ impl HeadlessRunner {
     }
 
     /// `system status`: a real thin gRPC client of the running `nunciod`
-    /// daemon's `nuncio.v1.System` API (backlog story 1.A.3 / GH-150).
+    /// daemon's `nuncio.v1.System` API.
     ///
     /// Resolves the bearer token from the injected `SecretManager`, dials
     /// the configured gRPC daemon address via
@@ -1760,13 +1756,12 @@ mod tests {
         // Account Noun Commands: `Add`/`List` are exercised separately
         // below via `ephemeral_with` + `SecretManager::mock()` against a
         // live test gRPC server, for the exact same reason `system status`
-        // is (backlog stories 1.C.1 / 1.C.2, GH #156 / GH #157): they are
-        // now real gRPC clients of the `nunciod` daemon's `Accounts` API,
-        // so they must never run against this `ephemeral()`-constructed
-        // runner's production `SecretManager` or its (unreachable in CI)
-        // default gRPC address. `Show` still reads this runner's own
-        // ephemeral local `db` (out of scope for this backlog story), so it
-        // is safe to exercise here.
+        // is: they are real gRPC clients of the `nunciod` daemon's
+        // `Accounts` API, so they must never run against this
+        // `ephemeral()`-constructed runner's production `SecretManager` or
+        // its (unreachable in CI) default gRPC address. `Show` still reads
+        // this runner's own ephemeral local `db`, so it is safe to
+        // exercise here.
         let acct_show = runner
             .execute_command(
                 &Commands::Account {
@@ -1780,10 +1775,9 @@ mod tests {
         assert!(acct_show.contains("Account 'missing' not found"));
 
         // Mail Noun Commands: `Sync`/`List`/`Read`/`Search`/`Mark`/`Send`
-        // (and `Folder::List`) are all now real gRPC clients of the
-        // `nunciod` daemon's `Mail` API (backlog stories 1.C.4 / 1.C.5 /
-        // 1.C.6, GH #159 / GH #160 / GH #161) -- exactly like
-        // `Account::Add`/`List` and `System::Status` above, they must never
+        // (and `Folder::List`) are all real gRPC clients of the `nunciod`
+        // daemon's `Mail` API -- exactly like `Account::Add`/`List` and
+        // `System::Status` above, they must never
         // run against this `ephemeral()`-constructed runner's production
         // `SecretManager` or its (unreachable in CI) default gRPC address.
         // They are exercised separately below via `ephemeral_with` +
@@ -1813,8 +1807,8 @@ mod tests {
 
         // System Noun Commands are exercised separately below via
         // `ephemeral_with` + `SecretManager::mock()`: `system status` is a
-        // real gRPC client of the `nunciod` daemon (backlog story 1.A.3 /
-        // GH-150), so it must never run against the production
+        // real gRPC client of the `nunciod` daemon, so it must never run
+        // against the production
         // `SecretManager` this `ephemeral()`-constructed runner holds (that
         // would touch the real OS keyring during a test run).
     }
@@ -1890,8 +1884,8 @@ mod tests {
             }
 
             // `Subscribe` streaming is exercised by `nunciod`'s own
-            // `grpc::tests` (backlog story 1.A.4 / GH-151); this stub only
-            // needs to satisfy the trait so the CLI's `GetStatus` happy
+            // `grpc::tests`; this stub only needs to satisfy the trait so
+            // the CLI's `GetStatus` happy
             // path above can compile against the real `System` service
             // definition, so it deliberately returns `unimplemented` rather
             // than fabricating stream behavior no test here relies on.
@@ -1949,8 +1943,7 @@ mod tests {
         assert!(text_out.contains("9.9.9"));
     }
 
-    /// Reference-client proof for backlog stories 1.C.1 / 1.C.2 (GH #156 /
-    /// GH #157): boots a stub `nuncio.v1.Accounts` gRPC server (mirroring
+    /// Reference-client proof: boots a stub `nuncio.v1.Accounts` gRPC server (mirroring
     /// `system_status_reports_live_daemon_status_over_grpc_when_reachable`'s
     /// `StubSystem` pattern above) and drives the real `HeadlessRunner`'s
     /// `account add` / `account list` gRPC client paths against it.
@@ -2106,9 +2099,9 @@ mod tests {
         assert!(list_out_text.contains("imap.nuncio.mx"));
     }
 
-    /// Reference-client proof for backlog stories 1.C.4 / 1.C.6 (GH #159 /
-    /// GH #161): boots a stub `nuncio.v1.Mail` gRPC server (mirroring the
-    /// `Accounts` stub pattern above) and drives the real `HeadlessRunner`'s
+    /// Reference-client proof: boots a stub `nuncio.v1.Mail` gRPC server
+    /// (mirroring the `Accounts` stub pattern above) and drives the real
+    /// `HeadlessRunner`'s
     /// `mail sync`/`mail list`/`mail read`/`mail mark`/`mail search`/
     /// `folder list` gRPC client paths against it.
     ///
@@ -2276,8 +2269,8 @@ mod tests {
                 .expect("ephemeral runner initializes");
 
         // `mail sync`: proves the CLI is a real gRPC client of `Mail/Sync`
-        // (backlog story 1.C.6, GH #161) -- it sends a `SyncRequest` with no
-        // `account_id` (sync every account) and reports the daemon's real
+        // -- it sends a `SyncRequest` with no `account_id` (sync every
+        // account) and reports the daemon's real
         // `synced_count` in its output, rather than fabricating a status by
         // only flipping this runner's own throwaway local `EventBus`.
         let mail_sync = runner
@@ -2406,8 +2399,8 @@ mod tests {
         assert!(mark_no_flag.contains("exactly one of --read or --unread"));
 
         // `mail send`: proves the CLI is a real gRPC client of
-        // `Mail/SendMessage` (backlog story 1.C.5, GH #160) -- the exact
-        // recipient/subject/body the caller supplied reaches the daemon
+        // `Mail/SendMessage` -- the exact recipient/subject/body the
+        // caller supplied reaches the daemon
         // over the wire, and the daemon's returned message id (NOT a
         // fabricated "Message sent") appears in the CLI's output.
         let mail_send = runner
@@ -2436,9 +2429,9 @@ mod tests {
         assert_eq!(recorded_send.body_text, "Let's discuss the roadmap.");
     }
 
-    /// Reference-client proof for backlog story 2.A (GH #171): boots a stub
-    /// `nuncio.v1.Filters` gRPC server (mirroring the `Accounts`/`Mail` stub
-    /// pattern above) and drives the real `HeadlessRunner`'s
+    /// Reference-client proof: boots a stub `nuncio.v1.Filters` gRPC server
+    /// (mirroring the `Accounts`/`Mail` stub pattern above) and drives the
+    /// real `HeadlessRunner`'s
     /// `filter list`/`filter create`/`filter delete`/`filter validate`/
     /// `filter test` gRPC client paths against it.
     ///
@@ -2698,8 +2691,8 @@ mod tests {
         assert!(out.contains("unreachable"));
     }
 
-    /// Reference-client proof for backlog story 2.B (GH #172): boots a stub
-    /// `nuncio.v1.Export` gRPC server (mirroring
+    /// Reference-client proof: boots a stub `nuncio.v1.Export` gRPC server
+    /// (mirroring
     /// `system_status_reports_live_daemon_status_over_grpc_when_reachable`'s
     /// `StubSystem` pattern above), recording the exact `ExportRequest` it
     /// received, and drives the real `HeadlessRunner`'s `mail export` gRPC
@@ -2842,8 +2835,8 @@ mod tests {
         assert!(out.contains("Unknown export format"));
     }
 
-    /// Reference-client proof for backlog story 2.B (GH #172): boots a stub
-    /// `nuncio.v1.Audit` gRPC server and drives the real `HeadlessRunner`'s
+    /// Reference-client proof: boots a stub `nuncio.v1.Audit` gRPC server
+    /// and drives the real `HeadlessRunner`'s
     /// `system audit list` / `system audit verify` gRPC client paths
     /// against it. Real ledger seeding, chain verification, and the
     /// tampered-chain case are proven end-to-end by `nunciod`'s own

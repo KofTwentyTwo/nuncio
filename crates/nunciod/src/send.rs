@@ -1,9 +1,9 @@
-//! Real outbound mail send routine (backlog story 1.C.5, GH #160), folding
-//! in backlog story #168 (per-account SMTP endpoint).
+//! Real outbound mail send routine, including per-account SMTP endpoint
+//! resolution.
 //!
 //! Prior to this module, `nuncio-cli`'s `mail send` fabricated success --
 //! it never dialed an SMTP server at all (see `HeadlessRunner::handle_send_email`
-//! before this story). This module closes that gap: the daemon resolves the
+//! previously). This module closes that gap: the daemon resolves the
 //! account to send from, reads its keyring-stored password, builds a real
 //! [`SmtpTransportEngine`] from the account's SMTP endpoint
 //! (`AccountConfig::smtp_host`/`smtp_port`), and hands the composed message
@@ -17,8 +17,8 @@
 //! disambiguate between multiple configured accounts; it operates over a
 //! single, global store. Consistent with that existing scope, `SendMessage`
 //! sends from the first account returned by [`DatabaseEngine::list_accounts`].
-//! Supporting an explicit multi-account choice is future work, tracked
-//! alongside the rest of the `Mail` service's single-account scope.
+//! Supporting an explicit multi-account choice is future work, alongside
+//! the rest of the `Mail` service's single-account scope.
 //!
 //! # Testability
 //!
@@ -41,12 +41,12 @@
 //! freshly-composed outbound message (recipients, subject, body,
 //! attachments) that was never itself a persisted/synced message. Reshaping
 //! that schema to carry a full compose payload would be a much larger
-//! change than this story's scope. Per this story's own escape hatch, this
-//! send is therefore a DIRECT send inside the `SendMessage` RPC handler:
+//! change than the scope of this send path. As a deliberate escape hatch,
+//! this send is therefore a DIRECT send inside the `SendMessage` RPC handler:
 //! synchronous, and honest about success/failure -- never fabricated --
 //! but a transient SMTP failure is NOT automatically retried in the
-//! background the way a filter mutation is. A future story can route
-//! outbound sends through a dedicated outbox table if automatic retry
+//! background the way a filter mutation is. Outbound sends could route
+//! through a dedicated outbox table in the future if automatic retry
 //! becomes a requirement.
 use nuncio_core::model::Attachment;
 use nuncio_core::AccountConfig;
@@ -141,10 +141,10 @@ fn generate_message_id() -> String {
     format!("sent-{nanos:x}")
 }
 
-/// Production entry point for the `SendMessage` RPC (backlog story 1.C.5,
-/// GH #160): resolves the sending account and its keyring password, builds
-/// a real [`SmtpTransportEngine`] from the account's SMTP endpoint (backlog
-/// story #168), and sends `request` through it. Returns the generated
+/// Production entry point for the `SendMessage` RPC: resolves the sending
+/// account and its keyring password, builds a real [`SmtpTransportEngine`]
+/// from the account's SMTP endpoint, and sends `request` through it.
+/// Returns the generated
 /// message id ONLY on genuine transport acceptance -- a resolution failure
 /// (no account, missing credential) or transport failure both surface as
 /// `Err`, never a fabricated success.
@@ -172,9 +172,9 @@ pub async fn send_message_for_account(
 }
 
 /// Test/E2E entry point for the `SendMessage` RPC when a
-/// [`nunciod::grpc::MailEngineOverrides::message_sender`] is injected
-/// (backlog story 1.C.6, GH #161): resolves ONLY the sending account's
-/// `From:` address from the store -- no keyring lookup, no real SMTP
+/// [`nunciod::grpc::MailEngineOverrides::message_sender`] is injected:
+/// resolves ONLY the sending account's `From:` address from the store --
+/// no keyring lookup, no real SMTP
 /// transport construction -- and sends `request` through the given
 /// `sender` (e.g. a [`nuncio_mail::MockMessageSender`] in a full-daemon
 /// offline E2E test). Mirrors [`send_message_for_account`] in every other
@@ -365,8 +365,8 @@ mod tests {
         assert!(id.len() > "sent-".len());
     }
 
-    /// Backlog story 1.C.6 (GH #161): proves `send_message_with_injected_sender`
-    /// resolves the `From:` address from the store and records the exact
+    /// Proves `send_message_with_injected_sender` resolves the `From:`
+    /// address from the store and records the exact
     /// outbound message on the injected sender, WITHOUT ever touching the
     /// keyring (no credential is even stored for this account).
     #[tokio::test]

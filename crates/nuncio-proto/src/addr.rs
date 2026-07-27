@@ -3,8 +3,7 @@
 //! This is the single source of truth for the daemon's gRPC bind address
 //! defaults, consumed by both the server (`nunciod`) and any thin
 //! presentation-shell client (e.g. `nuncio-cli`) that needs to dial the same
-//! endpoint without depending on the `nunciod` binary crate (backlog story
-//! 1.A.3 / GH-150).
+//! endpoint without depending on the `nunciod` binary crate.
 
 /// Default loopback bind address for the `nuncio.v1` gRPC server, used when
 /// the [`GRPC_ADDR_ENV_VAR`] environment variable is unset. Deliberately

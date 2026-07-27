@@ -23,9 +23,9 @@ pub trait MailBackend: Send + Sync {
     async fn send_email(&self, email: &Email) -> Result<(), MailError>;
 }
 
-/// A composed outbound email message ready to send over SMTP (backlog
-/// story 1.C.5, GH #160). Deliberately independent of the persisted
-/// [`Email`] model: an outbound compose has no `id`/`folder_id`/
+/// A composed outbound email message ready to send over SMTP. Deliberately
+/// independent of the persisted [`Email`] model: an outbound compose has no
+/// `id`/`folder_id`/
 /// `received_at`/`read` -- it is never itself a synced inbox message, only
 /// something being handed to a transport for delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,9 +46,9 @@ pub struct OutboundMessage {
     pub attachments: Vec<Attachment>,
 }
 
-/// Narrow, send-only transport seam used by the outbound send RPC (backlog
-/// story 1.C.5, GH #160), distinct from the broader [`MailBackend`] trait:
-/// an SMTP-only transport cannot meaningfully implement
+/// Narrow, send-only transport seam used by the outbound send RPC, distinct
+/// from the broader [`MailBackend`] trait: an SMTP-only transport cannot
+/// meaningfully implement
 /// `sync_folders`/`sync_messages`, so forcing it to implement all of
 /// `MailBackend` would mean fabricating those methods. Production code
 /// (`nunciod`) builds a real [`crate::smtp::SmtpTransportEngine`] from the

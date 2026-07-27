@@ -1,11 +1,11 @@
 //! gRPC server wiring for `nunciod`: serves the versioned `nuncio.v1.System`
-//! contract (see `nuncio-proto`, backlog story 1.A.1 / GH-148) over loopback,
-//! authenticated by a bearer token sourced from the OS keyring vault
-//! (`nuncio_store::vault::GRPC_TOKEN_ACCOUNT`, backlog story 1.A.2 / GH-149).
+//! contract (see `nuncio-proto`) over loopback, authenticated by a bearer
+//! token sourced from the OS keyring vault
+//! (`nuncio_store::vault::GRPC_TOKEN_ACCOUNT`).
 //!
 //! This runs ALONGSIDE the existing hand-rolled JSON-RPC IPC server
 //! (`nuncio_core::ipc::IpcDaemonServer`); migrating callers off the JSON-RPC
-//! transport is out of scope here and lands in a later story.
+//! transport is out of scope here.
 
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
@@ -53,7 +53,7 @@ use tonic::{Request, Response, Status};
 // `nuncio-cli`) agree on the same default address without depending on this
 // `nunciod` binary crate. Re-exported here so existing callers of
 // `nunciod::grpc::{DEFAULT_GRPC_ADDR, GRPC_ADDR_ENV_VAR, grpc_addr_from_env}`
-// keep working unchanged (backlog story 1.A.3 / GH-150).
+// keep working unchanged.
 pub use nuncio_proto::{grpc_addr_from_env, DEFAULT_GRPC_ADDR, GRPC_ADDR_ENV_VAR};
 
 /// Errors that can occur while binding or running the `nuncio.v1` gRPC server.
@@ -76,7 +76,7 @@ pub enum GrpcServeError {
 /// Maps a `nuncio_core::CoreEvent` domain event onto its wire-format
 /// `nuncio.v1.Event` representation, faithfully carrying every variant's
 /// fields into the matching `oneof` case (see `proto/nuncio/v1/nuncio.proto`
-/// for the wire contract, backlog story 1.A.4 / GH-151).
+/// for the wire contract).
 ///
 /// `usize` fields (`processed`, `total`, `matched`, `salvaged_rules_count`)
 /// are narrowed to `u64` for the wire; these are in-process counters that
@@ -150,11 +150,11 @@ impl System for SystemGrpcService {
         }))
     }
 
-    /// Server-streaming push feed of daemon domain events (backlog story
-    /// 1.A.4 / GH-151). Defined on `System` (not a separate service) so this
-    /// RPC is automatically covered by the same `BearerAuthInterceptor` that
-    /// guards `GetStatus`, rather than risking a second, un-intercepted
-    /// service being mounted by mistake (see GH #165).
+    /// Server-streaming push feed of daemon domain events. Defined on
+    /// `System` (not a separate service) so this RPC is automatically
+    /// covered by the same `BearerAuthInterceptor` that guards `GetStatus`,
+    /// rather than risking a second, un-intercepted service being mounted by
+    /// mistake.
     ///
     /// The subscription is registered (`event_bus.subscribe_events()`)
     /// synchronously before this method returns, so once a client's
@@ -294,8 +294,7 @@ fn map_account_config_from_proto(
 }
 
 /// `nuncio.v1.Accounts` gRPC service implementation backed by the daemon's
-/// live [`DatabaseEngine`] and [`SecretManager`] vault (backlog stories
-/// 1.C.1 / 1.C.2, GH #156 / GH #157).
+/// live [`DatabaseEngine`] and [`SecretManager`] vault.
 ///
 /// Persists [`nuncio_core::AccountConfig`] rows via `DatabaseEngine::save_account`
 /// and routes the password credential exclusively to the OS keyring vault via
@@ -374,8 +373,7 @@ fn map_attachment_to_proto(attachment: nuncio_core::model::Attachment) -> Attach
 }
 
 /// Maps a wire-format `nuncio.v1.Attachment` request payload back onto
-/// `nuncio_core::model::Attachment` (backlog story 1.C.5, GH #160, used by
-/// `SendMessage`).
+/// `nuncio_core::model::Attachment`, used by `SendMessage`.
 fn map_attachment_from_proto(attachment: AttachmentProto) -> nuncio_core::model::Attachment {
     nuncio_core::model::Attachment {
         filename: attachment.filename,
@@ -423,8 +421,8 @@ fn map_folder_to_proto(folder: nuncio_core::model::Folder) -> FolderProto {
 }
 
 /// Test-only injection point for the daemon's inbound sync and outbound
-/// send engines, threaded through the daemon's runtime wiring (backlog
-/// story 1.C.6, GH #161: the full-daemon offline spine E2E test).
+/// send engines, threaded through the daemon's runtime wiring for the
+/// full-daemon offline spine E2E test.
 ///
 /// Production (`nunciod::main`, and every existing caller of [`serve`] /
 /// [`serve_on_listener`]) never constructs a non-default instance:
@@ -460,19 +458,18 @@ impl std::fmt::Debug for MailEngineOverrides {
 }
 
 /// `nuncio.v1.Mail` gRPC service implementation backed by the daemon's live
-/// [`DatabaseEngine`] read/mark methods and [`SearchEngine`] FTS index
-/// (backlog story 1.C.4, GH #159), and (backlog story 1.C.5, GH #160) the
-/// live [`SecretManager`] vault used to build a real outbound SMTP
+/// [`DatabaseEngine`] read/mark methods and [`SearchEngine`] FTS index, and
+/// the live [`SecretManager`] vault used to build a real outbound SMTP
 /// transport for `SendMessage`.
 ///
 /// This exposes the mail READ path (list folders, list messages, read a
 /// message, mark read/unread, search) over the real, persistent store that
-/// backlog story 1.C.3 (GH #158) syncs into, AND the outbound SEND path
-/// (`SendMessage`) -- as opposed to the CLI's previous local ephemeral
-/// `HeadlessRunner` database, which was thrown away when the CLI process
-/// exited, and its previous fabricated "Message sent" output, which never
-/// actually dialed an SMTP server. `Sync` (backlog story 1.C.6, GH #161)
-/// triggers a real inbound sync over the same authenticated API.
+/// the sync path writes into, AND the outbound SEND path (`SendMessage`) --
+/// as opposed to the CLI's previous local ephemeral `HeadlessRunner`
+/// database, which was thrown away when the CLI process exited, and its
+/// previous fabricated "Message sent" output, which never actually dialed an
+/// SMTP server. `Sync` triggers a real inbound sync over the same
+/// authenticated API.
 struct MailGrpcService {
     db: Arc<DatabaseEngine>,
     event_bus: Arc<EventBus>,
@@ -595,17 +592,17 @@ impl Mail for MailGrpcService {
         Ok(Response::new(SearchMessagesResponse { hits }))
     }
 
-    /// SendMessage (backlog story 1.C.5, GH #160): composes and sends a real
-    /// outbound email over SMTP via [`crate::send::send_message_for_account`],
-    /// which resolves the sending account, its keyring password, and builds
-    /// a real [`nuncio_mail::SmtpTransportEngine`] from the account's SMTP
-    /// endpoint (backlog story #168). Returns `Ok` ONLY when the transport
-    /// genuinely accepted the message -- a resolution or transport failure
-    /// surfaces as `Status::internal`/`Status::invalid_argument`, never a
-    /// fabricated `SendMessageResponse`.
+    /// SendMessage composes and sends a real outbound email over SMTP via
+    /// [`crate::send::send_message_for_account`], which resolves the sending
+    /// account, its keyring password, and builds a real
+    /// [`nuncio_mail::SmtpTransportEngine`] from the account's SMTP
+    /// endpoint. Returns `Ok` ONLY when the transport genuinely accepted the
+    /// message -- a resolution or transport failure surfaces as
+    /// `Status::internal`/`Status::invalid_argument`, never a fabricated
+    /// `SendMessageResponse`.
     ///
-    /// When [`MailEngineOverrides::message_sender`] is injected (backlog
-    /// story 1.C.6, GH #161), sends through it instead via
+    /// When [`MailEngineOverrides::message_sender`] is injected, sends
+    /// through it instead via
     /// [`crate::send::send_message_with_injected_sender`] -- no keyring
     /// lookup, no real SMTP transport -- so a full-daemon E2E test can
     /// assert on the exact outbound message an injected
@@ -648,19 +645,19 @@ impl Mail for MailGrpcService {
         Ok(Response::new(SendMessageResponse { message_id }))
     }
 
-    /// Sync (backlog story 1.C.6, GH #161): triggers a real inbound mail
-    /// synchronization and awaits full completion before returning, so a
-    /// successful response guarantees the synced messages are already
-    /// visible to `ListMessages`/`GetMessage`. `account_id` mirrors
-    /// `CoreCommand::SyncAccount`/`SyncAll`: `Some` scopes the sync to one
-    /// account, `None` syncs every configured account.
+    /// Sync triggers a real inbound mail synchronization and awaits full
+    /// completion before returning, so a successful response guarantees the
+    /// synced messages are already visible to `ListMessages`/`GetMessage`.
+    /// `account_id` mirrors `CoreCommand::SyncAccount`/`SyncAll`: `Some`
+    /// scopes the sync to one account, `None` syncs every configured
+    /// account.
     ///
     /// When [`MailEngineOverrides::mail_backend`] is injected, fetches from
     /// it via [`crate::sync::sync_with_backend`] instead of resolving a
     /// real per-account engine from keyring credentials -- this is what
     /// lets a full-daemon E2E test drive a real inbound sync entirely over
     /// this authenticated gRPC API with no live network, exactly as a real
-    /// client would trigger it (GH #165: no un-intercepted back door).
+    /// client would trigger it (no un-intercepted back door).
     async fn sync(&self, request: Request<SyncRequest>) -> Result<Response<SyncResponse>, Status> {
         let account_id = request.into_inner().account_id;
 
@@ -683,8 +680,8 @@ impl Mail for MailGrpcService {
 }
 
 /// Maps a `nuncio_filter::FilterRule` onto its wire-format
-/// `nuncio.v1.FilterRule` representation (backlog story 2.A, GH #171). The
-/// parsed condition AST is deliberately NOT carried over the wire -- see the
+/// `nuncio.v1.FilterRule` representation. The parsed condition AST is
+/// deliberately NOT carried over the wire -- see the
 /// message's doc comment in `proto/nuncio/v1/nuncio.proto` -- `actions` is
 /// rendered as NSQL strings via `RuleAction::to_nsql`.
 fn map_filter_rule_to_proto(rule: nuncio_filter::FilterRule) -> FilterRuleProto {
@@ -746,10 +743,10 @@ fn synthetic_preview_email(id: &str) -> nuncio_core::model::Email {
 
 /// `nuncio.v1.Filters` gRPC service implementation backed by the daemon's
 /// live [`DatabaseEngine`] filter-rule CRUD and the daemon's live
-/// [`FilterEngine`] (backlog story 2.A, GH #171) -- the authenticated gRPC
-/// replacement for the existing hand-rolled `filter.*` JSON-RPC IPC methods
-/// (`nunciod::main`'s `CustomRpcHandler`), which remain in place (both
-/// transports coexist) until retired in a later story (2.C).
+/// [`FilterEngine`] -- the authenticated gRPC replacement for the existing
+/// hand-rolled `filter.*` JSON-RPC IPC methods (`nunciod::main`'s
+/// `CustomRpcHandler`), which remain in place (both transports coexist)
+/// until retired.
 ///
 /// `CreateRule`/`DeleteRule` persist through `db` FIRST, then reload
 /// `filter_engine`'s `ArcSwap`-backed rule set from the freshly persisted
@@ -928,7 +925,7 @@ fn map_export_format_from_proto(
 }
 
 /// `nuncio.v1.Export` gRPC service implementation backed by the daemon's
-/// live [`DatabaseEngine`] (backlog story 2.B, GH #172): loads messages via
+/// live [`DatabaseEngine`]: loads messages via
 /// [`DatabaseEngine::list_messages_for_export`] (scoped by `account_id`,
 /// `folder_id`, or unscoped for "every message"), then writes them to
 /// `output_path` on the local host via
@@ -1005,7 +1002,7 @@ fn map_audit_record_to_proto(record: nuncio_core::WormAuditRecord) -> AuditRecor
 }
 
 /// `nuncio.v1.Audit` gRPC service implementation backed by the daemon's
-/// live [`DatabaseEngine`] WORM audit ledger (backlog story 2.B, GH #172).
+/// live [`DatabaseEngine`] WORM audit ledger.
 /// A read/verify-only surface -- there is no RPC here to create or mutate
 /// records, since the ledger is written internally by the daemon as a side
 /// effect of other operations (see `ExportGrpcService`).
@@ -1136,15 +1133,14 @@ pub async fn serve(
 /// `nuncio.v1.Filters`, `nuncio.v1.Export`, and `nuncio.v1.Audit` gRPC
 /// services on an already-bound [`TcpListener`].
 ///
-/// # Security (GH #165)
+/// # Security
 ///
 /// EVERY service mounted on this server MUST be wrapped in its own
 /// [`BearerAuthInterceptor`] via `*Server::with_interceptor`, exactly like
 /// `System` and `Accounts` below -- never `add_service(SomeServer::new(...))`
 /// unwrapped. This is a hard, non-negotiable invariant: an un-intercepted
 /// service mounted here would be reachable by any local process without
-/// authentication. If a future story adds another service, mount it the
-/// same way.
+/// authentication. If a future service is added, mount it the same way.
 ///
 /// Exposed separately from [`serve`] so tests can bind an ephemeral loopback
 /// port (`127.0.0.1:0`), read back the OS-assigned port via
@@ -1172,8 +1168,8 @@ pub async fn serve_on_listener(
 }
 
 /// Identical to [`serve_on_listener`], except the `nuncio.v1.Mail` service's
-/// inbound sync and outbound send engines can be overridden (backlog story
-/// 1.C.6, GH #161). [`serve_on_listener`] is simply this function called
+/// inbound sync and outbound send engines can be overridden.
+/// [`serve_on_listener`] is simply this function called
 /// with `MailEngineOverrides::default()` (i.e. every field `None`, which is
 /// production's exact prior behavior); this function exists so a
 /// full-daemon offline E2E test can supply `Some(..)` without changing
@@ -1202,10 +1198,9 @@ pub async fn serve_on_listener_with_overrides(
     let accounts_interceptor = BearerAuthInterceptor::new(token.clone());
     let accounts_svc = AccountsServer::with_interceptor(accounts_service, accounts_interceptor);
 
-    // Mail (backlog story 1.C.4, GH #159; SendMessage: 1.C.5, GH #160;
-    // Sync: 1.C.6, GH #161): mounted behind its own `BearerAuthInterceptor`,
-    // exactly like `System` and `Accounts` above -- see the hard invariant
-    // documented on this function's doc comment (GH #165).
+    // Mail: mounted behind its own `BearerAuthInterceptor`, exactly like
+    // `System` and `Accounts` above -- see the hard invariant documented on
+    // this function's doc comment.
     let mail_service = MailGrpcService {
         db: db.clone(),
         event_bus,
@@ -1215,10 +1210,9 @@ pub async fn serve_on_listener_with_overrides(
     let mail_interceptor = BearerAuthInterceptor::new(token.clone());
     let mail_svc = MailServer::with_interceptor(mail_service, mail_interceptor);
 
-    // Filters (backlog story 2.A, GH #171): mounted behind its own
-    // `BearerAuthInterceptor`, exactly like `System`/`Accounts`/`Mail` above
-    // -- see the hard invariant documented on this function's doc comment
-    // (GH #165).
+    // Filters: mounted behind its own `BearerAuthInterceptor`, exactly like
+    // `System`/`Accounts`/`Mail` above -- see the hard invariant documented
+    // on this function's doc comment.
     let filters_service = FiltersGrpcService {
         db: db.clone(),
         filter_engine,
@@ -1226,18 +1220,16 @@ pub async fn serve_on_listener_with_overrides(
     let filters_interceptor = BearerAuthInterceptor::new(token.clone());
     let filters_svc = FiltersServer::with_interceptor(filters_service, filters_interceptor);
 
-    // Export (backlog story 2.B, GH #172): mounted behind its own
-    // `BearerAuthInterceptor`, exactly like every other service above --
-    // see the hard invariant documented on this function's doc comment
-    // (GH #165).
+    // Export: mounted behind its own `BearerAuthInterceptor`, exactly like
+    // every other service above -- see the hard invariant documented on
+    // this function's doc comment.
     let export_service = ExportGrpcService { db: db.clone() };
     let export_interceptor = BearerAuthInterceptor::new(token.clone());
     let export_svc = ExportServer::with_interceptor(export_service, export_interceptor);
 
-    // Audit (backlog story 2.B, GH #172): mounted behind its own
-    // `BearerAuthInterceptor`, exactly like every other service above --
-    // see the hard invariant documented on this function's doc comment
-    // (GH #165).
+    // Audit: mounted behind its own `BearerAuthInterceptor`, exactly like
+    // every other service above -- see the hard invariant documented on
+    // this function's doc comment.
     let audit_service = AuditGrpcService { db };
     let audit_interceptor = BearerAuthInterceptor::new(token);
     let audit_svc = AuditServer::with_interceptor(audit_service, audit_interceptor);
@@ -1306,11 +1298,11 @@ mod tests {
     }
 
     /// Spawns a test server on an ephemeral loopback port backed by the
-    /// given `db`/`filter_engine`/`secrets`/`overrides` (backlog story
-    /// 1.C.6, GH #161): the helper every test that injects a
-    /// [`MailEngineOverrides::mail_backend`] / [`MailEngineOverrides::message_sender`]
-    /// uses to prove `Sync` / `SendMessage` drive an injected test double
-    /// over the real authenticated gRPC API.
+    /// given `db`/`filter_engine`/`secrets`/`overrides`: the helper every
+    /// test that injects a [`MailEngineOverrides::mail_backend`] /
+    /// [`MailEngineOverrides::message_sender`] uses to prove `Sync` /
+    /// `SendMessage` drive an injected test double over the real
+    /// authenticated gRPC API.
     async fn spawn_test_server_with_overrides(
         event_bus: Arc<EventBus>,
         db: Arc<DatabaseEngine>,
@@ -1554,7 +1546,7 @@ mod tests {
     async fn subscribe_rejects_missing_bearer_token() {
         // Confirms `Subscribe` inherits the same `BearerAuthInterceptor` as
         // `GetStatus` because both are defined on the single `System`
-        // service (GH #165: no separate, un-intercepted service).
+        // service (no separate, un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
         let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
 
@@ -1671,7 +1663,7 @@ mod tests {
     #[tokio::test]
     async fn add_account_rejects_missing_bearer_token() {
         // Confirms `Accounts` is mounted behind its own `BearerAuthInterceptor`
-        // exactly like `System` (GH #165: no un-intercepted service).
+        // exactly like `System` (no un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
         let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
 
@@ -1742,8 +1734,8 @@ mod tests {
         assert_eq!(err.code(), Code::InvalidArgument);
     }
 
-    /// Backlog story 1.C.1 (GH #156): proves an account added through the
-    /// daemon persists across a daemon restart. Simulates the restart by
+    /// Proves an account added through the daemon persists across a daemon
+    /// restart. Simulates the restart by
     /// dropping the first `DatabaseEngine`/server pair and opening a brand
     /// new one at the SAME on-disk database path (a real persistent temp
     /// file, not `connect_ephemeral`'s throwaway one), then calling
@@ -1828,10 +1820,9 @@ mod tests {
         assert_eq!(stored_password, "restart-secret-pw");
     }
 
-    /// Backlog story 1.C.2 (GH #157): proves the password credential is
-    /// retrievable from the (mock) keyring, but never appears in any
-    /// `accounts` SQLite column, and never appears in the `ListAccounts`
-    /// wire response.
+    /// Proves the password credential is retrievable from the (mock)
+    /// keyring, but never appears in any `accounts` SQLite column, and
+    /// never appears in the `ListAccounts` wire response.
     #[tokio::test]
     async fn add_account_password_never_touches_sqlite_or_the_list_response() {
         const PASSWORD: &str = "super-secret-credential-42";
@@ -1921,7 +1912,7 @@ mod tests {
         );
     }
 
-    // ---- Mail (backlog story 1.C.4, GH #159) ----
+    // ---- Mail ----
 
     use nuncio_proto::v1::mail_client::MailClient;
     use nuncio_proto::v1::{
@@ -1953,8 +1944,7 @@ mod tests {
     #[tokio::test]
     async fn mail_rpcs_reject_missing_bearer_token() {
         // Confirms `Mail` is mounted behind its own `BearerAuthInterceptor`
-        // exactly like `System` and `Accounts` (GH #165: no un-intercepted
-        // service).
+        // exactly like `System` and `Accounts` (no un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
         let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
 
@@ -2075,9 +2065,8 @@ mod tests {
         assert_eq!(err.code(), Code::InvalidArgument);
     }
 
-    /// End-to-end proof for backlog story 1.C.4 (GH #159): seeds the
-    /// daemon's real, persistent store directly via `DatabaseEngine::
-    /// save_email` (standing in for backlog story 1.C.3's real sync path,
+    /// End-to-end proof: seeds the daemon's real, persistent store directly
+    /// via `DatabaseEngine::save_email` (standing in for the real sync path,
     /// which uses the exact same write path), then proves every `Mail` RPC
     /// round-trips real data: `ListFolders` reports the seeded folder,
     /// `ListMessages` returns the seeded messages, `GetMessage` returns the
@@ -2212,7 +2201,7 @@ mod tests {
         );
     }
 
-    // ---- SendMessage (backlog story 1.C.5, GH #160) ----
+    // ---- SendMessage ----
 
     fn valid_send_message_request() -> SendMessageRequest {
         SendMessageRequest {
@@ -2259,10 +2248,10 @@ mod tests {
         assert_eq!(err.code(), Code::InvalidArgument);
     }
 
-    /// Backlog story 1.C.5 (GH #160): proves `SendMessage` never fabricates
-    /// success -- with no account configured at all, the daemon has nothing
-    /// to send from, and this surfaces as `Status::internal` rather than a
-    /// fabricated `SendMessageResponse`.
+    /// Proves `SendMessage` never fabricates success -- with no account
+    /// configured at all, the daemon has nothing to send from, and this
+    /// surfaces as `Status::internal` rather than a fabricated
+    /// `SendMessageResponse`.
     #[tokio::test]
     async fn send_message_reports_honest_error_when_no_account_configured() {
         let event_bus = Arc::new(EventBus::new());
@@ -2279,8 +2268,8 @@ mod tests {
     }
 
     /// Proves `SendMessage` genuinely builds a real SMTP transport from the
-    /// account's `smtp_host`/`smtp_port` (backlog story #168) and its
-    /// keyring password, and surfaces a real transport failure honestly --
+    /// account's `smtp_host`/`smtp_port` and its keyring password, and
+    /// surfaces a real transport failure honestly --
     /// WITHOUT any live network dependency: `smtp_host`/`smtp_port` point at
     /// a reserved loopback port nothing is listening on, so the connection
     /// attempt fails fast and deterministically (mirroring
@@ -2334,7 +2323,7 @@ mod tests {
         assert!(err.message().contains("failed to send message"));
     }
 
-    // ---- Sync (backlog story 1.C.6, GH #161) ----
+    // ---- Sync ----
 
     /// With no `MailEngineOverrides` and no configured accounts, `Sync`
     /// exercises the real production `run_all_accounts_sync` path and
@@ -2378,13 +2367,13 @@ mod tests {
         assert!(err.message().contains("acct-does-not-exist"));
     }
 
-    /// Backlog story 1.C.6 (GH #161): with a [`MailEngineOverrides::mail_backend`]
-    /// injected, `Sync` fetches from it (via `sync_with_backend`) instead of
-    /// resolving a real per-account engine from keyring credentials, and
-    /// awaits full completion before returning -- proving a caller can
-    /// immediately `ListMessages`/`GetMessage` the synced data with no
-    /// fixed sleep. This is the exact mechanism the full-daemon offline
-    /// spine E2E test (`spine_e2e_test.rs`) uses.
+    /// With a [`MailEngineOverrides::mail_backend`] injected, `Sync` fetches
+    /// from it (via `sync_with_backend`) instead of resolving a real
+    /// per-account engine from keyring credentials, and awaits full
+    /// completion before returning -- proving a caller can immediately
+    /// `ListMessages`/`GetMessage` the synced data with no fixed sleep.
+    /// This is the exact mechanism the full-daemon offline spine E2E test
+    /// (`spine_e2e_test.rs`) uses.
     #[tokio::test]
     async fn sync_with_injected_backend_persists_and_reports_count_deterministically() {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
@@ -2448,8 +2437,8 @@ mod tests {
         assert_eq!(fetched.body_plain.as_deref(), Some("Injected sync body"));
     }
 
-    /// Backlog story 1.C.6 (GH #161): with a [`MailEngineOverrides::message_sender`]
-    /// injected, `SendMessage` sends through it (via
+    /// With a [`MailEngineOverrides::message_sender`] injected,
+    /// `SendMessage` sends through it (via
     /// `send_message_with_injected_sender`) instead of building a real SMTP
     /// transport, and the injected mock captures the EXACT outbound message
     /// -- recipient, subject, and body -- the caller sent over the wire.
@@ -2524,10 +2513,10 @@ mod tests {
         assert_eq!(sent[0].body_plain.as_deref(), Some("Injected send body"));
     }
 
-    /// Backlog story 1.C.6 (GH #161): with a [`MailEngineOverrides::mail_backend`]
-    /// injected and configured to simulate a failure, `Sync` surfaces the
-    /// genuine `sync_with_backend` error as `Status::internal` rather than
-    /// a fabricated success.
+    /// With a [`MailEngineOverrides::mail_backend`] injected and configured
+    /// to simulate a failure, `Sync` surfaces the genuine
+    /// `sync_with_backend` error as `Status::internal` rather than a
+    /// fabricated success.
     #[tokio::test]
     async fn sync_with_injected_backend_reports_error_when_backend_fails() {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
@@ -2564,10 +2553,10 @@ mod tests {
         assert!(err.message().contains("sync failed"));
     }
 
-    /// Backlog story 1.C.6 (GH #161): with a [`MailEngineOverrides::message_sender`]
-    /// injected and configured to simulate a transport failure,
-    /// `SendMessage` surfaces the genuine `send_message_with_injected_sender`
-    /// error as `Status::internal` rather than a fabricated success.
+    /// With a [`MailEngineOverrides::message_sender`] injected and
+    /// configured to simulate a transport failure, `SendMessage` surfaces
+    /// the genuine `send_message_with_injected_sender` error as
+    /// `Status::internal` rather than a fabricated success.
     #[tokio::test]
     async fn send_message_with_injected_sender_reports_error_when_transport_fails() {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
@@ -2621,7 +2610,7 @@ mod tests {
         assert!(err.message().contains("failed to send message"));
     }
 
-    // ---- Filters (backlog story 2.A, GH #171) ----
+    // ---- Filters ----
 
     use nuncio_proto::v1::filters_client::FiltersClient;
     use nuncio_proto::v1::{
@@ -2666,7 +2655,7 @@ mod tests {
     #[tokio::test]
     async fn filters_rpcs_reject_missing_bearer_token() {
         // Confirms `Filters` is mounted behind its own `BearerAuthInterceptor`
-        // exactly like `System`/`Accounts`/`Mail` (GH #165: no un-intercepted
+        // exactly like `System`/`Accounts`/`Mail` (no un-intercepted
         // service).
         let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
 
@@ -2716,8 +2705,8 @@ mod tests {
         assert_eq!(err.code(), Code::Unauthenticated);
     }
 
-    /// End-to-end proof for backlog story 2.A (GH #171): `CreateRule`
-    /// persists AND reloads the live `FilterEngine`'s `ArcSwap` rule set
+    /// End-to-end proof: `CreateRule` persists AND reloads the live
+    /// `FilterEngine`'s `ArcSwap` rule set
     /// (proven by evaluating the SAME `filter_engine` instance directly,
     /// not just re-reading it back over `ListRules`); `ListRules` reflects
     /// the persisted rule; `DeleteRule` removes it AND reloads the engine
@@ -3023,15 +3012,14 @@ mod tests {
         assert_eq!(err.code(), Code::InvalidArgument);
     }
 
-    // ---- Export (backlog story 2.B, GH #172) ----
+    // ---- Export ----
 
     use nuncio_proto::v1::export_client::ExportClient;
 
     #[tokio::test]
     async fn export_rpcs_reject_missing_bearer_token() {
         // Confirms `Export` is mounted behind its own `BearerAuthInterceptor`
-        // exactly like every other service (GH #165: no un-intercepted
-        // service).
+        // exactly like every other service (no un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
         let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
 
@@ -3087,9 +3075,9 @@ mod tests {
         assert_eq!(err.code(), Code::InvalidArgument);
     }
 
-    /// Backlog story 2.B (GH #172): seeds the daemon's real store with
-    /// messages directly via `DatabaseEngine::save_email` (the same write
-    /// path `Mail`'s own tests use), then proves `ExportMailbox` writes a
+    /// Seeds the daemon's real store with messages directly via
+    /// `DatabaseEngine::save_email` (the same write path `Mail`'s own tests
+    /// use), then proves `ExportMailbox` writes a
     /// REAL file to `output_path` with the expected message/byte counts,
     /// and that the file's actual content contains the seeded messages --
     /// never a fabricated summary.
@@ -3205,15 +3193,14 @@ mod tests {
         assert!(!written.contains("From Account B"));
     }
 
-    // ---- Audit (backlog story 2.B, GH #172) ----
+    // ---- Audit ----
 
     use nuncio_proto::v1::audit_client::AuditClient;
 
     #[tokio::test]
     async fn audit_rpcs_reject_missing_bearer_token() {
         // Confirms `Audit` is mounted behind its own `BearerAuthInterceptor`
-        // exactly like every other service (GH #165: no un-intercepted
-        // service).
+        // exactly like every other service (no un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
         let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
 

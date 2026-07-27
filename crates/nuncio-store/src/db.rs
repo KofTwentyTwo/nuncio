@@ -116,7 +116,7 @@ fn resolve_engine_keys(
 }
 
 /// Structured result of re-verifying the entire persisted WORM audit
-/// ledger's hash chain (backlog story 2.B, GH #172). See
+/// ledger's hash chain. See
 /// [`DatabaseEngine::verify_worm_audit_chain_report`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WormChainReport {
@@ -524,7 +524,7 @@ impl DatabaseEngine {
         Ok(())
     }
 
-    /// Additive, backfill-safe migration for backlog story #168: adds the
+    /// Additive, backfill-safe migration that adds the
     /// `smtp_host` / `smtp_port` columns to a pre-existing `accounts` table
     /// that predates the SMTP account-endpoint feature.
     ///
@@ -678,7 +678,7 @@ impl DatabaseEngine {
                 )| {
                     let protocol = serde_json::from_str(&protocol_str)
                         .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
-                    // Backfill-safe fallback (backlog story #168): a row
+                    // Backfill-safe fallback: a row
                     // written before `smtp_host`/`smtp_port` existed has
                     // `NULL` in both columns (see
                     // `Self::ensure_accounts_smtp_columns`). Rather than
@@ -901,8 +901,7 @@ impl DatabaseEngine {
         })
     }
 
-    /// Update a single message's read/unread flag in place (backlog story
-    /// 1.C.4, GH #159).
+    /// Update a single message's read/unread flag in place.
     ///
     /// Returns `DatabaseError::Query(sqlx::Error::RowNotFound)` if no message
     /// with `message_id` exists, so callers can distinguish "flag flipped"
@@ -1290,8 +1289,8 @@ impl DatabaseEngine {
             .collect())
     }
 
-    /// Query messages across the WHOLE store for export purposes (backlog
-    /// story 2.B, GH #172), optionally narrowed to a single account or a
+    /// Query messages across the WHOLE store for export purposes,
+    /// optionally narrowed to a single account or a
     /// single folder. Passing `None` for both returns every message in the
     /// store. Ordered by `id` ascending, mirroring [`Self::get_message_chunk`]'s
     /// deterministic keyset ordering.
@@ -1455,7 +1454,7 @@ impl DatabaseEngine {
     }
 
     /// Re-verify the entire WORM audit ledger and report a structured
-    /// result (backlog story 2.B, GH #172), rather than the opaque
+    /// result, rather than the opaque
     /// pass/fail `Result` [`Self::verify_worm_audit_chain`] returns -- so
     /// callers (e.g. the `Audit/VerifyChain` gRPC RPC) can honestly report
     /// exactly how many records were checked and, if the chain is broken,
@@ -1558,7 +1557,7 @@ mod tests {
     use super::*;
     use sqlx::Connection;
 
-    /// Proves the fix for 1.B.4: a transient error surfacing from the integrity probe (here, a
+    /// Proves that a transient error surfacing from the integrity probe (here, a
     /// genuine pool-exhaustion / acquire-timeout condition, deterministically forced by holding
     /// the pool's only connection) must propagate as `Err`, never be coerced into `Ok(false)`
     /// (which would be indistinguishable from genuine corruption to `open_with_backup_dir` and
@@ -1596,7 +1595,7 @@ mod tests {
         );
     }
 
-    /// End-to-end proof of 1.B.4: a genuinely transient, operational condition (another
+    /// End-to-end proof that a genuinely transient, operational condition (another
     /// connection holding an exclusive lock on the live database) must never be treated as
     /// corruption by `open_with_backup_dir` -- no backup isolation, no salvage, no deletion of
     /// the live file. The database and its data must survive completely intact, and a retry
@@ -1787,7 +1786,7 @@ mod tests {
         assert_eq!(folders[0].unread_messages, 1);
     }
 
-    /// Backlog story 1.C.4 (GH #159): `set_message_read` flips the persisted
+    /// `set_message_read` flips the persisted
     /// `read_flag` in place (both directions), and reports
     /// `sqlx::Error::RowNotFound` for a message ID that was never saved,
     /// rather than silently succeeding on a no-op update.
@@ -1875,7 +1874,7 @@ mod tests {
         assert_eq!(accounts[0].smtp_port, 465);
     }
 
-    /// Backlog story #168: proves the additive `smtp_host`/`smtp_port`
+    /// Proves the additive `smtp_host`/`smtp_port`
     /// migration is backfill-safe. Simulates a database created BEFORE this
     /// feature existed (an `accounts` table with no `smtp_host`/`smtp_port`
     /// columns at all, populated via a direct `INSERT` bypassing
@@ -1895,7 +1894,7 @@ mod tests {
         // Step 1: create an OLD-schema `accounts` table (no smtp_host/smtp_port
         // columns) directly, bypassing `DatabaseEngine::migrate` entirely, and
         // insert one pre-existing row -- exactly what a database created
-        // before backlog story #168 would look like on disk.
+        // before the `smtp_host`/`smtp_port` columns existed would look like on disk.
         {
             let url = format!("sqlite://{}", db_path.to_string_lossy());
             let options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)

@@ -6,8 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// Carries an account password credential from an interactive `rpassword`
 /// prompt (see `nuncio-cli`'s `main`) through to `Accounts/AddAccount`
 /// without ever being reachable as a Clap CLI flag, printed by `Debug`, or
-/// carried by value through `Serialize`/`Deserialize` (backlog stories
-/// 1.C.1 / 1.C.2, GH #156 / GH #157).
+/// carried by value through `Serialize`/`Deserialize`.
 ///
 /// `AccountSubcommand::Add`'s `password` field is `#[arg(skip)]`, so Clap
 /// never parses it from argv; `main` populates it exactly once, right after
@@ -302,8 +301,8 @@ pub enum MailSubcommand {
         #[arg(long, help = "Mark the message as unread", conflicts_with = "read")]
         unread: bool,
     },
-    /// Export mailbox messages to a portable file format (backlog story
-    /// 2.B, GH #172): MBOX, an EML zip archive, JSON, or JSON Lines.
+    /// Export mailbox messages to a portable file format: MBOX, an EML
+    /// zip archive, JSON, or JSON Lines.
     Export {
         /// Export format (mbox, eml, json, or jsonl).
         #[arg(
@@ -358,15 +357,14 @@ pub enum SystemSubcommand {
     /// Display system, daemon, and event bus status.
     Status,
     /// WORM (Write Once, Read Many) tamper-evident audit ledger operations
-    /// (`nuncio system audit <verb>`, backlog story 2.B, GH #172).
+    /// (`nuncio system audit <verb>`).
     Audit {
         #[command(subcommand)]
         action: AuditSubcommand,
     },
 }
 
-/// Audit subcommands (`nuncio system audit <verb>`, backlog story 2.B,
-/// GH #172).
+/// Audit subcommands (`nuncio system audit <verb>`).
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuditSubcommand {

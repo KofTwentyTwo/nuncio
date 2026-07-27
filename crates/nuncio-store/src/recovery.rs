@@ -326,7 +326,7 @@ impl SqliteRecoveryEngine {
                     )| {
                         let protocol = serde_json::from_str(&protocol_str)
                             .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
-                        // Backfill-safe fallback (backlog story #168): see
+                        // Backfill-safe fallback: see
                         // `DatabaseEngine::list_accounts` for the matching
                         // rationale -- a salvaged row written before
                         // `smtp_host`/`smtp_port` existed falls back to the
@@ -505,7 +505,7 @@ mod tests {
         let secrets = crate::vault::SecretManager::mock();
 
         // Step 1: Create DB with account & a real NSQL filter rule (exercising the
-        // `filter_rules` schema salvage restores against -- see 1.B.3).
+        // `filter_rules` schema the salvage restore INSERT runs against).
         {
             let engine = DatabaseEngine::connect_file(&db_path, &secrets)
                 .await
@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(
             summary.salvaged_rules_count, 1,
             "salvage must restore the filter rule -- a 0 count here means the restore INSERT \
-             is silently failing against a schema mismatch (the exact 1.B.3 regression)"
+             is silently failing against a schema mismatch between it and the live table"
         );
         assert!(summary.backup_path.exists());
 
@@ -565,8 +565,8 @@ mod tests {
     // connection can never read ANY row out of a header-corrupted file -- that is real SQLite
     // behavior, not a salvage bug. `test_database_header_corruption_stage_1_detection` above
     // proves the header-corruption case still triggers detection + backup isolation (no
-    // regression on 1.B.4's destructive-path gating); `test_stage_2_backup_creation_and_stage_3_table_salvage`
-    // above proves the schema fix (1.B.3) by exercising salvage's actual read-then-restore SQL
+    // regression in destructive-path gating); `test_stage_2_backup_creation_and_stage_3_table_salvage`
+    // above proves the restore INSERT stays schema-correct by exercising salvage's actual read-then-restore SQL
     // against a normally-openable source, which is the only way to test the restore SQL, since
     // header corruption forecloses any row-level read.
 }

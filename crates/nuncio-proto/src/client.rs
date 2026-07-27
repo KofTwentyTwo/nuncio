@@ -5,9 +5,9 @@
 //! `nunciod` daemon over gRPC should go through [`connect_system`] rather
 //! than hand-rolling channel setup and bearer-token metadata injection. This
 //! keeps those crates free of any dependency on the `nunciod` binary crate
-//! itself (backlog story 1.A.3 / GH-150) while still sharing a single
-//! implementation of the client-side authentication handshake with the
-//! server-side interceptor in `nunciod::grpc`.
+//! itself while still sharing a single implementation of the client-side
+//! authentication handshake with the server-side interceptor in
+//! `nunciod::grpc`.
 
 use crate::v1::accounts_client::AccountsClient;
 use crate::v1::audit_client::AuditClient;
@@ -149,11 +149,11 @@ pub async fn connect_system(
 
 /// Dials the `nuncio.v1.Accounts` gRPC endpoint at `addr` and returns a
 /// client that injects `authorization: Bearer <token>` metadata on every
-/// call (backlog stories 1.C.1 / 1.C.2, GH #156 / GH #157).
+/// call.
 ///
 /// `Accounts` is guarded by the exact same `BearerAuthInterceptor` as
-/// `System` on the server side (see `nunciod::grpc::serve_on_listener`,
-/// GH #165), so this shares [`BearerTokenInterceptor`] and [`dial`] with
+/// `System` on the server side (see `nunciod::grpc::serve_on_listener`), so
+/// this shares [`BearerTokenInterceptor`] and [`dial`] with
 /// [`connect_system`] rather than hand-rolling a second auth handshake.
 pub async fn connect_accounts(
     addr: &str,
@@ -165,14 +165,13 @@ pub async fn connect_accounts(
 }
 
 /// Dials the `nuncio.v1.Mail` gRPC endpoint at `addr` and returns a client
-/// that injects `authorization: Bearer <token>` metadata on every call
-/// (backlog story 1.C.4, GH #159).
+/// that injects `authorization: Bearer <token>` metadata on every call.
 ///
 /// `Mail` is guarded by the exact same `BearerAuthInterceptor` as `System`
-/// and `Accounts` on the server side (see `nunciod::grpc::serve_on_listener`,
-/// GH #165), so this shares [`BearerTokenInterceptor`] and [`dial`] with
-/// [`connect_system`] / [`connect_accounts`] rather than hand-rolling a third
-/// auth handshake.
+/// and `Accounts` on the server side (see
+/// `nunciod::grpc::serve_on_listener`), so this shares
+/// [`BearerTokenInterceptor`] and [`dial`] with [`connect_system`] /
+/// [`connect_accounts`] rather than hand-rolling a third auth handshake.
 pub async fn connect_mail(
     addr: &str,
     token: &str,
@@ -184,11 +183,11 @@ pub async fn connect_mail(
 
 /// Dials the `nuncio.v1.Filters` gRPC endpoint at `addr` and returns a
 /// client that injects `authorization: Bearer <token>` metadata on every
-/// call (backlog story 2.A, GH #171).
+/// call.
 ///
 /// `Filters` is guarded by the exact same `BearerAuthInterceptor` as
 /// `System`/`Accounts`/`Mail` on the server side (see
-/// `nunciod::grpc::serve_on_listener`, GH #165), so this shares
+/// `nunciod::grpc::serve_on_listener`), so this shares
 /// [`BearerTokenInterceptor`] and [`dial`] with [`connect_system`] /
 /// [`connect_accounts`] / [`connect_mail`] rather than hand-rolling a fourth
 /// auth handshake.
@@ -203,13 +202,14 @@ pub async fn connect_filters(
 
 /// Dials the `nuncio.v1.Export` gRPC endpoint at `addr` and returns a
 /// client that injects `authorization: Bearer <token>` metadata on every
-/// call (backlog story 2.B, GH #172).
+/// call.
 ///
 /// `Export` is guarded by the exact same `BearerAuthInterceptor` as every
-/// other service on the server side (see `nunciod::grpc::serve_on_listener`,
-/// GH #165), so this shares [`BearerTokenInterceptor`] and [`dial`] with
-/// [`connect_system`] / [`connect_accounts`] / [`connect_mail`] /
-/// [`connect_filters`] rather than hand-rolling yet another auth handshake.
+/// other service on the server side (see
+/// `nunciod::grpc::serve_on_listener`), so this shares
+/// [`BearerTokenInterceptor`] and [`dial`] with [`connect_system`] /
+/// [`connect_accounts`] / [`connect_mail`] / [`connect_filters`] rather than
+/// hand-rolling yet another auth handshake.
 pub async fn connect_export(
     addr: &str,
     token: &str,
@@ -221,14 +221,14 @@ pub async fn connect_export(
 
 /// Dials the `nuncio.v1.Audit` gRPC endpoint at `addr` and returns a
 /// client that injects `authorization: Bearer <token>` metadata on every
-/// call (backlog story 2.B, GH #172).
+/// call.
 ///
 /// `Audit` is guarded by the exact same `BearerAuthInterceptor` as every
-/// other service on the server side (see `nunciod::grpc::serve_on_listener`,
-/// GH #165), so this shares [`BearerTokenInterceptor`] and [`dial`] with
-/// [`connect_system`] / [`connect_accounts`] / [`connect_mail`] /
-/// [`connect_filters`] / [`connect_export`] rather than hand-rolling yet
-/// another auth handshake.
+/// other service on the server side (see
+/// `nunciod::grpc::serve_on_listener`), so this shares
+/// [`BearerTokenInterceptor`] and [`dial`] with [`connect_system`] /
+/// [`connect_accounts`] / [`connect_mail`] / [`connect_filters`] /
+/// [`connect_export`] rather than hand-rolling yet another auth handshake.
 pub async fn connect_audit(
     addr: &str,
     token: &str,
@@ -246,9 +246,8 @@ pub async fn connect_audit(
 /// combinators) until the daemon closes the stream or the connection drops.
 ///
 /// This is the client-side counterpart of `nunciod::grpc`'s `Subscribe`
-/// implementation (backlog story 1.A.4 / GH-151) and keeps thin
-/// presentation-shell clients free of any dependency on the `nunciod`
-/// binary crate itself.
+/// implementation and keeps thin presentation-shell clients free of any
+/// dependency on the `nunciod` binary crate itself.
 pub async fn subscribe_events(
     client: &mut AuthenticatedSystemClient,
 ) -> Result<Streaming<Event>, Status> {

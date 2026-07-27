@@ -60,11 +60,11 @@ pub struct AccountConfig {
     pub server_host: String,
     /// Server port number (IMAP/JMAP).
     pub server_port: u16,
-    /// SMTP server hostname or IP address, used for outbound mail (backlog
-    /// story #168). Distinct from `server_host` because a mail provider's
-    /// inbound (IMAP/JMAP) and outbound (SMTP) endpoints commonly differ.
+    /// SMTP server hostname or IP address, used for outbound mail. Distinct
+    /// from `server_host` because a mail provider's inbound (IMAP/JMAP) and
+    /// outbound (SMTP) endpoints commonly differ.
     pub smtp_host: String,
-    /// SMTP server port number, used for outbound mail (backlog story #168).
+    /// SMTP server port number, used for outbound mail.
     pub smtp_port: u16,
     /// Whether TLS connection encryption is enabled.
     pub use_tls: bool,

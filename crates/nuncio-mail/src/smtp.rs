@@ -58,9 +58,9 @@ impl SmtpTransportEngine {
         Self::send_email_with_transport(&self.transport, email).await
     }
 
-    /// Send a composed [`OutboundMessage`] using the inner transport client
-    /// (backlog story 1.C.5, GH #160). Returns `Ok(())` only when the
-    /// transport genuinely accepted the message.
+    /// Send a composed [`OutboundMessage`] using the inner transport client.
+    /// Returns `Ok(())` only when the transport genuinely accepted the
+    /// message.
     pub async fn send_message(&self, message: &OutboundMessage) -> Result<(), MailError> {
         let msg = Self::build_outbound_mime_message(message)?;
         self.transport.send(msg).await.map_err(MailError::from)?;
@@ -105,9 +105,9 @@ impl SmtpTransportEngine {
         )
     }
 
-    /// Build an RFC 5322 [`lettre::Message`] from a composed [`OutboundMessage`]
-    /// (backlog story 1.C.5, GH #160), supporting an optional `Cc:` recipient
-    /// in addition to everything [`Self::build_mime_message`] supports.
+    /// Build an RFC 5322 [`lettre::Message`] from a composed [`OutboundMessage`],
+    /// supporting an optional `Cc:` recipient in addition to everything
+    /// [`Self::build_mime_message`] supports.
     pub fn build_outbound_mime_message(message: &OutboundMessage) -> Result<Message, MailError> {
         let from_mailbox = message
             .from
@@ -259,9 +259,9 @@ impl SmtpTransportEngine {
     }
 }
 
-/// Production implementation of [`MessageSender`] for the outbound send RPC
-/// (backlog story 1.C.5, GH #160): delegates to [`SmtpTransportEngine::send_message`],
-/// so a real send genuinely reaches the configured SMTP server -- never fabricated.
+/// Production implementation of [`MessageSender`] for the outbound send RPC:
+/// delegates to [`SmtpTransportEngine::send_message`], so a real send
+/// genuinely reaches the configured SMTP server -- never fabricated.
 #[async_trait]
 impl MessageSender for SmtpTransportEngine {
     async fn send(&self, message: &OutboundMessage) -> Result<(), MailError> {
@@ -522,8 +522,8 @@ mod tests {
     #[tokio::test]
     async fn message_sender_trait_impl_delegates_to_send_message() {
         // Proves `SmtpTransportEngine`'s `MessageSender` trait impl is wired
-        // through to the real `send_message` path (backlog story 1.C.5),
-        // not a separate/fabricated stub -- exercised via the trait object
+        // through to the real `send_message` path, not a separate/fabricated
+        // stub -- exercised via the trait object
         // exactly like production code (`nunciod::send`) uses it.
         let engine =
             SmtpTransportEngine::new("127.0.0.1", 1, "user", "pass").expect("valid config");

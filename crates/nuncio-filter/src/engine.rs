@@ -247,7 +247,7 @@ impl FilterEngine {
         results
     }
 
-    /// Evaluate with Tokio 50ms hard timeout for ReDoS safety (#277).
+    /// Evaluate with a Tokio hard timeout for ReDoS safety.
     pub async fn evaluate_with_timeout(
         &self,
         email: &Email,
@@ -270,7 +270,7 @@ impl FilterEngine {
         .unwrap_or_default()
     }
 
-    /// Dry-run preview evaluation returning detailed microsecond traces (#274).
+    /// Dry-run preview evaluation returning detailed microsecond traces.
     pub fn preview(&self, email: &Email) -> FilterPreviewResult {
         let start = Instant::now();
         let guard = self.cache.load();
@@ -309,7 +309,7 @@ impl FilterEngine {
         }
     }
 
-    /// Generate HMAC-SHA256 signature for outbound webhooks (#280).
+    /// Generate HMAC-SHA256 signature for outbound webhooks.
     pub fn sign_webhook_payload(secret: &str, timestamp: i64, payload: &str) -> String {
         type HmacSha256 = Hmac<Sha256>;
         // HMAC accepts keys of any length (RFC 2104), so this never fails in practice.

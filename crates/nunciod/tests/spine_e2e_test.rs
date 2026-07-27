@@ -1,12 +1,11 @@
-//! Capstone offline end-to-end test for the mail spine (backlog story
-//! 1.C.6, GH #161).
+//! Capstone offline end-to-end test for the mail spine.
 //!
 //! Boots a real `nunciod` daemon gRPC server (`nunciod::grpc::
 //! serve_on_listener_with_overrides`) on an ephemeral loopback port, backed
 //! by a real temp file-backed [`DatabaseEngine`] and a [`SecretManager::mock`]
 //! vault (never the real OS keyring), with an injected
 //! [`nuncio_mail::MockMailBackend`] / [`nuncio_mail::MockMessageSender`]
-//! standing in for real network I/O (backlog story 1.C.6's
+//! standing in for real network I/O (via the
 //! [`nunciod::grpc::MailEngineOverrides`] injection seam).
 //!
 //! Then, driving ONLY the authenticated `nuncio-proto` gRPC clients
@@ -14,8 +13,8 @@
 //! bearer token -- never reaching into daemon internals -- this proves the
 //! complete spine end-to-end:
 //!   a. `AddAccount` persists (`ListAccounts` reflects it).
-//!   b. `Mail/Sync` (backlog story 1.C.6) triggers a real inbound sync
-//!      against the injected mock backend and awaits full completion, so
+//!   b. `Mail/Sync` triggers a real inbound sync against the injected mock
+//!      backend and awaits full completion, so
 //!      the synced messages are immediately visible to
 //!      `ListMessages`/`GetMessage`.
 //!   c. `MarkRead` persists (a second `GetMessage` reflects the flip) and a
@@ -133,11 +132,11 @@ async fn boot_daemon(
     (addr, token, dir)
 }
 
-/// The full offline, deterministic end-to-end proof of the mail spine
-/// (backlog story 1.C.6, GH #161): add an account, sync inbound mail, list
-/// and read it, mark it read (observing the change stream live), and send
-/// an outbound message -- ALL over the authenticated `nuncio.v1` gRPC API
-/// against a live in-process daemon, with protocol I/O fully mocked.
+/// The full offline, deterministic end-to-end proof of the mail spine: add
+/// an account, sync inbound mail, list and read it, mark it read (observing
+/// the change stream live), and send an outbound message -- ALL over the
+/// authenticated `nuncio.v1` gRPC API against a live in-process daemon,
+/// with protocol I/O fully mocked.
 #[tokio::test]
 async fn full_mail_spine_round_trips_over_authenticated_grpc_with_mocked_protocol_io() {
     // ---- Arrange: one shared mock vault, an injected mock backend/sender ----

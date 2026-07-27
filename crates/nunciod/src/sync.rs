@@ -1,4 +1,4 @@
-//! Real inbound mail synchronization routine (backlog story 1.C.3, GH #158).
+//! Real inbound mail synchronization routine.
 //!
 //! Prior to this module, "sync" was a status-flag flip: `CoreCommand::SyncAll`
 //! / `CoreCommand::SyncAccount` only moved `EngineStatus` to `Syncing` and

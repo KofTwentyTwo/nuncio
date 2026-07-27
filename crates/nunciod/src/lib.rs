@@ -11,8 +11,8 @@ pub use orchestrator::SelfHealingSyncOrchestrator;
 /// Default PERSISTENT database path for `nunciod`: `~/.nuncio/nuncio.db`
 /// (or `%USERPROFILE%\.nuncio\nuncio.db` on Windows, since `USERPROFILE` is
 /// checked first). This is deliberately NOT a temp/ephemeral path -- it is
-/// what makes accounts (backlog stories 1.C.1 / 1.C.2, GH #156 / GH #157)
-/// and every other piece of daemon state survive a daemon restart.
+/// what makes accounts and every other piece of daemon state survive a
+/// daemon restart.
 ///
 /// Mirrors `nuncio_store::recovery::CorruptedBackupManager::default_backup_dir`'s
 /// existing `~/.nuncio/...` convention so all of `nunciod`'s on-disk state
@@ -35,12 +35,12 @@ pub fn default_db_path() -> std::path::PathBuf {
 /// Environment variable that opts `nunciod` in to its autonomous
 /// background auto-update-check loop.
 ///
-/// # Security (GH #140 / backlog story 0.B.2)
+/// # Security
 ///
 /// `nuncio_core::UpdateEngine`'s checksum verification is currently
 /// **fail-open**: if the `SHA256SUMS.txt` release asset is missing, an
-/// update install proceeds without checksum verification. That will be
-/// fixed properly in Phase 4. Until then, `nunciod` MUST NOT
+/// update install proceeds without checksum verification. Until that
+/// checksum-verification gap is closed, `nunciod` MUST NOT
 /// autonomously check for or install updates, so the background loop
 /// defaults to disabled and is only spawned when an operator explicitly
 /// opts in via this environment variable.
@@ -74,7 +74,7 @@ mod tests {
         std::env::remove_var(AUTO_UPDATE_ENV_VAR);
         assert!(
             !auto_update_task_enabled(),
-            "autonomous auto-update loop must default to disabled (GH #140)"
+            "autonomous auto-update loop must default to disabled"
         );
     }
 

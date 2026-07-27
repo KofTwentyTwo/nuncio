@@ -7,7 +7,7 @@
 //! the daemon. This suite intentionally has no dependency on the archived
 //! presentation shells that were moved to `_reference/` (nuncio-tui,
 //! nuncio-gui, nuncio-mcp) as part of shrinking the workspace to the
-//! engine + daemon + reference CLI (backlog 0.D.2 / GH-145).
+//! engine + daemon + reference CLI.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -85,12 +85,12 @@ async fn e2e_multi_shell_daemon_concurrency_test() {
     // design) to confirm a genuine presentation-shell client still
     // round-trips full commands correctly end-to-end. `Account::Show`
     // reads this runner's own ephemeral local `db` (out of scope for any
-    // gRPC-backed backlog story), so it is safe to exercise without a live
+    // gRPC-backed command), so it is safe to exercise without a live
     // `nunciod` gRPC daemon. `mail sync`, `mail list/read/mark/search/send`,
-    // and `account add/list` are now real gRPC clients of the daemon
-    // (backlog stories 1.C.1 through 1.C.6, GH #156-#161) and are exercised
-    // against a real `nunciod` gRPC server by `nuncio-cli`'s own test suite
-    // and by `spine_e2e_test.rs`'s full offline spine E2E, rather than here.
+    // and `account add/list` are now real gRPC clients of the daemon and
+    // are exercised against a real `nunciod` gRPC server by `nuncio-cli`'s
+    // own test suite and by `spine_e2e_test.rs`'s full offline spine E2E,
+    // rather than here.
     let cli_runner = HeadlessRunner::ephemeral()
         .await
         .expect("cli headless runner initializes");
@@ -108,14 +108,14 @@ async fn e2e_multi_shell_daemon_concurrency_test() {
     assert!(cli_show.contains("Account 'missing' not found"));
 
     // `system status` no longer reflects this `HeadlessRunner`'s own local
-    // ephemeral state: it is a real gRPC client of the `nunciod` daemon
-    // (backlog story 1.A.3 / GH-150). That round trip is exercised in full,
-    // against a real `nunciod` gRPC server, by
-    // `cli_system_status_round_trips_over_grpc_to_live_daemon` below.
+    // ephemeral state: it is a real gRPC client of the `nunciod` daemon.
+    // That round trip is exercised in full, against a real `nunciod` gRPC
+    // server, by `cli_system_status_round_trips_over_grpc_to_live_daemon`
+    // below.
 }
 
-/// Reference-client proof for backlog story 1.A.3 (GH-150): boots a real
-/// `nunciod` `nuncio.v1.System` gRPC server (via
+/// Reference-client proof that boots a real `nunciod` `nuncio.v1.System`
+/// gRPC server (via
 /// [`nunciod::grpc::serve_on_listener`]) on an ephemeral loopback port,
 /// authenticated by a bearer token minted from a [`SecretManager::mock`]
 /// (never the real OS keyring), then drives the real in-workspace

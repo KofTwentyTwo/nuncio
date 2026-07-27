@@ -14,11 +14,11 @@ use std::sync::Arc;
 async fn system_test_cli_noun_verb_execution_matrix() {
     let runner = HeadlessRunner::ephemeral().await.expect("runner init");
 
-    // 1. System status is a real gRPC client of the `nunciod` daemon
-    // (backlog story 1.A.3 / GH-150), so it is exercised separately below
-    // via `ephemeral_with` + `SecretManager::mock()` rather than through
-    // this `ephemeral()`-constructed runner (which holds the production
-    // `SecretManager` and must never touch the real OS keyring in a test).
+    // 1. System status is a real gRPC client of the `nunciod` daemon, so it
+    // is exercised separately below via `ephemeral_with` + `SecretManager::mock()`
+    // rather than through this `ephemeral()`-constructed runner (which holds
+    // the production `SecretManager` and must never touch the real OS
+    // keyring in a test).
 
     // 1b. Banner output
     let out: String = runner.execute_command(&Commands::Banner, true).await;
@@ -32,17 +32,15 @@ async fn system_test_cli_noun_verb_execution_matrix() {
     assert_eq!(json["status"], "ok");
 
     // 2. Account list & add are real gRPC clients of the `nunciod` daemon's
-    // `Accounts` API (backlog stories 1.C.1 / 1.C.2, GH #156 / GH #157), so
-    // -- exactly like `system status` above -- they are exercised
-    // separately below via `ephemeral_with` + `SecretManager::mock()`
+    // `Accounts` API, so -- exactly like `system status` above -- they are
+    // exercised separately below via `ephemeral_with` + `SecretManager::mock()`
     // rather than through this `ephemeral()`-constructed runner.
 
     // 3. Folder list & 4. Mail list/search/read/mark are real gRPC clients
-    // of the `nunciod` daemon's `Mail` API (backlog story 1.C.4, GH #159),
-    // so -- exactly like `system status` and `account add`/`list` above --
-    // they are exercised separately below via `ephemeral_with` +
-    // `SecretManager::mock()` rather than through this
-    // `ephemeral()`-constructed runner.
+    // of the `nunciod` daemon's `Mail` API, so -- exactly like `system
+    // status` and `account add`/`list` above -- they are exercised
+    // separately below via `ephemeral_with` + `SecretManager::mock()`
+    // rather than through this `ephemeral()`-constructed runner.
 
     // 5. Calendar list & sync
     let out: String = runner
@@ -57,10 +55,9 @@ async fn system_test_cli_noun_verb_execution_matrix() {
     assert_eq!(json["status"], "ok");
 }
 
-/// `system status` is a real gRPC client of the `nunciod` daemon (backlog
-/// story 1.A.3 / GH-150). With no daemon reachable at an address nothing is
-/// listening on, it must report a clear, honest error rather than
-/// fabricating a status.
+/// `system status` is a real gRPC client of the `nunciod` daemon. With no
+/// daemon reachable at an address nothing is listening on, it must report
+/// a clear, honest error rather than fabricating a status.
 #[tokio::test]
 async fn system_status_reports_honest_error_when_daemon_unreachable() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -90,10 +87,9 @@ async fn system_status_reports_honest_error_when_daemon_unreachable() {
 }
 
 /// `account add` / `account list` are real gRPC clients of the `nunciod`
-/// daemon's `Accounts` API (backlog stories 1.C.1 / 1.C.2, GH #156 /
-/// GH #157). With no daemon reachable, both must report a clear, honest
-/// error rather than fabricating success or silently falling back to any
-/// local state.
+/// daemon's `Accounts` API. With no daemon reachable, both must report a
+/// clear, honest error rather than fabricating success or silently
+/// falling back to any local state.
 #[tokio::test]
 async fn account_add_and_list_report_honest_errors_when_daemon_unreachable() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -149,9 +145,9 @@ async fn account_add_and_list_report_honest_errors_when_daemon_unreachable() {
 }
 
 /// `folder list`, `mail list`, `mail read`, `mail search`, and `mail mark`
-/// are real gRPC clients of the `nunciod` daemon's `Mail` API (backlog
-/// story 1.C.4, GH #159). With no daemon reachable, all of them must report
-/// a clear, honest error rather than fabricating an empty result.
+/// are real gRPC clients of the `nunciod` daemon's `Mail` API. With no
+/// daemon reachable, all of them must report a clear, honest error rather
+/// than fabricating an empty result.
 #[tokio::test]
 async fn mail_and_folder_report_honest_errors_when_daemon_unreachable() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
