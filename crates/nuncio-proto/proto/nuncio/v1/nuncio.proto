@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package nuncio.v1;
+
+// System service exposes daemon-level introspection RPCs.
+//
+// This is the foundation of the versioned gRPC API (see
+// docs/adr/0001-engine-first-grpc-architecture.md). Additional services and
+// RPCs will be added under the `nuncio.v1` package as later stories land;
+// breaking changes will be introduced under a new `nuncio.v2` package rather
+// than mutating this one.
+service System {
+  // GetStatus reports basic daemon/engine health information.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+
+// GetStatusRequest currently carries no parameters. Fields may be added
+// here in future stories (e.g. requested detail level).
+message GetStatusRequest {}
+
+// GetStatusResponse reports the current health and build identity of the
+// running nunciod engine.
+message GetStatusResponse {
+  // Human-readable engine status (e.g. "ok", "degraded").
+  string engine_status = 1;
+  // The nunciod build/crate version serving this response.
+  string version = 2;
+}

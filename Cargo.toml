@@ -9,6 +9,7 @@ members = [
     "crates/nunciod",
     "crates/nuncio-filter",
     "crates/nuncio-contacts",
+    "crates/nuncio-proto",
 ]
 
 [workspace.package]
@@ -77,6 +78,11 @@ hex = "0.4"
 flate2 = "1.0"
 tar = "0.4"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3.2"
 
 
 
