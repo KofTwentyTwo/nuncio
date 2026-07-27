@@ -95,6 +95,8 @@ A shared RustRover setup lives in `.idea/` (the useful parts are tracked;
   - *Cargo Coverage* — informational `llvm-cov` (needs `cargo-llvm-cov` installed).
 - Tip: set Clippy as the external linter (Settings → Rust → External Linters) so the
   editor mirrors the `-D warnings` gate.
+- **Full walkthrough:** [`docs/DEVELOPING-IN-RUSTROVER.md`](docs/DEVELOPING-IN-RUSTROVER.md)
+  — setup, running the daemon + CLI, running/debugging tests, gates, and the dev loop.
 
 ## Conventions
 
