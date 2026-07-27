@@ -814,6 +814,31 @@ impl DatabaseEngine {
         })
     }
 
+    /// Update a single message's read/unread flag in place (backlog story
+    /// 1.C.4, GH #159).
+    ///
+    /// Returns `DatabaseError::Query(sqlx::Error::RowNotFound)` if no message
+    /// with `message_id` exists, so callers can distinguish "flag flipped"
+    /// from "message never existed" rather than silently succeeding on a
+    /// no-op update.
+    pub async fn set_message_read(
+        &self,
+        message_id: &str,
+        read: bool,
+    ) -> Result<(), DatabaseError> {
+        let result = sqlx::query("UPDATE messages SET read_flag = ? WHERE id = ?")
+            .bind(if read { 1i64 } else { 0i64 })
+            .bind(message_id)
+            .execute(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        if result.rows_affected() == 0 {
+            return Err(DatabaseError::Query(sqlx::Error::RowNotFound));
+        }
+        Ok(())
+    }
+
     /// Query available folders with message counts.
     pub async fn list_folders(&self) -> Result<Vec<nuncio_core::model::Folder>, DatabaseError> {
         let rows: Vec<(String, i64, i64)> = sqlx::query_as(
@@ -1546,6 +1571,59 @@ mod tests {
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].id, "INBOX");
         assert_eq!(folders[0].unread_messages, 1);
+    }
+
+    /// Backlog story 1.C.4 (GH #159): `set_message_read` flips the persisted
+    /// `read_flag` in place (both directions), and reports
+    /// `sqlx::Error::RowNotFound` for a message ID that was never saved,
+    /// rather than silently succeeding on a no-op update.
+    #[tokio::test]
+    async fn set_message_read_flips_flag_and_reports_not_found_for_missing_message() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let email = nuncio_core::model::Email {
+            id: "msg-mark-1".to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "INBOX".to_string(),
+            subject: "Mark Read Test".to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1700000000,
+            read: false,
+            body_plain: None,
+            body_html: None,
+            attachments: Vec::new(),
+        };
+        engine.save_email(&email).await.expect("save email");
+
+        engine
+            .set_message_read("msg-mark-1", true)
+            .await
+            .expect("mark read succeeds");
+        let fetched = engine
+            .get_message("msg-mark-1")
+            .await
+            .expect("get message succeeds");
+        assert!(fetched.read);
+
+        engine
+            .set_message_read("msg-mark-1", false)
+            .await
+            .expect("mark unread succeeds");
+        let fetched = engine
+            .get_message("msg-mark-1")
+            .await
+            .expect("get message succeeds");
+        assert!(!fetched.read);
+
+        let err = engine
+            .set_message_read("msg-does-not-exist", true)
+            .await
+            .expect_err("marking an unknown message must fail");
+        assert!(matches!(
+            err,
+            DatabaseError::Query(sqlx::Error::RowNotFound)
+        ));
     }
 
     #[tokio::test]

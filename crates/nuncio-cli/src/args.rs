@@ -290,6 +290,18 @@ pub enum MailSubcommand {
         #[arg(short, long, help = "Search query string")]
         query: String,
     },
+    /// Mark a message read or unread.
+    Mark {
+        /// Unique message identifier.
+        #[arg(short, long, help = "Unique message identifier")]
+        id: String,
+        /// Mark the message as read.
+        #[arg(long, help = "Mark the message as read", conflicts_with = "unread")]
+        read: bool,
+        /// Mark the message as unread.
+        #[arg(long, help = "Mark the message as unread", conflicts_with = "read")]
+        unread: bool,
+    },
 }
 
 /// Folder subcommands (`nuncio folder <verb>`).
@@ -447,6 +459,38 @@ mod tests {
                 }
             }
         );
+
+        let cli_mark_read =
+            Cli::parse_from(["nuncio", "mail", "mark", "--id", "msg-123", "--read"]);
+        assert_eq!(
+            cli_mark_read.command,
+            Commands::Mail {
+                action: MailSubcommand::Mark {
+                    id: "msg-123".to_string(),
+                    read: true,
+                    unread: false,
+                }
+            }
+        );
+
+        let cli_mark_unread =
+            Cli::parse_from(["nuncio", "mail", "mark", "--id", "msg-123", "--unread"]);
+        assert_eq!(
+            cli_mark_unread.command,
+            Commands::Mail {
+                action: MailSubcommand::Mark {
+                    id: "msg-123".to_string(),
+                    read: false,
+                    unread: true,
+                }
+            }
+        );
+
+        // `--read` and `--unread` are mutually exclusive at the Clap level.
+        let conflict = Cli::try_parse_from([
+            "nuncio", "mail", "mark", "--id", "msg-123", "--read", "--unread",
+        ]);
+        assert!(conflict.is_err());
     }
 
     #[test]

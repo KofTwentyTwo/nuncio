@@ -214,3 +214,145 @@ message ListAccountsRequest {}
 message ListAccountsResponse {
   repeated AccountConfig accounts = 1;
 }
+
+// Mail exposes the READ path over the daemon's real, persistent message
+// store (the data backlog story 1.C.3 / GH #158 syncs in via
+// `DatabaseEngine::save_email`) -- backlog story 1.C.4, GH #159.
+//
+// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards `System` and `Accounts` -- every gRPC
+// service `nunciod` exposes MUST be authenticated, with no exceptions
+// carved out for "just one more" unauthenticated service. See
+// `nunciod::grpc::serve_on_listener`.
+service Mail {
+  // ListFolders returns every mailbox folder known to the store, with
+  // total/unread message counts.
+  rpc ListFolders(ListFoldersRequest) returns (ListFoldersResponse);
+  // ListMessages returns messages in a single folder, newest first, capped
+  // at `limit`.
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+  // GetMessage returns a single message by ID, including its (decrypted)
+  // body.
+  rpc GetMessage(GetMessageRequest) returns (GetMessageResponse);
+  // MarkRead updates a message's read/unread flag.
+  rpc MarkRead(MarkReadRequest) returns (MarkReadResponse);
+  // SearchMessages runs a full-text (FTS5) search over cached message
+  // subjects, senders, and bodies.
+  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+}
+
+// Mirrors `nuncio_core::model::Attachment`.
+message Attachment {
+  // Attachment filename.
+  string filename = 1;
+  // MIME content type (e.g. "application/pdf").
+  string mime_type = 2;
+  // Raw attachment content buffer.
+  bytes content = 3;
+}
+
+// Mirrors `nuncio_core::model::Email` field-for-field. Named `Message`
+// (rather than `Email`) to avoid colliding with common generated-code
+// identifiers in hand-written Rust using this module.
+message Message {
+  // Unique message identifier.
+  string id = 1;
+  // Account identifier owning the message.
+  string account_id = 2;
+  // Mailbox folder identifier (e.g. "inbox").
+  string folder_id = 3;
+  // Subject line.
+  string subject = 4;
+  // Sender address.
+  string sender = 5;
+  // Recipient address.
+  string recipient = 6;
+  // Unix timestamp of message arrival.
+  int64 received_at = 7;
+  // Read/unread flag status.
+  bool read = 8;
+  // Plaintext message body (already decrypted by the store).
+  optional string body_plain = 9;
+  // HTML message body (already decrypted by the store).
+  optional string body_html = 10;
+  // List of attached files.
+  repeated Attachment attachments = 11;
+}
+
+// Mirrors `nuncio_core::model::Folder`.
+message Folder {
+  // Folder identifier.
+  string id = 1;
+  // Folder display name.
+  string name = 2;
+  // Total message count.
+  uint64 total_messages = 3;
+  // Unread message count.
+  uint64 unread_messages = 4;
+}
+
+// ListFoldersRequest currently carries no parameters.
+message ListFoldersRequest {}
+
+// ListFoldersResponse.
+message ListFoldersResponse {
+  repeated Folder folders = 1;
+}
+
+// ListMessagesRequest. `limit` caps the number of messages returned
+// (newest first); a value of 0 means "use the server's default limit".
+message ListMessagesRequest {
+  // Mailbox folder identifier (e.g. "inbox").
+  string folder_id = 1;
+  // Maximum number of messages to return; 0 means "server default".
+  uint32 limit = 2;
+}
+
+// ListMessagesResponse.
+message ListMessagesResponse {
+  repeated Message messages = 1;
+}
+
+// GetMessageRequest.
+message GetMessageRequest {
+  // Unique message identifier.
+  string message_id = 1;
+}
+
+// GetMessageResponse.
+message GetMessageResponse {
+  Message message = 1;
+}
+
+// MarkReadRequest.
+message MarkReadRequest {
+  // Unique message identifier.
+  string message_id = 1;
+  // Desired read state.
+  bool read = 2;
+}
+
+// MarkReadResponse currently carries no parameters; a successful RPC
+// response (as opposed to a `Status` error) is confirmation enough.
+message MarkReadResponse {}
+
+// SearchMessagesRequest.
+message SearchMessagesRequest {
+  // Full-text search query string.
+  string query = 1;
+}
+
+// Mirrors `nuncio_store::search::SearchHit`.
+message MessageSearchHit {
+  // Matching message ID.
+  string id = 1;
+  // Matching subject/title.
+  string title = 2;
+  // Text snippet matching the search term.
+  string snippet = 3;
+}
+
+// SearchMessagesResponse.
+message SearchMessagesResponse {
+  repeated MessageSearchHit hits = 1;
+}

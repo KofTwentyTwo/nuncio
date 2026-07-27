@@ -7,18 +7,24 @@
 //! (`nuncio_core::ipc::IpcDaemonServer`); migrating callers off the JSON-RPC
 //! transport is out of scope here and lands in a later story.
 
-use nuncio_core::{CoreEvent, EventBus};
+use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::event::Kind;
+use nuncio_proto::v1::mail_server::{Mail, MailServer};
 use nuncio_proto::v1::system_server::{System, SystemServer};
 use nuncio_proto::v1::{
     AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
-    AddAccountRequest, AddAccountResponse, BatchFilterProgress, DatabaseRecovered, Event,
-    EventError, FilterExecuted, GetStatusRequest, GetStatusResponse, ListAccountsRequest,
-    ListAccountsResponse, MessageFlagsChanged, ShuttingDown, SubscribeRequest, SyncCompleted,
-    SyncStarted, TlsMode as TlsModeProto, UpdateAvailable,
+    AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto, BatchFilterProgress,
+    DatabaseRecovered, Event, EventError, FilterExecuted, Folder as FolderProto, GetMessageRequest,
+    GetMessageResponse, GetStatusRequest, GetStatusResponse, ListAccountsRequest,
+    ListAccountsResponse, ListFoldersRequest, ListFoldersResponse, ListMessagesRequest,
+    ListMessagesResponse, MarkReadRequest, MarkReadResponse, Message as MessageProto,
+    MessageFlagsChanged, MessageSearchHit, SearchMessagesRequest, SearchMessagesResponse,
+    ShuttingDown, SubscribeRequest, SyncCompleted, SyncStarted, TlsMode as TlsModeProto,
+    UpdateAvailable,
 };
 use nuncio_store::db::DatabaseEngine;
+use nuncio_store::search::SearchEngine;
 use nuncio_store::vault::SecretManager;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -336,6 +342,188 @@ impl Accounts for AccountsGrpcService {
     }
 }
 
+/// Default cap on messages returned by `ListMessages` when the caller
+/// supplies `limit: 0` ("use the server default").
+const DEFAULT_LIST_MESSAGES_LIMIT: usize = 50;
+
+/// Maps a `nuncio_core::model::Attachment` onto its wire-format
+/// `nuncio.v1.Attachment` representation.
+fn map_attachment_to_proto(attachment: nuncio_core::model::Attachment) -> AttachmentProto {
+    AttachmentProto {
+        filename: attachment.filename,
+        mime_type: attachment.mime_type,
+        content: attachment.content.to_vec(),
+    }
+}
+
+/// Maps a `nuncio_core::model::Email` onto its wire-format `nuncio.v1.Message`
+/// representation. The store (`DatabaseEngine::get_message` /
+/// `list_messages`) already returns `body_plain`/`body_html` decrypted, so
+/// there is no further decryption to do here -- just field-for-field
+/// mapping.
+fn map_email_to_proto(email: nuncio_core::model::Email) -> MessageProto {
+    MessageProto {
+        id: email.id,
+        account_id: email.account_id,
+        folder_id: email.folder_id,
+        subject: email.subject,
+        sender: email.sender,
+        recipient: email.recipient,
+        received_at: email.received_at,
+        read: email.read,
+        body_plain: email.body_plain,
+        body_html: email.body_html,
+        attachments: email
+            .attachments
+            .into_iter()
+            .map(map_attachment_to_proto)
+            .collect(),
+    }
+}
+
+/// Maps a `nuncio_core::model::Folder` onto its wire-format `nuncio.v1.Folder`
+/// representation. `usize` counts are narrowed to `u64` for the wire; these
+/// are message counts that cannot realistically approach `u64::MAX`, and
+/// protobuf has no native `usize` type.
+fn map_folder_to_proto(folder: nuncio_core::model::Folder) -> FolderProto {
+    FolderProto {
+        id: folder.id,
+        name: folder.name,
+        total_messages: folder.total_messages as u64,
+        unread_messages: folder.unread_messages as u64,
+    }
+}
+
+/// `nuncio.v1.Mail` gRPC service implementation backed by the daemon's live
+/// [`DatabaseEngine`] read/mark methods and [`SearchEngine`] FTS index
+/// (backlog story 1.C.4, GH #159).
+///
+/// This exposes the mail READ path (list folders, list messages, read a
+/// message, mark read/unread, search) over the real, persistent store that
+/// backlog story 1.C.3 (GH #158) syncs into -- as opposed to the CLI's
+/// previous local ephemeral `HeadlessRunner` database, which was thrown away
+/// when the CLI process exited.
+struct MailGrpcService {
+    db: Arc<DatabaseEngine>,
+    event_bus: Arc<EventBus>,
+}
+
+#[tonic::async_trait]
+impl Mail for MailGrpcService {
+    async fn list_folders(
+        &self,
+        _request: Request<ListFoldersRequest>,
+    ) -> Result<Response<ListFoldersResponse>, Status> {
+        let folders = self
+            .db
+            .list_folders()
+            .await
+            .map_err(|e| Status::internal(format!("failed to list folders: {e}")))?
+            .into_iter()
+            .map(map_folder_to_proto)
+            .collect();
+
+        Ok(Response::new(ListFoldersResponse { folders }))
+    }
+
+    async fn list_messages(
+        &self,
+        request: Request<ListMessagesRequest>,
+    ) -> Result<Response<ListMessagesResponse>, Status> {
+        let req = request.into_inner();
+        if req.folder_id.is_empty() {
+            return Err(Status::invalid_argument("folder_id is required"));
+        }
+        let limit = if req.limit == 0 {
+            DEFAULT_LIST_MESSAGES_LIMIT
+        } else {
+            req.limit as usize
+        };
+
+        let messages = self
+            .db
+            .list_messages(&req.folder_id, limit)
+            .await
+            .map_err(|e| Status::internal(format!("failed to list messages: {e}")))?
+            .into_iter()
+            .map(map_email_to_proto)
+            .collect();
+
+        Ok(Response::new(ListMessagesResponse { messages }))
+    }
+
+    async fn get_message(
+        &self,
+        request: Request<GetMessageRequest>,
+    ) -> Result<Response<GetMessageResponse>, Status> {
+        let req = request.into_inner();
+        if req.message_id.is_empty() {
+            return Err(Status::invalid_argument("message_id is required"));
+        }
+
+        let email = self.db.get_message(&req.message_id).await.map_err(|e| {
+            Status::not_found(format!("message '{}' not found: {e}", req.message_id))
+        })?;
+
+        Ok(Response::new(GetMessageResponse {
+            message: Some(map_email_to_proto(email)),
+        }))
+    }
+
+    /// Persists the flag change via `DatabaseEngine::set_message_read` FIRST
+    /// (so a stream subscriber never observes `MessageFlagsChanged` for a
+    /// change that failed to persist), then drives it through
+    /// `EventBus::process_command(CoreCommand::MarkRead { .. })` -- the same
+    /// path the JSON-RPC IPC transport's `MarkRead` command uses -- so the
+    /// in-memory unread-count state updates AND the existing
+    /// `CoreEvent::MessageFlagsChanged` event is published, which is what
+    /// makes this flow through `System/Subscribe` for free.
+    async fn mark_read(
+        &self,
+        request: Request<MarkReadRequest>,
+    ) -> Result<Response<MarkReadResponse>, Status> {
+        let req = request.into_inner();
+        if req.message_id.is_empty() {
+            return Err(Status::invalid_argument("message_id is required"));
+        }
+
+        self.db
+            .set_message_read(&req.message_id, req.read)
+            .await
+            .map_err(|e| {
+                Status::not_found(format!("message '{}' not found: {e}", req.message_id))
+            })?;
+
+        self.event_bus.process_command(CoreCommand::MarkRead {
+            message_id: req.message_id,
+            read: req.read,
+        });
+
+        Ok(Response::new(MarkReadResponse {}))
+    }
+
+    async fn search_messages(
+        &self,
+        request: Request<SearchMessagesRequest>,
+    ) -> Result<Response<SearchMessagesResponse>, Status> {
+        let req = request.into_inner();
+        let search = SearchEngine::new(&self.db);
+        let hits = search
+            .search_messages(&req.query)
+            .await
+            .map_err(|e| Status::internal(format!("search failed: {e}")))?
+            .into_iter()
+            .map(|hit| MessageSearchHit {
+                id: hit.id,
+                title: hit.title,
+                snippet: hit.snippet,
+            })
+            .collect();
+
+        Ok(Response::new(SearchMessagesResponse { hits }))
+    }
+}
+
 /// Bearer-token authentication interceptor for the loopback `nuncio.v1` gRPC
 /// server.
 ///
@@ -382,9 +570,9 @@ impl tonic::service::Interceptor for BearerAuthInterceptor {
     }
 }
 
-/// Binds a loopback TCP listener at `addr` and serves the `nuncio.v1.System`
-/// and `nuncio.v1.Accounts` gRPC services on it, both authenticated by
-/// `token`, until the transport server errors.
+/// Binds a loopback TCP listener at `addr` and serves the `nuncio.v1.System`,
+/// `nuncio.v1.Accounts`, and `nuncio.v1.Mail` gRPC services on it, all
+/// authenticated by `token`, until the transport server errors.
 ///
 /// `addr` MUST be a loopback address (e.g. `127.0.0.1:PORT`); callers are
 /// responsible for passing loopback-only addresses (see
@@ -405,8 +593,8 @@ pub async fn serve(
     serve_on_listener(listener, event_bus, db, secrets, token).await
 }
 
-/// Serves the `nuncio.v1.System` and `nuncio.v1.Accounts` gRPC services on
-/// an already-bound [`TcpListener`].
+/// Serves the `nuncio.v1.System`, `nuncio.v1.Accounts`, and `nuncio.v1.Mail`
+/// gRPC services on an already-bound [`TcpListener`].
 ///
 /// # Security (GH #165)
 ///
@@ -432,17 +620,31 @@ pub async fn serve_on_listener(
 ) -> Result<(), GrpcServeError> {
     let token: Arc<str> = token.into();
 
-    let system_service = SystemGrpcService { event_bus };
+    let system_service = SystemGrpcService {
+        event_bus: event_bus.clone(),
+    };
     let system_interceptor = BearerAuthInterceptor::new(token.clone());
     let system_svc = SystemServer::with_interceptor(system_service, system_interceptor);
 
-    let accounts_service = AccountsGrpcService { db, secrets };
-    let accounts_interceptor = BearerAuthInterceptor::new(token);
+    let accounts_service = AccountsGrpcService {
+        db: db.clone(),
+        secrets,
+    };
+    let accounts_interceptor = BearerAuthInterceptor::new(token.clone());
     let accounts_svc = AccountsServer::with_interceptor(accounts_service, accounts_interceptor);
+
+    // Mail (backlog story 1.C.4, GH #159): mounted behind its own
+    // `BearerAuthInterceptor`, exactly like `System` and `Accounts` above --
+    // see the hard invariant documented on this function's doc comment
+    // (GH #165).
+    let mail_service = MailGrpcService { db, event_bus };
+    let mail_interceptor = BearerAuthInterceptor::new(token);
+    let mail_svc = MailServer::with_interceptor(mail_service, mail_interceptor);
 
     Server::builder()
         .add_service(system_svc)
         .add_service(accounts_svc)
+        .add_service(mail_svc)
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await
         .map_err(GrpcServeError::Transport)
@@ -1056,6 +1258,271 @@ mod tests {
         assert!(
             !response_debug.contains(PASSWORD),
             "password leaked into the ListAccounts response: {response_debug}"
+        );
+    }
+
+    // ---- Mail (backlog story 1.C.4, GH #159) ----
+
+    use nuncio_proto::v1::mail_client::MailClient;
+    use nuncio_proto::v1::{
+        GetMessageRequest, ListFoldersRequest, ListMessagesRequest, MarkReadRequest,
+        SearchMessagesRequest,
+    };
+
+    fn sample_email(
+        id: &str,
+        folder_id: &str,
+        subject: &str,
+        body: &str,
+    ) -> nuncio_core::model::Email {
+        nuncio_core::model::Email {
+            id: id.to_string(),
+            account_id: "acct-mail-1".to_string(),
+            folder_id: folder_id.to_string(),
+            subject: subject.to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1_700_000_000,
+            read: false,
+            body_plain: Some(body.to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mail_rpcs_reject_missing_bearer_token() {
+        // Confirms `Mail` is mounted behind its own `BearerAuthInterceptor`
+        // exactly like `System` and `Accounts` (GH #165: no un-intercepted
+        // service).
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .list_folders(ListFoldersRequest {})
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .list_messages(ListMessagesRequest {
+                folder_id: "inbox".to_string(),
+                limit: 10,
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .get_message(GetMessageRequest {
+                message_id: "msg-1".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .mark_read(MarkReadRequest {
+                message_id: "msg-1".to_string(),
+                read: true,
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .search_messages(SearchMessagesRequest {
+                query: "hello".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn get_message_reports_not_found_for_unknown_message_id() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .get_message(authed_bearer_request(GetMessageRequest {
+                message_id: "does-not-exist".to_string(),
+            }))
+            .await
+            .expect_err("unknown message id must be rejected");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn mark_read_reports_not_found_for_unknown_message_id() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .mark_read(authed_bearer_request(MarkReadRequest {
+                message_id: "does-not-exist".to_string(),
+                read: true,
+            }))
+            .await
+            .expect_err("unknown message id must be rejected");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn list_messages_rejects_empty_folder_id() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .list_messages(authed_bearer_request(ListMessagesRequest {
+                folder_id: String::new(),
+                limit: 10,
+            }))
+            .await
+            .expect_err("empty folder_id must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    /// End-to-end proof for backlog story 1.C.4 (GH #159): seeds the
+    /// daemon's real, persistent store directly via `DatabaseEngine::
+    /// save_email` (standing in for backlog story 1.C.3's real sync path,
+    /// which uses the exact same write path), then proves every `Mail` RPC
+    /// round-trips real data: `ListFolders` reports the seeded folder,
+    /// `ListMessages` returns the seeded messages, `GetMessage` returns the
+    /// full (decrypted) body, `SearchMessages` finds a body term via FTS5,
+    /// and `MarkRead` persists across a second `GetMessage` call AND
+    /// publishes `MessageFlagsChanged` on the live event bus (proving it
+    /// would stream via `System/Subscribe`).
+    #[tokio::test]
+    async fn mail_rpcs_round_trip_real_seeded_data_and_mark_read_persists_and_streams() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        db.save_email(&sample_email(
+            "msg-mail-1",
+            "inbox",
+            "Quarterly Roadmap",
+            "Let's discuss the annual revenue forecast",
+        ))
+        .await
+        .expect("seed message 1");
+        db.save_email(&sample_email(
+            "msg-mail-2",
+            "inbox",
+            "Lunch Plans",
+            "Sandwiches at noon",
+        ))
+        .await
+        .expect("seed message 2");
+
+        let event_bus = Arc::new(EventBus::new());
+        let mut events = event_bus.subscribe_events();
+        let secrets = Arc::new(SecretManager::mock());
+        let (addr, _handle) =
+            spawn_test_server_with(event_bus, Arc::new(db), secrets, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        // ListFolders reports the seeded folder with the right counts.
+        let folders = client
+            .list_folders(authed_bearer_request(ListFoldersRequest {}))
+            .await
+            .expect("list_folders succeeds")
+            .into_inner()
+            .folders;
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].id, "inbox");
+        assert_eq!(folders[0].total_messages, 2);
+        assert_eq!(folders[0].unread_messages, 2);
+
+        // ListMessages returns both seeded messages, newest-first.
+        let messages = client
+            .list_messages(authed_bearer_request(ListMessagesRequest {
+                folder_id: "inbox".to_string(),
+                limit: 10,
+            }))
+            .await
+            .expect("list_messages succeeds")
+            .into_inner()
+            .messages;
+        assert_eq!(messages.len(), 2);
+        let ids: Vec<&str> = messages.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"msg-mail-1"));
+        assert!(ids.contains(&"msg-mail-2"));
+
+        // GetMessage returns the full, decrypted body.
+        let fetched = client
+            .get_message(authed_bearer_request(GetMessageRequest {
+                message_id: "msg-mail-1".to_string(),
+            }))
+            .await
+            .expect("get_message succeeds")
+            .into_inner()
+            .message
+            .expect("message present in response");
+        assert_eq!(fetched.subject, "Quarterly Roadmap");
+        assert_eq!(
+            fetched.body_plain.as_deref(),
+            Some("Let's discuss the annual revenue forecast")
+        );
+        assert!(!fetched.read);
+
+        // SearchMessages finds a body term via the real FTS5 index.
+        let hits = client
+            .search_messages(authed_bearer_request(SearchMessagesRequest {
+                query: "revenue".to_string(),
+            }))
+            .await
+            .expect("search_messages succeeds")
+            .into_inner()
+            .hits;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "msg-mail-1");
+
+        // MarkRead persists: a second GetMessage call reflects the flip.
+        client
+            .mark_read(authed_bearer_request(MarkReadRequest {
+                message_id: "msg-mail-1".to_string(),
+                read: true,
+            }))
+            .await
+            .expect("mark_read succeeds");
+
+        let refetched = client
+            .get_message(authed_bearer_request(GetMessageRequest {
+                message_id: "msg-mail-1".to_string(),
+            }))
+            .await
+            .expect("get_message succeeds after mark_read")
+            .into_inner()
+            .message
+            .expect("message present in response");
+        assert!(refetched.read);
+
+        // MarkRead publishes `MessageFlagsChanged` on the live event bus, so
+        // it would stream via `System/Subscribe` for a connected client.
+        let event = events.recv().await.expect("event bus yields an event");
+        assert_eq!(
+            event,
+            CoreEvent::MessageFlagsChanged {
+                message_id: "msg-mail-1".to_string(),
+                read: true,
+            }
         );
     }
 }

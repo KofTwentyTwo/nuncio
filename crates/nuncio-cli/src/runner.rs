@@ -39,6 +39,24 @@ fn map_tls_mode_to_proto(mode: nuncio_core::TlsMode) -> nuncio_proto::v1::TlsMod
     }
 }
 
+/// Renders a `nuncio.v1.Message` (as returned by the daemon's `Mail` gRPC
+/// service) into the JSON shape used by `mail list`/`mail read`'s
+/// `--json` output.
+fn message_proto_to_json(message: &nuncio_proto::v1::Message) -> serde_json::Value {
+    json!({
+        "id": message.id,
+        "account_id": message.account_id,
+        "folder_id": message.folder_id,
+        "subject": message.subject,
+        "sender": message.sender,
+        "recipient": message.recipient,
+        "received_at": message.received_at,
+        "read": message.read,
+        "body_plain": message.body_plain,
+        "body_html": message.body_html,
+    })
+}
+
 /// Errors emitted by the CLI headless runner.
 #[derive(Error, Debug)]
 pub enum RunnerError {
@@ -196,6 +214,9 @@ impl HeadlessRunner {
                     self.handle_send_email(to, subject, body, json_mode).await
                 }
                 MailSubcommand::Search { query } => self.handle_search(query, json_mode).await,
+                MailSubcommand::Mark { id, read, unread } => {
+                    self.handle_mark_read(id, *read, *unread, json_mode).await
+                }
             },
             Commands::Banner => {
                 crate::output::print_splash_banner();
@@ -714,21 +735,41 @@ impl HeadlessRunner {
         }
     }
 
+    /// `mail list`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159). Lists
+    /// messages in `folder`, newest first, from the daemon's real,
+    /// persistent store -- NOT this runner's own ephemeral local `db`, which
+    /// is thrown away when this CLI process exits.
     async fn handle_list_folder(&self, folder: &str, json_mode: bool) -> String {
-        let count: i64 = sqlx::query_as("SELECT COUNT(*) FROM messages WHERE folder_id = ?")
-            .bind(folder)
-            .fetch_one(self.db.pool())
-            .await
-            .map(|r: (i64,)| r.0)
-            .unwrap_or(0);
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
 
-        if json_mode {
-            format_json(&json!({
-                "folder": folder,
-                "total_messages": count
-            }))
-        } else {
-            format!("Folder '{}': {} total messages", folder, count)
+        match client
+            .list_messages(nuncio_proto::v1::ListMessagesRequest {
+                folder_id: folder.to_string(),
+                limit: 0,
+            })
+            .await
+        {
+            Ok(response) => {
+                let messages = response.into_inner().messages;
+                if json_mode {
+                    let messages_json: Vec<serde_json::Value> =
+                        messages.iter().map(message_proto_to_json).collect();
+                    format_json(&json!({
+                        "folder": folder,
+                        "messages": messages_json
+                    }))
+                } else {
+                    format!("Folder '{}': {} message(s) found", folder, messages.len())
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected list_messages: {status}"),
+                json_mode,
+            ),
         }
     }
 
@@ -751,49 +792,176 @@ impl HeadlessRunner {
         }
     }
 
+    /// `mail search`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159). Runs a
+    /// full-text (FTS5) search over the daemon's real, persistent store.
     async fn handle_search(&self, query: &str, json_mode: bool) -> String {
-        if json_mode {
-            format_json(&json!({
-                "query": query,
-                "results": []
-            }))
-        } else {
-            format!("Search complete for '{}' (0 matches)", query)
-        }
-    }
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
 
-    async fn handle_folders_list(&self, json_mode: bool) -> String {
-        let folders = self.db.list_folders().await.unwrap_or_default();
-        if json_mode {
-            format_json(&json!({
-                "folders": folders
-            }))
-        } else {
-            format!("Available Mailbox Folders: {} folders found", folders.len())
-        }
-    }
-
-    async fn handle_read_message(&self, id: &str, json_mode: bool) -> String {
-        match self.db.get_message(id).await {
-            Ok(msg) => {
+        match client
+            .search_messages(nuncio_proto::v1::SearchMessagesRequest {
+                query: query.to_string(),
+            })
+            .await
+        {
+            Ok(response) => {
+                let hits = response.into_inner().hits;
                 if json_mode {
+                    let hits_json: Vec<serde_json::Value> = hits
+                        .iter()
+                        .map(|h| {
+                            json!({
+                                "id": h.id,
+                                "title": h.title,
+                                "snippet": h.snippet,
+                            })
+                        })
+                        .collect();
                     format_json(&json!({
-                        "message": msg
+                        "query": query,
+                        "results": hits_json
                     }))
                 } else {
+                    format!("Search complete for '{}' ({} matches)", query, hits.len())
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected search_messages: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `folder list`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159).
+    async fn handle_folders_list(&self, json_mode: bool) -> String {
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .list_folders(nuncio_proto::v1::ListFoldersRequest {})
+            .await
+        {
+            Ok(response) => {
+                let folders = response.into_inner().folders;
+                if json_mode {
+                    let folders_json: Vec<serde_json::Value> = folders
+                        .iter()
+                        .map(|f| {
+                            json!({
+                                "id": f.id,
+                                "name": f.name,
+                                "total_messages": f.total_messages,
+                                "unread_messages": f.unread_messages,
+                            })
+                        })
+                        .collect();
+                    format_json(&json!({ "folders": folders_json }))
+                } else {
+                    format!("Available Mailbox Folders: {} folders found", folders.len())
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected list_folders: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `mail read`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159). Returns
+    /// the full message, including its (decrypted) body, from the daemon's
+    /// real, persistent store.
+    async fn handle_read_message(&self, id: &str, json_mode: bool) -> String {
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .get_message(nuncio_proto::v1::GetMessageRequest {
+                message_id: id.to_string(),
+            })
+            .await
+        {
+            Ok(response) => match response.into_inner().message {
+                Some(msg) => {
+                    if json_mode {
+                        format_json(&json!({ "message": message_proto_to_json(&msg) }))
+                    } else {
+                        format!(
+                            "Message {}: Subject: '{}', From: {}, Date: {}",
+                            msg.id, msg.subject, msg.sender, msg.received_at
+                        )
+                    }
+                }
+                None => Self::render_error(&format!("message '{}' not found", id), json_mode),
+            },
+            Err(status) if status.code() == tonic::Code::NotFound => {
+                Self::render_error(&format!("message '{}' not found", id), json_mode)
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected get_message: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `mail mark`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Mail` API (backlog story 1.C.4, GH #159). Exactly
+    /// one of `read`/`unread` must be set (enforced both by Clap's
+    /// `conflicts_with` and this runtime check, so a caller invoking this
+    /// programmatically without going through Clap still cannot request an
+    /// ambiguous state).
+    async fn handle_mark_read(
+        &self,
+        id: &str,
+        read: bool,
+        unread: bool,
+        json_mode: bool,
+    ) -> String {
+        if read == unread {
+            return Self::render_error(
+                "exactly one of --read or --unread must be specified",
+                json_mode,
+            );
+        }
+
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .mark_read(nuncio_proto::v1::MarkReadRequest {
+                message_id: id.to_string(),
+                read,
+            })
+            .await
+        {
+            Ok(_) => {
+                if json_mode {
+                    format_json(&json!({ "status": "marked", "id": id, "read": read }))
+                } else {
                     format!(
-                        "Message {}: Subject: '{}', From: {}, Date: {}",
-                        msg.id, msg.subject, msg.sender, msg.received_at
+                        "Message '{}' marked as {}",
+                        id,
+                        if read { "read" } else { "unread" }
                     )
                 }
             }
-            Err(_) => {
-                if json_mode {
-                    format_json_error(&format!("message '{}' not found", id))
-                } else {
-                    format!("Error: message '{}' not found", id)
-                }
+            Err(status) if status.code() == tonic::Code::NotFound => {
+                Self::render_error(&format!("message '{}' not found", id), json_mode)
             }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected mark_read: {status}"),
+                json_mode,
+            ),
         }
     }
 
@@ -947,6 +1115,23 @@ impl HeadlessRunner {
         let token = hex::encode(token_bytes);
 
         nuncio_proto::client::connect_accounts(&self.grpc_addr, &token)
+            .await
+            .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
+    }
+
+    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// `nuncio.v1.Mail` service at `self.grpc_addr` (backlog story 1.C.4,
+    /// GH #159), shared by every `mail`/`folder` read-path handler above.
+    async fn connect_mail_client(
+        &self,
+    ) -> Result<nuncio_proto::client::AuthenticatedMailClient, String> {
+        let token_bytes = self
+            .secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
+        let token = hex::encode(token_bytes);
+
+        nuncio_proto::client::connect_mail(&self.grpc_addr, &token)
             .await
             .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
     }
@@ -1138,7 +1323,17 @@ mod tests {
             .await;
         assert!(acct_show.contains("Account 'missing' not found"));
 
-        // Mail Noun Commands
+        // Mail Noun Commands: `Sync` and `Send` do not talk to the daemon
+        // (yet), so they are safe to exercise against this ephemeral local
+        // runner. `List`/`Read`/`Search`/`Mark` (and `Folder::List`) are now
+        // real gRPC clients of the `nunciod` daemon's `Mail` API (backlog
+        // story 1.C.4, GH #159) -- exactly like `Account::Add`/`List` and
+        // `System::Status` above, they must never run against this
+        // `ephemeral()`-constructed runner's production `SecretManager` or
+        // its (unreachable in CI) default gRPC address. They are exercised
+        // separately below via `ephemeral_with` + `SecretManager::mock()`
+        // against a live stub `Mail` gRPC server
+        // (`mail_rpcs_round_trip_over_grpc_to_a_stub_daemon`).
         let mail_sync = runner
             .execute_command(
                 &Commands::Mail {
@@ -1148,30 +1343,6 @@ mod tests {
             )
             .await;
         assert!(mail_sync.contains(r#""status":"sync_started""#));
-
-        let mail_list = runner
-            .execute_command(
-                &Commands::Mail {
-                    action: MailSubcommand::List {
-                        folder: "INBOX".to_string(),
-                    },
-                },
-                false,
-            )
-            .await;
-        assert!(mail_list.contains("INBOX"));
-
-        let mail_read_err = runner
-            .execute_command(
-                &Commands::Mail {
-                    action: MailSubcommand::Read {
-                        id: "missing".to_string(),
-                    },
-                },
-                true,
-            )
-            .await;
-        assert!(mail_read_err.contains(r#""status":"error""#));
 
         let mail_send = runner
             .execute_command(
@@ -1186,29 +1357,6 @@ mod tests {
             )
             .await;
         assert!(mail_send.contains("alice@nuncio.mx"));
-
-        let mail_search = runner
-            .execute_command(
-                &Commands::Mail {
-                    action: MailSubcommand::Search {
-                        query: "roadmap".to_string(),
-                    },
-                },
-                true,
-            )
-            .await;
-        assert!(mail_search.contains(r#""query":"roadmap""#));
-
-        // Folder Noun Commands
-        let folder_list = runner
-            .execute_command(
-                &Commands::Folder {
-                    action: FolderSubcommand::List,
-                },
-                true,
-            )
-            .await;
-        assert!(folder_list.contains(r#""folders":[]"#));
 
         // Cal Noun Commands
         let cal_list = runner
@@ -1519,6 +1667,255 @@ mod tests {
             )
             .await;
         assert!(list_out_text.contains("1 account(s) registered"));
+    }
+
+    /// Reference-client proof for backlog story 1.C.4 (GH #159): boots a
+    /// stub `nuncio.v1.Mail` gRPC server (mirroring the `Accounts` stub
+    /// pattern above) and drives the real `HeadlessRunner`'s `mail
+    /// list`/`mail read`/`mail mark`/`mail search`/`folder list` gRPC client
+    /// paths against it.
+    ///
+    /// Real persistence (`mark_read` actually flipping the flag in the
+    /// daemon's store, `list`/`get` returning REAL synced data,
+    /// `MessageFlagsChanged` streaming) is proven by `nunciod`'s own
+    /// `grpc::tests`; this test exists purely to prove the CLI's connect +
+    /// call + JSON-format happy path, its honest not-found error handling,
+    /// and that `mail mark` rejects an ambiguous `--read`/`--unread`
+    /// combination before ever dialing the daemon.
+    #[tokio::test]
+    async fn mail_rpcs_round_trip_over_grpc_to_a_stub_daemon() {
+        use nuncio_proto::v1::mail_server::{Mail as MailService, MailServer};
+        use nuncio_proto::v1::{
+            Folder as FolderProto, GetMessageRequest, GetMessageResponse, ListFoldersRequest,
+            ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, MarkReadRequest,
+            MarkReadResponse, Message as MessageProto, MessageSearchHit, SearchMessagesRequest,
+            SearchMessagesResponse,
+        };
+        use std::sync::Mutex;
+
+        fn stub_message() -> MessageProto {
+            MessageProto {
+                id: "msg-stub-1".to_string(),
+                account_id: "acct-stub-1".to_string(),
+                folder_id: "inbox".to_string(),
+                subject: "Stub Subject".to_string(),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1_700_000_000,
+                read: false,
+                body_plain: Some("Stub body text".to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+            }
+        }
+
+        /// Minimal test-only stub of `nuncio.v1.Mail`: records the last
+        /// `MarkReadRequest` it received (so this test can assert on
+        /// exactly what the CLI sent over the wire) and otherwise returns
+        /// fixed responses.
+        #[derive(Default)]
+        struct StubMail {
+            last_mark_read: Arc<Mutex<Option<MarkReadRequest>>>,
+        }
+
+        #[tonic::async_trait]
+        impl MailService for StubMail {
+            async fn list_folders(
+                &self,
+                _request: tonic::Request<ListFoldersRequest>,
+            ) -> Result<tonic::Response<ListFoldersResponse>, tonic::Status> {
+                Ok(tonic::Response::new(ListFoldersResponse {
+                    folders: vec![FolderProto {
+                        id: "inbox".to_string(),
+                        name: "inbox".to_string(),
+                        total_messages: 3,
+                        unread_messages: 1,
+                    }],
+                }))
+            }
+
+            async fn list_messages(
+                &self,
+                request: tonic::Request<ListMessagesRequest>,
+            ) -> Result<tonic::Response<ListMessagesResponse>, tonic::Status> {
+                let req = request.into_inner();
+                let mut message = stub_message();
+                message.folder_id = req.folder_id;
+                Ok(tonic::Response::new(ListMessagesResponse {
+                    messages: vec![message],
+                }))
+            }
+
+            async fn get_message(
+                &self,
+                request: tonic::Request<GetMessageRequest>,
+            ) -> Result<tonic::Response<GetMessageResponse>, tonic::Status> {
+                let req = request.into_inner();
+                if req.message_id == "msg-stub-1" {
+                    Ok(tonic::Response::new(GetMessageResponse {
+                        message: Some(stub_message()),
+                    }))
+                } else {
+                    Err(tonic::Status::not_found(format!(
+                        "message '{}' not found",
+                        req.message_id
+                    )))
+                }
+            }
+
+            async fn mark_read(
+                &self,
+                request: tonic::Request<MarkReadRequest>,
+            ) -> Result<tonic::Response<MarkReadResponse>, tonic::Status> {
+                let req = request.into_inner();
+                *self
+                    .last_mark_read
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(req);
+                Ok(tonic::Response::new(MarkReadResponse {}))
+            }
+
+            async fn search_messages(
+                &self,
+                request: tonic::Request<SearchMessagesRequest>,
+            ) -> Result<tonic::Response<SearchMessagesResponse>, tonic::Status> {
+                let req = request.into_inner();
+                Ok(tonic::Response::new(SearchMessagesResponse {
+                    hits: vec![MessageSearchHit {
+                        id: "msg-stub-1".to_string(),
+                        title: "Stub Subject".to_string(),
+                        snippet: format!("...{}...", req.query),
+                    }],
+                }))
+            }
+        }
+
+        let stub = StubMail::default();
+        let probe = stub.last_mark_read.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(MailServer::new(stub))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+                .await
+                .expect("ephemeral runner initializes");
+
+        // `folder list`
+        let folder_list = runner
+            .execute_command(
+                &Commands::Folder {
+                    action: FolderSubcommand::List,
+                },
+                true,
+            )
+            .await;
+        assert!(folder_list.contains(r#""id":"inbox""#));
+        assert!(folder_list.contains(r#""total_messages":3"#));
+
+        // `mail list`
+        let mail_list = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::List {
+                        folder: "inbox".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mail_list.contains("msg-stub-1"));
+        assert!(mail_list.contains(r#""folder_id":"inbox""#));
+
+        // `mail read` happy path
+        let mail_read = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Read {
+                        id: "msg-stub-1".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mail_read.contains("Stub Subject"));
+        assert!(mail_read.contains("Stub body text"));
+
+        // `mail read` honest not-found error
+        let mail_read_missing = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Read {
+                        id: "missing".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mail_read_missing.contains(r#""status":"error""#));
+        assert!(mail_read_missing.contains("not found"));
+
+        // `mail search`
+        let mail_search = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Search {
+                        query: "roadmap".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mail_search.contains(r#""query":"roadmap""#));
+        assert!(mail_search.contains("msg-stub-1"));
+
+        // `mail mark --read`
+        let mail_mark = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Mark {
+                        id: "msg-stub-1".to_string(),
+                        read: true,
+                        unread: false,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mail_mark.contains(r#""status":"marked""#));
+        assert!(mail_mark.contains(r#""read":true"#));
+
+        let recorded = probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received a mark_read request");
+        assert_eq!(recorded.message_id, "msg-stub-1");
+        assert!(recorded.read);
+
+        // `mail mark` with neither --read nor --unread fails BEFORE dialing
+        // the daemon.
+        let mark_no_flag = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Mark {
+                        id: "msg-stub-1".to_string(),
+                        read: false,
+                        unread: false,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mark_no_flag.contains("exactly one of --read or --unread"));
     }
 
     #[test]

@@ -37,44 +37,12 @@ async fn system_test_cli_noun_verb_execution_matrix() {
     // separately below via `ephemeral_with` + `SecretManager::mock()`
     // rather than through this `ephemeral()`-constructed runner.
 
-    // 3. Folder list
-    let out: String = runner
-        .execute_command(
-            &Commands::Folder {
-                action: FolderSubcommand::List,
-            },
-            true,
-        )
-        .await;
-    let json: Value = serde_json::from_str(&out).expect("valid json");
-    assert_eq!(json["status"], "ok");
-
-    // 4. Mail list & search & read
-    let out: String = runner
-        .execute_command(
-            &Commands::Mail {
-                action: MailSubcommand::List {
-                    folder: "INBOX".to_string(),
-                },
-            },
-            true,
-        )
-        .await;
-    let json: Value = serde_json::from_str(&out).expect("valid json");
-    assert_eq!(json["status"], "ok");
-
-    let out: String = runner
-        .execute_command(
-            &Commands::Mail {
-                action: MailSubcommand::Search {
-                    query: "Architecture".to_string(),
-                },
-            },
-            true,
-        )
-        .await;
-    let json: Value = serde_json::from_str(&out).expect("valid json");
-    assert_eq!(json["status"], "ok");
+    // 3. Folder list & 4. Mail list/search/read/mark are real gRPC clients
+    // of the `nunciod` daemon's `Mail` API (backlog story 1.C.4, GH #159),
+    // so -- exactly like `system status` and `account add`/`list` above --
+    // they are exercised separately below via `ephemeral_with` +
+    // `SecretManager::mock()` rather than through this
+    // `ephemeral()`-constructed runner.
 
     // 5. Calendar list & sync
     let out: String = runner
@@ -178,4 +146,95 @@ async fn account_add_and_list_report_honest_errors_when_daemon_unreachable() {
         .contains("unreachable"));
     // The password must never leak into an error message either.
     assert!(!add_out.contains("irrelevant-unreachable-daemon"));
+}
+
+/// `folder list`, `mail list`, `mail read`, `mail search`, and `mail mark`
+/// are real gRPC clients of the `nunciod` daemon's `Mail` API (backlog
+/// story 1.C.4, GH #159). With no daemon reachable, all of them must report
+/// a clear, honest error rather than fabricating an empty result.
+#[tokio::test]
+async fn mail_and_folder_report_honest_errors_when_daemon_unreachable() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral loopback port");
+    let addr = listener.local_addr().expect("listener has local addr");
+    drop(listener); // free the port; nothing is listening on it now
+
+    let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+        .await
+        .expect("runner init");
+
+    let assert_honest_error = |out: String| {
+        let json: Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(json["status"], "error");
+        assert!(json["error"]
+            .as_str()
+            .expect("error message present")
+            .contains("unreachable"));
+    };
+
+    assert_honest_error(
+        runner
+            .execute_command(
+                &Commands::Folder {
+                    action: FolderSubcommand::List,
+                },
+                true,
+            )
+            .await,
+    );
+
+    assert_honest_error(
+        runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::List {
+                        folder: "INBOX".to_string(),
+                    },
+                },
+                true,
+            )
+            .await,
+    );
+
+    assert_honest_error(
+        runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Read {
+                        id: "msg-1".to_string(),
+                    },
+                },
+                true,
+            )
+            .await,
+    );
+
+    assert_honest_error(
+        runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Search {
+                        query: "Architecture".to_string(),
+                    },
+                },
+                true,
+            )
+            .await,
+    );
+
+    assert_honest_error(
+        runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Mark {
+                        id: "msg-1".to_string(),
+                        read: true,
+                        unread: false,
+                    },
+                },
+                true,
+            )
+            .await,
+    );
 }
