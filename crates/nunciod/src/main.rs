@@ -1,12 +1,9 @@
 //! Centralized Standalone Background Daemon Server Binary (`nunciod`).
 //! Owns storage persistence, background sync loops, protocol connections,
-//! filter automation engine, outbox retries, and multi-client IPC socket distribution.
+//! filter automation engine, outbox retries, and the multi-client gRPC API.
 
-use nuncio_core::ipc::server::CustomRpcHandler;
-use nuncio_core::ipc::IpcDaemonServer;
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
-use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, OutboxManager, ValidationOptions};
-use serde_json::json;
+use nuncio_filter::{FilterEngine, OutboxManager};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -172,206 +169,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None
     };
 
-    // Custom RPC Handler for filter.* and update.* methods
-
-    let db_rpc = db.clone();
-    let engine_rpc = filter_engine.clone();
-    let event_bus_rpc = event_bus.clone();
-
-    let handler: CustomRpcHandler = Arc::new(move |method, params| {
-        let db = db_rpc.clone();
-        let engine = engine_rpc.clone();
-        let event_bus = event_bus_rpc.clone();
-        let method_str = method.to_string();
-
-        Box::pin(async move {
-            match method_str.as_str() {
-                "filter.list" => match db.list_filter_rules().await {
-                    Ok(rules) => Some(Ok(json!(rules))),
-                    Err(e) => Some(Err(e.to_string())),
-                },
-                "filter.create" => {
-                    let name = params
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Untitled Rule");
-                    let nsql = params.get("nsql").and_then(|v| v.as_str()).unwrap_or("");
-                    let priority =
-                        params.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-
-                    match NsqlParser::parse_rule(name, priority, nsql) {
-                        Ok(rule) => {
-                            let val_opts = ValidationOptions::default();
-                            if let Err(val_err) = NsqlValidator::validate(&rule, &val_opts) {
-                                return Some(Err(val_err.to_string()));
-                            }
-                            if let Err(e) = db.save_filter_rule(&rule).await {
-                                return Some(Err(e.to_string()));
-                            }
-                            if let Ok(all_rules) = db.list_filter_rules().await {
-                                let _ = engine.reload_rules(all_rules);
-                            }
-                            Some(Ok(json!(rule)))
-                        }
-                        Err(parse_err) => Some(Err(parse_err.to_string())),
-                    }
-                }
-                "filter.edit" => {
-                    let id = match params.get("id").and_then(|v| v.as_str()) {
-                        Some(id) => id,
-                        None => return Some(Err("missing rule id".to_string())),
-                    };
-                    let name = params
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Updated Rule");
-                    let nsql = params.get("nsql").and_then(|v| v.as_str()).unwrap_or("");
-                    let priority =
-                        params.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-
-                    match NsqlParser::parse_rule(name, priority, nsql) {
-                        Ok(mut rule) => {
-                            rule.id = id.to_string();
-                            let val_opts = ValidationOptions::default();
-                            if let Err(val_err) = NsqlValidator::validate(&rule, &val_opts) {
-                                return Some(Err(val_err.to_string()));
-                            }
-                            if let Err(e) = db.save_filter_rule(&rule).await {
-                                return Some(Err(e.to_string()));
-                            }
-                            if let Ok(all_rules) = db.list_filter_rules().await {
-                                let _ = engine.reload_rules(all_rules);
-                            }
-                            Some(Ok(json!(rule)))
-                        }
-                        Err(parse_err) => Some(Err(parse_err.to_string())),
-                    }
-                }
-                "filter.delete" => {
-                    let id = match params.get("id").and_then(|v| v.as_str()) {
-                        Some(id) => id,
-                        None => return Some(Err("missing rule id".to_string())),
-                    };
-                    if let Err(e) = db.delete_filter_rule(id).await {
-                        return Some(Err(e.to_string()));
-                    }
-                    if let Ok(all_rules) = db.list_filter_rules().await {
-                        let _ = engine.reload_rules(all_rules);
-                    }
-                    Some(Ok(json!({ "status": "deleted" })))
-                }
-                "filter.preview" => {
-                    if let Some(email_val) = params.get("email") {
-                        if let Ok(email) =
-                            serde_json::from_value::<nuncio_core::model::Email>(email_val.clone())
-                        {
-                            let preview = engine.preview(&email);
-                            return Some(Ok(json!(preview)));
-                        }
-                    }
-                    Some(Err("invalid email payload for preview".to_string()))
-                }
-                "filter.logs" => {
-                    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-                    match db.list_filter_execution_logs(limit).await {
-                        Ok(logs) => Some(Ok(json!(logs))),
-                        Err(e) => Some(Err(e.to_string())),
-                    }
-                }
-                "filter.triage_keyset" => {
-                    // Keyset Chunking Triage Engine
-                    let batch_size = params
-                        .get("batch_size")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1000) as usize;
-                    let mut last_id = String::new();
-                    let mut processed = 0;
-                    let mut matched_count = 0;
-
-                    loop {
-                        let chunk = match db.get_message_chunk(&last_id, batch_size).await {
-                            Ok(c) => c,
-                            Err(e) => return Some(Err(e.to_string())),
-                        };
-                        let Some(last) = chunk.last() else {
-                            break;
-                        };
-                        last_id = last.id.clone();
-                        for email in &chunk {
-                            processed += 1;
-                            let matches = engine.evaluate(email);
-                            for (rule, actions) in matches {
-                                matched_count += 1;
-                                for action in actions {
-                                    let action_str = action.to_nsql();
-                                    let _ = db
-                                        .save_filter_execution_log(&rule.id, &email.id, &action_str)
-                                        .await;
-                                    let outbox_item = OutboxManager::create_mutation(
-                                        &rule.id,
-                                        &email.id,
-                                        &action_str,
-                                        None,
-                                    );
-                                    let _ = db.save_pending_mutation(&outbox_item).await;
-
-                                    event_bus.publish_event(CoreEvent::FilterExecuted {
-                                        rule_id: rule.id.clone(),
-                                        message_id: email.id.clone(),
-                                        action_taken: action_str,
-                                    });
-                                }
-                            }
-                        }
-                        event_bus.publish_event(CoreEvent::BatchFilterProgress {
-                            processed,
-                            total: processed,
-                            matched: matched_count,
-                        });
-                    }
-
-                    Some(Ok(
-                        json!({ "processed": processed, "matched": matched_count }),
-                    ))
-                }
-                "update.check" => match nuncio_core::UpdateEngine::new() {
-                    Ok(updater) => match updater.check_for_updates().await {
-                        Ok(res) => Some(Ok(json!(res))),
-                        Err(e) => Some(Err(e.to_string())),
-                    },
-                    Err(e) => Some(Err(e.to_string())),
-                },
-                "update.apply" => {
-                    // SECURITY: `UpdateEngine`'s checksum verification is
-                    // currently fail-open (an update installs unverified if
-                    // `SHA256SUMS.txt` is missing from the release). Until
-                    // that checksum-verification gap is closed, nunciod must
-                    // never perform an on-demand install either. Use
-                    // `update.check` for a read-only version check, and
-                    // install updates manually in the meantime.
-                    Some(Err(
-                        "auto-update is temporarily disabled: update verification is not yet \
-                         safe; install updates manually for now"
-                            .to_string(),
-                    ))
-                }
-                _ => None,
-            }
-        })
-    });
-
-    // gRPC `nuncio.v1.System` + `nuncio.v1.Accounts` server.
-    //
-    // Runs ALONGSIDE the existing JSON-RPC IPC server below; the migration
-    // off the hand-rolled JSON-RPC transport happens incrementally. The
-    // bearer token is minted (or loaded, on subsequent runs) from the real
-    // OS keyring vault via the shared `account_secrets` `SecretManager`
-    // (same instance the real-sync command loop above uses), fails closed
-    // if the keyring is unavailable, and is never logged. `Accounts` reuses
-    // this SAME `SecretManager` to write account password credentials to
-    // the OS keyring (never to SQLite) -- see `nunciod::grpc`'s security
-    // comment on why EVERY mounted service shares this one
-    // `BearerAuthInterceptor`.
+    // gRPC `nuncio.v1.System`, `nuncio.v1.Accounts`, `nuncio.v1.Mail`,
+    // `nuncio.v1.Filters`, `nuncio.v1.Export`, and `nuncio.v1.Audit` server.
+    // This is the daemon's ONLY client-facing transport: the bearer token is
+    // minted (or loaded, on subsequent runs) from the real OS keyring vault
+    // via the shared `account_secrets` `SecretManager` (same instance the
+    // real-sync command loop above uses), fails closed if the keyring is
+    // unavailable, and is never logged. `Accounts` reuses this SAME
+    // `SecretManager` to write account password credentials to the OS
+    // keyring (never to SQLite) -- see `nunciod::grpc`'s security comment on
+    // why EVERY mounted service shares this one `BearerAuthInterceptor`.
     let grpc_secrets = account_secrets.clone();
     let grpc_token_bytes = grpc_secrets
         .get_or_create_key_bytes(nuncio_store::vault::GRPC_TOKEN_ACCOUNT, 32)
@@ -383,33 +190,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
          nuncio.v1.Export, nuncio.v1.Audit) starting on {} (loopback only)",
         grpc_addr
     );
-    let grpc_event_bus = event_bus.clone();
-    let grpc_db = db.clone();
-    // The gRPC `Filters` service shares this SAME `filter_engine` instance
-    // with the JSON-RPC `filter.*` handler
-    // above, so a rule created/deleted through EITHER transport reloads the
-    // one live `ArcSwap`-backed rule set both transports evaluate against.
-    let grpc_filter_engine = filter_engine.clone();
-    let _grpc_task = tokio::spawn(async move {
-        if let Err(e) = nunciod::grpc::serve(
-            &grpc_addr,
-            grpc_event_bus,
-            grpc_db,
-            grpc_filter_engine,
-            grpc_secrets,
-            grpc_token,
-        )
-        .await
-        {
-            tracing::error!("nunciod gRPC server failed: {}", e);
-        }
-    });
 
-    let addr = std::env::var("NUNCIO_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:9422".to_string());
-    let server = IpcDaemonServer::with_handler(event_bus.clone(), &addr, handler);
-
-    tracing::info!("nunciod listening on {}", addr);
-    server.run_server().await?;
+    // The gRPC server is the long-running foreground task that keeps this
+    // process alive; every other subsystem above is a background worker
+    // spawned on top of it.
+    nunciod::grpc::serve(
+        &grpc_addr,
+        event_bus,
+        db,
+        filter_engine,
+        grpc_secrets,
+        grpc_token,
+    )
+    .await
+    .map_err(|e| format!("nunciod gRPC server failed: {e}"))?;
 
     Ok(())
 }

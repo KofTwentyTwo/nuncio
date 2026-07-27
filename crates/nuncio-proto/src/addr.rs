@@ -6,8 +6,7 @@
 //! endpoint without depending on the `nunciod` binary crate.
 
 /// Default loopback bind address for the `nuncio.v1` gRPC server, used when
-/// the [`GRPC_ADDR_ENV_VAR`] environment variable is unset. Deliberately
-/// distinct from the legacy JSON-RPC IPC server's default (`127.0.0.1:9422`).
+/// the [`GRPC_ADDR_ENV_VAR`] environment variable is unset.
 pub const DEFAULT_GRPC_ADDR: &str = "127.0.0.1:9420";
 
 /// Environment variable overriding the gRPC bind/connect address.

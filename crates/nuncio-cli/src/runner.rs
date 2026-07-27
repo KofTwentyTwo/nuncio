@@ -677,14 +677,6 @@ impl HeadlessRunner {
                     }
                 },
             },
-            Commands::Daemon { port } => {
-                let addr = format!("127.0.0.1:{}", port);
-                if json_mode {
-                    format_json(&json!({ "status": "daemon_running", "bind_addr": addr }))
-                } else {
-                    format!("Nuncio IPC Daemon listening on {}", addr)
-                }
-            }
         }
     }
 

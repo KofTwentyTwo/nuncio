@@ -132,12 +132,6 @@ pub enum Commands {
         #[command(subcommand)]
         action: ContactSubcommand,
     },
-    /// Launch centralized local background server daemon (`nuncio daemon`).
-    Daemon {
-        /// TCP port to bind IPC daemon server to (default: 9422).
-        #[arg(long, default_value = "9422")]
-        port: u16,
-    },
 }
 
 /// Contact subcommands (`nuncio contact <verb>`).

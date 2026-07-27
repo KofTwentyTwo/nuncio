@@ -7,7 +7,6 @@ pub mod ai;
 pub mod config;
 pub mod e2ee;
 pub mod export;
-pub mod ipc;
 pub mod mcp_policy;
 pub mod model;
 pub mod plugin;

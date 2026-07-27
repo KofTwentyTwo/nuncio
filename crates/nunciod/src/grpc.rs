@@ -3,9 +3,7 @@
 //! token sourced from the OS keyring vault
 //! (`nuncio_store::vault::GRPC_TOKEN_ACCOUNT`).
 //!
-//! This runs ALONGSIDE the existing hand-rolled JSON-RPC IPC server
-//! (`nuncio_core::ipc::IpcDaemonServer`); migrating callers off the JSON-RPC
-//! transport is out of scope here.
+//! This is the daemon's sole client-facing transport.
 
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
