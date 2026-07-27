@@ -52,27 +52,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
-    // Background Auto-Update Check Listener Loop (24h interval)
-    let event_bus_update = event_bus.clone();
-    let _update_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-        interval.tick().await;
-        loop {
+    // Background Auto-Update Check Listener Loop (24h interval).
+    //
+    // SECURITY (GH #140 / backlog story 0.B.2): `UpdateEngine`'s checksum
+    // verification is currently fail-open (installs proceed unverified if
+    // `SHA256SUMS.txt` is missing from the release). That will be fixed
+    // properly in Phase 4. Until then, nunciod must never autonomously
+    // check for or install updates, so this loop only runs when an
+    // operator explicitly opts in via `NUNCIO_AUTO_UPDATE_ENABLED=1`.
+    let _update_task = if nunciod::auto_update_task_enabled() {
+        let event_bus_update = event_bus.clone();
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
             interval.tick().await;
-            if let Ok(updater) = nuncio_core::UpdateEngine::new() {
-                if let Ok(result) = updater.check_for_updates().await {
-                    if result.update_available {
-                        if let Some(info) = result.release_info {
-                            event_bus_update.publish_event(CoreEvent::UpdateAvailable {
-                                version: info.version,
-                                release_notes: info.release_notes,
-                            });
+            loop {
+                interval.tick().await;
+                if let Ok(updater) = nuncio_core::UpdateEngine::new() {
+                    if let Ok(result) = updater.check_for_updates().await {
+                        if result.update_available {
+                            if let Some(info) = result.release_info {
+                                event_bus_update.publish_event(CoreEvent::UpdateAvailable {
+                                    version: info.version,
+                                    release_notes: info.release_notes,
+                                });
+                            }
                         }
                     }
                 }
             }
-        }
-    });
+        }))
+    } else {
+        tracing::info!(
+            "Autonomous auto-update check loop disabled (set {} to enable); \
+             pending Phase 4 checksum fail-open fix, see GH #140",
+            nunciod::AUTO_UPDATE_ENV_VAR
+        );
+        None
+    };
 
     // Custom RPC Handler for filter.* and update.* methods
 
@@ -243,26 +259,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     },
                     Err(e) => Some(Err(e.to_string())),
                 },
-                "update.apply" => match nuncio_core::UpdateEngine::new() {
-                    Ok(updater) => match updater.check_for_updates().await {
-                        Ok(res) => {
-                            if let Some(info) = res.release_info {
-                                match updater.apply_update(&info).await {
-                                    Ok(msg) => {
-                                        Some(Ok(json!({ "status": "updated", "message": msg })))
-                                    }
-                                    Err(e) => Some(Err(e.to_string())),
-                                }
-                            } else {
-                                Some(Ok(
-                                    json!({ "status": "already_up_to_date", "message": "Already up to date" }),
-                                ))
-                            }
-                        }
-                        Err(e) => Some(Err(e.to_string())),
-                    },
-                    Err(e) => Some(Err(e.to_string())),
-                },
+                "update.apply" => {
+                    // SECURITY (GH #140 / backlog story 0.B.2): `UpdateEngine`'s
+                    // checksum verification is currently fail-open (an update
+                    // installs unverified if `SHA256SUMS.txt` is missing from
+                    // the release). Until that is fixed in Phase 4, nunciod
+                    // must never perform an on-demand install either. Use
+                    // `update.check` for a read-only version check, and
+                    // install updates manually in the meantime.
+                    Some(Err(
+                        "auto-update is disabled pending Phase 4 (fail-open checksum fix, \
+                         see GH #140); install updates manually for now"
+                            .to_string(),
+                    ))
+                }
                 _ => None,
             }
         })
