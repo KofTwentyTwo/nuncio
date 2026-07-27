@@ -33,11 +33,10 @@ The daemon is the product; UIs are thin clients over a published contract.
 
 ### Current vs target state
 
-The workspace still contains `nuncio-tui`, `nuncio-gui` (+ `src-tauri`, `ui`), and
-`nuncio-mcp`; these are slated to move out (Phase 0.D) and are reference-only. The
-current transport is a hand-rolled length-prefixed JSON-RPC over **loopback TCP
-`127.0.0.1:9422`** (note: *not* Unix sockets / named pipes, despite older docs);
-it is being replaced by gRPC in Phase 1. Do not build new features on the old IPC.
+The presentation shells (`nuncio-tui`, `nuncio-gui`, `nuncio-mcp`) have been moved
+to `_reference/` (out of the workspace) and will be rebuilt as separate native
+client repos. The daemon serves a single transport — the **gRPC API on loopback
+`127.0.0.1:9420`**; the old hand-rolled JSON-RPC IPC has been removed.
 
 ### Library-first boundary
 
@@ -69,7 +68,7 @@ cargo build --workspace
 cargo test -p nuncio-store                       # one crate
 cargo test -p nuncio-filter parser::             # one module's tests
 cargo test -p nunciod --test daemon_e2e_test     # one integration suite
-cargo run -p nunciod                             # start the daemon (gRPC :9420, JSON-RPC :9422)
+cargo run -p nunciod                             # start the daemon (gRPC on 127.0.0.1:9420)
 cargo run -p nuncio-cli -- system status         # drive it via the CLI (daemon must be running)
 ```
 

@@ -58,13 +58,12 @@ parity structural.
   and sent as gRPC metadata.
 - **Unary RPCs** for commands and queries; **server-streaming RPCs** for push
   (new mail, sync progress, events). gRPC's multiplexing removes the
-  response/notification demux race present in the current hand-rolled IPC.
+  response/notification demux race that the old hand-rolled IPC suffered from.
 - The `.proto` files are the versioned contract every client codegens against.
 
-> **Current transport (to be replaced):** a hand-rolled length-prefixed
-> (4-byte big-endian, 16 MB cap) JSON-RPC 2.0 protocol over **loopback TCP
-> `127.0.0.1:9422`** (`NUNCIO_IPC_ADDR` override). It has a confirmed
-> response/notification interleaving bug. Do not extend it; build on gRPC.
+> **Removed:** the daemon previously also ran a hand-rolled length-prefixed
+> JSON-RPC 2.0 transport on `127.0.0.1:9422`, which had a response/notification
+> interleaving bug. It has been deleted — the daemon serves gRPC only.
 
 ### Clients
 

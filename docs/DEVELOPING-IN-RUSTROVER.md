@@ -55,8 +55,8 @@ Pick a configuration from the **run-config dropdown** (top-right, next to ▶/�
 
 ### Start the daemon
 Select **Run nunciod (daemon)** → ▶ (Shift+F10). It builds, then runs in the
-foreground in a Run tool-window tab; you'll see it bind gRPC `:9420` (+ the legacy
-IPC `:9422`). **Leave it running.** Stop with the red ■.
+foreground in a Run tool-window tab; you'll see it bind the gRPC API on
+`127.0.0.1:9420`. **Leave it running.** Stop with the red ■.
 
 On first run it creates `%USERPROFILE%\.nuncio\nuncio.db` and provisions its keys +
 the CLI's bearer token in the Windows Credential Manager. Override the DB path with
