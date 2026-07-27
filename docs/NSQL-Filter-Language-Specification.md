@@ -1,5 +1,13 @@
 # NSQL Filter Language & Webhook Specification
 
+> **Status (2026-07-26):** describes the *intended* language. The parser,
+> validator, and match engine are genuinely implemented and wired; however
+> **actions do not yet execute**, `ON ACCOUNT` scoping is ignored, header
+> conditions and non-ASCII rules have known bugs, and webhooks are unwired. Treat
+> this as the design target, not current behavior. Corrections are tracked in
+> [`ROADMAP.md`](ROADMAP.md) (Phase 3) and [`BACKLOG.md`](BACKLOG.md); reality is
+> the 2026-07-26 assessment.
+
 Nuncio SQL Filter Language (NSQL) is a declarative, high-throughput email routing and automation language powered by `sqlparser-rs`.
 
 ---

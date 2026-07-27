@@ -1,170 +1,93 @@
-# Nuncio Architecture Specification
+# Nuncio Architecture
 
-Nuncio ([nuncio.mx](https://nuncio.mx)) is a high-performance cross-platform mail and calendar client for macOS, Windows, and Linux. This document defines the system architecture, crate layout, data models, network protocol engines, storage strategy, presentation shell integrations, quality gates, and domain encapsulation boundaries.
+> **Status (2026-07-26):** this describes the **target** architecture the project
+> is being rebuilt toward, and flags where the current tree differs. It replaces
+> the previous `Architecture-Specification.md` (removed — it contained fabricated
+> benchmarks and claims). Authoritative plan: [`ROADMAP.md`](ROADMAP.md); decision:
+> [`adr/0001-engine-first-grpc-architecture.md`](adr/0001-engine-first-grpc-architecture.md).
 
----
+## Principle: the daemon is the product
 
-## 1. Architectural Philosophy: Library-First ("Ghost" Model)
+`nunciod` owns everything that matters — persistent state, credentials, protocol
+synchronization, filtering, and all business logic. Every user interface is a thin
+client that talks to the daemon over a published API and holds no logic or data of
+its own. This is the language-server / database-server model.
 
-Nuncio decouples application state management, network protocol engines, cryptography, and storage persistence from presentation interfaces.
+The prior POC inverted this: four UI shells each carried their own (fake or
+throwaway) state and business logic, so nothing worked end-to-end and the shells
+drifted apart. Centralizing on the daemon makes correctness and cross-client
+parity structural.
 
-```
-┌───────────────────────────────────────────────────────────────────────────────────┐
-│                                Presentation Shells                                │
-│                                                                                   │
-│ ┌──────────────┐ ┌──────────────┐ ┌───────────────────┐ ┌───────────────────────┐ │
-│ │  nuncio-cli  │ │  nuncio-tui  │ │nuncio-gui(Tauri v2│ │nuncio-mcp (Native MCP │ │
-│ │ (POSIX CLI)  │ │  (Ratatui)   │ │  Desktop GUI)     │ │ LLM Agent Interface)  │ │
-│ └──────┬───────┘ └──────┬───────┘ └─────────┬─────────┘ └───────────┬───────────┘ │
-└────────┼────────────────┼───────────────────┼───────────────────────┼─────────────┘
-         │                │                   │                       │
-         ▼                ▼                   ▼                       ▼
-┌───────────────────────────────────────────────────────────────────────────────────┐
-│                                    nuncio-core                                    │
-│                           Async Event Bus & Orchestrator                          │
-└──────────────┬────────────────────────────┬───────────────────────┬───────────────┘
-               │                            │                       │
-               ▼                            ▼                       ▼
-┌──────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────────┐
-│       nuncio-mail        │  │        nuncio-cal        │  │       nuncio-store       │
-│    JMAP / IMAP / SMTP    │  │      CalDAV / iCal       │  │     SQLite FTS5 / Age    │
-└──────────────────────────┘  └──────────────────────────┘  └──────────────────────────┘
-```
+## Components
 
-- **Headless Engine Core**: `nuncio-core`, `nuncio-mail`, `nuncio-cal`, `nuncio-store`, and `nunciod` contain 100% of domain rules, protocol parsing, offline caching, search indexing, and secret key encryption.
-- **Thin Presentation Shells**: `nuncio-cli` (POSIX CLI), `nuncio-tui` (Ratatui TUI), `nuncio-gui` (Tauri v2 Desktop GUI), and `nuncio-mcp` (Native MCP Server) are stateless interfaces communicating over 4-byte length-prefixed JSON-RPC 2.0 IPC streams (`IpcClient`) with the central `nunciod` background daemon.
+### Engine libraries (composed by `nunciod`)
 
----
+- **`nuncio-core`** — domain models (`Email`, `CalendarEvent`, `Contact`), the
+  event bus, the API/IPC layer, and cross-cutting services (export, RBAC, audit,
+  config). Note: the `e2ee`, `ai`, and `plugin` modules are non-functional
+  placeholders in the current tree and are deferred until re-justified.
+- **`nuncio-store`** — SQLite persistence in WAL mode, migrations, FTS search,
+  payload ciphers (AES-GCM / age), corruption detection & recovery, and the OS
+  keyring vault abstraction. Genuinely engineered; see the correctness fixes in
+  [`BACKLOG.md`](BACKLOG.md) Phase 1.B.
+- **`nuncio-mail`** — IMAP, JMAP, and SMTP engines and MIME handling. SMTP/MIME
+  are solid; IMAP session code exists; JMAP needs a real HTTP client. None are yet
+  driven by the daemon (Phase 1–3 wire them in).
+- **`nuncio-cal`** — iCalendar parsing, CalDAV/CardDAV, recurrence (`rrule`), and
+  scheduling. Parsing utilities exist but lack real transport and have TZID bugs
+  (Phase 3).
+- **`nuncio-contacts`** — contacts store, CardDAV sync, vCard generation.
+- **`nuncio-filter`** — the NSQL declarative filter language: parser
+  (`sqlparser`-based), multi-pass validator, and evaluation engine. The strongest
+  subsystem; correctness fixes and action execution are Phase 3. See
+  [`NSQL-Filter-Language-Specification.md`](NSQL-Filter-Language-Specification.md).
 
-## 2. Domain Encapsulation & Anti-Corruption Boundary (Zero Library Leakage)
+### The daemon
 
-To ensure third-party crates (e.g. `mail-parser`, `calcard`, `rrule`, `sqlx`, `keyring`, `age`, `jmap-client`) can be swapped or upgraded at any time without breaking Nuncio's data models or presentation shells, Nuncio enforces a **Hexagonal Ports & Adapters Architecture**:
+- **`nunciod`** — boots the event bus, opens/recovers the store, loads filter
+  rules, runs background workers, and serves the API. Its central missing piece is
+  real protocol sync: today "sync" only flips a status flag and the outbox worker
+  *simulates* remote mutations. Phase 1 replaces this with a real
+  `IMAP fetch → store → SMTP send` loop.
 
-```
-┌───────────────────────────────────────────────────────────────────────────────────┐
-│                          nuncio-core Domain Entities                              │
-│       (Email, Folder, CalendarEvent, Contact, ExpandedOccurrence, SyncDelta)      │
-└─────────────────────────────────────────▲─────────────────────────────────────────┘
-                                          │ Implements Ports / Adapters
-┌─────────────────────────────────────────┴─────────────────────────────────────────┐
-│                       Anti-Corruption Layer (Adapters)                            │
-│                                                                                   │
-│  ┌─────────────────────────┐ ┌─────────────────────────┐ ┌─────────────────────┐  │
-│  │ MimeParserAdapter       │ │ IcalParserAdapter       │ │ SqliteStorageAdapter│  │
-│  │ (Wraps mail-parser)     │ │ (Wraps calcard & rrule) │ │ (Wraps sqlx & age)  │  │
-│  └────────────┬────────────┘ └────────────┬────────────┘ └──────────┬──────────┘  │
-└───────────────┼───────────────────────────┼─────────────────────────┼─────────────┘
-                ▼                           ▼                         ▼
-┌──────────────────────────┐ ┌──────────────────────────┐ ┌──────────────────────────┐
-│    mail-parser Crate     │ │   calcard & rrule Crates │ │    sqlx & age Crates     │
-│   (Implementation Detail)│ │   (Implementation Detail)│ │   (Implementation Detail)│
-└──────────────────────────┘ └──────────────────────────┘ └──────────────────────────┘
-```
+### The published API
 
-### Strict Isolation Rules
+- A versioned **gRPC** service defined by Protocol Buffers in `proto/nuncio/v1/`
+  (introduced in Phase 1), served over **loopback TCP (`127.0.0.1`)** with a
+  **bearer-token handshake** — the token minted into the OS keyring on first run
+  and sent as gRPC metadata.
+- **Unary RPCs** for commands and queries; **server-streaming RPCs** for push
+  (new mail, sync progress, events). gRPC's multiplexing removes the
+  response/notification demux race present in the current hand-rolled IPC.
+- The `.proto` files are the versioned contract every client codegens against.
 
-1. **Zero External Types in `nuncio-core`**: No third-party struct, enum, or trait types (e.g., `mail_parser::Message`, `calcard::Calendar`, `rrule::RRuleSet`, `sqlx::SqlitePool`, `keyring::Entry`, `lettre::Message`) are ever exposed in `nuncio-core` struct fields or public API signatures.
-2. **Domain Models Owned by Nuncio**: `nuncio-core` defines Nuncio's own pure Rust domain types (`Email`, `CalendarEvent`, `Contact`, `Folder`).
-3. **Adapter Boundary**:
-   - **MIME Parsing**: `mail-parser` is hidden behind an internal `MimeParserAdapter` function converting raw RFC 822/5322 byte slices (`&[u8]`) into `nuncio_core::model::Email`. Swapping `mail-parser` for another parser touches **only** the adapter implementation inside `nuncio-mail`.
-   - **Calendar Parsing & Recurrences**: `calcard` and `rrule` are hidden behind `IcalParserAdapter` and `RruleRecurrenceAdapter`. Swapping either crate touches **only** `nuncio-cal`.
-   - **Persistence & Vaults**: `sqlx`, `keyring`, and `age` are hidden behind `StorageEngine` and `SecretManager` adapter traits. Swapping SQLite or encryption algorithms touches **only** `nuncio-store`.
+> **Current transport (to be replaced):** a hand-rolled length-prefixed
+> (4-byte big-endian, 16 MB cap) JSON-RPC 2.0 protocol over **loopback TCP
+> `127.0.0.1:9422`** (`NUNCIO_IPC_ADDR` override). It has a confirmed
+> response/notification interleaving bug. Do not extend it; build on gRPC.
 
----
+### Clients
 
-## 3. Workspace Crate Layout & Crate Selections
+- **`nuncio-cli`** stays in-repo as the reference gRPC client and E2E driver.
+- **Native GUIs** (`nuncio-gui-macos` in Swift, `nuncio-gui-windows` in WinUI/C#),
+  a **Rust TUI** (`nuncio-tui`), and an **MCP↔gRPC bridge** (`nuncio-mcp`) become
+  separate repositories consuming the published API (Phase 5). Linux is supported
+  at the daemon + CLI level; a native Linux GUI is deferred.
 
-### Crate Ecosystem Selections
+## Data & security model
 
-| Domain | Primary Crates | Technical Justification | Encapsulation Adapter |
-| :--- | :--- | :--- | :--- |
-| **Mail Parsing** | `mail-parser` (Stalwart Labs) | Zero-copy MIME parser using SIMD Base64 decoding and perfect hashing. | `MimeParserAdapter` inside `nuncio-mail`. |
-| **Mail Protocols** | `jmap-client`, `jmap-proto`, `async-imap`, `lettre` | Dual JMAP / IMAP / SMTP engines. | `MailBackend` trait inside `nuncio-mail`. |
-| **Calendar & Contacts** | `calcard` (Stalwart Labs), `rrule`, `chrono-tz` | `calcard` parses iCal/vCard to JSCalendar; `rrule` expands recurrences. | `IcalParserAdapter` & `RecurrenceAdapter` inside `nuncio-cal`. |
-| **DAV Protocols** | `reqwest`, `quick-xml` | Custom WebDAV `PROPFIND` & CalDAV `sync-collection` REPORT queries. | `CalDavClient` trait inside `nuncio-cal`. |
-| **Database & Storage** | `sqlx` (SQLite WAL), `age` | Async SQLite metadata persistence and `age` chunked attachment cipher. | `StorageRepository` trait inside `nuncio-store`. |
-| **Full-Text Search** | SQLite FTS5 (`unicode61` + `trigram`) | Baseline ACID-compliant trigram search. Optional `tantivy` feature flag. | `SearchEngine` trait inside `nuncio-store`. |
-| **OS Credentials** | `keyring` | Binds to macOS Keychain, Windows Credential Manager, Linux Secret Service. | `SecretVault` trait inside `nuncio-store`. |
-| **Command Line Interface** | `clap` v4 | Fast subcommands parser supporting JSON output formatting. | Presentation Shell (`nuncio-cli`). |
-| **Terminal Shell** | `ratatui`, `crossterm`, `html2text` | Double-buffered terminal renderer & `html2text` hyperlink parser. | Presentation Shell (`nuncio-tui`). |
-| **Desktop Shell** | `Tauri v2` | Native OS webview sandboxed HTML email renderer and accessibility. | Presentation Shell (`nuncio-gui`). |
-| **Mocking & Test Infra** | `wiremock`, `tempfile` | HTTP/JMAP/CalDAV mock servers and ephemeral test databases. | Test Infrastructure. |
+- **Single local SQLite database per profile** (e.g. `~/.nuncio/`), WAL mode,
+  single-writer through the daemon.
+- **Credentials and keys belong in the OS keyring.** The current tree hardcodes
+  crypto keys in source and never calls the keyring — a critical defect fixed in
+  Phase 0.E before any at-rest-encryption or tamper-evidence claim is valid.
+- **Full-text search** via SQLite FTS5 (trigram). The indexing-vs-encryption
+  strategy is being corrected in Phase 1.B.
+- **HTML email** must render sandboxed (`<iframe sandbox>`, JS disabled, strict
+  CSP) in GUI clients.
 
----
+## Diagram
 
-## 4. Subsystem Architecture Specifications
-
-### 4.1 `crates/nuncio-mail` Engine
-
-`nuncio-mail` exposes a protocol-agnostic async trait (`MailBackend`) implemented by two engines: `JmapBackend` and `ImapBackend`.
-
-```rust
-use async_trait::async_trait;
-use nuncio_core::model::{Email, Folder, SyncDelta};
-
-#[async_trait]
-pub trait MailBackend: Send + Sync {
-    async fn sync_folders(&self) -> Result<Vec<Folder>, MailError>;
-    async fn sync_messages(&self, folder_id: &str, since_state: Option<&str>) -> Result<SyncDelta<Email>, MailError>;
-    async fn fetch_body(&self, email_id: &str) -> Result<Email, MailError>;
-    async fn send_mail(&self, email: Email) -> Result<(), MailError>;
-}
-```
-
-- **JMAP Engine**: Executes single-roundtrip differential updates using `Email/changes(sinceState)` and receives WebSocket push state changes.
-- **IMAP Engine**: Uses a dual-socket connection manager. Connection A remains locked in `IDLE` listening for socket events. Connection B handles on-demand `FETCH`, `STORE`, and `SEARCH` requests.
-- **MIME Parser Adapter**: Encapsulates `mail-parser` inside worker tasks, returning pure `nuncio_core::model::Email` entities.
-
-### 4.2 `crates/nuncio-cal` Engine
-
-`nuncio-cal` handles calendar synchronization and contact management across CalDAV (RFC 4791), CardDAV (RFC 6352), and JMAP Calendars.
-
-- **Data Normalization**: `calcard` converts native `.ics` components into `JSCalendar` (RFC 8984) and `JSContact` (RFC 9553) models.
-- **Recurrence Engine Adapter**: `rrule` processes master `RRULE` strings alongside `EXDATE` exclusions and detached `RECURRENCE-ID` override components over a finite window `[start_date, end_date]`.
-- **Sync Protocol**: Uses WebDAV `sync-collection` (RFC 6578) with `sync-token` parameters to receive minimal deltas, falling back to `calendar-query` time-range REPORT requests.
-
-### 4.3 `crates/nuncio-store` Storage & Security
-
-`nuncio-store` manages local caching, full-text search indexing, and secret key storage.
-
-- **Relational Metadata**: `sqlx` manages SQLite tables for mail envelopes, calendar events, contacts, and sync tokens in WAL mode (`PRAGMA journal_mode=WAL;`).
-- **Full-Text Indexing**: SQLite FTS5 with `unicode61 remove_diacritics 2 porter` and `trigram` tokenizers provides transactional full-text search.
-- **Payload & Attachment Encryption**: Raw MIME message bodies and binary attachments are encrypted on disk using `age` (X25519 / ChaCha20-Poly1305) with keys fetched from `keyring`.
-
----
-
-## 5. Presentation Shell Specifications
-
-### 5.1 Command Line Interface (`nuncio-cli`)
-
-- **Execution Engine**: `clap` v4 derive macro.
-- **Noun + Verb Command Standard**: Standardized `<Noun> <Verb> [Flags]` command hierarchy:
-  - `nuncio account list | add | show`
-  - `nuncio mail sync | list | read | send | search`
-  - `nuncio folder list`
-  - `nuncio cal list | sync`
-  - `nuncio system status`
-- **Pipeline & Scripting Support**: Accepts `--json` flag to stream machine-readable JSON payloads to stdout for processing with `jq`, `grep`, or automation pipelines. Global `--account <id>` flag allows targeting any specific account context.
-
-### 5.2 Terminal UI Shell (`nuncio-tui`)
-
-- **Rendering Engine**: `ratatui` v0.28+ with `crossterm` v0.28+.
-- **HTML Email Strategy**: HTML email bodies are parsed with `html2text` and transformed into `ratatui::text::Text` structures. Links are assigned numeric footers (e.g. `o 1`) to trigger the OS default browser via `open::that`. Pressing `o` exports the message to an external browser or terminal pager (`w3m`).
-
-### 5.3 Desktop GUI Shell (`nuncio-gui`)
-
-- **Rendering Engine**: **Tauri v2** shell calling `nuncio-core` via IPC.
-- **HTML Email Sandboxing**: Displays untrusted HTML emails inside isolated `<iframe sandbox="allow-same-origin" srcdoc="...">` tags with JavaScript execution disabled. Custom URI schemes (`nuncio-mail://`) proxy local attachments while blocking remote tracking pixels by default.
-- **Accessibility & Native Integration**: Utilizes OS native browser accessibility engines (VoiceOver on macOS, NVDA/JAWS on Windows, Orca on Linux), OS system tray integration, and native notification APIs.
-
----
-
-## 6. Testing, E2E & Protocol Mocking Standards
-
-1. **100% Unit Test Line Coverage**: All engine domain logic, parsers, and recurrence algorithms require 100% line coverage (`cargo llvm-cov --workspace --fail-under-lines 100`).
-2. **Integration Test Isolation**: Integration tests in `tests/` MUST use ephemeral databases (`tempfile` or `:memory:`) with zero state leakage.
-3. **Headless E2E Test Suite**: E2E tests validate complete user workflows from `nuncio-cli` subcommands down through core engine streams and storage persistence.
-4. **100% Offline Mocks for External Systems**:
-   - Network protocols (JMAP, IMAP, CalDAV, CardDAV, SMTP) are 100% mocked via `wiremock` and async mock traits.
-   - OS native vaults are mocked via `MockKeyring` in-memory provider.
-   - Live network connections during testing are strictly forbidden.
+A current, accurate topology diagram will be added once the gRPC layer lands
+(Phase 1). The previous `architecture.png` depicted the superseded socket/4-shell
+model and was removed.

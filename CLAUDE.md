@@ -1,79 +1,111 @@
-# Nuncio Codebase Guidelines (CLAUDE.md)
+# CLAUDE.md
 
-Nuncio ([nuncio.mx](https://nuncio.mx)) is a cross-platform mail and calendar solution written in Rust.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Semantic Versioning 2.0.0 & Release Policy
+## What this repo is
 
-- **SemVer Standard**: All releases follow **Semantic Versioning 2.0.0** (`MAJOR.MINOR.PATCH`).
-- **UNIFIED V3 RELEASE MANDATE**: **No public release tag or binary distribution will be cut until Phase V3 (Platform & AI Automation) is 100% feature complete, verified, and working across all 4 presentation UIs on Linux, macOS, and Windows.**
-- **Git Tag Format**: Release tags MUST follow `vMAJOR.MINOR.PATCH` format (e.g. `v3.0.0` for GA launch).
-- **Automated GitHub Releases Workflow**: Pushing a `v*.*.*` tag triggers [.github/workflows/release.yml](file:///R:/Git.Local/KofTwentyTwo/nuncio/.github/workflows/release.yml) to compile, package, compute SHA256 checksums, and publish release binaries for Windows (`.zip` / `.msi`), macOS (`.tar.gz` / `.dmg`), and Linux (`.tar.gz` / `.AppImage`).
+Nuncio is a **local-first mail, calendar, and contacts engine** written in Rust
+(edition 2021, Cargo workspace). It is **pre-alpha and under active
+reconstruction** after a 2026-07-26 forensic assessment found the original
+AI-generated proof of concept was largely non-functional and its documentation
+substantially fabricated. **Trust the code and this file over any older prose.**
 
-## JetBrains RustRover IDE Integration
+Read these before substantive work:
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — the authoritative plan and target architecture
+- [`docs/adr/0001-engine-first-grpc-architecture.md`](docs/adr/0001-engine-first-grpc-architecture.md) — the governing architecture decision
+- [`docs/BACKLOG.md`](docs/BACKLOG.md) — engineering-ready Phase 0 / Phase 1 stories
 
-Nuncio is pre-configured for **JetBrains RustRover** out of the box:
-- **Workspace Cargo Resolution**: RustRover automatically recognizes all 9 workspace member crates (`crates/*`).
-- **Pre-Configured Shared Run Configurations**: Located in `.idea/runConfigurations/`:
-  - `Cargo Check All`: Executes `cargo check-all` with warnings treated as errors.
-  - `Cargo Test All`: Executes `cargo test-all` for the full workspace.
-  - `Cargo Coverage Gate`: Executes `cargo cov` measuring 100% unit test line coverage.
-  - `Run nuncio-cli (status)`: Executes `cargo run -p nuncio-cli -- status`.
-  - `Run nuncio-tui`: Executes `cargo run -p nuncio-tui`.
-  - `Run nuncio-gui`: Executes `cargo run -p nuncio-gui`.
-- **Code Style & Formatting**: `.idea/codeStyles/Project.xml` configures RustRover to format files automatically via `rustfmt` on save.
+## Architecture (target)
 
-## Multi-Agent Execution Framework
+The daemon is the product; UIs are thin clients over a published contract.
 
-- **Master Orchestrator Agent (`agy` / Antigravity)**: Manages high-level task decomposition, roadmap tracking ([docs/PLAN-nuncio-roadmap.md](file:///R:/Git.Local/KofTwentyTwo/nuncio/docs/PLAN-nuncio-roadmap.md), [docs/TODO.md](file:///R:/Git.Local/KofTwentyTwo/nuncio/docs/TODO.md)), subagent dispatching, quality gate validation (`cargo verify`, `cargo cov`), git branch workflows, and wiki documentation.
-- **Claude Code Subagent (`claude`)**: Assigned to headless engine crates (`crates/nuncio-core`, `crates/nuncio-mail`, `crates/nuncio-cal`, `crates/nuncio-store`), SQLite FTS5 migrations, protocol parsers, `rrule` recurrence math, `age` encryption, and 100% unit test coverage.
-- **OpenAI Codex Subagent (`codex`)**: Assigned to CLI subcommands and shell pipeline automation (`crates/nuncio-cli`).
-- **Antigravity Worker Subagent (`agy-worker`)**: Assigned to TUI (`crates/nuncio-tui`), GUI (`crates/nuncio-gui`), webview sandboxing, and CI/CD cross-platform release matrix.
+- **`nunciod`** owns all state (SQLite/WAL), credentials (OS keyring), protocol
+  sync logic, the filter engine, and all business logic. The `nuncio-*` library
+  crates are composed by the daemon.
+- The daemon **publishes a versioned gRPC API** (`proto/nuncio/v1/*.proto`, being
+  introduced in roadmap Phase 1) over **loopback TCP with a bearer-token
+  handshake** (token in the OS keyring). **Server-streaming RPCs carry push**
+  (new mail, sync progress, events).
+- The `.proto` files are the single source of truth for the contract. **Feature
+  parity across clients is guaranteed by the contract, not by discipline.**
+- **`nuncio-cli` is the in-repo reference client** and E2E driver. All other UIs
+  (native macOS/Windows GUIs, TUI, MCP bridge) become separate repositories.
 
-## Architecture Guidelines
+### Current vs target state
 
-1. **Library-First ("Ghost" Decoupled Model)**:
-   - Business logic, protocol clients, offline state synchronization, SQLite FTS5 search indexing, and cryptographic key management MUST reside strictly inside headless Rust crates: `crates/nuncio-core`, `crates/nuncio-mail`, `crates/nuncio-cal`, and `crates/nuncio-store`.
-   - Presentation shells (`crates/nuncio-cli`, `crates/nuncio-tui`, `crates/nuncio-gui`, `crates/nuncio-mcp`) MUST remain thin UI layers interacting with `nuncio-core` via `IpcClient` and async Tokio channels.
+The workspace still contains `nuncio-tui`, `nuncio-gui` (+ `src-tauri`, `ui`), and
+`nuncio-mcp`; these are slated to move out (Phase 0.D) and are reference-only. The
+current transport is a hand-rolled length-prefixed JSON-RPC over **loopback TCP
+`127.0.0.1:9422`** (note: *not* Unix sockets / named pipes, despite older docs);
+it is being replaced by gRPC in Phase 1. Do not build new features on the old IPC.
 
-2. **Standing Rule: 100% Multi-Shell Feature Parity Equivalence**:
-   - **Mandatory 1:1 Parity**: Any feature, action, search query, configuration setting, or workflow exposed in one presentation shell MUST be fully implemented and accessible across ALL FOUR presentation shells (`nuncio-cli`, `nuncio-tui`, `nuncio-gui`, `nuncio-mcp`).
-   - Adding a new feature to V1, V2, or V3 automatically requires implementing its CLI subcommand (`--json`), TUI keyboard shortcut/modal, GUI React component, and MCP LLM tool handler.
+### Library-first boundary
 
-3. **Language & Code Quality Standards**:
-   - **Rust Edition**: 2021 edition across all workspace crates.
-   - **Compiler & Linter Gates**: `rustflags = ["-D", "warnings"]` configured in `.cargo/config.toml`. All compiler and clippy warnings MUST be treated as hard build errors during normal development.
-   - **Formatting**: `cargo fmt` enforced. No unformatted code allowed.
-   - **Error Handling**: Use `thiserror` for library crates (`nuncio-core`, `nuncio-mail`, `nuncio-cal`, `nuncio-store`). `unwrap()` and `expect()` are **forbidden** in production library code (permitted only in tests and prototypes).
-   - **Security**: Never store plain-text passwords, tokens, or encryption keys in source files or SQLite tables. Route all credentials to OS native vaults via `keyring`. Payload attachments encrypted at rest via `age`. Untrusted HTML email sandboxed inside `<iframe sandbox>` with JS disabled.
+Business logic, protocol clients, storage, search, and key management live in the
+headless crates (`nuncio-core`, `nuncio-store`, `nuncio-mail`, `nuncio-cal`,
+`nuncio-contacts`, `nuncio-filter`). Presentation code must remain a thin client
+of the daemon's API and hold no business logic or private data store.
 
-3. **Testing, E2E & Mocking Standards**:
-   - **Test-First Commit Policy**: 100% of workspace tests (`cargo test --workspace`) MUST pass locally before committing or triggering CI pipelines.
-   - **100% Line Coverage Requirement**: **100% line coverage** is required for unit tests across workspace engine crates (`cargo llvm-cov --workspace --fail-under-lines 100`).
-   - **Integration Testing Standards**: `tests/` directories MUST test multi-crate interaction, SQLite WAL migrations, FTS5 trigram queries, and channel event loops using isolated ephemeral databases (`tempfile` or `:memory:`). State leakage between tests is forbidden.
-   - **End-to-End (E2E) Testing Standards**: Headless E2E integration tests MUST validate complete user workflows from `nuncio-cli` subcommands and `nuncio-core` state streams down through storage and protocol layers.
-   - **Full Mocks for External Systems**:
-     - All external network protocols (JMAP, IMAP, CalDAV, CardDAV, SMTP) MUST be 100% mocked for offline test execution using `wiremock` or mock trait implementations (`MockMailBackend`, `MockCalDavClient`).
-     - OS native vaults MUST be mocked via an in-memory `MockKeyring` provider during tests.
-     - Live network calls during test runs are strictly **forbidden**.
+## Build, test, and quality gates
 
-4. **Commit & Branch Conventions**:
-   - Commit messages MUST follow Conventional Commits format (`feat(scope): description`, `fix(scope): description`). Subject lines under 72 characters, imperative mood, zero AI attribution.
-   - All work MUST be performed on feature branches (`feature/GH-123-description`), never committed directly to `main`.
+Warnings are hard errors and `unsafe_code` is forbidden (see
+[`.cargo/config.toml`](.cargo/config.toml) and workspace lints in
+[`Cargo.toml`](Cargo.toml): `unwrap_used`, `expect_used`, `panic`, `todo` are all
+`deny`).
 
-## Local Build & Quality Verification Commands
-
-Normal development automatically enforces compiler warnings as errors via `.cargo/config.toml`. Before pushing or creating a Pull Request, run the full verification suite locally:
+Cargo aliases (defined in `.cargo/config.toml`):
 
 ```bash
-# 1. Format Check
-cargo fmt --all -- --check
-
-# 2. Clippy Linter Check (warnings as errors)
-cargo check-all
-
-# 3. Complete Test Suite Execution (Unit, Integration & E2E - 100% passing required)
-cargo test-all
-
-# 4. Enforce 100% Code Coverage Threshold
-cargo llvm-cov --workspace --fail-under-lines 100
+cargo check-all   # = clippy --all-targets --workspace -- -D warnings   (the lint gate)
+cargo test-all    # = test --workspace
+cargo cov         # = llvm-cov --workspace --fail-under-lines 100        (needs cargo-llvm-cov)
+cargo verify      # = fmt --all --check + check-all + test-all
 ```
+
+Common commands:
+
+```bash
+cargo build --workspace
+cargo test -p nuncio-store                       # one crate
+cargo test -p nuncio-filter parser::             # one module's tests
+cargo test -p nunciod --test daemon_e2e_test     # one integration suite
+cargo run -p nuncio-cli -- status                # run the CLI
+```
+
+> **Known gate caveats (being fixed in Phase 0):** `cargo check-all` currently
+> fails on uncommitted edits in `nuncio-core`; CI runs `cargo clippy --workspace`
+> *without* `--all-targets`, so it can pass while the local gate fails; and the
+> `--fail-under-lines 100` coverage gate excludes `main.rs` and has never passed
+> in CI. Get these green before adding features (backlog epic 0.C).
+
+## Conventions
+
+- **Rust edition 2021**; `cargo fmt` enforced (no unformatted code).
+- **Error handling:** `thiserror` in library crates; `unwrap()`/`expect()` are
+  forbidden in production code (tests only).
+- **Security:** never store plaintext credentials/keys in source or SQLite; route
+  secrets through the OS keyring; encrypt attachments at rest; sandbox untrusted
+  HTML email in an `<iframe sandbox>` with JS disabled. (Several of these are
+  aspirational in the current tree — see the assessment; Phase 0.E hardens them.)
+- **Commits:** Conventional Commits (`feat(scope): …`, `fix(scope): …`), imperative,
+  <72-char subjects, no AI attribution.
+- **Branches:** feature branches; never commit directly to `main`. Branch flow is
+  `dev` → `rc` → `main`.
+- **A capability is "done" only when engine + proto + CLI command + offline E2E
+  test all exist and CI is green.** No fabricated success output — an unimplemented
+  path returns an honest error, never fake data.
+
+## Testing standards
+
+- 100% of `cargo test-all` must pass before committing.
+- Integration tests use ephemeral SQLite (`tempfile` / `:memory:`); no state
+  leakage between tests.
+- **All external protocols (IMAP/JMAP/SMTP/CalDAV/CardDAV) must be mocked**
+  (`wiremock` or the `Mock*Backend` traits); the OS keyring is mocked via
+  `MockKeyring`. **Live network calls in tests are forbidden.**
+
+## Release policy
+
+SemVer 2.0.0; release tags are `vMAJOR.MINOR.PATCH`. **No release should be
+presented as functional until the engine and its API are solid (roadmap Phase 4).**
+Existing public pre-1.0 releases are non-functional and are being marked pre-alpha.
