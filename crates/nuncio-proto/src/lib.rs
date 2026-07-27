@@ -68,3 +68,50 @@ mod tests {
         let _request = GetStatusRequest {};
     }
 }
+
+/// Contract-stability check for the published `nuncio.v1` wire format.
+///
+/// `build.rs` emits a `FileDescriptorSet` for `proto/nuncio/v1/nuncio.proto`
+/// to `$OUT_DIR` on every build (with `SourceCodeInfo` stripped, so pure doc-
+/// comment edits don't perturb it). This module compares that freshly
+/// compiled descriptor, byte for byte, against the one committed at
+/// `proto/nuncio/v1/descriptor.bin` -- the crate's published contract, which
+/// future native client repos (Swift, C#, TypeScript) codegen from.
+///
+/// A mismatch means the `.proto` sources changed the wire contract: an added,
+/// removed, or renumbered field; a changed field type; a changed RPC
+/// signature; etc. See the assertion message below for how to intentionally
+/// update the golden once such a change is reviewed and accepted.
+#[cfg(test)]
+mod contract_stability {
+    /// The published, committed `nuncio.v1` `FileDescriptorSet`.
+    const GOLDEN_DESCRIPTOR: &[u8] = include_bytes!("../proto/nuncio/v1/descriptor.bin");
+
+    /// The `FileDescriptorSet` compiled from the current `.proto` sources by
+    /// this very build, written by `build.rs` via
+    /// `file_descriptor_set_path`.
+    const FRESH_DESCRIPTOR: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/nuncio_v1_descriptor.bin"));
+
+    #[test]
+    fn descriptor_matches_committed_golden() {
+        assert_eq!(
+            FRESH_DESCRIPTOR,
+            GOLDEN_DESCRIPTOR,
+            "the `nuncio.v1` FileDescriptorSet compiled from \
+             `proto/nuncio/v1/nuncio.proto` no longer matches the committed \
+             golden at `crates/nuncio-proto/proto/nuncio/v1/descriptor.bin`. \
+             This means the wire contract changed (an added/removed/\
+             renumbered field, a changed field type, or a changed RPC \
+             signature). If this change is intentional -- either an \
+             additive, backward-compatible change within `nuncio.v1`, or a \
+             deliberate breaking change that has ALSO been moved to a new \
+             `nuncio.v2` package -- update the golden: rebuild with \
+             `cargo build -p nuncio-proto`, then overwrite the committed \
+             `descriptor.bin` with the freshly generated descriptor at:\n  \
+             {}\n\nThen re-run `cargo test -p nuncio-proto` and commit the \
+             updated `descriptor.bin` alongside the `.proto` change.",
+            concat!(env!("OUT_DIR"), "/nuncio_v1_descriptor.bin")
+        );
+    }
+}
