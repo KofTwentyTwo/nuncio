@@ -127,6 +127,17 @@ impl DatabaseEngine {
     ) -> Result<Self, DatabaseError> {
         let (storage_key, worm_key, ledger_key) = resolve_engine_keys(secrets)?;
 
+        // Ensure the database's parent directory exists before opening. SQLite's
+        // `create_if_missing` creates the file but NOT its parent directory, so a
+        // fresh install (e.g. `~/.nuncio` not yet created) would otherwise fail to
+        // start with SQLITE_CANTOPEN (code 14). Found via dogfooding.
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| DatabaseError::PoolCreation(e.to_string()))?;
+            }
+        }
+
         let url = format!("sqlite://{}", path.to_string_lossy());
         let options = SqliteConnectOptions::from_str(&url)
             .map_err(|e| DatabaseError::PoolCreation(e.to_string()))?
@@ -1572,6 +1583,25 @@ mod tests {
             .expect("query calendar_events table");
 
         assert_eq!(event_row.0, 0);
+    }
+
+    #[tokio::test]
+    async fn connect_file_creates_missing_parent_directory() {
+        // Regression (found via dogfooding): a fresh install opens the DB at a
+        // path whose parent directory (e.g. ~/.nuncio) does not exist yet.
+        // `create_if_missing` creates the file, not the dir, so without an
+        // explicit create_dir_all the daemon failed to start with CANTOPEN.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("nested").join("data").join("nuncio.db");
+        assert!(!db_path.parent().expect("has parent").exists());
+
+        let secrets = crate::vault::SecretManager::mock();
+        let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+            .await
+            .expect("connect_file creates the missing parent dir and opens");
+
+        assert!(db_path.parent().expect("has parent").exists());
+        assert!(engine.check_integrity().await.expect("integrity check"));
     }
 
     #[tokio::test]
