@@ -10,10 +10,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-nuncio-core = { path = "../nuncio-core" }
-nuncio-mail = { path = "../nuncio-mail" }
-nuncio-cal = { path = "../nuncio-cal" }
-nuncio-store = { path = "../nuncio-store" }
+nuncio-core = { path = "../../crates/nuncio-core" }
+nuncio-mail = { path = "../../crates/nuncio-mail" }
+nuncio-cal = { path = "../../crates/nuncio-cal" }
+nuncio-store = { path = "../../crates/nuncio-store" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

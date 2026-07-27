@@ -28,4 +28,3 @@ tempfile.workspace = true
 
 [dev-dependencies]
 nuncio-cli = { path = "../nuncio-cli" }
-nuncio-mcp = { path = "../nuncio-mcp" }

@@ -10,12 +10,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-nuncio-core = { path = "../nuncio-core" }
-nuncio-mail = { path = "../nuncio-mail" }
-nuncio-cal = { path = "../nuncio-cal" }
-nuncio-store = { path = "../nuncio-store" }
-nuncio-filter = { path = "../nuncio-filter" }
-nuncio-contacts = { path = "../nuncio-contacts" }
+nuncio-core = { path = "../../crates/nuncio-core" }
+nuncio-mail = { path = "../../crates/nuncio-mail" }
+nuncio-cal = { path = "../../crates/nuncio-cal" }
+nuncio-store = { path = "../../crates/nuncio-store" }
+nuncio-filter = { path = "../../crates/nuncio-filter" }
+nuncio-contacts = { path = "../../crates/nuncio-contacts" }
 
 
 tokio = { workspace = true, features = ["full"] }
