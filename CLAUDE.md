@@ -109,6 +109,12 @@ A shared RustRover setup lives in `.idea/` (the useful parts are tracked;
   aspirational in the current tree — see the assessment; Phase 0.E hardens them.)
 - **Commits:** Conventional Commits (`feat(scope): …`, `fix(scope): …`), imperative,
   <72-char subjects, no AI attribution.
+- **Comments:** explain the code's *intent, constraints, and rationale*. Do NOT
+  put backlog-story numbers (`1.C.2`), GH issue references (`#156`, `GH-156`,
+  `Refs #`), or `Phase N` breadcrumbs in source comments (`.rs`/`.proto`) — that
+  traceability belongs in git history and `docs/`, and it rots in the code.
+  Keep genuine technical rationale (RFC citations, algorithm notes, why-not-X).
+  (Commit messages may still cite `Refs #NNN`.)
 - **Branches:** feature branches; never commit directly to `main`. Branch flow is
   `dev` → `rc` → `main`.
 - **A capability is "done" only when engine + proto + CLI command + offline E2E
