@@ -69,14 +69,32 @@ cargo build --workspace
 cargo test -p nuncio-store                       # one crate
 cargo test -p nuncio-filter parser::             # one module's tests
 cargo test -p nunciod --test daemon_e2e_test     # one integration suite
-cargo run -p nuncio-cli -- status                # run the CLI
+cargo run -p nunciod                             # start the daemon (gRPC :9420, JSON-RPC :9422)
+cargo run -p nuncio-cli -- system status         # drive it via the CLI (daemon must be running)
 ```
 
-> **Known gate caveats (being fixed in Phase 0):** `cargo check-all` currently
-> fails on uncommitted edits in `nuncio-core`; CI runs `cargo clippy --workspace`
-> *without* `--all-targets`, so it can pass while the local gate fails; and the
-> `--fail-under-lines 100` coverage gate excludes `main.rs` and has never passed
-> in CI. Get these green before adding features (backlog epic 0.C).
+> **Gate status:** the workspace is green under the pinned toolchain
+> (`rust-toolchain.toml` = 1.97.1), so the local pre-commit hook runs the exact
+> `fmt`/`clippy --all-targets`/tests that CI does — "green locally" is CI-equivalent.
+> CI itself is paused until the GitHub Actions minutes reset (releases are tag-only).
+> Coverage is informational, not a 100% gate.
+
+## RustRover / IDE
+
+A shared RustRover setup lives in `.idea/` (the useful parts are tracked;
+`workspace.xml`/`*.iml` and other local churn are gitignored):
+- **Cargo project** auto-resolves from the root `Cargo.toml`; after pulling changes
+  that add or move crates, run **Reload Cargo Project** (RustRover usually prompts).
+- **Toolchain** comes from `rust-toolchain.toml` (1.97.1) automatically.
+- **rustfmt on save** is enabled (`.idea/codeStyles/Project.xml`).
+- **Shared run configurations** (`.idea/runConfigurations/`):
+  - *Run nunciod (daemon)* — start the daemon.
+  - *Run nuncio-cli (system status)* — drive it (start the daemon first).
+  - *Cargo Build Release (daemon + CLI)* — `cargo build-release`.
+  - *Cargo Check All* · *Cargo Test All* · *Cargo Verify (fmt + clippy + tests)* — the gates.
+  - *Cargo Coverage* — informational `llvm-cov` (needs `cargo-llvm-cov` installed).
+- Tip: set Clippy as the external linter (Settings → Rust → External Linters) so the
+  editor mirrors the `-D warnings` gate.
 
 ## Conventions
 

@@ -1,6 +1,6 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Run nuncio-cli (system status)" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
-    <option name="command" value="run -p nuncio-cli -- system status" />
+  <configuration default="false" name="Run nunciod (daemon)" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+    <option name="command" value="run -p nunciod" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <option name="emulateTerminal" value="true" />
     <option name="channel" value="DEFAULT" />
