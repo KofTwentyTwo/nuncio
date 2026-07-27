@@ -581,3 +581,144 @@ message PreviewRuleResponse {
   // Human-readable step-by-step match traces.
   repeated string condition_traces = 7;
 }
+
+// Export exposes the daemon's real mailbox export engine
+// (`nuncio_core::export`, via `DatabaseEngine::export_messages_to_file`)
+// over authenticated gRPC (backlog story 2.B, GH #172). The daemon and its
+// caller run on the SAME host (a local, single-machine deployment), so
+// writing the export to a filesystem path on that shared host -- rather
+// than streaming potentially very large export bytes back over the RPC
+// itself -- is both simpler and honest about where the data actually ends
+// up.
+//
+// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards `System`/`Accounts`/`Mail`/`Filters`
+// -- every gRPC service `nunciod` exposes MUST be authenticated, with no
+// exceptions carved out for "just one more" unauthenticated service. See
+// `nunciod::grpc::serve_on_listener`.
+service Export {
+  // ExportMailbox writes every message in `scope` to `output_path` in
+  // `format`, using the real `nuncio_core::export::ExportEngine`. Returns
+  // real message/byte counts read back from the file actually written --
+  // never fabricated. Also appends a WORM audit record for the export (see
+  // `Audit`).
+  rpc ExportMailbox(ExportRequest) returns (ExportResponse);
+}
+
+// Mirrors `nuncio_core::export::ExportFormat`.
+enum ExportFormat {
+  EXPORT_FORMAT_UNSPECIFIED = 0;
+  // RFC 4155 MBOX format (.mbox).
+  EXPORT_FORMAT_MBOX = 1;
+  // Zip archive of individual .eml MIME files (.zip).
+  EXPORT_FORMAT_EML_ZIP = 2;
+  // Structured JSON array (.json).
+  EXPORT_FORMAT_JSON = 3;
+  // JSON Lines, one message per line (.jsonl).
+  EXPORT_FORMAT_JSONL = 4;
+}
+
+// ExportRequest. `scope` selects which messages to export -- absent (no
+// oneof case set) means every message across every account and folder;
+// setting `account_id` or `folder_id` narrows the export to just that
+// account's or that folder's messages. These are the only scopes the store
+// can currently filter export by -- there is deliberately no broader query
+// scope here (e.g. an arbitrary NSQL filter) since the underlying store has
+// no such filtered read path to back one honestly.
+message ExportRequest {
+  oneof scope {
+    // Restrict the export to a single account's messages.
+    string account_id = 1;
+    // Restrict the export to a single folder's messages.
+    string folder_id = 2;
+  }
+  // Export output format.
+  ExportFormat format = 3;
+  // Absolute filesystem path to write the export to, on the SAME host the
+  // `nunciod` daemon runs on (see `Export`'s doc comment).
+  string output_path = 4;
+}
+
+// ExportResponse reports the REAL result of writing `output_path` -- never
+// a fabricated count.
+message ExportResponse {
+  // The path written to (echoes `ExportRequest.output_path`).
+  string output_path = 1;
+  // Number of messages actually written.
+  uint64 message_count = 2;
+  // Total bytes actually written to `output_path`.
+  uint64 bytes_written = 3;
+}
+
+// Audit exposes the daemon's real WORM (Write Once, Read Many) HMAC-chained
+// tamper-evident audit ledger (`nuncio_core::worm_audit`, via
+// `DatabaseEngine`'s `worm_audit_records` table) over authenticated gRPC
+// (backlog story 2.B, GH #172). This is a read/verify-only surface --
+// there is deliberately no RPC to create or mutate records here, since the
+// ledger is written internally by the daemon as a side effect of other
+// operations (e.g. `Export.ExportMailbox`) and the underlying SQLite table
+// itself rejects `UPDATE`/`DELETE` at the schema level.
+//
+// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards every other service `nunciod`
+// exposes -- see `nunciod::grpc::serve_on_listener`.
+service Audit {
+  // ListRecords returns a page of the real, persisted WORM audit ledger,
+  // sequence ascending.
+  rpc ListRecords(ListRecordsRequest) returns (ListRecordsResponse);
+  // VerifyChain re-verifies the ENTIRE persisted WORM audit ledger's
+  // HMAC hash-chain integrity, using the ledger's real WORM HMAC key
+  // (provisioned once from the OS keyring vault at daemon startup). Never
+  // fabricates `valid: true`.
+  rpc VerifyChain(VerifyChainRequest) returns (VerifyChainResponse);
+}
+
+// AuditRecord mirrors `nuncio_core::WormAuditRecord` field-for-field.
+// `record_hmac` is this record's verification MAC (a derived signature
+// output), NOT secret key material -- the WORM HMAC signing key itself is
+// never exposed over this or any other RPC.
+message AuditRecord {
+  // Monotonically increasing sequence index.
+  uint64 sequence = 1;
+  // UTC timestamp in nanoseconds since Unix epoch.
+  int64 timestamp_ns = 2;
+  // Subsystem or actor that performed the audited action.
+  string actor = 3;
+  // Action identifier (e.g. "data.export").
+  string action = 4;
+  // SHA-256 hash of the audited payload.
+  string data_hash = 5;
+  // Previous record's HMAC signature ("GENESIS" for sequence 1).
+  string previous_block_hash = 6;
+  // HMAC-SHA256 signature sealing this record.
+  string record_hmac = 7;
+}
+
+// ListRecordsRequest. `limit` caps the number of records returned
+// (sequence ascending); a value of 0 means "use the server's default
+// limit".
+message ListRecordsRequest {
+  uint32 limit = 1;
+  uint32 offset = 2;
+}
+
+// ListRecordsResponse.
+message ListRecordsResponse {
+  repeated AuditRecord records = 1;
+}
+
+// VerifyChainRequest currently carries no parameters.
+message VerifyChainRequest {}
+
+// VerifyChainResponse reports the REAL result of re-verifying the entire
+// persisted WORM audit ledger's hash chain -- never a fabricated `valid`.
+message VerifyChainResponse {
+  // Whether every persisted record's HMAC AND inter-record chain linkage
+  // verified.
+  bool valid = 1;
+  // Total number of records checked.
+  uint64 record_count = 2;
+  // Present only when `valid` is false: the sequence number of the first
+  // record whose HMAC or chain linkage failed to verify.
+  optional uint64 first_broken_seq = 3;
+}

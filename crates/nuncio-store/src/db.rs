@@ -115,6 +115,20 @@ fn resolve_engine_keys(
     Ok((storage_key, worm_key, ledger_key))
 }
 
+/// Structured result of re-verifying the entire persisted WORM audit
+/// ledger's hash chain (backlog story 2.B, GH #172). See
+/// [`DatabaseEngine::verify_worm_audit_chain_report`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WormChainReport {
+    /// Whether every persisted record's HMAC and inter-record chain linkage
+    /// verified.
+    pub valid: bool,
+    /// Total number of records checked.
+    pub record_count: usize,
+    /// Sequence number of the first record that failed to verify, if any.
+    pub first_broken_seq: Option<u64>,
+}
+
 impl DatabaseEngine {
     /// Maximum concurrent read/write pool size.
     pub const MAX_CONNECTIONS: u32 = 16;
@@ -1276,6 +1290,81 @@ impl DatabaseEngine {
             .collect())
     }
 
+    /// Query messages across the WHOLE store for export purposes (backlog
+    /// story 2.B, GH #172), optionally narrowed to a single account or a
+    /// single folder. Passing `None` for both returns every message in the
+    /// store. Ordered by `id` ascending, mirroring [`Self::get_message_chunk`]'s
+    /// deterministic keyset ordering.
+    #[allow(clippy::type_complexity)]
+    pub async fn list_messages_for_export(
+        &self,
+        account_id: Option<&str>,
+        folder_id: Option<&str>,
+    ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html FROM messages"
+        );
+
+        let mut has_filter = false;
+        if let Some(account_id) = account_id {
+            builder.push(" WHERE account_id = ");
+            builder.push_bind(account_id);
+            has_filter = true;
+        }
+        if let Some(folder_id) = folder_id {
+            builder.push(if has_filter {
+                " AND folder_id = "
+            } else {
+                " WHERE folder_id = "
+            });
+            builder.push_bind(folder_id);
+        }
+        builder.push(" ORDER BY id ASC");
+
+        let query = builder.build_query_as::<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+        )>();
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let dec_plain = r.8.map(|p| {
+                    crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
+                });
+                let dec_html = r.9.map(|h| {
+                    crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
+                });
+                nuncio_core::model::Email {
+                    id: r.0,
+                    account_id: r.1,
+                    folder_id: r.2,
+                    subject: r.3,
+                    sender: r.4,
+                    recipient: r.5,
+                    received_at: r.6,
+                    read: r.7 != 0,
+                    body_plain: dec_plain,
+                    body_html: dec_html,
+                    attachments: Vec::new(),
+                }
+            })
+            .collect())
+    }
+
     /// Append a new immutable WORM audit record to the log ledger, signed with the WORM
     /// HMAC key provisioned for this engine from the secret vault.
     pub async fn append_worm_audit_record(
@@ -1363,6 +1452,37 @@ impl DatabaseEngine {
         let records = self.list_worm_audit_records(100_000, 0).await?;
         nuncio_core::verify_worm_chain(&records, &self.worm_key)
             .map_err(|e| DatabaseError::ChainIntegrityFailed(e.to_string()))
+    }
+
+    /// Re-verify the entire WORM audit ledger and report a structured
+    /// result (backlog story 2.B, GH #172), rather than the opaque
+    /// pass/fail `Result` [`Self::verify_worm_audit_chain`] returns -- so
+    /// callers (e.g. the `Audit/VerifyChain` gRPC RPC) can honestly report
+    /// exactly how many records were checked and, if the chain is broken,
+    /// exactly which sequence broke it. `first_broken_seq` is populated ONLY
+    /// when the underlying failure is a genuine
+    /// `WormAuditError::TamperingDetected` (a specific record's HMAC or
+    /// chain linkage did not verify) -- never guessed. Any other failure
+    /// (e.g. a signing error) fails closed as `Err`, never reported as a
+    /// fabricated `valid: false`.
+    pub async fn verify_worm_audit_chain_report(&self) -> Result<WormChainReport, DatabaseError> {
+        let records = self.list_worm_audit_records(100_000, 0).await?;
+        let record_count = records.len();
+        match nuncio_core::verify_worm_chain(&records, &self.worm_key) {
+            Ok(()) => Ok(WormChainReport {
+                valid: true,
+                record_count,
+                first_broken_seq: None,
+            }),
+            Err(nuncio_core::WormAuditError::TamperingDetected { sequence, .. }) => {
+                Ok(WormChainReport {
+                    valid: false,
+                    record_count,
+                    first_broken_seq: Some(sequence),
+                })
+            }
+            Err(e) => Err(DatabaseError::ChainIntegrityFailed(e.to_string())),
+        }
     }
 
     /// Export a collection of email messages to a target output path in the requested portable format.
@@ -2042,5 +2162,159 @@ mod tests {
             !is_valid,
             "an independently-vaulted engine must not validate another vault's ledger chain"
         );
+    }
+
+    fn export_test_email(id: &str, account_id: &str, folder_id: &str) -> nuncio_core::model::Email {
+        nuncio_core::model::Email {
+            id: id.to_string(),
+            account_id: account_id.to_string(),
+            folder_id: folder_id.to_string(),
+            subject: format!("Subject {id}"),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1_700_000_000,
+            read: false,
+            body_plain: Some(format!("Body {id}")),
+            body_html: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_messages_for_export_with_no_filters_returns_every_message() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        engine
+            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
+            .await
+            .unwrap();
+        engine
+            .save_email(&export_test_email("msg-2", "acct-b", "archive"))
+            .await
+            .unwrap();
+
+        let all = engine.list_messages_for_export(None, None).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, "msg-1");
+        assert_eq!(all[1].id, "msg-2");
+    }
+
+    #[tokio::test]
+    async fn list_messages_for_export_filters_by_account_id() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        engine
+            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
+            .await
+            .unwrap();
+        engine
+            .save_email(&export_test_email("msg-2", "acct-b", "inbox"))
+            .await
+            .unwrap();
+
+        let scoped = engine
+            .list_messages_for_export(Some("acct-a"), None)
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, "msg-1");
+    }
+
+    #[tokio::test]
+    async fn list_messages_for_export_filters_by_folder_id() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        engine
+            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
+            .await
+            .unwrap();
+        engine
+            .save_email(&export_test_email("msg-2", "acct-a", "archive"))
+            .await
+            .unwrap();
+
+        let scoped = engine
+            .list_messages_for_export(None, Some("archive"))
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, "msg-2");
+    }
+
+    #[tokio::test]
+    async fn list_messages_for_export_filters_by_account_and_folder_together() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        engine
+            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
+            .await
+            .unwrap();
+        engine
+            .save_email(&export_test_email("msg-2", "acct-a", "archive"))
+            .await
+            .unwrap();
+        engine
+            .save_email(&export_test_email("msg-3", "acct-b", "inbox"))
+            .await
+            .unwrap();
+
+        let scoped = engine
+            .list_messages_for_export(Some("acct-a"), Some("inbox"))
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, "msg-1");
+    }
+
+    #[tokio::test]
+    async fn verify_worm_audit_chain_report_reports_valid_on_an_intact_chain() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        engine
+            .append_worm_audit_record("system.test", "action.one", b"payload-1")
+            .await
+            .unwrap();
+        engine
+            .append_worm_audit_record("system.test", "action.two", b"payload-2")
+            .await
+            .unwrap();
+
+        let report = engine.verify_worm_audit_chain_report().await.unwrap();
+        assert!(report.valid);
+        assert_eq!(report.record_count, 2);
+        assert_eq!(report.first_broken_seq, None);
+    }
+
+    #[tokio::test]
+    async fn verify_worm_audit_chain_report_reports_empty_chain_as_valid() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let report = engine.verify_worm_audit_chain_report().await.unwrap();
+        assert!(report.valid);
+        assert_eq!(report.record_count, 0);
+        assert_eq!(report.first_broken_seq, None);
+    }
+
+    #[tokio::test]
+    async fn verify_worm_audit_chain_report_reports_first_broken_seq_on_a_vault_key_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("worm_report_mismatch_test.sqlite");
+
+        let secrets_a = crate::vault::SecretManager::mock();
+        let engine_a = DatabaseEngine::connect_file(&db_path, &secrets_a)
+            .await
+            .expect("engine_a connects");
+        engine_a
+            .append_worm_audit_record("system.test", "action.one", b"payload-1")
+            .await
+            .expect("record signed with engine_a's vault key");
+        engine_a.close().await;
+
+        let secrets_b = crate::vault::SecretManager::mock();
+        let engine_b = DatabaseEngine::connect_file(&db_path, &secrets_b)
+            .await
+            .expect("engine_b connects to the same file with an independent vault");
+
+        let report = engine_b
+            .verify_worm_audit_chain_report()
+            .await
+            .expect("verification query succeeds (an invalid chain is a normal result)");
+        assert!(!report.valid);
+        assert_eq!(report.record_count, 1);
+        assert_eq!(report.first_broken_seq, Some(1));
     }
 }

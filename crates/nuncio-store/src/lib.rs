@@ -10,7 +10,7 @@ pub mod search;
 pub mod vault;
 
 pub use cipher::{CipherError, PayloadCipher};
-pub use db::{DatabaseEngine, DatabaseError};
+pub use db::{DatabaseEngine, DatabaseError, WormChainReport};
 pub use recovery::{
     is_sqlite_corruption_error, CorruptedBackupManager, RecoverySummary, SqliteRecoveryEngine,
 };

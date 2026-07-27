@@ -11,23 +11,27 @@ use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
 use nuncio_mail::{MailBackend, MessageSender};
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
+use nuncio_proto::v1::audit_server::{Audit, AuditServer};
 use nuncio_proto::v1::event::Kind;
+use nuncio_proto::v1::export_server::{Export, ExportServer};
 use nuncio_proto::v1::filters_server::{Filters, FiltersServer};
 use nuncio_proto::v1::mail_server::{Mail, MailServer};
 use nuncio_proto::v1::system_server::{System, SystemServer};
 use nuncio_proto::v1::{
-    AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
-    AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto, BatchFilterProgress,
-    CreateRuleRequest, CreateRuleResponse, DatabaseRecovered, DeleteRuleRequest,
-    DeleteRuleResponse, Event, EventError, FilterExecuted, FilterRule as FilterRuleProto,
-    Folder as FolderProto, GetMessageRequest, GetMessageResponse, GetStatusRequest,
-    GetStatusResponse, ListAccountsRequest, ListAccountsResponse, ListFoldersRequest,
-    ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, ListRulesRequest,
-    ListRulesResponse, MarkReadRequest, MarkReadResponse, Message as MessageProto,
-    MessageFlagsChanged, MessageSearchHit, PreviewRuleRequest, PreviewRuleResponse,
-    SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest, SendMessageResponse,
-    ShuttingDown, SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse, SyncStarted,
-    TlsMode as TlsModeProto, UpdateAvailable, ValidateRuleRequest, ValidateRuleResponse,
+    export_request, AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
+    AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto,
+    AuditRecord as AuditRecordProto, BatchFilterProgress, CreateRuleRequest, CreateRuleResponse,
+    DatabaseRecovered, DeleteRuleRequest, DeleteRuleResponse, Event, EventError,
+    ExportFormat as ExportFormatProto, ExportRequest, ExportResponse, FilterExecuted,
+    FilterRule as FilterRuleProto, Folder as FolderProto, GetMessageRequest, GetMessageResponse,
+    GetStatusRequest, GetStatusResponse, ListAccountsRequest, ListAccountsResponse,
+    ListFoldersRequest, ListFoldersResponse, ListMessagesRequest, ListMessagesResponse,
+    ListRecordsRequest, ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest,
+    MarkReadResponse, Message as MessageProto, MessageFlagsChanged, MessageSearchHit,
+    PreviewRuleRequest, PreviewRuleResponse, SearchMessagesRequest, SearchMessagesResponse,
+    SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
+    SyncRequest, SyncResponse, SyncStarted, TlsMode as TlsModeProto, UpdateAvailable,
+    ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -906,6 +910,157 @@ impl Filters for FiltersGrpcService {
     }
 }
 
+/// Maps a wire-format `nuncio.v1.ExportFormat` enum value back onto
+/// `nuncio_core::ExportFormat`. `Unspecified` is rejected rather than
+/// silently defaulting to a format the caller never asked for.
+fn map_export_format_from_proto(
+    format: ExportFormatProto,
+) -> Result<nuncio_core::ExportFormat, Status> {
+    match format {
+        ExportFormatProto::Mbox => Ok(nuncio_core::ExportFormat::Mbox),
+        ExportFormatProto::EmlZip => Ok(nuncio_core::ExportFormat::EmlZip),
+        ExportFormatProto::Json => Ok(nuncio_core::ExportFormat::Json),
+        ExportFormatProto::Jsonl => Ok(nuncio_core::ExportFormat::JsonLines),
+        ExportFormatProto::Unspecified => {
+            Err(Status::invalid_argument("export format is required"))
+        }
+    }
+}
+
+/// `nuncio.v1.Export` gRPC service implementation backed by the daemon's
+/// live [`DatabaseEngine`] (backlog story 2.B, GH #172): loads messages via
+/// [`DatabaseEngine::list_messages_for_export`] (scoped by `account_id`,
+/// `folder_id`, or unscoped for "every message"), then writes them to
+/// `output_path` on the local host via
+/// [`DatabaseEngine::export_messages_to_file`] -- the SAME real
+/// `nuncio_core::export::ExportEngine` `nuncio-cli`'s previous local-only
+/// export path used, now reachable over the authenticated gRPC API against
+/// the daemon's real, persistent store. `export_messages_to_file` also
+/// appends a WORM audit record for the export as a side effect, so every
+/// export is itself auditable via `Audit`.
+struct ExportGrpcService {
+    db: Arc<DatabaseEngine>,
+}
+
+#[tonic::async_trait]
+impl Export for ExportGrpcService {
+    async fn export_mailbox(
+        &self,
+        request: Request<ExportRequest>,
+    ) -> Result<Response<ExportResponse>, Status> {
+        let req = request.into_inner();
+        if req.output_path.trim().is_empty() {
+            return Err(Status::invalid_argument("output_path is required"));
+        }
+        let format = map_export_format_from_proto(req.format())?;
+
+        let messages = match req.scope {
+            Some(export_request::Scope::AccountId(account_id)) => {
+                self.db
+                    .list_messages_for_export(Some(&account_id), None)
+                    .await
+            }
+            Some(export_request::Scope::FolderId(folder_id)) => {
+                self.db
+                    .list_messages_for_export(None, Some(&folder_id))
+                    .await
+            }
+            None => self.db.list_messages_for_export(None, None).await,
+        }
+        .map_err(|e| Status::internal(format!("failed to load messages for export: {e}")))?;
+
+        let output_path = std::path::PathBuf::from(&req.output_path);
+        let summary = self
+            .db
+            .export_messages_to_file(&messages, format, &output_path)
+            .await
+            .map_err(|e| Status::internal(format!("export failed: {e}")))?;
+
+        Ok(Response::new(ExportResponse {
+            output_path: summary.output_path,
+            message_count: summary.message_count as u64,
+            bytes_written: summary.bytes_written,
+        }))
+    }
+}
+
+/// Default cap on records returned by `Audit/ListRecords` when the caller
+/// supplies `limit: 0` ("use the server default").
+const DEFAULT_LIST_RECORDS_LIMIT: u32 = 100;
+
+/// Maps a `nuncio_core::WormAuditRecord` onto its wire-format
+/// `nuncio.v1.AuditRecord` representation. `record_hmac` is a verification
+/// MAC output, never the WORM HMAC signing key itself -- see the message's
+/// doc comment in `proto/nuncio/v1/nuncio.proto`.
+fn map_audit_record_to_proto(record: nuncio_core::WormAuditRecord) -> AuditRecordProto {
+    AuditRecordProto {
+        sequence: record.sequence,
+        timestamp_ns: record.timestamp_ns,
+        actor: record.actor,
+        action: record.action,
+        data_hash: record.data_hash,
+        previous_block_hash: record.previous_block_hash,
+        record_hmac: record.record_hmac,
+    }
+}
+
+/// `nuncio.v1.Audit` gRPC service implementation backed by the daemon's
+/// live [`DatabaseEngine`] WORM audit ledger (backlog story 2.B, GH #172).
+/// A read/verify-only surface -- there is no RPC here to create or mutate
+/// records, since the ledger is written internally by the daemon as a side
+/// effect of other operations (see `ExportGrpcService`).
+struct AuditGrpcService {
+    db: Arc<DatabaseEngine>,
+}
+
+#[tonic::async_trait]
+impl Audit for AuditGrpcService {
+    async fn list_records(
+        &self,
+        request: Request<ListRecordsRequest>,
+    ) -> Result<Response<ListRecordsResponse>, Status> {
+        let req = request.into_inner();
+        let limit = if req.limit == 0 {
+            DEFAULT_LIST_RECORDS_LIMIT
+        } else {
+            req.limit
+        };
+
+        let records = self
+            .db
+            .list_worm_audit_records(limit, req.offset)
+            .await
+            .map_err(|e| Status::internal(format!("failed to list audit records: {e}")))?
+            .into_iter()
+            .map(map_audit_record_to_proto)
+            .collect();
+
+        Ok(Response::new(ListRecordsResponse { records }))
+    }
+
+    /// Re-verifies the ENTIRE persisted WORM audit ledger via
+    /// [`DatabaseEngine::verify_worm_audit_chain_report`], using the ledger's
+    /// real WORM HMAC key. Never fabricates `valid: true`; a genuine
+    /// signing/crypto failure (as opposed to a specific broken record) is
+    /// surfaced as `Status::internal` rather than a false `valid: false`.
+    async fn verify_chain(
+        &self,
+        _request: Request<VerifyChainRequest>,
+    ) -> Result<Response<VerifyChainResponse>, Status> {
+        let report = self
+            .db
+            .verify_worm_audit_chain_report()
+            .await
+            .map_err(|e| Status::internal(format!("failed to verify audit chain: {e}")))?;
+
+        Ok(Response::new(VerifyChainResponse {
+            valid: report.valid,
+            record_count: report.record_count as u64,
+            first_broken_seq: report.first_broken_seq,
+        }))
+    }
+}
+
 /// Bearer-token authentication interceptor for the loopback `nuncio.v1` gRPC
 /// server.
 ///
@@ -953,9 +1108,9 @@ impl tonic::service::Interceptor for BearerAuthInterceptor {
 }
 
 /// Binds a loopback TCP listener at `addr` and serves the `nuncio.v1.System`,
-/// `nuncio.v1.Accounts`, `nuncio.v1.Mail`, and `nuncio.v1.Filters` gRPC
-/// services on it, all authenticated by `token`, until the transport server
-/// errors.
+/// `nuncio.v1.Accounts`, `nuncio.v1.Mail`, `nuncio.v1.Filters`,
+/// `nuncio.v1.Export`, and `nuncio.v1.Audit` gRPC services on it, all
+/// authenticated by `token`, until the transport server errors.
 ///
 /// `addr` MUST be a loopback address (e.g. `127.0.0.1:PORT`); callers are
 /// responsible for passing loopback-only addresses (see
@@ -977,8 +1132,9 @@ pub async fn serve(
     serve_on_listener(listener, event_bus, db, filter_engine, secrets, token).await
 }
 
-/// Serves the `nuncio.v1.System`, `nuncio.v1.Accounts`, `nuncio.v1.Mail`, and
-/// `nuncio.v1.Filters` gRPC services on an already-bound [`TcpListener`].
+/// Serves the `nuncio.v1.System`, `nuncio.v1.Accounts`, `nuncio.v1.Mail`,
+/// `nuncio.v1.Filters`, `nuncio.v1.Export`, and `nuncio.v1.Audit` gRPC
+/// services on an already-bound [`TcpListener`].
 ///
 /// # Security (GH #165)
 ///
@@ -1063,15 +1219,36 @@ pub async fn serve_on_listener_with_overrides(
     // `BearerAuthInterceptor`, exactly like `System`/`Accounts`/`Mail` above
     // -- see the hard invariant documented on this function's doc comment
     // (GH #165).
-    let filters_service = FiltersGrpcService { db, filter_engine };
-    let filters_interceptor = BearerAuthInterceptor::new(token);
+    let filters_service = FiltersGrpcService {
+        db: db.clone(),
+        filter_engine,
+    };
+    let filters_interceptor = BearerAuthInterceptor::new(token.clone());
     let filters_svc = FiltersServer::with_interceptor(filters_service, filters_interceptor);
+
+    // Export (backlog story 2.B, GH #172): mounted behind its own
+    // `BearerAuthInterceptor`, exactly like every other service above --
+    // see the hard invariant documented on this function's doc comment
+    // (GH #165).
+    let export_service = ExportGrpcService { db: db.clone() };
+    let export_interceptor = BearerAuthInterceptor::new(token.clone());
+    let export_svc = ExportServer::with_interceptor(export_service, export_interceptor);
+
+    // Audit (backlog story 2.B, GH #172): mounted behind its own
+    // `BearerAuthInterceptor`, exactly like every other service above --
+    // see the hard invariant documented on this function's doc comment
+    // (GH #165).
+    let audit_service = AuditGrpcService { db };
+    let audit_interceptor = BearerAuthInterceptor::new(token);
+    let audit_svc = AuditServer::with_interceptor(audit_service, audit_interceptor);
 
     Server::builder()
         .add_service(system_svc)
         .add_service(accounts_svc)
         .add_service(mail_svc)
         .add_service(filters_svc)
+        .add_service(export_svc)
+        .add_service(audit_svc)
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await
         .map_err(GrpcServeError::Transport)
@@ -2844,5 +3021,373 @@ mod tests {
             .await
             .expect_err("invalid NSQL must be rejected");
         assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    // ---- Export (backlog story 2.B, GH #172) ----
+
+    use nuncio_proto::v1::export_client::ExportClient;
+
+    #[tokio::test]
+    async fn export_rpcs_reject_missing_bearer_token() {
+        // Confirms `Export` is mounted behind its own `BearerAuthInterceptor`
+        // exactly like every other service (GH #165: no un-intercepted
+        // service).
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = ExportClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .export_mailbox(ExportRequest {
+                scope: None,
+                format: ExportFormatProto::Json.into(),
+                output_path: "irrelevant.json".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn export_mailbox_rejects_empty_output_path() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = ExportClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .export_mailbox(authed_bearer_request(ExportRequest {
+                scope: None,
+                format: ExportFormatProto::Json.into(),
+                output_path: String::new(),
+            }))
+            .await
+            .expect_err("empty output_path must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn export_mailbox_rejects_unspecified_format() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = ExportClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .export_mailbox(authed_bearer_request(ExportRequest {
+                scope: None,
+                format: ExportFormatProto::Unspecified.into(),
+                output_path: "irrelevant.json".to_string(),
+            }))
+            .await
+            .expect_err("unspecified format must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    /// Backlog story 2.B (GH #172): seeds the daemon's real store with
+    /// messages directly via `DatabaseEngine::save_email` (the same write
+    /// path `Mail`'s own tests use), then proves `ExportMailbox` writes a
+    /// REAL file to `output_path` with the expected message/byte counts,
+    /// and that the file's actual content contains the seeded messages --
+    /// never a fabricated summary.
+    #[tokio::test]
+    async fn export_mailbox_writes_a_real_file_with_the_expected_seeded_messages() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        db.save_email(&sample_email(
+            "msg-export-1",
+            "inbox",
+            "Export Subject One",
+            "Export body one",
+        ))
+        .await
+        .expect("seed message 1");
+        db.save_email(&sample_email(
+            "msg-export-2",
+            "archive",
+            "Export Subject Two",
+            "Export body two",
+        ))
+        .await
+        .expect("seed message 2");
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = ExportClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let out_dir = tempfile::tempdir().expect("create temp export dir");
+        let out_path = out_dir.path().join("export.json");
+
+        let response = client
+            .export_mailbox(authed_bearer_request(ExportRequest {
+                scope: None,
+                format: ExportFormatProto::Json.into(),
+                output_path: out_path.to_string_lossy().to_string(),
+            }))
+            .await
+            .expect("export_mailbox succeeds")
+            .into_inner();
+
+        assert_eq!(response.message_count, 2);
+        assert!(response.bytes_written > 0);
+        assert_eq!(response.output_path, out_path.to_string_lossy().to_string());
+
+        let written = std::fs::read_to_string(&out_path).expect("export file was written");
+        assert!(written.contains("Export Subject One"));
+        assert!(written.contains("Export Subject Two"));
+        assert_eq!(written.len() as u64, response.bytes_written);
+    }
+
+    /// Proves `ExportRequest.scope`'s `account_id` case narrows the export
+    /// to just that account's messages -- the daemon's `Export` gRPC layer
+    /// wiring for `DatabaseEngine::list_messages_for_export`'s account
+    /// filter, not just its own already-covered unit tests.
+    #[tokio::test]
+    async fn export_mailbox_scopes_by_account_id() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let mut msg_a = sample_email("msg-acct-a", "inbox", "From Account A", "Body A");
+        msg_a.account_id = "acct-a".to_string();
+        db.save_email(&msg_a).await.expect("seed account a message");
+        let mut msg_b = sample_email("msg-acct-b", "inbox", "From Account B", "Body B");
+        msg_b.account_id = "acct-b".to_string();
+        db.save_email(&msg_b).await.expect("seed account b message");
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = ExportClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let out_dir = tempfile::tempdir().expect("create temp export dir");
+        let out_path = out_dir.path().join("scoped.jsonl");
+
+        let response = client
+            .export_mailbox(authed_bearer_request(ExportRequest {
+                scope: Some(export_request::Scope::AccountId("acct-a".to_string())),
+                format: ExportFormatProto::Jsonl.into(),
+                output_path: out_path.to_string_lossy().to_string(),
+            }))
+            .await
+            .expect("export_mailbox succeeds")
+            .into_inner();
+
+        assert_eq!(response.message_count, 1);
+        let written = std::fs::read_to_string(&out_path).expect("export file was written");
+        assert!(written.contains("From Account A"));
+        assert!(!written.contains("From Account B"));
+    }
+
+    // ---- Audit (backlog story 2.B, GH #172) ----
+
+    use nuncio_proto::v1::audit_client::AuditClient;
+
+    #[tokio::test]
+    async fn audit_rpcs_reject_missing_bearer_token() {
+        // Confirms `Audit` is mounted behind its own `BearerAuthInterceptor`
+        // exactly like every other service (GH #165: no un-intercepted
+        // service).
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AuditClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .list_records(ListRecordsRequest {
+                limit: 10,
+                offset: 0,
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .verify_chain(VerifyChainRequest {})
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    /// Seeds the daemon's real WORM audit ledger directly via
+    /// `DatabaseEngine::append_worm_audit_record`, then proves
+    /// `Audit/ListRecords` returns the REAL seeded records, sequence
+    /// ascending, with a non-empty `record_hmac` -- never a fabricated
+    /// list.
+    #[tokio::test]
+    async fn list_records_returns_seeded_worm_audit_records_in_sequence_order() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        db.append_worm_audit_record("system.test", "test.action.one", b"payload-one")
+            .await
+            .expect("append first audit record");
+        db.append_worm_audit_record("system.test", "test.action.two", b"payload-two")
+            .await
+            .expect("append second audit record");
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = AuditClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let response = client
+            .list_records(authed_bearer_request(ListRecordsRequest {
+                limit: 0,
+                offset: 0,
+            }))
+            .await
+            .expect("list_records succeeds")
+            .into_inner();
+
+        assert_eq!(response.records.len(), 2);
+        assert_eq!(response.records[0].sequence, 1);
+        assert_eq!(response.records[0].action, "test.action.one");
+        assert_eq!(response.records[0].previous_block_hash, "GENESIS");
+        assert!(!response.records[0].record_hmac.is_empty());
+        assert_eq!(response.records[1].sequence, 2);
+        assert_eq!(response.records[1].action, "test.action.two");
+    }
+
+    /// Proves `Audit/VerifyChain` reports `valid: true` and the real
+    /// record count on an intact, honestly-signed chain -- never a
+    /// fabricated `valid`.
+    #[tokio::test]
+    async fn verify_chain_reports_valid_true_on_an_intact_chain() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        db.append_worm_audit_record("system.test", "test.action.one", b"payload-one")
+            .await
+            .expect("append first audit record");
+        db.append_worm_audit_record("system.test", "test.action.two", b"payload-two")
+            .await
+            .expect("append second audit record");
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = AuditClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let response = client
+            .verify_chain(authed_bearer_request(VerifyChainRequest {}))
+            .await
+            .expect("verify_chain succeeds")
+            .into_inner();
+
+        assert!(response.valid);
+        assert_eq!(response.record_count, 2);
+        assert_eq!(response.first_broken_seq, None);
+    }
+
+    /// Proves `Audit/VerifyChain` honestly reports `valid: false` (with the
+    /// exact broken sequence) when the persisted ledger was signed with a
+    /// DIFFERENT WORM HMAC key than the one this engine instance was
+    /// provisioned with -- the same cross-vault mismatch scenario
+    /// `nuncio_store::db`'s own `worm_audit_key_is_vault_sourced_not_a_shared_default`
+    /// / `verify_worm_audit_chain_report_reports_first_broken_seq_on_a_vault_key_mismatch`
+    /// tests prove at the `DatabaseEngine` layer, exercised here end-to-end
+    /// over the authenticated gRPC API. The ledger's `UPDATE`/`DELETE`
+    /// triggers make it impossible to tamper with an existing record
+    /// in-place, so a mismatched vault key is the realistic way a
+    /// persisted chain becomes "invalid" without bypassing the store's own
+    /// immutability guarantees.
+    #[tokio::test]
+    async fn verify_chain_reports_invalid_and_first_broken_seq_on_a_vault_key_mismatch() {
+        let dir = tempfile::tempdir().expect("create persistent temp dir");
+        let db_path = dir.path().join("audit_mismatch_test.db");
+
+        let secrets_a = Arc::new(SecretManager::mock());
+        let db_a = DatabaseEngine::connect_file(&db_path, &secrets_a)
+            .await
+            .expect("open db with vault a");
+        db_a.append_worm_audit_record("system.test", "test.action.one", b"payload-one")
+            .await
+            .expect("append audit record signed with vault a's key");
+        db_a.close().await;
+
+        // "Restart" against the SAME on-disk database file, but with a
+        // DIFFERENT mock vault -- so the WORM HMAC key resolved for this
+        // second engine instance does not match the key that actually
+        // signed the persisted record.
+        let secrets_b = Arc::new(SecretManager::mock());
+        let db_b = DatabaseEngine::connect_file(&db_path, &secrets_b)
+            .await
+            .expect("open db with vault b");
+
+        let event_bus = Arc::new(EventBus::new());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db_b),
+            filter_engine,
+            secrets_b,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = AuditClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let response = client
+            .verify_chain(authed_bearer_request(VerifyChainRequest {}))
+            .await
+            .expect("verify_chain succeeds (a broken chain is a normal result, not an RPC error)")
+            .into_inner();
+
+        assert!(!response.valid);
+        assert_eq!(response.record_count, 1);
+        assert_eq!(response.first_broken_seq, Some(1));
     }
 }

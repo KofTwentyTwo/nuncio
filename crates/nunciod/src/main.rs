@@ -380,8 +380,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let grpc_token = hex::encode(grpc_token_bytes);
     let grpc_addr = nunciod::grpc::grpc_addr_from_env();
     tracing::info!(
-        "nunciod gRPC (nuncio.v1.System, nuncio.v1.Accounts, nuncio.v1.Mail, nuncio.v1.Filters) \
-         starting on {} (loopback only)",
+        "nunciod gRPC (nuncio.v1.System, nuncio.v1.Accounts, nuncio.v1.Mail, nuncio.v1.Filters, \
+         nuncio.v1.Export, nuncio.v1.Audit) starting on {} (loopback only)",
         grpc_addr
     );
     let grpc_event_bus = event_bus.clone();

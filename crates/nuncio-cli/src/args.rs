@@ -302,6 +302,35 @@ pub enum MailSubcommand {
         #[arg(long, help = "Mark the message as unread", conflicts_with = "read")]
         unread: bool,
     },
+    /// Export mailbox messages to a portable file format (backlog story
+    /// 2.B, GH #172): MBOX, an EML zip archive, JSON, or JSON Lines.
+    Export {
+        /// Export format (mbox, eml, json, or jsonl).
+        #[arg(
+            short = 'f',
+            long,
+            default_value = "mbox",
+            help = "Export format (mbox, eml, json, jsonl)"
+        )]
+        format: String,
+        /// Destination output file path, on the daemon's host filesystem.
+        #[arg(short = 'o', long, help = "Destination output file path")]
+        out: String,
+        /// Restrict the export to a single account's messages.
+        #[arg(
+            long,
+            help = "Restrict export to a single account ID",
+            conflicts_with = "folder"
+        )]
+        account: Option<String>,
+        /// Restrict the export to a single folder's messages.
+        #[arg(
+            long,
+            help = "Restrict export to a single folder ID",
+            conflicts_with = "account"
+        )]
+        folder: Option<String>,
+    },
 }
 
 /// Folder subcommands (`nuncio folder <verb>`).
@@ -328,6 +357,31 @@ pub enum CalSubcommand {
 pub enum SystemSubcommand {
     /// Display system, daemon, and event bus status.
     Status,
+    /// WORM (Write Once, Read Many) tamper-evident audit ledger operations
+    /// (`nuncio system audit <verb>`, backlog story 2.B, GH #172).
+    Audit {
+        #[command(subcommand)]
+        action: AuditSubcommand,
+    },
+}
+
+/// Audit subcommands (`nuncio system audit <verb>`, backlog story 2.B,
+/// GH #172).
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuditSubcommand {
+    /// List persisted WORM audit ledger records, sequence ascending.
+    List {
+        /// Max records to fetch (0 = server default).
+        #[arg(short, long, default_value_t = 50, help = "Max records to fetch")]
+        limit: u32,
+        /// Pagination offset.
+        #[arg(short, long, default_value_t = 0, help = "Pagination offset")]
+        offset: u32,
+    },
+    /// Verify the WORM audit ledger's cryptographic HMAC hash-chain
+    /// integrity.
+    Verify,
 }
 
 /// Filter subcommands (`nuncio filter <verb>`).
@@ -497,6 +551,110 @@ mod tests {
             "nuncio", "mail", "mark", "--id", "msg-123", "--read", "--unread",
         ]);
         assert!(conflict.is_err());
+    }
+
+    #[test]
+    fn parse_pure_noun_verb_mail_export_command() {
+        let cli_export = Cli::parse_from([
+            "nuncio",
+            "mail",
+            "export",
+            "--format",
+            "json",
+            "--out",
+            "/tmp/out.json",
+        ]);
+        assert_eq!(
+            cli_export.command,
+            Commands::Mail {
+                action: MailSubcommand::Export {
+                    format: "json".to_string(),
+                    out: "/tmp/out.json".to_string(),
+                    account: None,
+                    folder: None,
+                }
+            }
+        );
+
+        let cli_export_scoped = Cli::parse_from([
+            "nuncio",
+            "mail",
+            "export",
+            "--format",
+            "jsonl",
+            "--out",
+            "/tmp/scoped.jsonl",
+            "--account",
+            "acct-1",
+        ]);
+        assert_eq!(
+            cli_export_scoped.command,
+            Commands::Mail {
+                action: MailSubcommand::Export {
+                    format: "jsonl".to_string(),
+                    out: "/tmp/scoped.jsonl".to_string(),
+                    account: Some("acct-1".to_string()),
+                    folder: None,
+                }
+            }
+        );
+
+        // `--account` and `--folder` are mutually exclusive at the Clap
+        // level -- an export scope is either "one account", "one folder",
+        // or (neither flag) "everything".
+        let conflict = Cli::try_parse_from([
+            "nuncio",
+            "mail",
+            "export",
+            "--out",
+            "/tmp/out.json",
+            "--account",
+            "acct-1",
+            "--folder",
+            "inbox",
+        ]);
+        assert!(conflict.is_err());
+    }
+
+    #[test]
+    fn parse_pure_noun_verb_system_audit_commands() {
+        let cli_list = Cli::parse_from(["nuncio", "system", "audit", "list"]);
+        assert_eq!(
+            cli_list.command,
+            Commands::System {
+                action: SystemSubcommand::Audit {
+                    action: AuditSubcommand::List {
+                        limit: 50,
+                        offset: 0,
+                    }
+                }
+            }
+        );
+
+        let cli_list_paged = Cli::parse_from([
+            "nuncio", "system", "audit", "list", "--limit", "10", "--offset", "5",
+        ]);
+        assert_eq!(
+            cli_list_paged.command,
+            Commands::System {
+                action: SystemSubcommand::Audit {
+                    action: AuditSubcommand::List {
+                        limit: 10,
+                        offset: 5,
+                    }
+                }
+            }
+        );
+
+        let cli_verify = Cli::parse_from(["nuncio", "system", "audit", "verify"]);
+        assert_eq!(
+            cli_verify.command,
+            Commands::System {
+                action: SystemSubcommand::Audit {
+                    action: AuditSubcommand::Verify
+                }
+            }
+        );
     }
 
     #[test]

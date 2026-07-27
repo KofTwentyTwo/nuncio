@@ -8,8 +8,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::args::{
-    AccountSubcommand, CalSubcommand, Commands, ContactSubcommand, FilterSubcommand,
-    FolderSubcommand, MailSubcommand, SystemSubcommand, UpdateSubcommand,
+    AccountSubcommand, AuditSubcommand, CalSubcommand, Commands, ContactSubcommand,
+    FilterSubcommand, FolderSubcommand, MailSubcommand, SystemSubcommand, UpdateSubcommand,
 };
 
 use crate::output::{format_json, format_json_error};
@@ -54,6 +54,34 @@ fn message_proto_to_json(message: &nuncio_proto::v1::Message) -> serde_json::Val
         "read": message.read,
         "body_plain": message.body_plain,
         "body_html": message.body_html,
+    })
+}
+
+/// Maps a `nuncio_core::export::ExportFormat` onto its wire-format
+/// `nuncio.v1.ExportFormat` enum value, mirroring `nunciod::grpc`'s
+/// server-side mapping (backlog story 2.B, GH #172).
+fn map_export_format_to_proto(format: nuncio_core::ExportFormat) -> nuncio_proto::v1::ExportFormat {
+    match format {
+        nuncio_core::ExportFormat::Mbox => nuncio_proto::v1::ExportFormat::Mbox,
+        nuncio_core::ExportFormat::EmlZip => nuncio_proto::v1::ExportFormat::EmlZip,
+        nuncio_core::ExportFormat::Json => nuncio_proto::v1::ExportFormat::Json,
+        nuncio_core::ExportFormat::JsonLines => nuncio_proto::v1::ExportFormat::Jsonl,
+    }
+}
+
+/// Renders a `nuncio.v1.AuditRecord` (as returned by the daemon's `Audit`
+/// gRPC service, backlog story 2.B / GH #172) into the JSON shape used by
+/// `system audit list`'s `--json` output. `record_hmac` is a verification
+/// MAC output, never secret key material, so it is safe to include here.
+fn audit_record_proto_to_json(record: &nuncio_proto::v1::AuditRecord) -> serde_json::Value {
+    json!({
+        "sequence": record.sequence,
+        "timestamp_ns": record.timestamp_ns,
+        "actor": record.actor,
+        "action": record.action,
+        "data_hash": record.data_hash,
+        "previous_block_hash": record.previous_block_hash,
+        "record_hmac": record.record_hmac,
     })
 }
 
@@ -236,6 +264,21 @@ impl HeadlessRunner {
                 MailSubcommand::Mark { id, read, unread } => {
                     self.handle_mark_read(id, *read, *unread, json_mode).await
                 }
+                MailSubcommand::Export {
+                    format,
+                    out,
+                    account,
+                    folder,
+                } => {
+                    self.handle_mail_export(
+                        format,
+                        out,
+                        account.as_deref(),
+                        folder.as_deref(),
+                        json_mode,
+                    )
+                    .await
+                }
             },
             Commands::Banner => {
                 crate::output::print_splash_banner();
@@ -319,6 +362,12 @@ impl HeadlessRunner {
             },
             Commands::System { action } => match action {
                 SystemSubcommand::Status => self.handle_system_status(json_mode).await,
+                SystemSubcommand::Audit { action } => match action {
+                    AuditSubcommand::List { limit, offset } => {
+                        self.handle_audit_list(*limit, *offset, json_mode).await
+                    }
+                    AuditSubcommand::Verify => self.handle_audit_verify(json_mode).await,
+                },
             },
             Commands::Contact { action } => match action {
                 ContactSubcommand::List => {
@@ -939,6 +988,191 @@ impl HeadlessRunner {
                 json_mode,
             ),
         }
+    }
+
+    /// `mail export`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Export` API (backlog story 2.B, GH #172). The
+    /// daemon writes the export to `out` on ITS OWN host filesystem (the
+    /// same host this CLI runs on, in this local deployment) using the real
+    /// `nuncio_core::export::ExportEngine`, and reports back the real
+    /// message/byte counts it actually wrote -- never a fabricated
+    /// summary. `account`/`folder` are mutually exclusive (enforced both by
+    /// Clap's `conflicts_with` and the daemon's own oneof `scope`); leaving
+    /// both unset exports every message.
+    async fn handle_mail_export(
+        &self,
+        format: &str,
+        out: &str,
+        account: Option<&str>,
+        folder: Option<&str>,
+        json_mode: bool,
+    ) -> String {
+        let export_format = match format.parse::<nuncio_core::ExportFormat>() {
+            Ok(f) => f,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        let mut client = match self.connect_export_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        let scope = if let Some(account_id) = account {
+            Some(nuncio_proto::v1::export_request::Scope::AccountId(
+                account_id.to_string(),
+            ))
+        } else {
+            folder.map(|folder_id| {
+                nuncio_proto::v1::export_request::Scope::FolderId(folder_id.to_string())
+            })
+        };
+
+        match client
+            .export_mailbox(nuncio_proto::v1::ExportRequest {
+                scope,
+                format: map_export_format_to_proto(export_format).into(),
+                output_path: out.to_string(),
+            })
+            .await
+        {
+            Ok(response) => {
+                let resp = response.into_inner();
+                if json_mode {
+                    format_json(&json!({
+                        "output_path": resp.output_path,
+                        "message_count": resp.message_count,
+                        "bytes_written": resp.bytes_written,
+                    }))
+                } else {
+                    format!(
+                        "Exported {} message(s) to '{}' ({} bytes)",
+                        resp.message_count, resp.output_path, resp.bytes_written
+                    )
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected export_mailbox: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// `nuncio.v1.Export` service at `self.grpc_addr` (backlog story 2.B,
+    /// GH #172), shared by [`Self::handle_mail_export`].
+    async fn connect_export_client(
+        &self,
+    ) -> Result<nuncio_proto::client::AuthenticatedExportClient, String> {
+        let token_bytes = self
+            .secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
+        let token = hex::encode(token_bytes);
+
+        nuncio_proto::client::connect_export(&self.grpc_addr, &token)
+            .await
+            .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
+    }
+
+    /// `system audit list`: a real thin gRPC client of the running
+    /// `nunciod` daemon's `nuncio.v1.Audit` API (backlog story 2.B,
+    /// GH #172). Lists a page of the daemon's real, persisted WORM audit
+    /// ledger, sequence ascending.
+    async fn handle_audit_list(&self, limit: u32, offset: u32, json_mode: bool) -> String {
+        let mut client = match self.connect_audit_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .list_records(nuncio_proto::v1::ListRecordsRequest { limit, offset })
+            .await
+        {
+            Ok(response) => {
+                let records = response.into_inner().records;
+                if json_mode {
+                    let records_json: Vec<serde_json::Value> =
+                        records.iter().map(audit_record_proto_to_json).collect();
+                    format_json(&json!({ "records": records_json }))
+                } else if records.is_empty() {
+                    "No audit records recorded.".to_string()
+                } else {
+                    let mut out = String::from(
+                        "SEQ  ACTOR                ACTION               TIMESTAMP_NS\n",
+                    );
+                    for r in records {
+                        out.push_str(&format!(
+                            "{:<4} {:<20} {:<20} {}\n",
+                            r.sequence, r.actor, r.action, r.timestamp_ns
+                        ));
+                    }
+                    out
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected list_records: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `system audit verify`: a real thin gRPC client of the running
+    /// `nunciod` daemon's `nuncio.v1.Audit` API (backlog story 2.B,
+    /// GH #172). Re-verifies the ENTIRE persisted WORM audit ledger's
+    /// HMAC hash-chain integrity server-side, using the ledger's real WORM
+    /// HMAC key -- never fabricates a `valid` verdict.
+    async fn handle_audit_verify(&self, json_mode: bool) -> String {
+        let mut client = match self.connect_audit_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .verify_chain(nuncio_proto::v1::VerifyChainRequest {})
+            .await
+        {
+            Ok(response) => {
+                let resp = response.into_inner();
+                if json_mode {
+                    format_json(&json!({
+                        "valid": resp.valid,
+                        "record_count": resp.record_count,
+                        "first_broken_seq": resp.first_broken_seq,
+                    }))
+                } else if resp.valid {
+                    format!("Audit chain OK: {} record(s) verified.", resp.record_count)
+                } else {
+                    format!(
+                        "Audit chain TAMPERED: first broken at sequence {}.",
+                        resp.first_broken_seq
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    )
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected verify_chain: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// `nuncio.v1.Audit` service at `self.grpc_addr` (backlog story 2.B,
+    /// GH #172), shared by [`Self::handle_audit_list`] /
+    /// [`Self::handle_audit_verify`].
+    async fn connect_audit_client(
+        &self,
+    ) -> Result<nuncio_proto::client::AuthenticatedAuditClient, String> {
+        let token_bytes = self
+            .secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
+        let token = hex::encode(token_bytes);
+
+        nuncio_proto::client::connect_audit(&self.grpc_addr, &token)
+            .await
+            .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
     }
 
     /// `filter list`: a real thin gRPC client of the running `nunciod`
@@ -2445,6 +2679,310 @@ mod tests {
             .await;
         assert!(out.contains(r#""status":"error""#));
         assert!(out.contains("unreachable"));
+    }
+
+    /// Reference-client proof for backlog story 2.B (GH #172): boots a stub
+    /// `nuncio.v1.Export` gRPC server (mirroring
+    /// `system_status_reports_live_daemon_status_over_grpc_when_reachable`'s
+    /// `StubSystem` pattern above), recording the exact `ExportRequest` it
+    /// received, and drives the real `HeadlessRunner`'s `mail export` gRPC
+    /// client path against it. Real message/byte counts and file writing
+    /// are proven end-to-end by `nunciod`'s own `grpc::tests`; this test
+    /// exists purely to prove the CLI's connect + call + scope-mapping +
+    /// JSON-format happy path.
+    #[tokio::test]
+    async fn mail_export_round_trips_over_grpc_to_a_stub_daemon() {
+        use nuncio_proto::v1::export_server::{Export as ExportService, ExportServer};
+        use nuncio_proto::v1::{ExportRequest, ExportResponse};
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct StubExport {
+            last_request: Arc<Mutex<Option<ExportRequest>>>,
+        }
+
+        #[tonic::async_trait]
+        impl ExportService for StubExport {
+            async fn export_mailbox(
+                &self,
+                request: tonic::Request<ExportRequest>,
+            ) -> Result<tonic::Response<ExportResponse>, tonic::Status> {
+                let req = request.into_inner();
+                let output_path = req.output_path.clone();
+                *self.last_request.lock().unwrap_or_else(|e| e.into_inner()) = Some(req);
+                Ok(tonic::Response::new(ExportResponse {
+                    output_path,
+                    message_count: 7,
+                    bytes_written: 4096,
+                }))
+            }
+        }
+
+        let last_request = Arc::new(Mutex::new(None));
+        let stub = StubExport {
+            last_request: last_request.clone(),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(ExportServer::new(stub))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+                .await
+                .expect("ephemeral runner initializes");
+
+        let out = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Export {
+                        format: "jsonl".to_string(),
+                        out: "/tmp/stub-export.jsonl".to_string(),
+                        account: Some("acct-stub-1".to_string()),
+                        folder: None,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(out.contains(r#""message_count":7"#));
+        assert!(out.contains(r#""bytes_written":4096"#));
+        assert!(out.contains("stub-export.jsonl"));
+
+        let recorded = last_request
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received an export_mailbox request");
+        assert_eq!(recorded.output_path, "/tmp/stub-export.jsonl");
+        assert_eq!(recorded.format(), nuncio_proto::v1::ExportFormat::Jsonl);
+        assert_eq!(
+            recorded.scope,
+            Some(nuncio_proto::v1::export_request::Scope::AccountId(
+                "acct-stub-1".to_string()
+            ))
+        );
+
+        let text_out = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Export {
+                        format: "mbox".to_string(),
+                        out: "/tmp/stub-export-2.mbox".to_string(),
+                        account: None,
+                        folder: Some("inbox".to_string()),
+                    },
+                },
+                false,
+            )
+            .await;
+        assert!(text_out.contains("Exported 7 message(s)"));
+        let recorded2 = last_request
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received a second export_mailbox request");
+        assert_eq!(
+            recorded2.scope,
+            Some(nuncio_proto::v1::export_request::Scope::FolderId(
+                "inbox".to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn mail_export_rejects_an_unknown_format_before_dialing_the_daemon() {
+        // An unreachable address deliberately proves the format is
+        // validated BEFORE the daemon is ever dialed -- if this connected
+        // first, the error would be a transport failure instead of the
+        // expected format-parsing error.
+        let addr = reserve_unreachable_addr().await;
+        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
+            .await
+            .expect("ephemeral runner initializes");
+
+        let out = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Export {
+                        format: "not-a-real-format".to_string(),
+                        out: "/tmp/out.json".to_string(),
+                        account: None,
+                        folder: None,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(out.contains(r#""status":"error""#));
+        assert!(out.contains("Unknown export format"));
+    }
+
+    /// Reference-client proof for backlog story 2.B (GH #172): boots a stub
+    /// `nuncio.v1.Audit` gRPC server and drives the real `HeadlessRunner`'s
+    /// `system audit list` / `system audit verify` gRPC client paths
+    /// against it. Real ledger seeding, chain verification, and the
+    /// tampered-chain case are proven end-to-end by `nunciod`'s own
+    /// `grpc::tests`; this test exists purely to prove the CLI's connect +
+    /// call + JSON-format happy path.
+    #[tokio::test]
+    async fn system_audit_list_and_verify_round_trip_over_grpc_to_a_stub_daemon() {
+        use nuncio_proto::v1::audit_server::{Audit as AuditService, AuditServer};
+        use nuncio_proto::v1::{
+            AuditRecord, ListRecordsRequest, ListRecordsResponse, VerifyChainRequest,
+            VerifyChainResponse,
+        };
+
+        struct StubAudit;
+
+        #[tonic::async_trait]
+        impl AuditService for StubAudit {
+            async fn list_records(
+                &self,
+                _request: tonic::Request<ListRecordsRequest>,
+            ) -> Result<tonic::Response<ListRecordsResponse>, tonic::Status> {
+                Ok(tonic::Response::new(ListRecordsResponse {
+                    records: vec![AuditRecord {
+                        sequence: 1,
+                        timestamp_ns: 1_700_000_000_000_000_000,
+                        actor: "system.test".to_string(),
+                        action: "data.export".to_string(),
+                        data_hash: "deadbeef".to_string(),
+                        previous_block_hash: "GENESIS".to_string(),
+                        record_hmac: "cafebabe".to_string(),
+                    }],
+                }))
+            }
+
+            async fn verify_chain(
+                &self,
+                _request: tonic::Request<VerifyChainRequest>,
+            ) -> Result<tonic::Response<VerifyChainResponse>, tonic::Status> {
+                Ok(tonic::Response::new(VerifyChainResponse {
+                    valid: false,
+                    record_count: 3,
+                    first_broken_seq: Some(2),
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(AuditServer::new(StubAudit))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+                .await
+                .expect("ephemeral runner initializes");
+
+        let list_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Audit {
+                        action: AuditSubcommand::List {
+                            limit: 0,
+                            offset: 0,
+                        },
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(list_out.contains(r#""action":"data.export""#));
+        assert!(list_out.contains(r#""sequence":1"#));
+
+        let verify_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Audit {
+                        action: AuditSubcommand::Verify,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(verify_out.contains(r#""valid":false"#));
+        assert!(verify_out.contains(r#""first_broken_seq":2"#));
+
+        let verify_text = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Audit {
+                        action: AuditSubcommand::Verify,
+                    },
+                },
+                false,
+            )
+            .await;
+        assert!(verify_text.contains("TAMPERED"));
+        assert!(verify_text.contains("sequence 2"));
+    }
+
+    #[tokio::test]
+    async fn mail_export_and_system_audit_report_honest_error_when_daemon_unreachable() {
+        let addr = reserve_unreachable_addr().await;
+        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
+            .await
+            .expect("ephemeral runner initializes");
+
+        let export_out = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Export {
+                        format: "json".to_string(),
+                        out: "/tmp/out.json".to_string(),
+                        account: None,
+                        folder: None,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(export_out.contains(r#""status":"error""#));
+        assert!(export_out.contains("unreachable"));
+
+        let audit_list_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Audit {
+                        action: AuditSubcommand::List {
+                            limit: 0,
+                            offset: 0,
+                        },
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(audit_list_out.contains(r#""status":"error""#));
+        assert!(audit_list_out.contains("unreachable"));
+
+        let audit_verify_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Audit {
+                        action: AuditSubcommand::Verify,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(audit_verify_out.contains(r#""status":"error""#));
+        assert!(audit_verify_out.contains("unreachable"));
     }
 
     #[test]
