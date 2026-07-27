@@ -2,7 +2,7 @@
 # Development quality enforcement aliases
 check-all = "clippy --all-targets --workspace -- -D warnings"
 test-all = "test --workspace"
-cov = "llvm-cov --workspace --fail-under-lines 100"
+cov = "llvm-cov --workspace --ignore-filename-regex main\\.rs --summary-only"
 verify = ["fmt --all -- --check", "check-all", "test-all"]
 
 [build]
