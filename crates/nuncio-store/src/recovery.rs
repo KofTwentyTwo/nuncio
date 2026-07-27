@@ -35,27 +35,72 @@ pub struct RecoverySummary {
     pub resync_triggered: bool,
 }
 
-/// Helper identifying SQLite corruption and connection error codes.
+/// Helper identifying SQLite corruption error codes, as distinct from transient/operational
+/// errors (busy, locked, timed out, momentarily unable to open).
+///
+/// This classification is data-safety-critical: only errors classified `true` here are
+/// permitted to trigger backup isolation + destructive salvage of the live database (which
+/// deletes the original file, keeping only what could be salvaged). A false positive here
+/// would destroy a perfectly healthy database on nothing more than a transient hiccup, so the
+/// classifier is deliberately an *allowlist* of unambiguous corruption signatures rather than a
+/// denylist that grows to catch "everything that isn't obviously fine".
 pub fn is_sqlite_corruption_error(err: &sqlx::Error) -> bool {
-    let msg = err.to_string().to_lowercase();
-    if msg.contains("disk image is malformed")
-        || msg.contains("not a database")
-        || msg.contains("corrupt")
-        || msg.contains("sqlite_notadb")
-        || msg.contains("cantopen")
-        || msg.contains("disk i/o error")
-    {
-        return true;
-    }
+    // A structured SQLite result code, when sqlx can supply one, is authoritative. sqlx-sqlite
+    // reports the *extended* result code (see `sqlite3_extended_errcode`), so the primary code
+    // is recovered via `code & 0xff` before comparing -- this still matches corruption
+    // sub-variants such as `SQLITE_CORRUPT_VTAB`/`SQLITE_CORRUPT_INDEX` while continuing to
+    // exclude every non-corruption code (SQLITE_BUSY = 5, SQLITE_LOCKED = 6, SQLITE_IOERR = 10,
+    // SQLITE_CANTOPEN = 14, and their extended sub-variants), which describe operational
+    // conditions -- another connection holding a lock, a momentary disk I/O hiccup, a file the
+    // OS would not open just now -- that clear up on retry and must NEVER be treated as
+    // corruption.
     if let sqlx::Error::Database(db_err) = err {
-        if let Some(code) = db_err.code() {
-            let code_str = code.as_ref();
-            if code_str == "11" || code_str == "26" || code_str == "14" {
-                return true;
-            }
-        }
+        return db_err
+            .code()
+            .and_then(|code| code.parse::<i32>().ok())
+            .map(|code| {
+                const SQLITE_CORRUPT: i32 = 11;
+                const SQLITE_NOTADB: i32 = 26;
+                let primary = code & 0xff;
+                primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB
+            })
+            .unwrap_or(false);
     }
-    false
+
+    // Errors without a structured database code (e.g. a connection-level failure raised before
+    // sqlx has parsed a SQLite result code) are classified from message text, restricted to the
+    // same narrow, unambiguous corruption signatures used above.
+    let msg = err.to_string().to_lowercase();
+    msg.contains("database disk image is malformed") || msg.contains("file is not a database")
+}
+
+/// SQLite's fixed 16-byte file header magic string (always the first 16 bytes of a valid
+/// SQLite database file).
+const SQLITE_HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+
+/// Directly inspect the raw SQLite header magic bytes on disk, bypassing any SQLite
+/// connection, connection pool, or pager cache entirely.
+///
+/// This exists because corruption detection routed entirely through a SQLite connection
+/// (`connect` + `PRAGMA quick_check`) can race a WAL checkpoint or a connection-close from a
+/// prior engine instance still completing in the background: depending on timing, a freshly
+/// opened connection can occasionally fail to observe a header that was corrupted moments
+/// earlier. A plain `std::fs` read of the header bytes has no such race -- it is a single
+/// synchronous read of exactly what is on disk right now, independent of any connection state
+/// -- so it gives a deterministic, reproducible answer for the header-corruption case
+/// specifically, and is used as an authoritative pre-flight signal in
+/// [`crate::db::DatabaseEngine::open_with_backup_dir`].
+///
+/// Returns `true` only when the file exists, is at least header-sized, and its first 16 bytes
+/// do not match SQLite's fixed magic string -- i.e. never for a missing file or a freshly
+/// created (not yet initialized) empty database file, only for a genuinely unreadable header.
+pub fn has_corrupted_sqlite_header(path: &Path) -> bool {
+    match std::fs::read(path) {
+        Ok(bytes) if bytes.len() >= SQLITE_HEADER_MAGIC.len() => {
+            bytes[0..SQLITE_HEADER_MAGIC.len()] != SQLITE_HEADER_MAGIC[..]
+        }
+        _ => false,
+    }
 }
 
 /// Manager isolating damaged database files into forensic backups.
@@ -183,19 +228,20 @@ impl SqliteRecoveryEngine {
             }
         }
 
+        // Column order/names below MUST match the live `filter_rules` / `filter_conditions` /
+        // `filter_actions` schema created in `DatabaseEngine::migrate` -- including every
+        // NOT NULL column -- or every insert silently fails (via `res.is_ok()`) and salvage
+        // reports 0 restored rows despite having read valid data from the backup.
         let mut restored_rules_count = 0;
-        for (id, name, desc, enabled, match_all, priority, created_at, updated_at) in
-            &salvaged_rules
-        {
+        for (id, name, priority, enabled, nsql_text, created_at, updated_at) in &salvaged_rules {
             let res = sqlx::query(
-                "INSERT INTO filter_rules (id, name, description, enabled, match_all, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO filter_rules (id, name, priority, enabled, nsql_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(id)
             .bind(name)
-            .bind(desc)
-            .bind(enabled)
-            .bind(match_all)
             .bind(priority)
+            .bind(enabled)
+            .bind(nsql_text)
             .bind(created_at)
             .bind(updated_at)
             .execute(fresh_engine.pool())
@@ -206,15 +252,16 @@ impl SqliteRecoveryEngine {
         }
 
         let mut restored_conditions_count = 0;
-        for (id, rule_id, field, operator, value) in &salvaged_conditions {
+        for (id, rule_id, field, operator, value, logical_op) in &salvaged_conditions {
             let res = sqlx::query(
-                "INSERT INTO filter_conditions (id, rule_id, field, operator, value) VALUES (?, ?, ?, ?, ?)"
+                "INSERT INTO filter_conditions (id, rule_id, field, operator, value, logical_op) VALUES (?, ?, ?, ?, ?, ?)"
             )
             .bind(id)
             .bind(rule_id)
             .bind(field)
             .bind(operator)
             .bind(value)
+            .bind(logical_op)
             .execute(fresh_engine.pool())
             .await;
             if res.is_ok() {
@@ -223,14 +270,14 @@ impl SqliteRecoveryEngine {
         }
 
         let mut restored_actions_count = 0;
-        for (id, rule_id, action_type, value) in &salvaged_actions {
+        for (id, rule_id, action_type, target) in &salvaged_actions {
             let res = sqlx::query(
-                "INSERT INTO filter_actions (id, rule_id, action_type, value) VALUES (?, ?, ?, ?)",
+                "INSERT INTO filter_actions (id, rule_id, action_type, target) VALUES (?, ?, ?, ?)",
             )
             .bind(id)
             .bind(rule_id)
             .bind(action_type)
-            .bind(value)
+            .bind(target)
             .execute(fresh_engine.pool())
             .await;
             if res.is_ok() {
@@ -295,30 +342,34 @@ impl SqliteRecoveryEngine {
         }
     }
 
+    /// Read back valid rows from `filter_rules` / `filter_conditions` / `filter_actions` in the
+    /// backup connection, using column names/order matching the live schema (see
+    /// `DatabaseEngine::migrate`). `filter_conditions.value`/`filter_actions.target` are the
+    /// only nullable columns in that pair of tables that this reads.
     #[allow(clippy::type_complexity)]
     async fn salvage_filter_tables(
         pool: &sqlx::SqlitePool,
     ) -> (
-        Vec<(String, String, String, i64, i64, i64, i64, i64)>,
-        Vec<(String, String, String, String, String)>,
+        Vec<(String, String, i64, i64, String, i64, i64)>,
+        Vec<(String, String, String, String, String, String)>,
         Vec<(String, String, String, Option<String>)>,
     ) {
-        let rules = sqlx::query_as::<_, (String, String, String, i64, i64, i64, i64, i64)>(
-            "SELECT id, name, description, enabled, match_all, priority, created_at, updated_at FROM filter_rules"
+        let rules = sqlx::query_as::<_, (String, String, i64, i64, String, i64, i64)>(
+            "SELECT id, name, priority, enabled, nsql_text, created_at, updated_at FROM filter_rules"
         )
         .fetch_all(pool)
         .await
         .unwrap_or_default();
 
-        let conditions = sqlx::query_as::<_, (String, String, String, String, String)>(
-            "SELECT id, rule_id, field, operator, value FROM filter_conditions",
+        let conditions = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+            "SELECT id, rule_id, field, operator, value, logical_op FROM filter_conditions",
         )
         .fetch_all(pool)
         .await
         .unwrap_or_default();
 
         let actions = sqlx::query_as::<_, (String, String, String, Option<String>)>(
-            "SELECT id, rule_id, action_type, value FROM filter_actions",
+            "SELECT id, rule_id, action_type, target FROM filter_actions",
         )
         .fetch_all(pool)
         .await
@@ -338,6 +389,38 @@ mod tests {
     fn test_is_sqlite_corruption_error() {
         let err = sqlx::Error::PoolTimedOut;
         assert!(!is_sqlite_corruption_error(&err));
+    }
+
+    #[test]
+    fn has_corrupted_sqlite_header_is_false_for_missing_or_fresh_files() {
+        let dir = tempdir().expect("tempdir");
+        // A path that has never been created at all.
+        assert!(!has_corrupted_sqlite_header(
+            &dir.path().join("does_not_exist.db")
+        ));
+
+        // A freshly created, empty (not-yet-initialized) file: shorter than the header, must
+        // never be reported as "corrupted".
+        let empty_path = dir.path().join("empty.db");
+        std::fs::write(&empty_path, []).unwrap();
+        assert!(!has_corrupted_sqlite_header(&empty_path));
+    }
+
+    #[test]
+    fn has_corrupted_sqlite_header_is_true_only_for_a_bad_magic_string() {
+        let dir = tempdir().expect("tempdir");
+
+        let valid_path = dir.path().join("valid_header.db");
+        let mut valid_bytes = vec![0u8; 4096];
+        valid_bytes[0..16].copy_from_slice(SQLITE_HEADER_MAGIC);
+        std::fs::write(&valid_path, &valid_bytes).unwrap();
+        assert!(!has_corrupted_sqlite_header(&valid_path));
+
+        let bad_path = dir.path().join("bad_header.db");
+        let mut bad_bytes = vec![0u8; 4096];
+        bad_bytes[0..16].copy_from_slice(b"CORRUPTED_NOISE_");
+        std::fs::write(&bad_path, &bad_bytes).unwrap();
+        assert!(has_corrupted_sqlite_header(&bad_path));
     }
 
     #[tokio::test]
@@ -404,7 +487,8 @@ mod tests {
         let backup_dir = dir.path().join("corrupted_backups");
         let secrets = crate::vault::SecretManager::mock();
 
-        // Step 1: Create DB with account & rule
+        // Step 1: Create DB with account & a real NSQL filter rule (exercising the
+        // `filter_rules` schema salvage restores against -- see 1.B.3).
         {
             let engine = DatabaseEngine::connect_file(&db_path, &secrets)
                 .await
@@ -423,6 +507,10 @@ mod tests {
                 sync_interval_secs: 60,
             };
             engine.save_account(&acct).await.unwrap();
+
+            let nsql = "SELECT * FROM emails WHERE subject CONTAINS 'Spam' ACTION DELETE";
+            let rule = nuncio_filter::NsqlParser::parse_rule("Spam Filter", 1, nsql).unwrap();
+            engine.save_filter_rule(&rule).await.unwrap();
         }
 
         // Step 2: Perform salvage recovery
@@ -431,14 +519,35 @@ mod tests {
             .expect("salvage succeeds");
 
         assert_eq!(summary.salvaged_accounts_count, 1);
+        assert_eq!(
+            summary.salvaged_rules_count, 1,
+            "salvage must restore the filter rule -- a 0 count here means the restore INSERT \
+             is silently failing against a schema mismatch (the exact 1.B.3 regression)"
+        );
         assert!(summary.backup_path.exists());
 
-        // Step 3: Verify fresh DB contains salvaged account
+        // Step 3: Verify fresh DB contains the salvaged account AND filter rule.
         let fresh = DatabaseEngine::connect_file(&db_path, &secrets)
             .await
             .unwrap();
         let accounts = fresh.list_accounts().await.unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "acct-salvage-1");
+
+        let rules = fresh.list_filter_rules().await.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "Spam Filter");
     }
+
+    // NOTE: there is deliberately no test combining *header* corruption (bytes 0-16 -- the
+    // fixed "SQLite format 3\0" magic string) with a nonzero salvaged-rule-count assertion.
+    // A corrupted header makes the file entirely unopenable by SQLite (`SQLITE_NOTADB`), by
+    // design regardless of how intact the rest of the file's pages are, so salvage's backup
+    // connection can never read ANY row out of a header-corrupted file -- that is real SQLite
+    // behavior, not a salvage bug. `test_database_header_corruption_stage_1_detection` above
+    // proves the header-corruption case still triggers detection + backup isolation (no
+    // regression on 1.B.4's destructive-path gating); `test_stage_2_backup_creation_and_stage_3_table_salvage`
+    // above proves the schema fix (1.B.3) by exercising salvage's actual read-then-restore SQL
+    // against a normally-openable source, which is the only way to test the restore SQL, since
+    // header corruption forecloses any row-level read.
 }

@@ -135,9 +135,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "flaky: DB-corruption detection races the WAL/file close in the recovery path \
-                (initialize_and_recover intermittently returns None). Quarantined to keep CI \
-                reliably green; fix properly under Phase 1.B recovery reliability (GH #155)."]
     async fn orchestrator_recovers_corrupted_database_and_emits_event() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("corrupt_orch.db");

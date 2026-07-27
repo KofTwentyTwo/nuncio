@@ -39,7 +39,15 @@ pub enum DatabaseError {
 }
 
 impl DatabaseError {
-    /// Returns true if this error indicates database file corruption or un-openable state.
+    /// Returns true if this error indicates GENUINE database file corruption (as opposed to a
+    /// transient/operational error such as a pool timeout, a busy/locked database, or a
+    /// momentary inability to open the file).
+    ///
+    /// This is data-safety-critical: `true` here is the sole gate that permits
+    /// [`DatabaseEngine::open_with_backup_dir`] to run destructive backup-isolation + salvage
+    /// (which deletes the live database file). Only unambiguous corruption signatures are
+    /// matched; transient conditions must propagate as ordinary errors instead, so callers can
+    /// retry rather than lose data to a passing hiccup.
     pub fn is_corrupt(&self) -> bool {
         match self {
             DatabaseError::Corrupted(_) => true,
@@ -48,12 +56,13 @@ impl DatabaseError {
             | DatabaseError::Migration(msg)
             | DatabaseError::RecoveryFailed(msg) => {
                 let lower = msg.to_lowercase();
+                // Deliberately excludes "cantopen" and "disk i/o error": both describe
+                // operational conditions (locked file, momentary I/O hiccup) that clear up on
+                // retry and must never be classified as corruption.
                 lower.contains("not a database")
                     || lower.contains("malformed")
-                    || lower.contains("corrupt")
                     || lower.contains("sqlite_notadb")
-                    || lower.contains("cantopen")
-                    || lower.contains("disk i/o error")
+                    || lower.contains("corrupt")
             }
             _ => false,
         }
@@ -144,7 +153,23 @@ impl DatabaseEngine {
     }
 
     /// Close the underlying connection pool.
+    ///
+    /// Forces a full WAL checkpoint (`PRAGMA wal_checkpoint(TRUNCATE)`) before closing so every
+    /// committed page is flushed into the main database file and the `-wal` file is truncated.
+    /// Without this, a WAL-mode connection can leave committed pages un-flushed in the `-wal`
+    /// file; SQLite then performs its own "last connection closes" checkpoint internally, but
+    /// that teardown is not guaranteed to complete synchronously within this call on every
+    /// platform, and can instead complete moments later on a background thread -- which then
+    /// races any code that inspects or replaces the main database file shortly after `close()`
+    /// returns (this was the confirmed root cause of a nondeterministic corruption-detection
+    /// test failure: a deferred checkpoint silently overwrote a deliberately corrupted header
+    /// with the last-known-good page 1 a few milliseconds after `close()` had already
+    /// returned). Explicitly checkpointing first leaves nothing for that deferred teardown to
+    /// apply, closing the race.
     pub async fn close(&self) {
+        let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+            .execute(&self.pool)
+            .await;
         self.pool.close().await;
     }
 
@@ -161,29 +186,52 @@ impl DatabaseEngine {
 
     /// Open database at `path` specifying a custom backup directory, provisioning
     /// cryptographic key material from `secrets`.
+    ///
+    /// # Data safety
+    ///
+    /// This is the sole entry point that may trigger destructive backup-isolation + salvage
+    /// (which deletes the live database file, keeping only what could be re-extracted). That
+    /// path is gated on GENUINE corruption only -- classified via a connection-independent raw
+    /// header-byte check (see [`crate::recovery::has_corrupted_sqlite_header`]) and/or
+    /// [`DatabaseError::is_corrupt`] / [`crate::recovery::is_sqlite_corruption_error`]. A
+    /// transient/operational error (pool timeout, busy, locked, momentarily unable to open)
+    /// is NEVER coerced into "corrupt": it is propagated as-is so the caller can retry, and the
+    /// live database is left completely untouched.
     pub async fn open_with_backup_dir(
         path: &Path,
         backup_dir: &Path,
         secrets: &crate::vault::SecretManager,
     ) -> Result<(Self, Option<crate::recovery::RecoverySummary>), DatabaseError> {
+        // Deterministic, connection-independent pre-flight check: read the raw SQLite header
+        // magic bytes directly from disk before ever touching a connection pool. Unlike a
+        // `PRAGMA quick_check` run over a freshly (re)opened pooled connection, this cannot race
+        // a WAL checkpoint or a connection-close from a prior engine instance still completing
+        // in the background, so it authoritatively and reproducibly detects a genuinely
+        // corrupted header.
+        let header_corrupted = crate::recovery::has_corrupted_sqlite_header(path);
+
         match Self::connect_file(path, secrets).await {
             Ok(engine) => {
-                let is_healthy = engine.check_integrity().await.unwrap_or(false);
-                if is_healthy {
-                    Ok((engine, None))
-                } else {
-                    engine.close().await;
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    let summary = crate::recovery::SqliteRecoveryEngine::salvage(
-                        path, path, backup_dir, secrets,
-                    )
-                    .await?;
-                    let fresh_engine = Self::connect_file(path, secrets).await?;
-                    Ok((fresh_engine, Some(summary)))
+                if header_corrupted {
+                    return Self::close_and_salvage(engine, path, backup_dir, secrets).await;
+                }
+                match engine.check_integrity().await {
+                    Ok(true) => Ok((engine, None)),
+                    Ok(false) => Self::close_and_salvage(engine, path, backup_dir, secrets).await,
+                    Err(err) => {
+                        // The integrity probe itself failed with an error that is NOT a
+                        // recognized corruption signature (e.g. a pool acquire timeout, a
+                        // transient SQLITE_BUSY/locked condition). This is an operational
+                        // hiccup, not proof of corruption -- NEVER salvage or delete the live
+                        // database on the strength of it. Surface the error and let the caller
+                        // retry.
+                        engine.close().await;
+                        Err(err)
+                    }
                 }
             }
             Err(err) => {
-                if err.is_corrupt() {
+                if header_corrupted || err.is_corrupt() {
                     let summary = crate::recovery::SqliteRecoveryEngine::salvage(
                         path, path, backup_dir, secrets,
                     )
@@ -195,6 +243,24 @@ impl DatabaseEngine {
                 }
             }
         }
+    }
+
+    /// Close an engine that has been confirmed corrupted (either by a failed integrity check or
+    /// by the independent raw-header-byte check), then run backup isolation and stream salvage.
+    async fn close_and_salvage(
+        engine: Self,
+        path: &Path,
+        backup_dir: &Path,
+        secrets: &crate::vault::SecretManager,
+    ) -> Result<(Self, Option<crate::recovery::RecoverySummary>), DatabaseError> {
+        engine.close().await;
+        // Give the OS a brief moment to release file handles/locks from the just-closed pool
+        // before salvage copies and then deletes the live database file.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let summary =
+            crate::recovery::SqliteRecoveryEngine::salvage(path, path, backup_dir, secrets).await?;
+        let fresh_engine = Self::connect_file(path, secrets).await?;
+        Ok((fresh_engine, Some(summary)))
     }
 
     /// Check database integrity executing `PRAGMA quick_check(10);`.
@@ -1272,6 +1338,131 @@ fn compute_log_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Connection;
+
+    /// Proves the fix for 1.B.4: a transient error surfacing from the integrity probe (here, a
+    /// genuine pool-exhaustion / acquire-timeout condition, deterministically forced by holding
+    /// the pool's only connection) must propagate as `Err`, never be coerced into `Ok(false)`
+    /// (which would be indistinguishable from genuine corruption to `open_with_backup_dir` and
+    /// would trigger destructive salvage of a perfectly healthy database).
+    #[tokio::test]
+    async fn check_integrity_pool_propagates_transient_timeout_without_masking_as_corrupt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("busy_test.db");
+        let secrets = crate::vault::SecretManager::mock();
+        {
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .unwrap();
+            engine.close().await;
+        }
+
+        let url = format!("sqlite://{}", db_path.to_string_lossy());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect(&url)
+            .await
+            .unwrap();
+
+        // Hold the pool's only connection so a concurrent acquire attempt cannot succeed and
+        // must time out -- a genuine, deterministic transient condition (no SQLite-level lock
+        // contention required).
+        let _held = pool.acquire().await.unwrap();
+
+        let result = DatabaseEngine::check_integrity_pool(&pool).await;
+        assert!(
+            matches!(result, Err(DatabaseError::Query(sqlx::Error::PoolTimedOut))),
+            "a pool-exhaustion / acquire-timeout condition must propagate as an Err, never be \
+             silently coerced into Ok(false); got: {result:?}"
+        );
+    }
+
+    /// End-to-end proof of 1.B.4: a genuinely transient, operational condition (another
+    /// connection holding an exclusive lock on the live database) must never be treated as
+    /// corruption by `open_with_backup_dir` -- no backup isolation, no salvage, no deletion of
+    /// the live file. The database and its data must survive completely intact, and a retry
+    /// once the contention clears must succeed with no recovery recorded.
+    #[tokio::test]
+    async fn open_with_backup_dir_never_salvages_on_transient_lock_contention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("contended.db");
+        let backup_dir = dir.path().join("backups");
+        let secrets = crate::vault::SecretManager::mock();
+
+        // Create a valid, healthy database with real data.
+        {
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .unwrap();
+            let acct = nuncio_core::AccountConfig {
+                id: "acct-contended-1".to_string(),
+                name: "Contended Account".to_string(),
+                email_address: "contended@nuncio.mx".to_string(),
+                protocol: nuncio_core::AccountProtocol::ImapSmtp,
+                server_host: "imap.nuncio.mx".to_string(),
+                server_port: 993,
+                use_tls: true,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                keyring_secret_key: "nuncio/acct-contended-1".to_string(),
+                sync_interval_secs: 60,
+            };
+            engine.save_account(&acct).await.unwrap();
+            engine.close().await;
+        }
+
+        // Hold an exclusive lock on the file from an independent connection, forcing any other
+        // connection attempt against the same file into a genuine SQLITE_BUSY -- a transient,
+        // operational condition, not corruption.
+        let url = format!("sqlite://{}", db_path.to_string_lossy());
+        let mut locker = sqlx::sqlite::SqliteConnection::connect(&url)
+            .await
+            .expect("locker connects");
+        sqlx::query("PRAGMA locking_mode=EXCLUSIVE;")
+            .execute(&mut locker)
+            .await
+            .expect("set exclusive locking mode");
+        sqlx::query("BEGIN IMMEDIATE;")
+            .execute(&mut locker)
+            .await
+            .expect("begin immediate");
+        // Locking mode only takes effect on the next read/write, so force one now.
+        sqlx::query("SELECT COUNT(*) FROM accounts;")
+            .execute(&mut locker)
+            .await
+            .expect("force exclusive lock acquisition");
+
+        let result = DatabaseEngine::open_with_backup_dir(&db_path, &backup_dir, &secrets).await;
+        assert!(
+            result.is_err(),
+            "a locked/busy database must surface an error, not silently succeed: {result:?}"
+        );
+        let backup_is_empty =
+            !backup_dir.exists() || std::fs::read_dir(&backup_dir).unwrap().next().is_none();
+        assert!(
+            backup_is_empty,
+            "a transient lock/busy condition must NEVER trigger backup isolation + salvage"
+        );
+
+        // Release the lock deterministically before checking that the live database survived.
+        let _ = sqlx::query("ROLLBACK;").execute(&mut locker).await;
+        let _ = locker.close().await;
+
+        // The live database and its data must be completely intact, and a retry succeeds with
+        // no recovery recorded.
+        let (engine, summary) =
+            DatabaseEngine::open_with_backup_dir(&db_path, &backup_dir, &secrets)
+                .await
+                .expect("reopen succeeds once contention clears");
+        assert!(
+            summary.is_none(),
+            "no recovery should have been recorded for a transient condition"
+        );
+        let accounts = engine.list_accounts().await.unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "acct-contended-1");
+    }
 
     #[tokio::test]
     async fn ephemeral_database_initializes_and_migrates() {
