@@ -2612,17 +2612,23 @@ name = "nunciod"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
+ "hex",
  "nuncio-cal",
  "nuncio-cli",
  "nuncio-core",
  "nuncio-filter",
  "nuncio-mail",
+ "nuncio-proto",
  "nuncio-store",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
  "tracing-subscriber",
 ]

@@ -22,6 +22,12 @@ pub const WORM_KEY_ACCOUNT: &str = "worm-audit-hmac-key";
 /// ledger (see [`crate::db::DatabaseEngine::save_filter_execution_log`]).
 pub const LEDGER_KEY_ACCOUNT: &str = "ledger-hmac-key";
 
+/// Keyring account name for the bearer token used to authenticate loopback gRPC calls
+/// against the `nuncio.v1` API server exposed by `nunciod` (see backlog story 1.A.2 /
+/// GH-149). The token is minted on first use via [`SecretManager::get_or_create_key_bytes`]
+/// and hex-encoded for use as an `authorization: Bearer <token>` header value.
+pub const GRPC_TOKEN_ACCOUNT: &str = "grpc-bearer-token";
+
 /// Zeroized sensitive string wrapper ensuring heap bytes are wiped on drop.
 #[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct ZeroizingSecret(String);

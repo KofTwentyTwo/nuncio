@@ -278,6 +278,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
     });
 
+    // gRPC `nuncio.v1.System` server (backlog story 1.A.2 / GH-149).
+    //
+    // Runs ALONGSIDE the existing JSON-RPC IPC server below; the migration
+    // off the hand-rolled JSON-RPC transport happens in later stories. The
+    // bearer token is minted (or loaded, on subsequent runs) from the real
+    // OS keyring vault via `SecretManager::production()`, fails closed if
+    // the keyring is unavailable, and is never logged.
+    let grpc_secrets = nuncio_store::vault::SecretManager::production();
+    let grpc_token_bytes = grpc_secrets
+        .get_or_create_key_bytes(nuncio_store::vault::GRPC_TOKEN_ACCOUNT, 32)
+        .map_err(|e| format!("failed to provision gRPC bearer token from vault: {e}"))?;
+    let grpc_token = hex::encode(grpc_token_bytes);
+    let grpc_addr = nunciod::grpc::grpc_addr_from_env();
+    tracing::info!(
+        "nunciod gRPC (nuncio.v1.System) starting on {} (loopback only)",
+        grpc_addr
+    );
+    let grpc_event_bus = event_bus.clone();
+    let _grpc_task = tokio::spawn(async move {
+        if let Err(e) = nunciod::grpc::serve(&grpc_addr, grpc_event_bus, grpc_token).await {
+            tracing::error!("nunciod gRPC server failed: {}", e);
+        }
+    });
+
     let addr = std::env::var("NUNCIO_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:9422".to_string());
     let server = IpcDaemonServer::with_handler(event_bus.clone(), &addr, handler);
 
