@@ -1,8 +1,10 @@
 //! Headless engine runner executing CLI commands against core services.
 
 use nuncio_core::{CoreCommand, EventBus};
+use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
 use nuncio_store::{DatabaseEngine, DatabaseError};
 use serde_json::json;
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::args::{
@@ -24,19 +26,54 @@ pub enum RunnerError {
 }
 
 /// Headless core runner executing CLI commands non-interactively.
+///
+/// Most commands operate against an ephemeral local engine (database +
+/// event bus) for now. `system status` (see [`Self::handle_system_status`])
+/// is the exception: it is a thin gRPC client of the real `nunciod` daemon's
+/// `nuncio.v1.System` API (backlog story 1.A.3 / GH-150), authenticated by a
+/// bearer token read from an injected [`SecretManager`] — production code
+/// uses [`SecretManager::production`] (the real OS keyring), while tests
+/// inject [`SecretManager::mock`] so no test ever touches the real vault.
 pub struct HeadlessRunner {
     event_bus: EventBus,
     db: DatabaseEngine,
+    secrets: Arc<SecretManager>,
+    grpc_addr: String,
 }
 
 impl HeadlessRunner {
-    /// Initialize a new `HeadlessRunner` with an ephemeral database.
+    /// Initialize a new `HeadlessRunner` with an ephemeral database, the
+    /// real OS keyring vault ([`SecretManager::production`]), and the gRPC
+    /// daemon address resolved from [`nuncio_proto::grpc_addr_from_env`].
     pub async fn ephemeral() -> Result<Self, RunnerError> {
+        Self::ephemeral_with(
+            Arc::new(SecretManager::production()),
+            nuncio_proto::grpc_addr_from_env(),
+        )
+        .await
+    }
+
+    /// Initialize a new `HeadlessRunner` with an ephemeral database and an
+    /// explicit secret vault + gRPC daemon address.
+    ///
+    /// This is the constructor tests MUST use whenever they exercise
+    /// `system status`: pass a [`SecretManager::mock`]-backed instance
+    /// (never the real OS keyring) and the address of a test-local gRPC
+    /// server.
+    pub async fn ephemeral_with(
+        secrets: Arc<SecretManager>,
+        grpc_addr: String,
+    ) -> Result<Self, RunnerError> {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
             .map_err(|e| RunnerError::InitFailed(e.to_string()))?;
         let event_bus = EventBus::new();
-        Ok(Self { event_bus, db })
+        Ok(Self {
+            event_bus,
+            db,
+            secrets,
+            grpc_addr,
+        })
     }
 
     /// Access the underlying `EventBus`.
@@ -787,26 +824,62 @@ impl HeadlessRunner {
         }
     }
 
+    /// `system status`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.System` API (backlog story 1.A.3 / GH-150).
+    ///
+    /// Resolves the bearer token from the injected `SecretManager`, dials
+    /// the configured gRPC daemon address via
+    /// `nuncio_proto::client::connect_system`, and calls `GetStatus`. If the
+    /// daemon is unreachable or rejects the call, this returns a clear,
+    /// honest error — it never fabricates a status. This deliberately does
+    /// NOT auto-spawn the daemon.
     async fn handle_system_status(&self, json_mode: bool) -> String {
-        let state = self.event_bus.current_state();
-        let healthy = self.db.check_integrity().await.unwrap_or(false);
-        if json_mode {
-            format_json(&json!({
-                "accounts_loaded": state.accounts_loaded,
-                "unread_count": state.unread_count,
-                "engine_status": format!("{:?}", state.status),
-                "database_health": if healthy { "healthy" } else { "repaired" }
-            }))
-        } else {
-            let mut msg = format!(
-                "Nuncio Configuration: {} accounts loaded, {} unread messages",
-                state.accounts_loaded, state.unread_count
-            );
-            if !healthy {
-                msg.push_str("\n[NOTICE] Database integrity issue was automatically repaired. Resynchronizing inbox...");
+        match self.query_daemon_status().await {
+            Ok((engine_status, version)) => {
+                if json_mode {
+                    format_json(&json!({
+                        "engine_status": engine_status,
+                        "version": version,
+                    }))
+                } else {
+                    format!(
+                        "Nuncio daemon status: {engine_status} (nunciod v{version}, {})",
+                        self.grpc_addr
+                    )
+                }
             }
-            msg
+            Err(e) => {
+                if json_mode {
+                    format_json_error(&e)
+                } else {
+                    format!("Error: {e}")
+                }
+            }
         }
+    }
+
+    /// Reads the gRPC bearer token from the injected vault, connects to the
+    /// daemon over gRPC, and calls `GetStatus`. Returns `(engine_status,
+    /// version)` on success, or a human-readable error string describing
+    /// exactly what failed (vault, connection, or the RPC itself).
+    async fn query_daemon_status(&self) -> Result<(String, String), String> {
+        let token_bytes = self
+            .secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
+        let token = hex::encode(token_bytes);
+
+        let mut client = nuncio_proto::client::connect_system(&self.grpc_addr, &token)
+            .await
+            .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))?;
+
+        let response = client
+            .get_status(nuncio_proto::v1::GetStatusRequest {})
+            .await
+            .map_err(|e| format!("nunciod daemon rejected status request: {e}"))?
+            .into_inner();
+
+        Ok((response.engine_status, response.version))
     }
 }
 
@@ -954,8 +1027,38 @@ mod tests {
             .await;
         assert!(cal_sync.contains(r#""status":"calendar_sync_started""#));
 
-        // System Noun Commands
-        let sys_status = runner
+        // System Noun Commands are exercised separately below via
+        // `ephemeral_with` + `SecretManager::mock()`: `system status` is a
+        // real gRPC client of the `nunciod` daemon (backlog story 1.A.3 /
+        // GH-150), so it must never run against the production
+        // `SecretManager` this `ephemeral()`-constructed runner holds (that
+        // would touch the real OS keyring during a test run).
+    }
+
+    /// Binds an ephemeral loopback TCP listener, reads back its OS-assigned
+    /// address, then immediately drops the listener so the port is free
+    /// again. Nothing is listening on the returned address, so connecting
+    /// to it deterministically fails with "connection refused" — used to
+    /// prove `system status` reports an honest error instead of fabricating
+    /// one when no daemon is reachable, without depending on any specific
+    /// hardcoded port that might collide with a real service.
+    async fn reserve_unreachable_addr() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        drop(listener);
+        addr.to_string()
+    }
+
+    #[tokio::test]
+    async fn system_status_reports_honest_error_when_daemon_unreachable() {
+        let addr = reserve_unreachable_addr().await;
+        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
+            .await
+            .expect("ephemeral runner initializes");
+
+        let json_out = runner
             .execute_command(
                 &Commands::System {
                     action: SystemSubcommand::Status,
@@ -963,7 +1066,84 @@ mod tests {
                 true,
             )
             .await;
-        assert!(sys_status.contains(r#""unread_count":0"#));
+        assert!(json_out.contains(r#""status":"error""#));
+        assert!(json_out.contains("unreachable"));
+
+        let text_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Status,
+                },
+                false,
+            )
+            .await;
+        assert!(text_out.starts_with("Error: "));
+        assert!(text_out.contains("unreachable"));
+    }
+
+    #[tokio::test]
+    async fn system_status_reports_live_daemon_status_over_grpc_when_reachable() {
+        use nuncio_proto::v1::system_server::{System as SystemService, SystemServer};
+        use nuncio_proto::v1::{GetStatusRequest, GetStatusResponse};
+
+        /// Minimal test-only stub of the `nuncio.v1.System` service: no
+        /// auth interceptor, just a fixed status. Bearer-token acceptance
+        /// itself is proven by `nuncio-proto`'s own client tests and
+        /// `nunciod`'s server + E2E tests; this test exists purely to
+        /// prove the CLI's connect + call + JSON-format happy path.
+        struct StubSystem;
+
+        #[tonic::async_trait]
+        impl SystemService for StubSystem {
+            async fn get_status(
+                &self,
+                _request: tonic::Request<GetStatusRequest>,
+            ) -> Result<tonic::Response<GetStatusResponse>, tonic::Status> {
+                Ok(tonic::Response::new(GetStatusResponse {
+                    engine_status: "Ready".to_string(),
+                    version: "9.9.9".to_string(),
+                }))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(SystemServer::new(StubSystem))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+                .await
+                .expect("ephemeral runner initializes");
+
+        let out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Status,
+                },
+                true,
+            )
+            .await;
+        assert!(out.contains(r#""status":"ok""#));
+        assert!(out.contains(r#""engine_status":"Ready""#));
+        assert!(out.contains(r#""version":"9.9.9""#));
+
+        let text_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Status,
+                },
+                false,
+            )
+            .await;
+        assert!(text_out.contains("Ready"));
+        assert!(text_out.contains("9.9.9"));
     }
 
     #[test]

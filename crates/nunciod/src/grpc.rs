@@ -18,13 +18,13 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
-/// Default loopback bind address for the `nuncio.v1` gRPC server, used when
-/// the [`GRPC_ADDR_ENV_VAR`] environment variable is unset. Deliberately
-/// distinct from the legacy JSON-RPC IPC server's default (`127.0.0.1:9422`).
-pub const DEFAULT_GRPC_ADDR: &str = "127.0.0.1:9420";
-
-/// Environment variable overriding the gRPC bind address.
-pub const GRPC_ADDR_ENV_VAR: &str = "NUNCIO_GRPC_ADDR";
+// The gRPC loopback address defaults/resolver live in `nuncio-proto` (see
+// `nuncio_proto::addr`) so that thin presentation-shell clients (e.g.
+// `nuncio-cli`) agree on the same default address without depending on this
+// `nunciod` binary crate. Re-exported here so existing callers of
+// `nunciod::grpc::{DEFAULT_GRPC_ADDR, GRPC_ADDR_ENV_VAR, grpc_addr_from_env}`
+// keep working unchanged (backlog story 1.A.3 / GH-150).
+pub use nuncio_proto::{grpc_addr_from_env, DEFAULT_GRPC_ADDR, GRPC_ADDR_ENV_VAR};
 
 /// Errors that can occur while binding or running the `nuncio.v1` gRPC server.
 #[derive(Debug, Error)]
@@ -41,12 +41,6 @@ pub enum GrpcServeError {
     /// The tonic transport server failed while serving requests.
     #[error("gRPC transport server failed: {0}")]
     Transport(#[from] tonic::transport::Error),
-}
-
-/// Resolves the gRPC bind address from [`GRPC_ADDR_ENV_VAR`], falling back to
-/// [`DEFAULT_GRPC_ADDR`] when unset.
-pub fn grpc_addr_from_env() -> String {
-    std::env::var(GRPC_ADDR_ENV_VAR).unwrap_or_else(|_| DEFAULT_GRPC_ADDR.to_string())
 }
 
 /// `nuncio.v1.System` gRPC service implementation backed by the daemon's live

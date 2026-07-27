@@ -2466,11 +2466,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "hex",
  "nuncio-cal",
  "nuncio-contacts",
  "nuncio-core",
  "nuncio-filter",
  "nuncio-mail",
+ "nuncio-proto",
  "nuncio-store",
  "rpassword",
  "serde",
@@ -2478,6 +2480,8 @@ dependencies = [
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
 ]
 
@@ -2579,6 +2583,8 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "protoc-bin-vendored",
+ "thiserror 1.0.69",
+ "tokio",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

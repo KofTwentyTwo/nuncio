@@ -11,6 +11,20 @@
 //! Consumers (e.g. `nunciod`, `nuncio-cli`, and future client repos) should
 //! depend on this crate and use the generated client/server types under
 //! [`v1`] rather than re-generating protobuf code themselves.
+//!
+//! This crate is also the single source of truth for the gRPC loopback
+//! address defaults ([`addr`]) and the shared authenticated client
+//! connection helper ([`client::connect_system`]), so that thin
+//! presentation-shell clients (e.g. `nuncio-cli`) can talk to the `nunciod`
+//! daemon's `nuncio.v1.System` API without depending on the `nunciod`
+//! binary crate itself (backlog story 1.A.3 / GH-150).
+
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
+pub mod addr;
+pub mod client;
+
+pub use addr::{grpc_addr_from_env, DEFAULT_GRPC_ADDR, GRPC_ADDR_ENV_VAR};
 
 /// Generated code for the `nuncio.v1` protobuf package.
 ///
