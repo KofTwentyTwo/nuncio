@@ -9,9 +9,15 @@ use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::transport::smtp::Error as LettreSmtpError;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use nuncio_core::model::{Attachment, Email};
+use nuncio_core::TlsMode;
 
 use crate::backend::{MessageSender, OutboundMessage};
 use crate::parser::MailError;
+
+/// Upper bound on how long `SmtpTransportEngine::test_connection` may take
+/// before reporting an honest timeout, rather than waiting on `lettre`'s
+/// own default (which is tuned for a real send, not a fast settings check).
+const SMTP_TEST_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl From<LettreSmtpError> for MailError {
     fn from(err: LettreSmtpError) -> Self {
@@ -42,9 +48,16 @@ pub struct SmtpTransportEngine {
 }
 
 impl SmtpTransportEngine {
-    /// Create a new [`SmtpTransportEngine`] with initialized transport client.
-    pub fn new(host: &str, port: u16, username: &str, password: &str) -> Result<Self, MailError> {
-        let transport = Self::build_transport(host, port, username, password)?;
+    /// Create a new [`SmtpTransportEngine`] with initialized transport client,
+    /// honoring the account's configured [`TlsMode`].
+    pub fn new(
+        host: &str,
+        port: u16,
+        tls_mode: TlsMode,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, MailError> {
+        let transport = Self::build_transport(host, port, tls_mode, username, password)?;
         Ok(Self { transport })
     }
 
@@ -65,6 +78,35 @@ impl SmtpTransportEngine {
         let msg = Self::build_outbound_mime_message(message)?;
         self.transport.send(msg).await.map_err(MailError::from)?;
         Ok(())
+    }
+
+    /// Validate that this transport's configured host/port/credentials can
+    /// genuinely connect and authenticate, without sending any mail:
+    /// delegates to `lettre`'s own `test_connection` (connect, TLS/STARTTLS,
+    /// `AUTH`, then a `NOOP`), bounded by [`SMTP_TEST_CONNECTION_TIMEOUT`] so
+    /// an unreachable host fails fast with an honest timeout error rather
+    /// than blocking on `lettre`'s own (much longer) default.
+    pub async fn test_connection(&self) -> Result<(), MailError> {
+        let outcome = tokio::time::timeout(
+            SMTP_TEST_CONNECTION_TIMEOUT,
+            self.transport.test_connection(),
+        )
+        .await
+        .map_err(|_| {
+            MailError::TransportFailed(format!(
+                "SMTP connection test timed out after {}s",
+                SMTP_TEST_CONNECTION_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(MailError::from)?;
+
+        if outcome {
+            Ok(())
+        } else {
+            Err(MailError::TransportFailed(
+                "SMTP server did not confirm the connection as usable".to_string(),
+            ))
+        }
     }
 
     /// Send an email message using a provided [`AsyncSmtpTransport`] client instance.
@@ -229,23 +271,42 @@ impl SmtpTransportEngine {
 
     /// Build an [`AsyncSmtpTransport`] client instance.
     /// Configures Implicit TLS (`Tls::Wrapper`) for port 465, and STARTTLS (`Tls::Required`) for port 587 or other ports.
+    /// Build an [`AsyncSmtpTransport`] client instance honoring the account's
+    /// configured `tls_mode` rather than guessing it from the port number:
+    /// [`TlsMode::ImplicitTls`] wraps the socket in TLS immediately (the
+    /// traditional port-465 style), [`TlsMode::StartTls`] requires the
+    /// server to accept a `STARTTLS` upgrade (the traditional port-587
+    /// style, but enforced regardless of port), and [`TlsMode::Plain`]
+    /// never uses TLS at all (trusted local relays only).
     pub fn build_transport(
         host: &str,
         port: u16,
+        tls_mode: TlsMode,
         username: &str,
         password: &str,
     ) -> Result<AsyncSmtpTransport<Tokio1Executor>, MailError> {
         Self::validate_smtp_config(host, port, username)?;
 
         let creds = Credentials::new(username.to_string(), password.to_string());
-        let tls_params = TlsParameters::builder(host.to_string())
-            .build()
-            .map_err(|e| MailError::TransportFailed(format!("TLS parameters error: {}", e)))?;
 
-        let tls = if port == 465 {
-            Tls::Wrapper(tls_params)
-        } else {
-            Tls::Required(tls_params)
+        let tls = match tls_mode {
+            TlsMode::Plain => Tls::None,
+            TlsMode::ImplicitTls => {
+                let tls_params = TlsParameters::builder(host.to_string())
+                    .build()
+                    .map_err(|e| {
+                        MailError::TransportFailed(format!("TLS parameters error: {}", e))
+                    })?;
+                Tls::Wrapper(tls_params)
+            }
+            TlsMode::StartTls => {
+                let tls_params = TlsParameters::builder(host.to_string())
+                    .build()
+                    .map_err(|e| {
+                        MailError::TransportFailed(format!("TLS parameters error: {}", e))
+                    })?;
+                Tls::Required(tls_params)
+            }
         };
 
         let transport = AsyncSmtpTransport::<Tokio1Executor>::relay(host)
@@ -384,20 +445,39 @@ mod tests {
 
     #[test]
     fn build_transport_creates_starttls_client_for_port_587() {
-        let transport = SmtpTransportEngine::build_transport("smtp.nuncio.mx", 587, "user", "pass");
+        let transport = SmtpTransportEngine::build_transport(
+            "smtp.nuncio.mx",
+            587,
+            TlsMode::StartTls,
+            "user",
+            "pass",
+        );
         assert!(transport.is_ok());
     }
 
     #[test]
     fn build_transport_creates_implicit_tls_client_for_port_465() {
-        let transport = SmtpTransportEngine::build_transport("smtp.nuncio.mx", 465, "user", "pass");
+        let transport = SmtpTransportEngine::build_transport(
+            "smtp.nuncio.mx",
+            465,
+            TlsMode::ImplicitTls,
+            "user",
+            "pass",
+        );
+        assert!(transport.is_ok());
+    }
+
+    #[test]
+    fn build_transport_creates_plain_client_for_local_relay() {
+        let transport =
+            SmtpTransportEngine::build_transport("127.0.0.1", 2525, TlsMode::Plain, "user", "pass");
         assert!(transport.is_ok());
     }
 
     #[tokio::test]
     async fn send_email_to_unreachable_server_fails_with_transport_error() {
-        let engine =
-            SmtpTransportEngine::new("127.0.0.1", 1, "user", "pass").expect("valid config");
+        let engine = SmtpTransportEngine::new("127.0.0.1", 1, TlsMode::ImplicitTls, "user", "pass")
+            .expect("valid config");
         let email = sample_email();
         let err = engine
             .send_email(&email)
@@ -409,9 +489,24 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn test_connection_to_unreachable_server_fails_honestly() {
+        let engine = SmtpTransportEngine::new("127.0.0.1", 1, TlsMode::ImplicitTls, "user", "pass")
+            .expect("valid config");
+        let err = engine
+            .test_connection()
+            .await
+            .expect_err("an unreachable SMTP server must not report a successful test");
+        assert!(matches!(
+            err,
+            MailError::TransportFailed(_) | MailError::SmtpFailed(_)
+        ));
+    }
+
     #[test]
     fn engine_constructor_creates_instance() {
-        let engine = SmtpTransportEngine::new("smtp.nuncio.mx", 465, "user", "pass");
+        let engine =
+            SmtpTransportEngine::new("smtp.nuncio.mx", 465, TlsMode::ImplicitTls, "user", "pass");
         assert!(engine.is_ok());
     }
 
@@ -506,8 +601,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_to_unreachable_server_fails_with_transport_error() {
-        let engine =
-            SmtpTransportEngine::new("127.0.0.1", 1, "user", "pass").expect("valid config");
+        let engine = SmtpTransportEngine::new("127.0.0.1", 1, TlsMode::ImplicitTls, "user", "pass")
+            .expect("valid config");
         let message = sample_outbound_message();
         let err = engine
             .send_message(&message)
@@ -525,8 +620,8 @@ mod tests {
         // through to the real `send_message` path, not a separate/fabricated
         // stub -- exercised via the trait object
         // exactly like production code (`nunciod::send`) uses it.
-        let engine =
-            SmtpTransportEngine::new("127.0.0.1", 1, "user", "pass").expect("valid config");
+        let engine = SmtpTransportEngine::new("127.0.0.1", 1, TlsMode::ImplicitTls, "user", "pass")
+            .expect("valid config");
         let sender: &dyn MessageSender = &engine;
         let message = sample_outbound_message();
         let err = sender

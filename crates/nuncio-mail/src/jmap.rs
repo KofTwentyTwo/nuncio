@@ -288,6 +288,20 @@ impl MailBackend for JmapEngine {
         }
         Ok(())
     }
+
+    /// `JmapEngine` has no real HTTP transport yet -- `sync_folders`/
+    /// `sync_messages` above parse a fixed sample payload rather than
+    /// calling a live server (see the real-JMAP-client backlog item). A
+    /// fabricated "connection ok" here would be actively misleading for a
+    /// settings-validation feature, so this is an honest "not supported"
+    /// error instead.
+    async fn test_connection(&self) -> Result<(), MailError> {
+        Err(MailError::NetworkError(
+            "JMAP account connection testing is not yet supported: the JMAP engine does not \
+             perform real HTTP session discovery yet"
+                .to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]

@@ -2,10 +2,14 @@
 
 use async_trait::async_trait;
 use nuncio_core::model::{Email, Folder};
+use nuncio_core::TlsMode;
 use std::fmt::Debug;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
@@ -15,6 +19,13 @@ use tokio_stream::StreamExt;
 
 use crate::backend::MailBackend;
 use crate::parser::{MailError, MimeParserAdapter};
+
+/// Upper bound on how long a single TCP connect + TLS handshake to an IMAP
+/// server may take before this client gives up and reports an honest
+/// timeout error, rather than hanging indefinitely. A misconfigured or
+/// unreachable host (wrong hostname, firewall silently dropping packets,
+/// wrong port) must fail fast and visibly, not stall the caller forever.
+const IMAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// State of the dedicated IMAP IDLE socket listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,41 +76,189 @@ pub fn build_fetch_command_query() -> &'static str {
     "(FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODY.PEEK[])"
 }
 
-/// Establish an encrypted TLS stream to an IMAP server.
-pub async fn connect_tls_stream(host: &str, port: u16) -> Result<TlsStream<TcpStream>, MailError> {
+/// A live IMAP socket that may or may not be TLS-wrapped, depending on the
+/// account's configured [`TlsMode`]. `async_imap::Session`/`Client` are
+/// generic over the underlying stream type, so this lets one connection
+/// path serve `ImplicitTls` (already-encrypted), `StartTls` (plaintext
+/// upgraded to TLS mid-handshake), and `Plain` (never encrypted -- local
+/// dev/test servers only) without duplicating the session/IDLE/fetch logic
+/// three times.
+pub enum MaybeTlsStream {
+    /// Unencrypted TCP socket ([`TlsMode::Plain`]).
+    Plain(TcpStream),
+    /// TLS-wrapped socket, either from an immediate handshake
+    /// ([`TlsMode::ImplicitTls`]) or a post-`STARTTLS` upgrade
+    /// ([`TlsMode::StartTls`]). Boxed: `TlsStream` is far larger than
+    /// `TcpStream`, and clippy's `large_enum_variant` flags the resulting
+    /// size skew otherwise.
+    Tls(Box<TlsStream<TcpStream>>),
+}
+
+impl Debug for MaybeTlsStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MaybeTlsStream::Plain(_) => f.write_str("MaybeTlsStream::Plain"),
+            MaybeTlsStream::Tls(_) => f.write_str("MaybeTlsStream::Tls"),
+        }
+    }
+}
+
+impl AsyncRead for MaybeTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTlsStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            MaybeTlsStream::Tls(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for MaybeTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            MaybeTlsStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            MaybeTlsStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTlsStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            MaybeTlsStream::Tls(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTlsStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            MaybeTlsStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Connect the bare TCP socket underlying every [`TlsMode`], bounded by
+/// [`IMAP_CONNECT_TIMEOUT`] so an unreachable host (bad hostname silently
+/// dropped by a firewall, wrong port with no RST) fails fast with an honest
+/// timeout error instead of hanging indefinitely.
+async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, MailError> {
+    let addr = format!("{}:{}", host, port);
+    tokio::time::timeout(IMAP_CONNECT_TIMEOUT, TcpStream::connect(&addr))
+        .await
+        .map_err(|_| {
+            MailError::NetworkError(format!(
+                "TCP connection to {} timed out after {}s",
+                addr,
+                IMAP_CONNECT_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| MailError::NetworkError(format!("TCP connection to {} failed: {}", addr, e)))
+}
+
+/// Upgrade a plaintext TCP socket to TLS, bounded by [`IMAP_CONNECT_TIMEOUT`].
+async fn upgrade_to_tls(
+    host: &str,
+    tcp_stream: TcpStream,
+) -> Result<TlsStream<TcpStream>, MailError> {
     let connector = build_tls_connector()?;
-    let target_port = if port == 0 { 993 } else { port };
-    let addr = format!("{}:{}", host, target_port);
-
-    let tcp_stream = TcpStream::connect(&addr).await.map_err(|e| {
-        MailError::NetworkError(format!("TCP connection to {} failed: {}", addr, e))
-    })?;
-
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|e| MailError::TlsError(format!("invalid TLS server name '{}': {}", host, e)))?;
 
-    let tls_stream = connector
-        .connect(server_name, tcp_stream)
-        .await
-        .map_err(|e| MailError::TlsError(format!("TLS handshake with {} failed: {}", host, e)))?;
+    tokio::time::timeout(
+        IMAP_CONNECT_TIMEOUT,
+        connector.connect(server_name, tcp_stream),
+    )
+    .await
+    .map_err(|_| {
+        MailError::TlsError(format!(
+            "TLS handshake with {} timed out after {}s",
+            host,
+            IMAP_CONNECT_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| MailError::TlsError(format!("TLS handshake with {} failed: {}", host, e)))
+}
 
-    Ok(tls_stream)
+/// Establish a socket to an IMAP server honoring `tls_mode`:
+/// - [`TlsMode::ImplicitTls`]: TCP connect, then an immediate TLS handshake
+///   (the traditional port-993 style).
+/// - [`TlsMode::StartTls`]: TCP connect in plaintext, issue the IMAP
+///   `STARTTLS` command and require the server to accept it, then perform
+///   the TLS handshake on the same socket. STARTTLS is required, never
+///   opportunistic -- a server that rejects or lacks it is an honest error,
+///   never a silent downgrade to plaintext for a mode the caller explicitly
+///   asked to be encrypted.
+/// - [`TlsMode::Plain`]: TCP connect only, no encryption. For trusted local
+///   dev/test servers only.
+pub async fn connect_stream(
+    host: &str,
+    port: u16,
+    tls_mode: TlsMode,
+) -> Result<MaybeTlsStream, MailError> {
+    let target_port = if port == 0 { 993 } else { port };
+
+    match tls_mode {
+        TlsMode::ImplicitTls => {
+            let tcp_stream = connect_tcp(host, target_port).await?;
+            Ok(MaybeTlsStream::Tls(Box::new(
+                upgrade_to_tls(host, tcp_stream).await?,
+            )))
+        }
+        TlsMode::Plain => {
+            let tcp_stream = connect_tcp(host, target_port).await?;
+            Ok(MaybeTlsStream::Plain(tcp_stream))
+        }
+        TlsMode::StartTls => {
+            let tcp_stream = connect_tcp(host, target_port).await?;
+            let mut client = async_imap::Client::new(tcp_stream);
+            tokio::time::timeout(
+                IMAP_CONNECT_TIMEOUT,
+                client.run_command_and_check_ok("STARTTLS", None),
+            )
+            .await
+            .map_err(|_| {
+                MailError::TlsError(format!(
+                    "STARTTLS negotiation with {} timed out after {}s",
+                    host,
+                    IMAP_CONNECT_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(|e| {
+                MailError::TlsError(format!(
+                    "server {} rejected or does not support STARTTLS: {}",
+                    host, e
+                ))
+            })?;
+            let tcp_stream = client.into_inner();
+            Ok(MaybeTlsStream::Tls(Box::new(
+                upgrade_to_tls(host, tcp_stream).await?,
+            )))
+        }
+    }
 }
 
 /// IMAP dual-socket manager maintaining isolated connections for IDLE push and FETCH/STORE queries.
 pub struct ImapDualSocketManager {
     server_host: String,
     server_port: u16,
+    tls_mode: TlsMode,
     idle_active: Arc<AtomicBool>,
 }
 
 impl ImapDualSocketManager {
-    /// Create a new `ImapDualSocketManager`.
-    pub fn new(server_host: &str, server_port: u16) -> Self {
+    /// Create a new `ImapDualSocketManager` for the given [`TlsMode`].
+    pub fn new(server_host: &str, server_port: u16, tls_mode: TlsMode) -> Self {
         let port = if server_port == 0 { 993 } else { server_port };
         Self {
             server_host: server_host.to_string(),
             server_port: port,
+            tls_mode,
             idle_active: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -123,17 +282,18 @@ impl ImapDualSocketManager {
         }
     }
 
-    /// Establish a live TLS socket connection to the target IMAP server.
-    pub async fn connect_tls_socket(&self) -> Result<TlsStream<TcpStream>, MailError> {
-        connect_tls_stream(&self.server_host, self.server_port).await
+    /// Establish a live socket connection to the target IMAP server,
+    /// honoring this manager's configured [`TlsMode`].
+    pub async fn connect_tls_socket(&self) -> Result<MaybeTlsStream, MailError> {
+        connect_stream(&self.server_host, self.server_port, self.tls_mode).await
     }
 
-    /// Establish an authenticated IMAP session over a live TLS socket connection.
+    /// Establish an authenticated IMAP session over a live socket connection.
     pub async fn connect_session(
         &self,
         username: &str,
         password: &str,
-    ) -> Result<async_imap::Session<TlsStream<TcpStream>>, MailError> {
+    ) -> Result<async_imap::Session<MaybeTlsStream>, MailError> {
         let stream = self.connect_tls_socket().await?;
         let client = async_imap::Client::new(stream);
         let session = client
@@ -146,6 +306,25 @@ impl ImapDualSocketManager {
                 ))
             })?;
         Ok(session)
+    }
+
+    /// Validate that `username`/`password` can genuinely authenticate
+    /// against this server: connects, logs in, then immediately logs out
+    /// again -- no folders or messages are touched. Used by the daemon's
+    /// `TestAccountConnection` RPC to let a caller check account settings
+    /// are correct without running a real sync. Returns the real
+    /// connect/TLS/auth error on failure, never a fabricated success.
+    pub async fn test_login(&self, username: &str, password: &str) -> Result<(), MailError> {
+        let mut session = self.connect_session(username, password).await?;
+        // A logout failure after a successful login doesn't change the
+        // verdict -- the credentials and server settings are already
+        // proven correct at this point -- but it's still surfaced so a
+        // caller can see the server misbehaved on teardown.
+        session
+            .logout()
+            .await
+            .map_err(|e| MailError::ImapError(format!("IMAP logout failed: {}", e)))?;
+        Ok(())
     }
 
     /// Start the dedicated IDLE socket listener connection (Connection A).
@@ -169,26 +348,41 @@ pub struct ImapEngine {
 }
 
 impl ImapEngine {
-    /// Create a new `ImapEngine`.
+    /// Create a new `ImapEngine` using [`TlsMode::ImplicitTls`] (the
+    /// traditional port-993 style). Use [`Self::with_tls_mode`] to select a
+    /// different connection type.
     pub fn new(account_id: &str, server_host: &str, server_port: u16) -> Self {
+        Self::with_tls_mode(account_id, server_host, server_port, TlsMode::ImplicitTls)
+    }
+
+    /// Create a new `ImapEngine` targeting a specific [`TlsMode`]
+    /// (`ImplicitTls`, `StartTls`, or `Plain`).
+    pub fn with_tls_mode(
+        account_id: &str,
+        server_host: &str,
+        server_port: u16,
+        tls_mode: TlsMode,
+    ) -> Self {
         Self {
-            socket_manager: ImapDualSocketManager::new(server_host, server_port),
+            socket_manager: ImapDualSocketManager::new(server_host, server_port, tls_mode),
             account_id: account_id.to_string(),
             username: None,
             password: None,
         }
     }
 
-    /// Create a new `ImapEngine` with host, port, and authentication credentials.
+    /// Create a new `ImapEngine` with host, port, TLS mode, and
+    /// authentication credentials.
     pub fn with_credentials(
         account_id: &str,
         server_host: &str,
         server_port: u16,
+        tls_mode: TlsMode,
         username: &str,
         password: &str,
     ) -> Self {
         Self {
-            socket_manager: ImapDualSocketManager::new(server_host, server_port),
+            socket_manager: ImapDualSocketManager::new(server_host, server_port, tls_mode),
             account_id: account_id.to_string(),
             username: Some(username.to_string()),
             password: Some(password.to_string()),
@@ -324,20 +518,9 @@ impl ImapEngine {
         let (username, password) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
             _ => {
-                let mock_emails = vec![Email {
-                    id: "imap-uid-100".to_string(),
-                    account_id: self.account_id.clone(),
-                    folder_id: folder_id.to_string(),
-                    subject: "IMAP Sync Message".to_string(),
-                    sender: "sender@nuncio.mx".to_string(),
-                    recipient: "me@nuncio.mx".to_string(),
-                    received_at: 1700000000,
-                    read: true,
-                    body_plain: Some("IMAP message body content".to_string()),
-                    body_html: None,
-                    attachments: Vec::new(),
-                }];
-                return Ok(mock_emails);
+                return Err(MailError::AuthError(
+                    "no credentials configured for this IMAP engine instance".to_string(),
+                ));
             }
         };
 
@@ -453,47 +636,41 @@ impl ImapEngine {
 #[async_trait]
 impl MailBackend for ImapEngine {
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError> {
-        if let (Some(u), Some(p)) = (&self.username, &self.password) {
-            let mut session = self.socket_manager.connect_session(u, p).await?;
-            let mut mailboxes = session
-                .list(None, Some("*"))
-                .await
-                .map_err(|e| MailError::ImapError(format!("failed to list mailboxes: {}", e)))?;
+        let (u, p) = self
+            .username
+            .as_deref()
+            .zip(self.password.as_deref())
+            .ok_or_else(|| {
+                MailError::AuthError(
+                    "no credentials configured for this IMAP engine instance".to_string(),
+                )
+            })?;
 
-            let mut folders = Vec::new();
-            while let Some(mb_res) = mailboxes.next().await {
-                let mb = mb_res.map_err(|e| {
-                    MailError::ImapError(format!("failed reading mailbox item: {}", e))
-                })?;
-                let folder_name = mb.name().to_string();
-                folders.push(Folder {
-                    id: folder_name.clone(),
-                    name: folder_name,
-                    total_messages: 0,
-                    unread_messages: 0,
-                });
-            }
-            drop(mailboxes);
-            let _ = session.logout().await;
-            if !folders.is_empty() {
-                return Ok(folders);
-            }
-        }
+        let mut session = self.socket_manager.connect_session(u, p).await?;
+        let mut mailboxes = session
+            .list(None, Some("*"))
+            .await
+            .map_err(|e| MailError::ImapError(format!("failed to list mailboxes: {}", e)))?;
 
-        Ok(vec![
-            Folder {
-                id: "INBOX".to_string(),
-                name: "Inbox".to_string(),
-                total_messages: 10,
-                unread_messages: 2,
-            },
-            Folder {
-                id: "Sent".to_string(),
-                name: "Sent Messages".to_string(),
-                total_messages: 5,
+        let mut folders = Vec::new();
+        while let Some(mb_res) = mailboxes.next().await {
+            let mb = mb_res
+                .map_err(|e| MailError::ImapError(format!("failed reading mailbox item: {}", e)))?;
+            let folder_name = mb.name().to_string();
+            folders.push(Folder {
+                id: folder_name.clone(),
+                name: folder_name,
+                total_messages: 0,
                 unread_messages: 0,
-            },
-        ])
+            });
+        }
+        drop(mailboxes);
+        let _ = session.logout().await;
+        // A genuinely empty mailbox (or a server that reports zero
+        // folders) is real data, not an error -- returning it as-is is the
+        // honest result. Fabricating a non-empty "Inbox"/"Sent" fallback
+        // here would silently lie about what the server actually has.
+        Ok(folders)
     }
 
     async fn sync_messages(
@@ -506,8 +683,29 @@ impl MailBackend for ImapEngine {
         Ok((emails, modseq))
     }
 
+    /// Not wired to a real SMTP transport: production sends go through
+    /// [`crate::smtp::SmtpTransportEngine`] directly (see its doc comment),
+    /// never through this trait method. Rather than silently return `Ok(())`
+    /// and let a caller believe mail was sent, this is an honest error.
     async fn send_email(&self, _email: &Email) -> Result<(), MailError> {
-        Ok(())
+        Err(MailError::NetworkError(
+            "ImapEngine::send_email is not a real transport -- outbound mail goes through \
+             SmtpTransportEngine"
+                .to_string(),
+        ))
+    }
+
+    async fn test_connection(&self) -> Result<(), MailError> {
+        let (u, p) = self
+            .username
+            .as_deref()
+            .zip(self.password.as_deref())
+            .ok_or_else(|| {
+                MailError::AuthError(
+                    "no credentials configured for this IMAP engine instance".to_string(),
+                )
+            })?;
+        self.socket_manager.test_login(u, p).await
     }
 }
 
@@ -517,7 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn imap_dual_socket_manager_lifecycle() -> Result<(), MailError> {
-        let manager = ImapDualSocketManager::new("mail.kof22.com", 993);
+        let manager = ImapDualSocketManager::new("mail.kof22.com", 993, TlsMode::ImplicitTls);
         assert_eq!(manager.server_host(), "mail.kof22.com");
         assert_eq!(manager.server_port(), 993);
         assert_eq!(manager.idle_state(), IdleSocketState::Disconnected);
@@ -531,19 +729,178 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imap_engine_sync_folders_and_messages() -> Result<(), MailError> {
+    async fn imap_engine_without_credentials_honestly_errors_rather_than_fabricating_data() {
+        // `ImapEngine::new` (no credentials) must never fabricate folders,
+        // messages, or a successful send -- every `MailBackend` method must
+        // surface a real "no credentials configured" error instead.
         let engine = ImapEngine::new("acct-1", "mail.kof22.com", 993);
-        let folders = engine.sync_folders().await?;
-        assert_eq!(folders.len(), 2);
-        assert_eq!(folders[0].id, "INBOX");
 
-        let (emails, modseq) = engine.sync_messages("INBOX", None).await?;
-        assert_eq!(modseq, "imap-modseq-1");
-        assert_eq!(emails.len(), 1);
-        assert_eq!(emails[0].id, "imap-uid-100");
+        let folders_err = engine
+            .sync_folders()
+            .await
+            .expect_err("sync_folders without credentials must error, not fabricate folders");
+        assert!(matches!(folders_err, MailError::AuthError(_)));
 
-        engine.send_email(&emails[0]).await?;
-        Ok(())
+        let messages_err = engine
+            .sync_messages("INBOX", None)
+            .await
+            .expect_err("sync_messages without credentials must error, not fabricate emails");
+        assert!(matches!(messages_err, MailError::AuthError(_)));
+
+        let test_err = engine
+            .test_connection()
+            .await
+            .expect_err("test_connection without credentials must error, not fabricate success");
+        assert!(matches!(test_err, MailError::AuthError(_)));
+
+        let dummy_email = Email {
+            id: "e1".to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "INBOX".to_string(),
+            subject: "s".to_string(),
+            sender: "a@b.com".to_string(),
+            recipient: "c@d.com".to_string(),
+            received_at: 0,
+            read: false,
+            body_plain: None,
+            body_html: None,
+            attachments: Vec::new(),
+        };
+        let send_err = engine
+            .send_email(&dummy_email)
+            .await
+            .expect_err("ImapEngine::send_email is not a real transport and must error");
+        assert!(matches!(send_err, MailError::NetworkError(_)));
+    }
+
+    /// Bind a loopback listener and run a minimal, single-connection,
+    /// line-oriented IMAP responder: sends the initial greeting, then
+    /// answers each tagged command according to `respond`. Used to prove
+    /// `test_login`/`test_connection` genuinely speak the IMAP wire
+    /// protocol (tag matching, greeting, LOGIN/STARTTLS/LOGOUT) end to end,
+    /// rather than only being exercised against a real network server.
+    ///
+    /// Deliberately plaintext-only: a TLS-terminating mock would need a
+    /// vendored test certificate, which this harness does not set up, so
+    /// `TlsMode::ImplicitTls`'s handshake step itself is not covered here --
+    /// only `TlsMode::Plain` and the pre-upgrade half of `TlsMode::StartTls`
+    /// are exercised against a real socket.
+    async fn spawn_mock_imap_server(
+        respond: impl Fn(&str, &str) -> String + Send + 'static,
+    ) -> std::net::SocketAddr {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback listener");
+        let addr = listener.local_addr().expect("listener has local addr");
+
+        tokio::spawn(async move {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            let (read_half, mut write_half) = socket.into_split();
+            let mut reader = BufReader::new(read_half);
+            if write_half
+                .write_all(b"* OK mock IMAP ready\r\n")
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let trimmed = line.trim_end();
+                let tag = trimmed.split_whitespace().next().unwrap_or("*");
+                let reply = respond(tag, trimmed);
+                if write_half.write_all(reply.as_bytes()).await.is_err() {
+                    break;
+                }
+                if trimmed.to_uppercase().contains("LOGOUT") {
+                    break;
+                }
+            }
+        });
+
+        addr
+    }
+
+    #[tokio::test]
+    async fn test_login_succeeds_over_a_real_plain_socket() -> Result<(), MailError> {
+        let addr = spawn_mock_imap_server(|tag, line| {
+            if line.to_uppercase().contains("LOGIN") {
+                format!("{} OK LOGIN completed\r\n", tag)
+            } else if line.to_uppercase().contains("LOGOUT") {
+                format!("* BYE logging out\r\n{} OK LOGOUT completed\r\n", tag)
+            } else {
+                format!("{} BAD unrecognized\r\n", tag)
+            }
+        })
+        .await;
+
+        let manager =
+            ImapDualSocketManager::new(&addr.ip().to_string(), addr.port(), TlsMode::Plain);
+        manager.test_login("user", "pass").await
+    }
+
+    #[tokio::test]
+    async fn test_login_surfaces_real_auth_error_on_login_rejection() {
+        let addr = spawn_mock_imap_server(|tag, line| {
+            if line.to_uppercase().contains("LOGIN") {
+                format!("{} NO authentication failed\r\n", tag)
+            } else {
+                format!("{} BAD unrecognized\r\n", tag)
+            }
+        })
+        .await;
+
+        let manager =
+            ImapDualSocketManager::new(&addr.ip().to_string(), addr.port(), TlsMode::Plain);
+        let err = manager
+            .test_login("user", "wrong-password")
+            .await
+            .expect_err("a server-rejected LOGIN must surface as a real error");
+        assert!(matches!(err, MailError::AuthError(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_stream_start_tls_surfaces_honest_error_when_server_rejects_starttls() {
+        let addr = spawn_mock_imap_server(|tag, line| {
+            if line.to_uppercase().contains("STARTTLS") {
+                format!("{} NO STARTTLS not supported\r\n", tag)
+            } else {
+                format!("{} BAD unrecognized\r\n", tag)
+            }
+        })
+        .await;
+
+        let err = connect_stream(&addr.ip().to_string(), addr.port(), TlsMode::StartTls)
+            .await
+            .expect_err("a server that rejects STARTTLS must be an honest error, never a silent plaintext fallback");
+        assert!(matches!(err, MailError::TlsError(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_stream_reports_honest_error_for_unreachable_host() {
+        // Bind then immediately drop a loopback listener: the OS reserves
+        // the port momentarily, then refuses the next connection attempt --
+        // deterministic "connection refused" without depending on any
+        // specific hardcoded port that might collide with a real service.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        drop(listener);
+
+        let err = connect_stream(&addr.ip().to_string(), addr.port(), TlsMode::Plain)
+            .await
+            .expect_err("connecting to a closed port must be an honest error");
+        assert!(matches!(err, MailError::NetworkError(_)));
     }
 
     #[test]

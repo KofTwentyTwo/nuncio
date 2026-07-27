@@ -232,6 +232,21 @@ pub enum AccountSubcommand {
         /// Updated SMTP server port.
         #[arg(long, help = "Updated SMTP server port")]
         smtp_port: Option<u16>,
+        /// Updated IMAP connection transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, help = "Updated IMAP transport mode")]
+        imap_mode: Option<String>,
+        /// Updated SMTP connection transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, help = "Updated SMTP transport mode")]
+        smtp_mode: Option<String>,
+        /// Prompt (without echo) for a new password and rotate the stored
+        /// OS-keyring credential. Without this flag, the existing
+        /// credential is left untouched.
+        #[arg(long, help = "Rotate the stored password credential")]
+        rotate_password: bool,
+        /// Populated from an interactive `rpassword` prompt in `main` when
+        /// `rotate_password` is set -- never a CLI flag. See [`PasswordArg`].
+        #[arg(skip)]
+        password: PasswordArg,
     },
     /// Remove a configured account profile.
     Delete {

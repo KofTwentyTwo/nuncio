@@ -144,6 +144,20 @@ service Accounts {
   // ListAccounts returns every persisted account configuration. Password
   // credentials are NEVER included in this response.
   rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+  // UpdateAccount overwrites an existing account's configuration by id.
+  // Fails with NOT_FOUND if no account with that id is already persisted --
+  // it never silently creates one, so a typo'd id can't produce a second,
+  // unintended account.
+  rpc UpdateAccount(UpdateAccountRequest) returns (UpdateAccountResponse);
+  // RemoveAccount deletes a persisted account configuration and its OS
+  // keyring credential by id. Fails with NOT_FOUND if no account with that
+  // id exists, rather than silently reporting success.
+  rpc RemoveAccount(RemoveAccountRequest) returns (RemoveAccountResponse);
+  // TestAccountConnection validates that an account's settings genuinely
+  // work: a real connect + authenticate against its configured mail
+  // transport(s), with no sync/send side effects. Reports each transport's
+  // real result independently -- never a fabricated blanket "ok".
+  rpc TestAccountConnection(TestAccountConnectionRequest) returns (TestAccountConnectionResponse);
 }
 
 // Mirrors `nuncio_core::AccountProtocol`.
@@ -218,6 +232,55 @@ message ListAccountsRequest {}
 // -- see `AccountConfig`'s doc comment.
 message ListAccountsResponse {
   repeated AccountConfig accounts = 1;
+}
+
+// UpdateAccountRequest carries the full replacement configuration for the
+// account identified by `config.id`. `password`, if non-empty, rotates the
+// OS keyring credential; if empty, the existing credential is left
+// untouched -- there is no other way to distinguish "no change" from "set
+// to an empty password" with a bare proto3 string, and an empty mail
+// password is never a legitimate account state.
+message UpdateAccountRequest {
+  AccountConfig config = 1;
+  string password = 2;
+}
+
+// UpdateAccountResponse deliberately carries only the updated account's id
+// (callers already have the full config they just sent).
+message UpdateAccountResponse {
+  string id = 1;
+}
+
+// RemoveAccountRequest identifies the account to delete by id.
+message RemoveAccountRequest {
+  string id = 1;
+}
+
+// RemoveAccountResponse carries no payload: success is the response
+// arriving at all, and failure (including NOT_FOUND for an unknown id)
+// surfaces as a gRPC error status instead.
+message RemoveAccountResponse {}
+
+// TestAccountConnectionRequest identifies the account to test by id.
+// `password`, if non-empty, tests that candidate credential directly
+// (e.g. validating settings before `AddAccount`/`UpdateAccount` persists
+// them); if empty, the daemon resolves the already-stored keyring
+// credential for `id` and tests that instead.
+message TestAccountConnectionRequest {
+  string id = 1;
+  string password = 2;
+}
+
+// TestAccountConnectionResponse reports the inbound (IMAP/JMAP) and
+// outbound (SMTP) transport legs independently and honestly: a
+// protocol/transport that cannot yet be genuinely tested (e.g. JMAP, which
+// has no real HTTP client yet) reports `ok = false` with an explanatory
+// `error`, never a fabricated `true`.
+message TestAccountConnectionResponse {
+  bool inbound_ok = 1;
+  string inbound_error = 2;
+  bool outbound_ok = 3;
+  string outbound_error = 4;
 }
 
 // Mail exposes the READ path over the daemon's real, persistent message

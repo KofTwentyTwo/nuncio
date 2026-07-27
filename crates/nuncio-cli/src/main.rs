@@ -20,6 +20,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         *password = PasswordArg(entered);
     }
 
+    // `account edit --rotate-password` follows the exact same pattern:
+    // only prompt when the caller actually asked to rotate the credential,
+    // so a plain settings edit (hostname/port/etc.) never touches the
+    // terminal for a password it isn't changing.
+    if let Commands::Account {
+        action:
+            AccountSubcommand::Edit {
+                rotate_password: true,
+                password,
+                ..
+            },
+    } = &mut cli.command
+    {
+        let entered = rpassword::prompt_password("New account password: ")
+            .map_err(|e| format!("failed to read password: {e}"))?;
+        *password = PasswordArg(entered);
+    }
+
     let runner = HeadlessRunner::ephemeral().await?;
 
     let output_str = runner.execute_command(&cli.command, cli.json).await;

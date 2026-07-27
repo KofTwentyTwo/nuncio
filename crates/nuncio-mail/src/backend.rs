@@ -21,6 +21,15 @@ pub trait MailBackend: Send + Sync {
 
     /// Send an email message over the configured transport.
     async fn send_email(&self, email: &Email) -> Result<(), MailError>;
+
+    /// Validate that this backend's configured account settings genuinely
+    /// work end to end: real connect + auth against every transport the
+    /// backend uses, with no sync/send side effects. Implementations MUST
+    /// return the real underlying error on failure -- never a fabricated
+    /// success -- and MUST return an honest "not supported" error rather
+    /// than a fabricated success for a protocol whose transport isn't
+    /// genuinely implemented yet.
+    async fn test_connection(&self) -> Result<(), MailError>;
 }
 
 /// A composed outbound email message ready to send over SMTP. Deliberately

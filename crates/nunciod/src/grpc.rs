@@ -7,7 +7,7 @@
 
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
-use nuncio_mail::{MailBackend, MessageSender};
+use nuncio_mail::{MailBackend, MessageSender, SmtpTransportEngine};
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::audit_server::{Audit, AuditServer};
 use nuncio_proto::v1::event::Kind;
@@ -26,10 +26,12 @@ use nuncio_proto::v1::{
     ListFoldersRequest, ListFoldersResponse, ListMessagesRequest, ListMessagesResponse,
     ListRecordsRequest, ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest,
     MarkReadResponse, Message as MessageProto, MessageFlagsChanged, MessageSearchHit,
-    PreviewRuleRequest, PreviewRuleResponse, SearchMessagesRequest, SearchMessagesResponse,
-    SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
-    SyncRequest, SyncResponse, SyncStarted, TlsMode as TlsModeProto, UpdateAvailable,
-    ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
+    PreviewRuleRequest, PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse,
+    SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest, SendMessageResponse,
+    ShuttingDown, SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse, SyncStarted,
+    TestAccountConnectionRequest, TestAccountConnectionResponse, TlsMode as TlsModeProto,
+    UpdateAccountRequest, UpdateAccountResponse, UpdateAvailable, ValidateRuleRequest,
+    ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -353,6 +355,137 @@ impl Accounts for AccountsGrpcService {
             .collect();
 
         Ok(Response::new(ListAccountsResponse { accounts }))
+    }
+
+    async fn update_account(
+        &self,
+        request: Request<UpdateAccountRequest>,
+    ) -> Result<Response<UpdateAccountResponse>, Status> {
+        let req = request.into_inner();
+        let proto_config = req
+            .config
+            .ok_or_else(|| Status::invalid_argument("config is required"))?;
+
+        let config = map_account_config_from_proto(proto_config)?;
+        config
+            .validate()
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        // Never silently create an account under an edit request: an id
+        // that doesn't already exist is a caller error, not an implicit
+        // add.
+        self.db
+            .get_account(&config.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
+            .ok_or_else(|| Status::not_found(format!("no account with id '{}'", config.id)))?;
+
+        // Only rotate the keyring credential when a new password was
+        // actually supplied -- an empty `password` means "leave the
+        // existing credential untouched", never "set it to empty".
+        if !req.password.is_empty() {
+            self.secrets
+                .set_secret(&config.keyring_secret_key, &req.password)
+                .map_err(|e| {
+                    Status::internal(format!("failed to rotate credential in vault: {e}"))
+                })?;
+        }
+
+        self.db
+            .save_account(&config)
+            .await
+            .map_err(|e| Status::internal(format!("failed to persist account: {e}")))?;
+
+        Ok(Response::new(UpdateAccountResponse { id: config.id }))
+    }
+
+    async fn remove_account(
+        &self,
+        request: Request<RemoveAccountRequest>,
+    ) -> Result<Response<RemoveAccountResponse>, Status> {
+        let req = request.into_inner();
+
+        let existing = self
+            .db
+            .get_account(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
+            .ok_or_else(|| Status::not_found(format!("no account with id '{}'", req.id)))?;
+
+        self.db
+            .delete_account(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to delete account: {e}")))?;
+
+        // The account row is already gone at this point; a credential
+        // cleanup failure is reported rather than swallowed so the caller
+        // knows a keyring entry was left behind, but it deliberately does
+        // not attempt to resurrect the just-deleted row over it.
+        self.secrets
+            .delete_secret(&existing.keyring_secret_key)
+            .map_err(|e| {
+                Status::internal(format!(
+                    "account '{}' was removed, but its keyring credential could not be \
+                     cleared: {e}",
+                    req.id
+                ))
+            })?;
+
+        Ok(Response::new(RemoveAccountResponse {}))
+    }
+
+    async fn test_account_connection(
+        &self,
+        request: Request<TestAccountConnectionRequest>,
+    ) -> Result<Response<TestAccountConnectionResponse>, Status> {
+        let req = request.into_inner();
+
+        let config = self
+            .db
+            .get_account(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
+            .ok_or_else(|| Status::not_found(format!("no account with id '{}'", req.id)))?;
+
+        let password = if !req.password.is_empty() {
+            req.password
+        } else {
+            self.secrets
+                .get_secret(&config.keyring_secret_key)
+                .map_err(|e| {
+                    Status::internal(format!("failed to read credential from vault: {e}"))
+                })?
+        };
+
+        // A connection that genuinely fails is real, honest response DATA
+        // -- not an RPC-level error -- so both legs are tested and reported
+        // independently rather than short-circuiting on the first failure.
+        let backend = crate::sync::build_mail_backend(&config, &password);
+        let (inbound_ok, inbound_error) = match backend.test_connection().await {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, e.to_string()),
+        };
+
+        let (outbound_ok, outbound_error) = match SmtpTransportEngine::new(
+            &config.smtp_host,
+            config.smtp_port,
+            config.smtp_tls_mode,
+            &config.email_address,
+            &password,
+        ) {
+            Ok(engine) => match engine.test_connection().await {
+                Ok(()) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            },
+            Err(e) => (false, e.to_string()),
+        };
+
+        Ok(Response::new(TestAccountConnectionResponse {
+            inbound_ok,
+            inbound_error,
+            outbound_ok,
+            outbound_error,
+        }))
     }
 }
 
@@ -891,10 +1024,25 @@ impl Filters for FiltersGrpcService {
             .map_err(|e| Status::internal(format!("failed to build preview engine: {e}")))?;
 
         let email = match &req.message_id {
+            // A real, resolvable `message_id` must evaluate against that
+            // REAL message -- a lookup failure here must be an honest
+            // error, never a fake email silently stamped with the id the
+            // caller asked for. Only the "no message_id given at all" case
+            // below intentionally falls back to a synthetic sample, and
+            // that fallback is documented on `PreviewRuleResponse` itself.
             Some(message_id) if !message_id.is_empty() => {
                 match self.db.get_message(message_id).await {
                     Ok(email) => email,
-                    Err(_) => synthetic_preview_email(message_id),
+                    Err(e) if e.is_row_not_found() => {
+                        return Err(Status::not_found(format!(
+                            "no message with id '{message_id}'"
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(Status::internal(format!(
+                            "failed to look up message '{message_id}': {e}"
+                        )));
+                    }
                 }
             }
             _ => synthetic_preview_email("msg-test"),
@@ -1730,6 +1878,243 @@ mod tests {
             .await
             .expect_err("missing config must be rejected");
         assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn update_account_rejects_missing_bearer_token() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .update_account(UpdateAccountRequest {
+                config: Some(sample_account_config_proto(
+                    "acct-noauth",
+                    "nuncio/acct-noauth",
+                )),
+                password: String::new(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn update_account_returns_not_found_for_unknown_id() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .update_account(authed_bearer_request(UpdateAccountRequest {
+                config: Some(sample_account_config_proto(
+                    "acct-does-not-exist",
+                    "nuncio/acct-does-not-exist",
+                )),
+                password: String::new(),
+            }))
+            .await
+            .expect_err("editing an unknown account id must never silently create one");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn update_account_persists_changes_without_touching_password_when_empty() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        client
+            .add_account(authed_bearer_request(AddAccountRequest {
+                config: Some(sample_account_config_proto(
+                    "acct-edit-1",
+                    "nuncio/acct-edit-1",
+                )),
+                password: "original-password".to_string(),
+            }))
+            .await
+            .expect("add succeeds");
+
+        let mut edited = sample_account_config_proto("acct-edit-1", "nuncio/acct-edit-1");
+        edited.server_host = "imap.updated-host.example".to_string();
+        edited.imap_tls_mode = TlsModeProto::StartTls.into();
+        client
+            .update_account(authed_bearer_request(UpdateAccountRequest {
+                config: Some(edited),
+                password: String::new(),
+            }))
+            .await
+            .expect("update succeeds");
+
+        let listed = client
+            .list_accounts(authed_bearer_request(ListAccountsRequest {}))
+            .await
+            .expect("list succeeds")
+            .into_inner()
+            .accounts;
+        assert_eq!(listed.len(), 1, "update must not create a second account");
+        assert_eq!(listed[0].server_host, "imap.updated-host.example");
+        assert_eq!(listed[0].imap_tls_mode(), TlsModeProto::StartTls);
+    }
+
+    #[tokio::test]
+    async fn remove_account_rejects_missing_bearer_token() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .remove_account(RemoveAccountRequest {
+                id: "acct-noauth".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn remove_account_returns_not_found_for_unknown_id() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .remove_account(authed_bearer_request(RemoveAccountRequest {
+                id: "acct-does-not-exist".to_string(),
+            }))
+            .await
+            .expect_err("deleting an unknown account id must be an honest error, not a silent no-op success");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn remove_account_deletes_the_row_and_its_keyring_credential() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        client
+            .add_account(authed_bearer_request(AddAccountRequest {
+                config: Some(sample_account_config_proto(
+                    "acct-del-1",
+                    "nuncio/acct-del-1",
+                )),
+                password: "some-password".to_string(),
+            }))
+            .await
+            .expect("add succeeds");
+
+        client
+            .remove_account(authed_bearer_request(RemoveAccountRequest {
+                id: "acct-del-1".to_string(),
+            }))
+            .await
+            .expect("remove succeeds");
+
+        let listed = client
+            .list_accounts(authed_bearer_request(ListAccountsRequest {}))
+            .await
+            .expect("list succeeds")
+            .into_inner()
+            .accounts;
+        assert!(listed.is_empty());
+
+        // Removing it again must be an honest NOT_FOUND, not a second
+        // silent success -- proves the row is genuinely gone, not just
+        // hidden.
+        let err = client
+            .remove_account(authed_bearer_request(RemoveAccountRequest {
+                id: "acct-del-1".to_string(),
+            }))
+            .await
+            .expect_err("the account was already removed");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_account_connection_rejects_missing_bearer_token() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .test_account_connection(TestAccountConnectionRequest {
+                id: "acct-noauth".to_string(),
+                password: String::new(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn test_account_connection_returns_not_found_for_unknown_id() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .test_account_connection(authed_bearer_request(TestAccountConnectionRequest {
+                id: "acct-does-not-exist".to_string(),
+                password: String::new(),
+            }))
+            .await
+            .expect_err("testing an unknown account id must be an honest error");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_account_connection_reports_real_failure_never_a_fabricated_ok() {
+        // `sample_account_config_proto` points at `imap.nuncio.mx`/
+        // `smtp.nuncio.mx`, which resolve to nothing reachable in this test
+        // environment -- proving the RPC reports the real connect failure
+        // on both legs instead of a fabricated success.
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        client
+            .add_account(authed_bearer_request(AddAccountRequest {
+                config: Some(sample_account_config_proto(
+                    "acct-unreachable",
+                    "nuncio/acct-unreachable",
+                )),
+                password: "some-password".to_string(),
+            }))
+            .await
+            .expect("add succeeds");
+
+        let response = client
+            .test_account_connection(authed_bearer_request(TestAccountConnectionRequest {
+                id: "acct-unreachable".to_string(),
+                password: String::new(),
+            }))
+            .await
+            .expect("the RPC itself succeeds even though the connection test fails")
+            .into_inner();
+
+        assert!(!response.inbound_ok);
+        assert!(!response.inbound_error.is_empty());
+        assert!(!response.outbound_ok);
+        assert!(!response.outbound_error.is_empty());
     }
 
     /// Proves an account added through the daemon persists across a daemon
@@ -2969,6 +3354,9 @@ mod tests {
             .await
             .expect("client connects");
 
+        // No `message_id` at all is the ONLY case that legitimately falls
+        // back to the fixed synthetic sample message -- documented on
+        // `PreviewRuleResponse` itself.
         let response = client
             .preview_rule(authed_bearer_request(PreviewRuleRequest {
                 nsql: "WHERE subject CONTAINS 'Test Subject' ACTION FLAG".to_string(),
@@ -2979,17 +3367,31 @@ mod tests {
             .into_inner();
         assert!(response.matched);
         assert_eq!(response.message_id, "msg-test");
+    }
 
-        let response_missing_id = client
+    #[tokio::test]
+    async fn preview_rule_reports_honest_not_found_for_an_unresolvable_message_id() {
+        // A caller-supplied `message_id` that doesn't exist must be an
+        // honest NOT_FOUND -- never a fake email silently stamped with the
+        // id the caller asked for (that would make a genuine "found and
+        // evaluated your real message" indistinguishable from "made one up
+        // and gave it your id").
+        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
             .preview_rule(authed_bearer_request(PreviewRuleRequest {
                 nsql: "WHERE subject CONTAINS 'Test Subject' ACTION FLAG".to_string(),
                 message_id: Some("does-not-exist".to_string()),
             }))
             .await
-            .expect("preview_rule succeeds with an unresolvable message_id")
-            .into_inner();
-        assert!(response_missing_id.matched);
-        assert_eq!(response_missing_id.message_id, "does-not-exist");
+            .expect_err(
+                "an unresolvable message_id must be an honest error, not a fabricated match",
+            );
+        assert_eq!(err.code(), Code::NotFound);
     }
 
     #[tokio::test]

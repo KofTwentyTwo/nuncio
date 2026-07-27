@@ -114,6 +114,19 @@ impl MailBackend for MockMailBackend {
         sent.push(email.clone());
         Ok(())
     }
+
+    async fn test_connection(&self) -> Result<(), MailError> {
+        let should_fail = self
+            .should_fail
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        if *should_fail {
+            return Err(MailError::ParseFailed(
+                "simulated network failure".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Deterministic mock [`MessageSender`] for offline testing of the outbound
