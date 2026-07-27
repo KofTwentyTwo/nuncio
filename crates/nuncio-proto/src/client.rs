@@ -10,6 +10,7 @@
 //! server-side interceptor in `nunciod::grpc`.
 
 use crate::v1::accounts_client::AccountsClient;
+use crate::v1::filters_client::FiltersClient;
 use crate::v1::mail_client::MailClient;
 use crate::v1::system_client::SystemClient;
 use crate::v1::{Event, SubscribeRequest};
@@ -94,6 +95,11 @@ pub type AuthenticatedAccountsClient =
 /// [`connect_mail`].
 pub type AuthenticatedMailClient = MailClient<InterceptedService<Channel, BearerTokenInterceptor>>;
 
+/// The authenticated `nuncio.v1.Filters` client type returned by
+/// [`connect_filters`].
+pub type AuthenticatedFiltersClient =
+    FiltersClient<InterceptedService<Channel, BearerTokenInterceptor>>;
+
 /// Dials `addr` (a `host:port` pair, e.g. `127.0.0.1:9420`) over plain HTTP
 /// (the loopback gRPC transport is never TLS-wrapped; auth is via bearer
 /// token instead) and returns the connected [`Channel`], shared by every
@@ -162,6 +168,25 @@ pub async fn connect_mail(
     let interceptor = BearerTokenInterceptor::new(token)?;
     let channel = dial(addr).await?;
     Ok(MailClient::with_interceptor(channel, interceptor))
+}
+
+/// Dials the `nuncio.v1.Filters` gRPC endpoint at `addr` and returns a
+/// client that injects `authorization: Bearer <token>` metadata on every
+/// call (backlog story 2.A, GH #171).
+///
+/// `Filters` is guarded by the exact same `BearerAuthInterceptor` as
+/// `System`/`Accounts`/`Mail` on the server side (see
+/// `nunciod::grpc::serve_on_listener`, GH #165), so this shares
+/// [`BearerTokenInterceptor`] and [`dial`] with [`connect_system`] /
+/// [`connect_accounts`] / [`connect_mail`] rather than hand-rolling a fourth
+/// auth handshake.
+pub async fn connect_filters(
+    addr: &str,
+    token: &str,
+) -> Result<AuthenticatedFiltersClient, ConnectError> {
+    let interceptor = BearerTokenInterceptor::new(token)?;
+    let channel = dial(addr).await?;
+    Ok(FiltersClient::with_interceptor(channel, interceptor))
 }
 
 /// Opens the `nuncio.v1.System/Subscribe` server-streaming RPC on an already
@@ -266,6 +291,23 @@ mod tests {
         // `ConnectError::Transport` rather than hanging or fabricating
         // success.
         let err = connect_system("127.0.0.1:1", "abc123")
+            .await
+            .expect_err("connecting to an unreachable daemon must fail");
+        assert!(matches!(err, ConnectError::Transport { .. }));
+        assert!(err.to_string().contains("127.0.0.1:1"));
+    }
+
+    #[tokio::test]
+    async fn connect_filters_fails_closed_on_invalid_token() {
+        let err = connect_filters("127.0.0.1:0", "tok\ntoken")
+            .await
+            .expect_err("invalid token must fail before dialing");
+        assert!(matches!(err, ConnectError::InvalidToken(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_filters_reports_transport_error_when_daemon_unreachable() {
+        let err = connect_filters("127.0.0.1:1", "abc123")
             .await
             .expect_err("connecting to an unreachable daemon must fail");
         assert!(matches!(err, ConnectError::Transport { .. }));

@@ -369,6 +369,12 @@ pub enum FilterSubcommand {
         #[arg(short, long, help = "Rule identifier")]
         id: String,
     },
+    /// Validate an NSQL query's syntax and semantics without persisting it.
+    Validate {
+        /// NSQL query string to validate.
+        #[arg(short, long, help = "NSQL query string")]
+        sql: String,
+    },
     /// Test / dry-run NSQL query against an email.
     Test {
         /// NSQL query string to test.

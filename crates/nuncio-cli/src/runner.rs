@@ -57,6 +57,23 @@ fn message_proto_to_json(message: &nuncio_proto::v1::Message) -> serde_json::Val
     })
 }
 
+/// Renders a `nuncio.v1.FilterRule` (as returned by the daemon's `Filters`
+/// gRPC service, backlog story 2.A / GH #171) into the JSON shape used by
+/// `filter list`/`filter create`'s `--json` output.
+fn filter_rule_proto_to_json(rule: &nuncio_proto::v1::FilterRule) -> serde_json::Value {
+    json!({
+        "id": rule.id,
+        "name": rule.name,
+        "target_account": rule.target_account,
+        "priority": rule.priority,
+        "enabled": rule.enabled,
+        "nsql_text": rule.nsql_text,
+        "actions": rule.actions,
+        "created_at": rule.created_at,
+        "updated_at": rule.updated_at,
+    })
+}
+
 /// Errors emitted by the CLI headless runner.
 #[derive(Error, Debug)]
 pub enum RunnerError {
@@ -368,60 +385,35 @@ impl HeadlessRunner {
                 }
             },
             Commands::Filter { action } => match action {
-                FilterSubcommand::List => {
-                    let rules = self.db.list_filter_rules().await.unwrap_or_default();
-                    if json_mode {
-                        format_json(&json!(rules))
-                    } else if rules.is_empty() {
-                        "No filter rules configured.".to_string()
-                    } else {
-                        let mut out = String::from(
-                            "ID         PRIORITY ENABLED NAME                  NSQL\n",
-                        );
-                        for r in rules {
-                            out.push_str(&format!(
-                                "{:<10} {:<8} {:<7} {:<20} {}\n",
-                                r.id, r.priority, r.enabled, r.name, r.nsql_text
-                            ));
-                        }
-                        out
-                    }
-                }
+                FilterSubcommand::List => self.handle_filter_list(json_mode).await,
                 FilterSubcommand::Create {
                     name,
                     sql,
                     priority,
-                } => match nuncio_filter::NsqlParser::parse_rule(name, *priority, sql) {
-                    Ok(rule) => {
-                        let opts = nuncio_filter::ValidationOptions::default();
-                        if let Err(e) = nuncio_filter::NsqlValidator::validate(&rule, &opts) {
-                            return if json_mode {
-                                format_json_error(&e.to_string())
-                            } else {
-                                format!("Validation Error: {e}")
-                            };
-                        }
-                        if let Err(e) = self.db.save_filter_rule(&rule).await {
-                            return if json_mode {
-                                format_json_error(&e.to_string())
-                            } else {
-                                format!("Database Error: {e}")
-                            };
-                        }
-                        if json_mode {
-                            format_json(&json!(rule))
-                        } else {
-                            format!("✓ Created filter rule '{}' (ID: {}).", rule.name, rule.id)
-                        }
-                    }
-                    Err(e) => {
-                        if json_mode {
-                            format_json_error(&e.to_string())
-                        } else {
-                            format!("Syntax Error: {e}")
-                        }
-                    }
-                },
+                } => {
+                    self.handle_filter_create(name, sql, *priority, json_mode)
+                        .await
+                }
+                FilterSubcommand::Delete { id } => self.handle_filter_delete(id, json_mode).await,
+                FilterSubcommand::Validate { sql } => {
+                    self.handle_filter_validate(sql, json_mode).await
+                }
+                FilterSubcommand::Test { sql, message_id } => {
+                    self.handle_filter_test(sql, message_id.as_deref(), json_mode)
+                        .await
+                }
+                // `filter edit`/`export`/`import`/`logs` are NOT part of
+                // backlog story 2.A (GH #171)'s required `Filters` gRPC
+                // surface (`CreateRule`/`ListRules`/`DeleteRule`/
+                // `ValidateRule`/`PreviewRule`); they still read/write this
+                // runner's own ephemeral local `db` below, exactly as
+                // before. Because `List`/`Create`/`Delete` above now go
+                // through the daemon's real, persistent store instead, a
+                // rule created via `filter create` will NOT show up in
+                // `filter export`/`filter logs` (which only see this
+                // process's throwaway `db`) until these are migrated too --
+                // a known gap tracked for a later story, not a regression
+                // introduced silently here.
                 FilterSubcommand::Edit {
                     id,
                     name,
@@ -472,80 +464,6 @@ impl HeadlessRunner {
                         format_json_error(&format!("Rule '{}' not found", id))
                     } else {
                         format!("Rule '{}' not found.", id)
-                    }
-                }
-                FilterSubcommand::Delete { id } => {
-                    if let Err(e) = self.db.delete_filter_rule(id).await {
-                        if json_mode {
-                            format_json_error(&e.to_string())
-                        } else {
-                            format!("Error: {e}")
-                        }
-                    } else if json_mode {
-                        format_json(&json!({ "status": "deleted", "id": id }))
-                    } else {
-                        format!("✓ Filter rule '{}' deleted.", id)
-                    }
-                }
-                FilterSubcommand::Test { sql, message_id } => {
-                    match nuncio_filter::NsqlParser::parse_rule("Test Rule", 0, sql) {
-                        Ok(rule) => {
-                            let engine = match nuncio_filter::FilterEngine::new(vec![rule.clone()])
-                            {
-                                Ok(engine) => engine,
-                                Err(e) => {
-                                    return if json_mode {
-                                        format_json_error(&e)
-                                    } else {
-                                        format!("Filter Engine Error: {e}")
-                                    };
-                                }
-                            };
-                            let sample_email = if let Some(mid) = message_id {
-                                self.db.get_message(mid).await.unwrap_or_else(|_| {
-                                    nuncio_core::model::Email {
-                                        id: mid.clone(),
-                                        account_id: "acct-1".to_string(),
-                                        folder_id: "inbox".to_string(),
-                                        subject: "Test Subject".to_string(),
-                                        sender: "test@nuncio.mx".to_string(),
-                                        recipient: "me@nuncio.mx".to_string(),
-                                        received_at: chrono::Utc::now().timestamp(),
-                                        read: false,
-                                        body_plain: Some("Sample body text".to_string()),
-                                        body_html: None,
-                                        attachments: Vec::new(),
-                                    }
-                                })
-                            } else {
-                                nuncio_core::model::Email {
-                                    id: "msg-test".to_string(),
-                                    account_id: "acct-1".to_string(),
-                                    folder_id: "inbox".to_string(),
-                                    subject: "Test Subject".to_string(),
-                                    sender: "test@nuncio.mx".to_string(),
-                                    recipient: "me@nuncio.mx".to_string(),
-                                    received_at: chrono::Utc::now().timestamp(),
-                                    read: false,
-                                    body_plain: Some("Sample body text".to_string()),
-                                    body_html: None,
-                                    attachments: Vec::new(),
-                                }
-                            };
-                            let preview = engine.preview(&sample_email);
-                            if json_mode {
-                                format_json(&json!(preview))
-                            } else {
-                                format!("Dry-run evaluation result: matched={}, actions={:?}, elapsed={}us", preview.matched, preview.actions_evaluated, preview.execution_time_us)
-                            }
-                        }
-                        Err(e) => {
-                            if json_mode {
-                                format_json_error(&e.to_string())
-                            } else {
-                                format!("Syntax Error: {e}")
-                            }
-                        }
                     }
                 }
                 FilterSubcommand::Export { format } => {
@@ -1021,6 +939,230 @@ impl HeadlessRunner {
                 json_mode,
             ),
         }
+    }
+
+    /// `filter list`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171). Lists
+    /// every persisted filter rule from the daemon's real, persistent
+    /// store -- NOT this runner's own ephemeral local `db`, which is thrown
+    /// away when this CLI process exits.
+    async fn handle_filter_list(&self, json_mode: bool) -> String {
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .list_rules(nuncio_proto::v1::ListRulesRequest {})
+            .await
+        {
+            Ok(response) => {
+                let rules = response.into_inner().rules;
+                if json_mode {
+                    let rules_json: Vec<serde_json::Value> =
+                        rules.iter().map(filter_rule_proto_to_json).collect();
+                    format_json(&json!({ "rules": rules_json }))
+                } else if rules.is_empty() {
+                    "No filter rules configured.".to_string()
+                } else {
+                    let mut out =
+                        String::from("ID         PRIORITY ENABLED NAME                  NSQL\n");
+                    for r in rules {
+                        out.push_str(&format!(
+                            "{:<10} {:<8} {:<7} {:<20} {}\n",
+                            r.id, r.priority, r.enabled, r.name, r.nsql_text
+                        ));
+                    }
+                    out
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected list_rules: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `filter create`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171). The
+    /// daemon parses, validates (6-pass `NsqlValidator`), and persists the
+    /// rule, then reloads its own live `FilterEngine` -- this runner's own
+    /// ephemeral local `db` is never touched, so the rule survives this CLI
+    /// process exiting.
+    async fn handle_filter_create(
+        &self,
+        name: &str,
+        sql: &str,
+        priority: i32,
+        json_mode: bool,
+    ) -> String {
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .create_rule(nuncio_proto::v1::CreateRuleRequest {
+                name: name.to_string(),
+                nsql: sql.to_string(),
+                priority,
+            })
+            .await
+        {
+            Ok(response) => match response.into_inner().rule {
+                Some(rule) => {
+                    if json_mode {
+                        format_json(&json!({ "rule": filter_rule_proto_to_json(&rule) }))
+                    } else {
+                        format!("✓ Created filter rule '{}' (ID: {}).", rule.name, rule.id)
+                    }
+                }
+                None => Self::render_error(
+                    "nunciod daemon accepted create_rule but returned no rule",
+                    json_mode,
+                ),
+            },
+            Err(status) if status.code() == tonic::Code::InvalidArgument => {
+                Self::render_error(status.message(), json_mode)
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected create_rule: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `filter delete`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171). The
+    /// daemon deletes the persisted rule and reloads its own live
+    /// `FilterEngine` so the removal takes effect immediately.
+    async fn handle_filter_delete(&self, id: &str, json_mode: bool) -> String {
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .delete_rule(nuncio_proto::v1::DeleteRuleRequest { id: id.to_string() })
+            .await
+        {
+            Ok(_) => {
+                if json_mode {
+                    format_json(&json!({ "status": "deleted", "id": id }))
+                } else {
+                    format!("✓ Filter rule '{}' deleted.", id)
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected delete_rule: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `filter validate`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171). Unlike
+    /// `filter create`, an invalid rule is never a connection/RPC failure
+    /// here -- it is the daemon's honestly reported `valid: false` result,
+    /// which this renders as a validation error without ever suggesting
+    /// the daemon itself was unreachable or misbehaving.
+    async fn handle_filter_validate(&self, sql: &str, json_mode: bool) -> String {
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .validate_rule(nuncio_proto::v1::ValidateRuleRequest {
+                nsql: sql.to_string(),
+            })
+            .await
+        {
+            Ok(response) => {
+                let response = response.into_inner();
+                if json_mode {
+                    format_json(&json!({ "valid": response.valid, "error": response.error }))
+                } else if response.valid {
+                    "✓ NSQL rule is valid.".to_string()
+                } else {
+                    format!("Validation Error: {}", response.error)
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected validate_rule: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `filter test`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Filters` API (backlog story 2.A, GH #171).
+    /// Dry-run evaluates the given NSQL rule against a stored message (by
+    /// `message_id`, read from the daemon's real, persistent store) or a
+    /// fixed synthetic sample when none is given/resolvable -- the rule is
+    /// never persisted and no action is ever executed.
+    async fn handle_filter_test(
+        &self,
+        sql: &str,
+        message_id: Option<&str>,
+        json_mode: bool,
+    ) -> String {
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .preview_rule(nuncio_proto::v1::PreviewRuleRequest {
+                nsql: sql.to_string(),
+                message_id: message_id.map(str::to_string),
+            })
+            .await
+        {
+            Ok(response) => {
+                let preview = response.into_inner();
+                if json_mode {
+                    format_json(&json!({
+                        "message_id": preview.message_id,
+                        "matched": preview.matched,
+                        "matched_rule_id": preview.matched_rule_id,
+                        "matched_rule_name": preview.matched_rule_name,
+                        "actions_evaluated": preview.actions_evaluated,
+                        "execution_time_us": preview.execution_time_us,
+                        "condition_traces": preview.condition_traces,
+                    }))
+                } else {
+                    format!(
+                        "Dry-run evaluation result: matched={}, actions={:?}, elapsed={}us",
+                        preview.matched, preview.actions_evaluated, preview.execution_time_us
+                    )
+                }
+            }
+            Err(status) if status.code() == tonic::Code::InvalidArgument => {
+                Self::render_error(status.message(), json_mode)
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected preview_rule: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// `nuncio.v1.Filters` service at `self.grpc_addr` (backlog story 2.A,
+    /// GH #171), shared by every `filter` handler above.
+    async fn connect_filters_client(
+        &self,
+    ) -> Result<nuncio_proto::client::AuthenticatedFiltersClient, String> {
+        let token_bytes = self
+            .secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
+        let token = hex::encode(token_bytes);
+
+        nuncio_proto::client::connect_filters(&self.grpc_addr, &token)
+            .await
+            .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
     }
 
     /// `account add`: a real thin gRPC client of the running `nunciod`
@@ -2041,6 +2183,268 @@ mod tests {
         assert_eq!(recorded_send.to, "alice@nuncio.mx");
         assert_eq!(recorded_send.subject, "Quarterly Roadmap");
         assert_eq!(recorded_send.body_text, "Let's discuss the roadmap.");
+    }
+
+    /// Reference-client proof for backlog story 2.A (GH #171): boots a stub
+    /// `nuncio.v1.Filters` gRPC server (mirroring the `Accounts`/`Mail` stub
+    /// pattern above) and drives the real `HeadlessRunner`'s
+    /// `filter list`/`filter create`/`filter delete`/`filter validate`/
+    /// `filter test` gRPC client paths against it.
+    ///
+    /// Real persistence, `ArcSwap` engine reload, and honest
+    /// validation/preview semantics are proven by `nunciod`'s own
+    /// `grpc::tests`; this test exists purely to prove the CLI's connect +
+    /// call + JSON-format happy path, and its honest invalid-argument error
+    /// handling.
+    #[tokio::test]
+    async fn filter_rpcs_round_trip_over_grpc_to_a_stub_daemon() {
+        use nuncio_proto::v1::filters_server::{Filters as FiltersService, FiltersServer};
+        use nuncio_proto::v1::{
+            CreateRuleRequest, CreateRuleResponse, DeleteRuleRequest, DeleteRuleResponse,
+            FilterRule as FilterRuleProto, ListRulesRequest, ListRulesResponse, PreviewRuleRequest,
+            PreviewRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
+        };
+        use std::sync::Mutex;
+
+        /// Minimal test-only stub of `nuncio.v1.Filters`: records the last
+        /// `DeleteRuleRequest` it received (so this test can assert on
+        /// exactly what the CLI sent over the wire) and otherwise returns
+        /// fixed responses.
+        #[derive(Default)]
+        struct StubFilters {
+            last_delete: Arc<Mutex<Option<DeleteRuleRequest>>>,
+        }
+
+        #[tonic::async_trait]
+        impl FiltersService for StubFilters {
+            async fn create_rule(
+                &self,
+                request: tonic::Request<CreateRuleRequest>,
+            ) -> Result<tonic::Response<CreateRuleResponse>, tonic::Status> {
+                let req = request.into_inner();
+                if req.nsql.contains("BROKEN") {
+                    return Err(tonic::Status::invalid_argument(
+                        "NSQL syntax error: stub rejects BROKEN rules",
+                    ));
+                }
+                Ok(tonic::Response::new(CreateRuleResponse {
+                    rule: Some(FilterRuleProto {
+                        id: "rule-stub-1".to_string(),
+                        name: req.name,
+                        target_account: "*".to_string(),
+                        priority: req.priority,
+                        enabled: true,
+                        nsql_text: req.nsql,
+                        actions: vec!["MARK READ".to_string()],
+                        created_at: 1_700_000_000,
+                        updated_at: 1_700_000_000,
+                    }),
+                }))
+            }
+
+            async fn list_rules(
+                &self,
+                _request: tonic::Request<ListRulesRequest>,
+            ) -> Result<tonic::Response<ListRulesResponse>, tonic::Status> {
+                Ok(tonic::Response::new(ListRulesResponse {
+                    rules: vec![FilterRuleProto {
+                        id: "rule-stub-1".to_string(),
+                        name: "Stub Rule".to_string(),
+                        target_account: "*".to_string(),
+                        priority: 5,
+                        enabled: true,
+                        nsql_text: "WHERE subject CONTAINS 'Urgent' ACTION MARK READ".to_string(),
+                        actions: vec!["MARK READ".to_string()],
+                        created_at: 1_700_000_000,
+                        updated_at: 1_700_000_000,
+                    }],
+                }))
+            }
+
+            async fn delete_rule(
+                &self,
+                request: tonic::Request<DeleteRuleRequest>,
+            ) -> Result<tonic::Response<DeleteRuleResponse>, tonic::Status> {
+                let req = request.into_inner();
+                *self.last_delete.lock().unwrap_or_else(|e| e.into_inner()) = Some(req);
+                Ok(tonic::Response::new(DeleteRuleResponse {}))
+            }
+
+            async fn validate_rule(
+                &self,
+                request: tonic::Request<ValidateRuleRequest>,
+            ) -> Result<tonic::Response<ValidateRuleResponse>, tonic::Status> {
+                let req = request.into_inner();
+                if req.nsql.contains("BROKEN") {
+                    Ok(tonic::Response::new(ValidateRuleResponse {
+                        valid: false,
+                        error: "NSQL syntax error: stub rejects BROKEN rules".to_string(),
+                    }))
+                } else {
+                    Ok(tonic::Response::new(ValidateRuleResponse {
+                        valid: true,
+                        error: String::new(),
+                    }))
+                }
+            }
+
+            async fn preview_rule(
+                &self,
+                _request: tonic::Request<PreviewRuleRequest>,
+            ) -> Result<tonic::Response<PreviewRuleResponse>, tonic::Status> {
+                Ok(tonic::Response::new(PreviewRuleResponse {
+                    message_id: "msg-stub-1".to_string(),
+                    matched: true,
+                    matched_rule_id: Some("rule-stub-1".to_string()),
+                    matched_rule_name: Some("Stub Rule".to_string()),
+                    actions_evaluated: vec!["MARK READ".to_string()],
+                    execution_time_us: 42,
+                    condition_traces: vec!["Rule 'Stub Rule': MATCH".to_string()],
+                }))
+            }
+        }
+
+        let stub = StubFilters::default();
+        let delete_probe = stub.last_delete.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(FiltersServer::new(stub))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+                .await
+                .expect("ephemeral runner initializes");
+
+        // `filter create` happy path.
+        let create_out = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Create {
+                        name: "My Rule".to_string(),
+                        sql: "WHERE subject CONTAINS 'Urgent' ACTION MARK READ".to_string(),
+                        priority: 5,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(create_out.contains("rule-stub-1"));
+        assert!(create_out.contains("My Rule"));
+
+        // `filter create` honest invalid-argument error.
+        let create_err = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Create {
+                        name: "Broken".to_string(),
+                        sql: "BROKEN NSQL".to_string(),
+                        priority: 0,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(create_err.contains(r#""status":"error""#));
+        assert!(create_err.contains("stub rejects BROKEN rules"));
+
+        // `filter list`.
+        let list_out = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::List,
+                },
+                true,
+            )
+            .await;
+        assert!(list_out.contains("rule-stub-1"));
+        assert!(list_out.contains("Stub Rule"));
+
+        // `filter delete`.
+        let delete_out = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Delete {
+                        id: "rule-stub-1".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(delete_out.contains(r#""status":"deleted""#));
+        let recorded_delete = delete_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received a delete_rule request");
+        assert_eq!(recorded_delete.id, "rule-stub-1");
+
+        // `filter validate` valid + invalid.
+        let validate_ok = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Validate {
+                        sql: "WHERE subject CONTAINS 'Urgent' ACTION MARK READ".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(validate_ok.contains(r#""valid":true"#));
+
+        let validate_err = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Validate {
+                        sql: "BROKEN NSQL".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(validate_err.contains(r#""valid":false"#));
+        assert!(validate_err.contains("stub rejects BROKEN rules"));
+
+        // `filter test` (PreviewRule) dry-run.
+        let test_out = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Test {
+                        sql: "WHERE subject CONTAINS 'Urgent' ACTION MARK READ".to_string(),
+                        message_id: Some("msg-stub-1".to_string()),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(test_out.contains(r#""matched":true"#));
+        assert!(test_out.contains("msg-stub-1"));
+    }
+
+    #[tokio::test]
+    async fn filter_commands_report_honest_error_when_daemon_unreachable() {
+        let addr = reserve_unreachable_addr().await;
+        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
+            .await
+            .expect("ephemeral runner initializes");
+
+        let out = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::List,
+                },
+                true,
+            )
+            .await;
+        assert!(out.contains(r#""status":"error""#));
+        assert!(out.contains("unreachable"));
     }
 
     #[test]

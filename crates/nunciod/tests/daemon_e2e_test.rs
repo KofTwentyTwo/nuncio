@@ -14,6 +14,7 @@
 use nuncio_cli::{AccountSubcommand, Commands, HeadlessRunner, SystemSubcommand};
 use nuncio_core::ipc::{IpcClient, IpcDaemonServer};
 use nuncio_core::{CoreCommand, EventBus};
+use nuncio_filter::FilterEngine;
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
 use std::sync::Arc;
@@ -157,11 +158,13 @@ async fn cli_system_status_round_trips_over_grpc_to_live_daemon() {
         .await
         .expect("connect ephemeral test db");
     let server_secrets = secrets.clone();
+    let server_filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
     let _server_handle = tokio::spawn(async move {
         let _ = nunciod::grpc::serve_on_listener(
             listener,
             server_event_bus,
             Arc::new(server_db),
+            server_filter_engine,
             server_secrets,
             token,
         )

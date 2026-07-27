@@ -34,6 +34,7 @@
 
 use nuncio_core::model::{Email, Folder};
 use nuncio_core::EventBus;
+use nuncio_filter::FilterEngine;
 use nuncio_mail::{MockMailBackend, MockMessageSender};
 use nuncio_proto::v1::event::Kind;
 use nuncio_proto::v1::{
@@ -115,11 +116,13 @@ async fn boot_daemon(
     let event_bus = Arc::new(EventBus::new());
     let server_secrets = secrets.clone();
     let server_token = token.clone();
+    let server_filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
     tokio::spawn(async move {
         let _ = serve_on_listener_with_overrides(
             listener,
             event_bus,
             db,
+            server_filter_engine,
             server_secrets,
             server_token,
             overrides,

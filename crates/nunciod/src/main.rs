@@ -380,16 +380,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let grpc_token = hex::encode(grpc_token_bytes);
     let grpc_addr = nunciod::grpc::grpc_addr_from_env();
     tracing::info!(
-        "nunciod gRPC (nuncio.v1.System, nuncio.v1.Accounts) starting on {} (loopback only)",
+        "nunciod gRPC (nuncio.v1.System, nuncio.v1.Accounts, nuncio.v1.Mail, nuncio.v1.Filters) \
+         starting on {} (loopback only)",
         grpc_addr
     );
     let grpc_event_bus = event_bus.clone();
     let grpc_db = db.clone();
+    // The gRPC `Filters` service (backlog story 2.A, GH #171) shares this
+    // SAME `filter_engine` instance with the JSON-RPC `filter.*` handler
+    // above, so a rule created/deleted through EITHER transport reloads the
+    // one live `ArcSwap`-backed rule set both transports evaluate against.
+    let grpc_filter_engine = filter_engine.clone();
     let _grpc_task = tokio::spawn(async move {
         if let Err(e) = nunciod::grpc::serve(
             &grpc_addr,
             grpc_event_bus,
             grpc_db,
+            grpc_filter_engine,
             grpc_secrets,
             grpc_token,
         )

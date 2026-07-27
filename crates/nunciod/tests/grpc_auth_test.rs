@@ -14,6 +14,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use nuncio_core::{CoreCommand, EngineStatus, EventBus};
+use nuncio_filter::FilterEngine;
 use nuncio_proto::v1::system_client::SystemClient;
 use nuncio_proto::v1::GetStatusRequest;
 use nuncio_store::db::DatabaseEngine;
@@ -40,8 +41,17 @@ async fn start_server(event_bus: Arc<EventBus>, token: String) -> std::net::Sock
         .await
         .expect("connect ephemeral test db");
     let secrets = Arc::new(SecretManager::mock());
+    let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
     tokio::spawn(async move {
-        let _ = serve_on_listener(listener, event_bus, Arc::new(db), secrets, token).await;
+        let _ = serve_on_listener(
+            listener,
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            token,
+        )
+        .await;
     });
     addr
 }

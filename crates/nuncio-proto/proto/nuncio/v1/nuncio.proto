@@ -422,3 +422,162 @@ message SyncRequest {
 message SyncResponse {
   uint64 synced_count = 1;
 }
+
+// Filters exposes the NSQL filter engine's rule CRUD, validation, and
+// dry-run preview operations over gRPC (backlog story 2.A, GH #171) -- the
+// authenticated replacement for the existing hand-rolled `filter.*` JSON-RPC
+// IPC methods (`nunciod::main`'s `CustomRpcHandler`), which remain in place
+// (both transports coexist) until they are retired in a later story (2.C).
+//
+// This faithfully exposes the filter engine as it exists today, including
+// its known correctness gaps (e.g. `target_account`/`ON ACCOUNT` matching
+// against `folder_id` rather than the message's actual account field) --
+// fixing those is out of scope here (Phase 3).
+//
+// SECURITY (GH #165): this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards `System`/`Accounts`/`Mail` -- every
+// gRPC service `nunciod` exposes MUST be authenticated, with no exceptions
+// carved out for "just one more" unauthenticated service. See
+// `nunciod::grpc::serve_on_listener`.
+service Filters {
+  // CreateRule parses and validates an NSQL rule definition, then persists
+  // it and reloads the daemon's live `FilterEngine` rule set (via its
+  // `ArcSwap`-backed hot-reload) so the new rule is active immediately.
+  // Rejects a syntactically or semantically invalid rule with
+  // `Status::invalid_argument` -- nothing is ever persisted on failure.
+  rpc CreateRule(CreateRuleRequest) returns (CreateRuleResponse);
+  // ListRules returns every persisted filter rule, priority ascending.
+  rpc ListRules(ListRulesRequest) returns (ListRulesResponse);
+  // DeleteRule removes a persisted filter rule by ID and reloads the
+  // daemon's live `FilterEngine` rule set so the removal takes effect
+  // immediately.
+  rpc DeleteRule(DeleteRuleRequest) returns (DeleteRuleResponse);
+  // ValidateRule parses and runs the 6-pass `NsqlValidator` audit against
+  // an NSQL rule definition WITHOUT persisting it. Unlike `CreateRule`,
+  // an invalid rule is NOT an RPC failure: it is the expected, honestly
+  // reported result carried in `ValidateRuleResponse.valid`/`error`.
+  rpc ValidateRule(ValidateRuleRequest) returns (ValidateRuleResponse);
+  // PreviewRule dry-run evaluates an ad hoc, NOT-yet-persisted NSQL rule
+  // definition against a stored message (by `message_id`) -- or, if none is
+  // given, a synthetic sample message -- using `FilterEngine::preview`'s
+  // existing dry-run evaluation path. Never persists the rule and never
+  // executes any of its actions.
+  rpc PreviewRule(PreviewRuleRequest) returns (PreviewRuleResponse);
+}
+
+// FilterRule mirrors `nuncio_filter::FilterRule`'s persisted/user-facing
+// fields. The parsed condition AST is intentionally NOT mirrored here --
+// `nsql_text` is the single source of truth, and re-parsing it via
+// `NsqlParser::parse_rule` deterministically reconstructs the identical AST,
+// so there is no independent state to carry over the wire. `actions` is the
+// NSQL-rendered form (`RuleAction::to_nsql`) of the rule's parsed action
+// list, included for display purposes.
+message FilterRule {
+  // Rule unique identifier.
+  string id = 1;
+  // Rule display name.
+  string name = 2;
+  // Target account pattern ("*" for all accounts, an exact address, or a
+  // wildcard like "%@kof22.com").
+  string target_account = 3;
+  // Rule evaluation order (0 = highest).
+  int32 priority = 4;
+  // Active flag.
+  bool enabled = 5;
+  // Full NSQL source code text.
+  string nsql_text = 6;
+  // Rendered NSQL action clauses (e.g. "MOVE TO 'Archive'"), derived from
+  // the parsed AST.
+  repeated string actions = 7;
+  // Creation timestamp (unix seconds).
+  int64 created_at = 8;
+  // Last update timestamp (unix seconds).
+  int64 updated_at = 9;
+}
+
+// CreateRuleRequest carries a new rule's display name, full NSQL source
+// text, and evaluation priority.
+message CreateRuleRequest {
+  // Display name for the rule.
+  string name = 1;
+  // Full NSQL source code text (may include an `ON ACCOUNT` clause and
+  // `ACTION` clause).
+  string nsql = 2;
+  // Evaluation order (0 = highest).
+  int32 priority = 3;
+}
+
+// CreateRuleResponse carries the persisted rule, including its
+// daemon-assigned `id` and timestamps.
+message CreateRuleResponse {
+  FilterRule rule = 1;
+}
+
+// ListRulesRequest currently carries no parameters.
+message ListRulesRequest {}
+
+// ListRulesResponse.
+message ListRulesResponse {
+  repeated FilterRule rules = 1;
+}
+
+// DeleteRuleRequest.
+message DeleteRuleRequest {
+  // Rule unique identifier.
+  string id = 1;
+}
+
+// DeleteRuleResponse currently carries no parameters; a successful RPC
+// response (as opposed to a `Status` error) is confirmation enough.
+message DeleteRuleResponse {}
+
+// ValidateRuleRequest carries only the raw NSQL source text -- validation
+// never persists anything, so no name/priority/id is needed.
+message ValidateRuleRequest {
+  string nsql = 1;
+}
+
+// ValidateRuleResponse. `valid == false` is an ordinary, successfully
+// returned result (never a `Status` error) carrying the honest parse or
+// `NsqlValidator` failure message in `error`.
+message ValidateRuleResponse {
+  // Whether `nsql` parsed AND passed every `NsqlValidator` pass.
+  bool valid = 1;
+  // Empty when `valid` is true; otherwise the parse or validation error
+  // message.
+  string error = 2;
+}
+
+// PreviewRuleRequest carries an ad hoc, NOT-yet-persisted NSQL rule
+// definition to dry-run evaluate. `message_id` optionally names a stored
+// message to evaluate against (looked up via the same store `Mail/
+// GetMessage` reads); when absent (or when `message_id` does not resolve to
+// a stored message), a fixed synthetic sample message is evaluated instead,
+// so this RPC can always return a result.
+message PreviewRuleRequest {
+  // Full NSQL source code text of the rule to preview.
+  string nsql = 1;
+  // Optional stored message id to evaluate the rule against.
+  optional string message_id = 2;
+}
+
+// PreviewRuleResponse mirrors `nuncio_filter::FilterPreviewResult`
+// field-for-field, except `actions_evaluated` is rendered as NSQL strings
+// (`RuleAction::to_nsql`) rather than a structured action AST.
+message PreviewRuleResponse {
+  // Evaluated message id (either the requested `message_id`, or the
+  // synthetic sample message's fixed id when none was given/resolvable).
+  string message_id = 1;
+  // Whether the previewed rule matched the evaluated message.
+  bool matched = 2;
+  // Present only when `matched` is true.
+  optional string matched_rule_id = 3;
+  // Present only when `matched` is true.
+  optional string matched_rule_name = 4;
+  // NSQL-rendered actions that would be executed on a real match.
+  repeated string actions_evaluated = 5;
+  // Evaluation duration in microseconds.
+  uint64 execution_time_us = 6;
+  // Human-readable step-by-step match traces.
+  repeated string condition_traces = 7;
+}

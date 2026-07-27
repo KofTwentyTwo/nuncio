@@ -8,27 +8,33 @@
 //! transport is out of scope here and lands in a later story.
 
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
+use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
 use nuncio_mail::{MailBackend, MessageSender};
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::event::Kind;
+use nuncio_proto::v1::filters_server::{Filters, FiltersServer};
 use nuncio_proto::v1::mail_server::{Mail, MailServer};
 use nuncio_proto::v1::system_server::{System, SystemServer};
 use nuncio_proto::v1::{
     AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
     AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto, BatchFilterProgress,
-    DatabaseRecovered, Event, EventError, FilterExecuted, Folder as FolderProto, GetMessageRequest,
-    GetMessageResponse, GetStatusRequest, GetStatusResponse, ListAccountsRequest,
-    ListAccountsResponse, ListFoldersRequest, ListFoldersResponse, ListMessagesRequest,
-    ListMessagesResponse, MarkReadRequest, MarkReadResponse, Message as MessageProto,
-    MessageFlagsChanged, MessageSearchHit, SearchMessagesRequest, SearchMessagesResponse,
-    SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
-    SyncRequest, SyncResponse, SyncStarted, TlsMode as TlsModeProto, UpdateAvailable,
+    CreateRuleRequest, CreateRuleResponse, DatabaseRecovered, DeleteRuleRequest,
+    DeleteRuleResponse, Event, EventError, FilterExecuted, FilterRule as FilterRuleProto,
+    Folder as FolderProto, GetMessageRequest, GetMessageResponse, GetStatusRequest,
+    GetStatusResponse, ListAccountsRequest, ListAccountsResponse, ListFoldersRequest,
+    ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, ListRulesRequest,
+    ListRulesResponse, MarkReadRequest, MarkReadResponse, Message as MessageProto,
+    MessageFlagsChanged, MessageSearchHit, PreviewRuleRequest, PreviewRuleResponse,
+    SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest, SendMessageResponse,
+    ShuttingDown, SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse, SyncStarted,
+    TlsMode as TlsModeProto, UpdateAvailable, ValidateRuleRequest, ValidateRuleResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
 use nuncio_store::vault::SecretManager;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -672,6 +678,234 @@ impl Mail for MailGrpcService {
     }
 }
 
+/// Maps a `nuncio_filter::FilterRule` onto its wire-format
+/// `nuncio.v1.FilterRule` representation (backlog story 2.A, GH #171). The
+/// parsed condition AST is deliberately NOT carried over the wire -- see the
+/// message's doc comment in `proto/nuncio/v1/nuncio.proto` -- `actions` is
+/// rendered as NSQL strings via `RuleAction::to_nsql`.
+fn map_filter_rule_to_proto(rule: nuncio_filter::FilterRule) -> FilterRuleProto {
+    FilterRuleProto {
+        id: rule.id,
+        name: rule.name,
+        target_account: rule.target_account,
+        priority: rule.priority,
+        enabled: rule.enabled,
+        nsql_text: rule.nsql_text,
+        actions: rule.actions.iter().map(|a| a.to_nsql()).collect(),
+        created_at: rule.created_at,
+        updated_at: rule.updated_at,
+    }
+}
+
+/// Maps a `nuncio_filter::FilterPreviewResult` onto its wire-format
+/// `nuncio.v1.PreviewRuleResponse` representation.
+fn map_preview_result_to_proto(preview: nuncio_filter::FilterPreviewResult) -> PreviewRuleResponse {
+    PreviewRuleResponse {
+        message_id: preview.message_id,
+        matched: preview.matched,
+        matched_rule_id: preview.matched_rule_id,
+        matched_rule_name: preview.matched_rule_name,
+        actions_evaluated: preview
+            .actions_evaluated
+            .iter()
+            .map(|a| a.to_nsql())
+            .collect(),
+        execution_time_us: preview.execution_time_us,
+        condition_traces: preview.condition_traces,
+    }
+}
+
+/// Builds a fixed synthetic sample message for `PreviewRule` to evaluate
+/// against when the caller supplies no `message_id` (or one that does not
+/// resolve to a stored message), mirroring the exact fallback sample the
+/// CLI's previous local `filter test` path used -- so this RPC can always
+/// return a preview result rather than requiring pre-existing stored mail.
+fn synthetic_preview_email(id: &str) -> nuncio_core::model::Email {
+    let received_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    nuncio_core::model::Email {
+        id: id.to_string(),
+        account_id: "acct-1".to_string(),
+        folder_id: "inbox".to_string(),
+        subject: "Test Subject".to_string(),
+        sender: "test@nuncio.mx".to_string(),
+        recipient: "me@nuncio.mx".to_string(),
+        received_at,
+        read: false,
+        body_plain: Some("Sample body text".to_string()),
+        body_html: None,
+        attachments: Vec::new(),
+    }
+}
+
+/// `nuncio.v1.Filters` gRPC service implementation backed by the daemon's
+/// live [`DatabaseEngine`] filter-rule CRUD and the daemon's live
+/// [`FilterEngine`] (backlog story 2.A, GH #171) -- the authenticated gRPC
+/// replacement for the existing hand-rolled `filter.*` JSON-RPC IPC methods
+/// (`nunciod::main`'s `CustomRpcHandler`), which remain in place (both
+/// transports coexist) until retired in a later story (2.C).
+///
+/// `CreateRule`/`DeleteRule` persist through `db` FIRST, then reload
+/// `filter_engine`'s `ArcSwap`-backed rule set from the freshly persisted
+/// state via `db.list_filter_rules()`, so the live engine and the persisted
+/// store never disagree about which rules exist. A reload failure (e.g. a
+/// rule whose regex no longer compiles) is logged but does NOT fail the
+/// RPC: the mutation already succeeded in the store, so failing the RPC
+/// here would misreport a successful write as an error.
+struct FiltersGrpcService {
+    db: Arc<DatabaseEngine>,
+    filter_engine: Arc<FilterEngine>,
+}
+
+impl FiltersGrpcService {
+    /// Reloads `self.filter_engine`'s active rule set from `self.db`'s
+    /// current persisted rules, logging (rather than propagating) a reload
+    /// failure -- shared by `create_rule` and `delete_rule` after each
+    /// persists its own mutation.
+    async fn reload_engine_from_store(&self) {
+        match self.db.list_filter_rules().await {
+            Ok(rules) => {
+                if let Err(e) = self.filter_engine.reload_rules(rules) {
+                    tracing::warn!("Filters: failed to reload live FilterEngine rules: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Filters: failed to re-list persisted filter rules for engine reload: {}",
+                    e
+                );
+            }
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl Filters for FiltersGrpcService {
+    async fn create_rule(
+        &self,
+        request: Request<CreateRuleRequest>,
+    ) -> Result<Response<CreateRuleResponse>, Status> {
+        let req = request.into_inner();
+
+        let rule = NsqlParser::parse_rule(req.name, req.priority, &req.nsql)
+            .map_err(|e| Status::invalid_argument(format!("NSQL syntax error: {e}")))?;
+
+        NsqlValidator::validate(&rule, &ValidationOptions::default())
+            .map_err(|e| Status::invalid_argument(format!("NSQL validation error: {e}")))?;
+
+        self.db
+            .save_filter_rule(&rule)
+            .await
+            .map_err(|e| Status::internal(format!("failed to persist filter rule: {e}")))?;
+
+        self.reload_engine_from_store().await;
+
+        Ok(Response::new(CreateRuleResponse {
+            rule: Some(map_filter_rule_to_proto(rule)),
+        }))
+    }
+
+    async fn list_rules(
+        &self,
+        _request: Request<ListRulesRequest>,
+    ) -> Result<Response<ListRulesResponse>, Status> {
+        let rules = self
+            .db
+            .list_filter_rules()
+            .await
+            .map_err(|e| Status::internal(format!("failed to list filter rules: {e}")))?
+            .into_iter()
+            .map(map_filter_rule_to_proto)
+            .collect();
+
+        Ok(Response::new(ListRulesResponse { rules }))
+    }
+
+    async fn delete_rule(
+        &self,
+        request: Request<DeleteRuleRequest>,
+    ) -> Result<Response<DeleteRuleResponse>, Status> {
+        let req = request.into_inner();
+        if req.id.is_empty() {
+            return Err(Status::invalid_argument("id is required"));
+        }
+
+        self.db
+            .delete_filter_rule(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to delete filter rule: {e}")))?;
+
+        self.reload_engine_from_store().await;
+
+        Ok(Response::new(DeleteRuleResponse {}))
+    }
+
+    /// Unlike `create_rule`, an invalid rule is never an RPC failure here --
+    /// see this RPC's doc comment in `proto/nuncio/v1/nuncio.proto`.
+    async fn validate_rule(
+        &self,
+        request: Request<ValidateRuleRequest>,
+    ) -> Result<Response<ValidateRuleResponse>, Status> {
+        let req = request.into_inner();
+
+        let rule = match NsqlParser::parse_rule("Validation Preview", 0, &req.nsql) {
+            Ok(rule) => rule,
+            Err(e) => {
+                return Ok(Response::new(ValidateRuleResponse {
+                    valid: false,
+                    error: format!("NSQL syntax error: {e}"),
+                }));
+            }
+        };
+
+        match NsqlValidator::validate(&rule, &ValidationOptions::default()) {
+            Ok(()) => Ok(Response::new(ValidateRuleResponse {
+                valid: true,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(ValidateRuleResponse {
+                valid: false,
+                error: format!("NSQL validation error: {e}"),
+            })),
+        }
+    }
+
+    /// Dry-run evaluates an ad hoc, NOT-yet-persisted NSQL rule against a
+    /// stored message (or a synthetic sample -- see
+    /// [`synthetic_preview_email`]), via a fresh one-off [`FilterEngine`]
+    /// built from just that single rule and its existing `preview` path.
+    /// This deliberately does NOT use `self.filter_engine` (the daemon's
+    /// live, persisted rule set): the whole point of a preview is to try out
+    /// a candidate rule that may not be, and may never be, saved.
+    async fn preview_rule(
+        &self,
+        request: Request<PreviewRuleRequest>,
+    ) -> Result<Response<PreviewRuleResponse>, Status> {
+        let req = request.into_inner();
+
+        let rule = NsqlParser::parse_rule("Preview Rule", 0, &req.nsql)
+            .map_err(|e| Status::invalid_argument(format!("NSQL syntax error: {e}")))?;
+
+        let preview_engine = FilterEngine::new(vec![rule])
+            .map_err(|e| Status::internal(format!("failed to build preview engine: {e}")))?;
+
+        let email = match &req.message_id {
+            Some(message_id) if !message_id.is_empty() => {
+                match self.db.get_message(message_id).await {
+                    Ok(email) => email,
+                    Err(_) => synthetic_preview_email(message_id),
+                }
+            }
+            _ => synthetic_preview_email("msg-test"),
+        };
+
+        let preview = preview_engine.preview(&email);
+        Ok(Response::new(map_preview_result_to_proto(preview)))
+    }
+}
+
 /// Bearer-token authentication interceptor for the loopback `nuncio.v1` gRPC
 /// server.
 ///
@@ -719,8 +953,9 @@ impl tonic::service::Interceptor for BearerAuthInterceptor {
 }
 
 /// Binds a loopback TCP listener at `addr` and serves the `nuncio.v1.System`,
-/// `nuncio.v1.Accounts`, and `nuncio.v1.Mail` gRPC services on it, all
-/// authenticated by `token`, until the transport server errors.
+/// `nuncio.v1.Accounts`, `nuncio.v1.Mail`, and `nuncio.v1.Filters` gRPC
+/// services on it, all authenticated by `token`, until the transport server
+/// errors.
 ///
 /// `addr` MUST be a loopback address (e.g. `127.0.0.1:PORT`); callers are
 /// responsible for passing loopback-only addresses (see
@@ -729,6 +964,7 @@ pub async fn serve(
     addr: &str,
     event_bus: Arc<EventBus>,
     db: Arc<DatabaseEngine>,
+    filter_engine: Arc<FilterEngine>,
     secrets: Arc<SecretManager>,
     token: impl Into<Arc<str>>,
 ) -> Result<(), GrpcServeError> {
@@ -738,11 +974,11 @@ pub async fn serve(
             addr: addr.to_string(),
             source,
         })?;
-    serve_on_listener(listener, event_bus, db, secrets, token).await
+    serve_on_listener(listener, event_bus, db, filter_engine, secrets, token).await
 }
 
-/// Serves the `nuncio.v1.System`, `nuncio.v1.Accounts`, and `nuncio.v1.Mail`
-/// gRPC services on an already-bound [`TcpListener`].
+/// Serves the `nuncio.v1.System`, `nuncio.v1.Accounts`, `nuncio.v1.Mail`, and
+/// `nuncio.v1.Filters` gRPC services on an already-bound [`TcpListener`].
 ///
 /// # Security (GH #165)
 ///
@@ -763,6 +999,7 @@ pub async fn serve_on_listener(
     listener: TcpListener,
     event_bus: Arc<EventBus>,
     db: Arc<DatabaseEngine>,
+    filter_engine: Arc<FilterEngine>,
     secrets: Arc<SecretManager>,
     token: impl Into<Arc<str>>,
 ) -> Result<(), GrpcServeError> {
@@ -770,6 +1007,7 @@ pub async fn serve_on_listener(
         listener,
         event_bus,
         db,
+        filter_engine,
         secrets,
         token,
         MailEngineOverrides::default(),
@@ -788,6 +1026,7 @@ pub async fn serve_on_listener_with_overrides(
     listener: TcpListener,
     event_bus: Arc<EventBus>,
     db: Arc<DatabaseEngine>,
+    filter_engine: Arc<FilterEngine>,
     secrets: Arc<SecretManager>,
     token: impl Into<Arc<str>>,
     overrides: MailEngineOverrides,
@@ -812,18 +1051,27 @@ pub async fn serve_on_listener_with_overrides(
     // exactly like `System` and `Accounts` above -- see the hard invariant
     // documented on this function's doc comment (GH #165).
     let mail_service = MailGrpcService {
-        db,
+        db: db.clone(),
         event_bus,
-        secrets,
+        secrets: secrets.clone(),
         overrides,
     };
-    let mail_interceptor = BearerAuthInterceptor::new(token);
+    let mail_interceptor = BearerAuthInterceptor::new(token.clone());
     let mail_svc = MailServer::with_interceptor(mail_service, mail_interceptor);
+
+    // Filters (backlog story 2.A, GH #171): mounted behind its own
+    // `BearerAuthInterceptor`, exactly like `System`/`Accounts`/`Mail` above
+    // -- see the hard invariant documented on this function's doc comment
+    // (GH #165).
+    let filters_service = FiltersGrpcService { db, filter_engine };
+    let filters_interceptor = BearerAuthInterceptor::new(token);
+    let filters_svc = FiltersServer::with_interceptor(filters_service, filters_interceptor);
 
     Server::builder()
         .add_service(system_svc)
         .add_service(accounts_svc)
         .add_service(mail_svc)
+        .add_service(filters_svc)
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await
         .map_err(GrpcServeError::Transport)
@@ -837,12 +1085,15 @@ mod tests {
     use nuncio_proto::v1::system_client::SystemClient;
     use tonic::Code;
 
-    /// Spawns a test server backed by a fresh ephemeral database and a
-    /// fresh [`SecretManager::mock`] vault -- the right default for every
-    /// test that only exercises `System` or doesn't care about pre-existing
-    /// account/keyring state. Tests that DO care (persistence-across-restart,
-    /// credential-secrecy) build their own `db`/`secrets` and call
-    /// [`spawn_test_server_with`] directly instead.
+    /// Spawns a test server backed by a fresh ephemeral database, a fresh
+    /// empty [`FilterEngine`], and a fresh [`SecretManager::mock`] vault --
+    /// the right default for every test that only exercises
+    /// `System`/`Accounts`/`Mail` or doesn't care about pre-existing
+    /// account/keyring/filter-rule state. Tests that DO care
+    /// (persistence-across-restart, credential-secrecy, the `Filters`
+    /// service itself) build their own `db`/`secrets`/`filter_engine` and
+    /// call [`spawn_test_server_with`] / [`spawn_test_server_with_overrides`]
+    /// directly instead.
     async fn spawn_test_server(
         event_bus: Arc<EventBus>,
         token: &str,
@@ -851,21 +1102,25 @@ mod tests {
             .await
             .expect("connect ephemeral test db");
         let secrets = Arc::new(SecretManager::mock());
-        spawn_test_server_with(event_bus, Arc::new(db), secrets, token).await
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        spawn_test_server_with(event_bus, Arc::new(db), filter_engine, secrets, token).await
     }
 
     /// Spawns a test server on an ephemeral loopback port backed by the
-    /// given `db` and `secrets`, so tests can share (and re-open) the same
-    /// database path / mock keyring state across multiple server instances.
+    /// given `db`, `filter_engine`, and `secrets`, so tests can share (and
+    /// re-open) the same database path / engine instance / mock keyring
+    /// state across multiple server instances.
     async fn spawn_test_server_with(
         event_bus: Arc<EventBus>,
         db: Arc<DatabaseEngine>,
+        filter_engine: Arc<FilterEngine>,
         secrets: Arc<SecretManager>,
         token: &str,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         spawn_test_server_with_overrides(
             event_bus,
             db,
+            filter_engine,
             secrets,
             token,
             MailEngineOverrides::default(),
@@ -874,14 +1129,15 @@ mod tests {
     }
 
     /// Spawns a test server on an ephemeral loopback port backed by the
-    /// given `db`/`secrets`/`overrides` (backlog story 1.C.6, GH #161): the
-    /// helper every test that injects a [`MailEngineOverrides::mail_backend`]
-    /// / [`MailEngineOverrides::message_sender`] uses to prove `Sync` /
-    /// `SendMessage` drive an injected test double over the real
-    /// authenticated gRPC API.
+    /// given `db`/`filter_engine`/`secrets`/`overrides` (backlog story
+    /// 1.C.6, GH #161): the helper every test that injects a
+    /// [`MailEngineOverrides::mail_backend`] / [`MailEngineOverrides::message_sender`]
+    /// uses to prove `Sync` / `SendMessage` drive an injected test double
+    /// over the real authenticated gRPC API.
     async fn spawn_test_server_with_overrides(
         event_bus: Arc<EventBus>,
         db: Arc<DatabaseEngine>,
+        filter_engine: Arc<FilterEngine>,
         secrets: Arc<SecretManager>,
         token: &str,
         overrides: MailEngineOverrides,
@@ -893,7 +1149,13 @@ mod tests {
         let token = token.to_string();
         let handle = tokio::spawn(async move {
             let _ = serve_on_listener_with_overrides(
-                listener, event_bus, db, secrets, token, overrides,
+                listener,
+                event_bus,
+                db,
+                filter_engine,
+                secrets,
+                token,
+                overrides,
             )
             .await;
         });
@@ -1021,8 +1283,17 @@ mod tests {
             .await
             .expect("connect ephemeral test db");
         let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
         let _handle = tokio::spawn(async move {
-            let _ = serve("127.0.0.1:0", event_bus, Arc::new(db), secrets, "token").await;
+            let _ = serve(
+                "127.0.0.1:0",
+                event_bus,
+                Arc::new(db),
+                filter_engine,
+                secrets,
+                "token",
+            )
+            .await;
         });
         // Yield so the spawned task is polled at least once and actually
         // reaches the bind + delegate-to-`serve_on_listener` call before
@@ -1037,10 +1308,12 @@ mod tests {
             .await
             .expect("connect ephemeral test db");
         let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
         let err = serve(
             "not-a-valid-addr",
             event_bus,
             Arc::new(db),
+            filter_engine,
             secrets,
             "token",
         )
@@ -1313,6 +1586,7 @@ mod tests {
         let (addr, _handle) = spawn_test_server_with(
             Arc::new(EventBus::new()),
             db_first_run.clone(),
+            Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set")),
             secrets.clone(),
             "correct-token",
         )
@@ -1348,6 +1622,7 @@ mod tests {
         let (addr2, _handle2) = spawn_test_server_with(
             Arc::new(EventBus::new()),
             db_second_run,
+            Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set")),
             secrets.clone(),
             "correct-token",
         )
@@ -1392,6 +1667,7 @@ mod tests {
         let (addr, _handle) = spawn_test_server_with(
             Arc::new(EventBus::new()),
             db.clone(),
+            Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set")),
             secrets.clone(),
             "correct-token",
         )
@@ -1657,8 +1933,15 @@ mod tests {
         let event_bus = Arc::new(EventBus::new());
         let mut events = event_bus.subscribe_events();
         let secrets = Arc::new(SecretManager::mock());
-        let (addr, _handle) =
-            spawn_test_server_with(event_bus, Arc::new(db), secrets, "correct-token").await;
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -1853,8 +2136,15 @@ mod tests {
             .set_secret(&config.keyring_secret_key, "irrelevant-password")
             .expect("store credential in mock vault");
 
-        let (addr, _handle) =
-            spawn_test_server_with(Arc::new(EventBus::new()), db, secrets, "correct-token").await;
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            Arc::new(EventBus::new()),
+            db,
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -1944,9 +2234,11 @@ mod tests {
             mail_backend: Some(Arc::new(mock_backend)),
             message_sender: None,
         };
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
         let (addr, _handle) = spawn_test_server_with_overrides(
             Arc::new(EventBus::new()),
             db,
+            filter_engine,
             secrets,
             "correct-token",
             overrides,
@@ -2017,9 +2309,11 @@ mod tests {
             mail_backend: None,
             message_sender: Some(Arc::new(mock_sender)),
         };
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
         let (addr, _handle) = spawn_test_server_with_overrides(
             Arc::new(EventBus::new()),
             db,
+            filter_engine,
             secrets,
             "correct-token",
             overrides,
@@ -2071,9 +2365,11 @@ mod tests {
             mail_backend: Some(Arc::new(mock_backend)),
             message_sender: None,
         };
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
         let (addr, _handle) = spawn_test_server_with_overrides(
             Arc::new(EventBus::new()),
             db,
+            filter_engine,
             secrets,
             "correct-token",
             overrides,
@@ -2126,9 +2422,11 @@ mod tests {
             mail_backend: None,
             message_sender: Some(Arc::new(mock_sender)),
         };
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
         let (addr, _handle) = spawn_test_server_with_overrides(
             Arc::new(EventBus::new()),
             db,
+            filter_engine,
             secrets,
             "correct-token",
             overrides,
@@ -2144,5 +2442,407 @@ mod tests {
             .expect_err("a failing injected sender must be rejected honestly");
         assert_eq!(err.code(), Code::Internal);
         assert!(err.message().contains("failed to send message"));
+    }
+
+    // ---- Filters (backlog story 2.A, GH #171) ----
+
+    use nuncio_proto::v1::filters_client::FiltersClient;
+    use nuncio_proto::v1::{
+        CreateRuleRequest, DeleteRuleRequest, ListRulesRequest, PreviewRuleRequest,
+        ValidateRuleRequest,
+    };
+
+    const SAMPLE_RULE_NSQL: &str =
+        "WHERE subject CONTAINS 'Urgent' ACTION MARK READ, MOVE TO 'Priority'";
+
+    /// Spawns a test server on an ephemeral loopback port backed by a fresh
+    /// ephemeral database and a fresh empty [`FilterEngine`], returning the
+    /// address AND the shared `filter_engine`/`db` handles so `Filters`
+    /// tests can assert directly on live engine state (proving the
+    /// `ArcSwap` reload actually happened) in addition to driving the gRPC
+    /// API.
+    async fn spawn_filters_test_server(
+        token: &str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        Arc<DatabaseEngine>,
+        Arc<FilterEngine>,
+    ) {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let secrets = Arc::new(SecretManager::mock());
+        let (addr, handle) = spawn_test_server_with(
+            Arc::new(EventBus::new()),
+            db.clone(),
+            filter_engine.clone(),
+            secrets,
+            token,
+        )
+        .await;
+        (addr, handle, db, filter_engine)
+    }
+
+    #[tokio::test]
+    async fn filters_rpcs_reject_missing_bearer_token() {
+        // Confirms `Filters` is mounted behind its own `BearerAuthInterceptor`
+        // exactly like `System`/`Accounts`/`Mail` (GH #165: no un-intercepted
+        // service).
+        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .create_rule(CreateRuleRequest {
+                name: "Unauthed".to_string(),
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+                priority: 0,
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .list_rules(ListRulesRequest {})
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .delete_rule(DeleteRuleRequest {
+                id: "rule-1".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .validate_rule(ValidateRuleRequest {
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .preview_rule(PreviewRuleRequest {
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+                message_id: None,
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    /// End-to-end proof for backlog story 2.A (GH #171): `CreateRule`
+    /// persists AND reloads the live `FilterEngine`'s `ArcSwap` rule set
+    /// (proven by evaluating the SAME `filter_engine` instance directly,
+    /// not just re-reading it back over `ListRules`); `ListRules` reflects
+    /// the persisted rule; `DeleteRule` removes it AND reloads the engine
+    /// back to empty.
+    #[tokio::test]
+    async fn create_list_and_delete_rule_round_trip_and_keep_the_live_engine_in_sync() {
+        let (addr, _handle, _db, filter_engine) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let sample_email = |subject: &str| nuncio_core::model::Email {
+            id: "msg-filters-1".to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "inbox".to_string(),
+            subject: subject.to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1_700_000_000,
+            read: false,
+            body_plain: Some("body".to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+        };
+
+        // Before creating anything, the live engine matches nothing.
+        assert!(filter_engine
+            .evaluate(&sample_email("Urgent Meeting"))
+            .is_empty());
+
+        let create_response = client
+            .create_rule(authed_bearer_request(CreateRuleRequest {
+                name: "Urgent Rule".to_string(),
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+                priority: 5,
+            }))
+            .await
+            .expect("create_rule succeeds")
+            .into_inner();
+        let created_rule = create_response.rule.expect("response carries the rule");
+        assert_eq!(created_rule.name, "Urgent Rule");
+        assert_eq!(created_rule.priority, 5);
+        assert!(created_rule.enabled);
+        assert_eq!(created_rule.nsql_text, SAMPLE_RULE_NSQL);
+        assert!(created_rule.actions.iter().any(|a| a.contains("MARK READ")));
+        let rule_id = created_rule.id.clone();
+
+        // The live `FilterEngine`'s `ArcSwap` rule set was reloaded --
+        // proven by evaluating the SAME instance the server holds, not a
+        // fresh one.
+        let matches = filter_engine.evaluate(&sample_email("Urgent Meeting"));
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0.id, rule_id);
+
+        // ListRules reflects the persisted rule.
+        let list_response = client
+            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .await
+            .expect("list_rules succeeds")
+            .into_inner();
+        assert_eq!(list_response.rules.len(), 1);
+        assert_eq!(list_response.rules[0].id, rule_id);
+
+        // DeleteRule removes it AND reloads the engine back to empty.
+        client
+            .delete_rule(authed_bearer_request(DeleteRuleRequest {
+                id: rule_id.clone(),
+            }))
+            .await
+            .expect("delete_rule succeeds");
+
+        let list_after_delete = client
+            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .await
+            .expect("list_rules succeeds")
+            .into_inner();
+        assert!(list_after_delete.rules.is_empty());
+        assert!(filter_engine
+            .evaluate(&sample_email("Urgent Meeting"))
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_rule_rejects_invalid_nsql_and_persists_nothing() {
+        let (addr, _handle, _db, filter_engine) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .create_rule(authed_bearer_request(CreateRuleRequest {
+                name: "Broken Rule".to_string(),
+                nsql: "THIS IS NOT VALID NSQL AT ALL {{{".to_string(),
+                priority: 0,
+            }))
+            .await
+            .expect_err("invalid NSQL must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+
+        let list_response = client
+            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .await
+            .expect("list_rules succeeds")
+            .into_inner();
+        assert!(
+            list_response.rules.is_empty(),
+            "an invalid rule must never be persisted"
+        );
+        assert!(filter_engine
+            .evaluate(&nuncio_core::model::Email {
+                id: "msg-1".to_string(),
+                account_id: "acct-1".to_string(),
+                folder_id: "inbox".to_string(),
+                subject: "anything".to_string(),
+                sender: "a@b.com".to_string(),
+                recipient: "c@d.com".to_string(),
+                received_at: 0,
+                read: false,
+                body_plain: None,
+                body_html: None,
+                attachments: Vec::new(),
+            })
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_rule_rejects_empty_id() {
+        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .delete_rule(authed_bearer_request(DeleteRuleRequest {
+                id: String::new(),
+            }))
+            .await
+            .expect_err("empty id must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    /// `ValidateRule` never fails the RPC itself -- an invalid rule is an
+    /// honest `valid: false` result, not a `Status` error (see this RPC's
+    /// doc comment). Also proves validation never persists anything.
+    #[tokio::test]
+    async fn validate_rule_reports_honest_ok_and_error_verdicts_without_persisting() {
+        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let valid_response = client
+            .validate_rule(authed_bearer_request(ValidateRuleRequest {
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+            }))
+            .await
+            .expect("validate_rule call itself succeeds for a valid rule")
+            .into_inner();
+        assert!(valid_response.valid);
+        assert!(valid_response.error.is_empty());
+
+        let invalid_response = client
+            .validate_rule(authed_bearer_request(ValidateRuleRequest {
+                nsql: "THIS IS NOT VALID NSQL AT ALL {{{".to_string(),
+            }))
+            .await
+            .expect("validate_rule call itself succeeds even for an invalid rule")
+            .into_inner();
+        assert!(!invalid_response.valid);
+        assert!(!invalid_response.error.is_empty());
+
+        // Nothing was persisted by either validation call.
+        let list_response = client
+            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .await
+            .expect("list_rules succeeds")
+            .into_inner();
+        assert!(
+            list_response.rules.is_empty(),
+            "validate_rule must never persist a rule"
+        );
+    }
+
+    /// `PreviewRule` dry-run evaluates an ad hoc rule against a stored
+    /// message (proving it reads REAL persisted mail via the same store
+    /// `Mail/GetMessage` reads) without ever persisting the rule itself.
+    #[tokio::test]
+    async fn preview_rule_dry_runs_against_a_stored_message_without_persisting() {
+        let (addr, _handle, db, _engine) = spawn_filters_test_server("correct-token").await;
+
+        db.save_email(&nuncio_core::model::Email {
+            id: "msg-preview-1".to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "inbox".to_string(),
+            subject: "Urgent Board Meeting".to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1_700_000_000,
+            read: false,
+            body_plain: Some("Please review the attached deck".to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+        })
+        .await
+        .expect("seed message");
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let response = client
+            .preview_rule(authed_bearer_request(PreviewRuleRequest {
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+                message_id: Some("msg-preview-1".to_string()),
+            }))
+            .await
+            .expect("preview_rule succeeds")
+            .into_inner();
+        assert_eq!(response.message_id, "msg-preview-1");
+        assert!(response.matched);
+        assert!(response
+            .actions_evaluated
+            .iter()
+            .any(|a| a.contains("MARK READ")));
+        assert!(!response.condition_traces.is_empty());
+
+        // Preview evaluates a NON-matching message honestly too.
+        let non_matching = client
+            .preview_rule(authed_bearer_request(PreviewRuleRequest {
+                nsql: "WHERE subject CONTAINS 'Nonexistent Term' ACTION DELETE".to_string(),
+                message_id: Some("msg-preview-1".to_string()),
+            }))
+            .await
+            .expect("preview_rule succeeds")
+            .into_inner();
+        assert!(!non_matching.matched);
+
+        // Previewing must never persist the rule.
+        let list_response = client
+            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .await
+            .expect("list_rules succeeds")
+            .into_inner();
+        assert!(
+            list_response.rules.is_empty(),
+            "preview_rule must never persist a rule"
+        );
+    }
+
+    /// When no `message_id` is given (or it does not resolve to a stored
+    /// message), `PreviewRule` falls back to a fixed synthetic sample
+    /// message rather than failing the RPC.
+    #[tokio::test]
+    async fn preview_rule_falls_back_to_a_synthetic_message_when_none_is_stored() {
+        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let response = client
+            .preview_rule(authed_bearer_request(PreviewRuleRequest {
+                nsql: "WHERE subject CONTAINS 'Test Subject' ACTION FLAG".to_string(),
+                message_id: None,
+            }))
+            .await
+            .expect("preview_rule succeeds with no message_id")
+            .into_inner();
+        assert!(response.matched);
+        assert_eq!(response.message_id, "msg-test");
+
+        let response_missing_id = client
+            .preview_rule(authed_bearer_request(PreviewRuleRequest {
+                nsql: "WHERE subject CONTAINS 'Test Subject' ACTION FLAG".to_string(),
+                message_id: Some("does-not-exist".to_string()),
+            }))
+            .await
+            .expect("preview_rule succeeds with an unresolvable message_id")
+            .into_inner();
+        assert!(response_missing_id.matched);
+        assert_eq!(response_missing_id.message_id, "does-not-exist");
+    }
+
+    #[tokio::test]
+    async fn preview_rule_and_validate_rule_reject_invalid_nsql_syntax() {
+        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .preview_rule(authed_bearer_request(PreviewRuleRequest {
+                nsql: "THIS IS NOT VALID NSQL AT ALL {{{".to_string(),
+                message_id: None,
+            }))
+            .await
+            .expect_err("invalid NSQL must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
     }
 }
