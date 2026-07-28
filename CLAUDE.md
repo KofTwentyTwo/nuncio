@@ -11,9 +11,11 @@ AI-generated proof of concept was largely non-functional and its documentation
 substantially fabricated. **Trust the code and this file over any older prose.**
 
 Read these before substantive work:
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — the authoritative plan and target architecture
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — the authoritative plan and target architecture (rendered page: <https://koftwentytwo.github.io/nuncio/roadmap/>)
+- [`docs/STORY-WORKFLOW.md`](docs/STORY-WORKFLOW.md) — how to execute a roadmap story (gates, patterns to mirror, branch/PR/review flow)
+- [`docs/HANDOFF.md`](docs/HANDOFF.md) — current state, branches, and the M1–M7 story index for picking up on a new machine
 - [`docs/adr/0001-engine-first-grpc-architecture.md`](docs/adr/0001-engine-first-grpc-architecture.md) — the governing architecture decision
-- [`docs/BACKLOG.md`](docs/BACKLOG.md) — engineering-ready Phase 0 / Phase 1 stories
+- [`docs/BACKLOG.md`](docs/BACKLOG.md) — engineering-ready Phase 0 / Phase 1 stories (Phase 2+ is in `docs/ROADMAP.md`)
 
 ## Architecture (target)
 
@@ -57,7 +59,7 @@ Cargo aliases (defined in `.cargo/config.toml`):
 ```bash
 cargo check-all   # = clippy --all-targets --workspace -- -D warnings   (the lint gate)
 cargo test-all    # = test --workspace
-cargo cov         # = llvm-cov --workspace --fail-under-lines 100        (needs cargo-llvm-cov)
+cargo cov         # = llvm-cov --workspace --ignore-filename-regex main.rs --summary-only  (informational; needs cargo-llvm-cov)
 cargo verify      # = fmt --all --check + check-all + test-all
 ```
 
@@ -119,6 +121,12 @@ A shared RustRover setup lives in `.idea/` (the useful parts are tracked;
 - **A capability is "done" only when engine + proto + CLI command + offline E2E
   test all exist and CI is green.** No fabricated success output — an unimplemented
   path returns an honest error, never fake data.
+- **Roadmap is dual-format — keep it in sync.** `docs/ROADMAP.md` is the source of
+  truth; `docs/roadmap/index.html` is its rendered GitHub Pages page
+  (<https://koftwentytwo.github.io/nuncio/roadmap/>, linked from `README.md`).
+  Any change to milestones, status, or scope MUST update **both** in the same
+  commit — never let the rendered page drift from the markdown, and keep the
+  `README.md` link valid.
 
 ## Testing standards
 

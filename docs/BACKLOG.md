@@ -1,5 +1,10 @@
 # Backlog — Phase 0 & Phase 1 (engineering-ready)
 
+> **Status:** Phase 0 and Phase 1 are both complete and on `dev` — this document
+> is now the historical story-level record of that work. For where the project
+> stands today (Phase 3 in progress, milestones M1–M7), see
+> [`ROADMAP.md`](ROADMAP.md).
+
 Ordered, executable stories for the first two phases of [`ROADMAP.md`](ROADMAP.md).
 Each story has acceptance criteria (AC) and a rough size (S ≤1d, M ≈2–4d, L ≈1wk).
 Do them roughly top-to-bottom; within an epic, stories are mostly independent

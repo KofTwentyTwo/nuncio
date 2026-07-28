@@ -32,7 +32,7 @@ target\release\nunciod.exe
 
 It runs in the foreground and:
 - serves the gRPC API on `127.0.0.1:9420` (loopback only) — services `System`,
-  `Accounts`, `Mail`, `Filters`, all bearer-token authenticated;
+  `Accounts`, `Mail`, `Filters`, `Export`, `Audit`, all bearer-token authenticated;
 - opens its database at `%USERPROFILE%\.nuncio\nuncio.db` (override with
   `NUNCIO_DB_PATH`); the `~/.nuncio` directory is created on first run;
 - provisions its keys + the CLI's bearer token in **Windows Credential Manager**
@@ -51,7 +51,7 @@ nuncio-cli.exe system status                 ::  -> "Idle (nunciod v0.1.0, 127.0
 :: add your real account (defaults target mail.kof22.com:993/:465; prompts for the
 :: password, which goes straight to the OS keyring):
 nuncio-cli.exe account add --email you@kof22.com
-        :: override if needed: --imap-host --imap-port --smtp-host --smtp-port --imap-tls-mode
+        :: override if needed: --imap-host --imap-port --smtp-host --smtp-port --imap-mode --smtp-mode
 nuncio-cli.exe account list
 
 :: the real spine:

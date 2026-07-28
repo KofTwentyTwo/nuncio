@@ -23,37 +23,43 @@ parity structural.
 ### Engine libraries (composed by `nunciod`)
 
 - **`nuncio-core`** — domain models (`Email`, `CalendarEvent`, `Contact`), the
-  event bus, the API/IPC layer, and cross-cutting services (export, RBAC, audit,
-  config). Note: the `e2ee`, `ai`, and `plugin` modules are non-functional
-  placeholders in the current tree and are deferred until re-justified.
+  event bus, and cross-cutting services (export, RBAC, audit, config). Note: the
+  `e2ee`, `ai`, and `plugin` modules are non-functional placeholders in the
+  current tree and are deferred until re-justified.
 - **`nuncio-store`** — SQLite persistence in WAL mode, migrations, FTS search,
   payload ciphers (AES-GCM / age), corruption detection & recovery, and the OS
-  keyring vault abstraction. Genuinely engineered; see the correctness fixes in
-  [`BACKLOG.md`](BACKLOG.md) Phase 1.B.
-- **`nuncio-mail`** — IMAP, JMAP, and SMTP engines and MIME handling. SMTP/MIME
-  are solid; IMAP session code exists; JMAP needs a real HTTP client. None are yet
-  driven by the daemon (Phase 1–3 wire them in).
+  keyring vault abstraction. Genuinely engineered; the FTS-vs-encryption,
+  backfill, salvage-schema, and transient-error-vs-corruption fixes tracked in
+  [`BACKLOG.md`](BACKLOG.md) Phase 1.B are done.
+- **`nuncio-mail`** — IMAP, JMAP, and SMTP engines and MIME handling. IMAP and
+  SMTP are wired into the daemon's real `fetch → store → read → send` spine
+  (Phase 1–2); JMAP still needs a real HTTP client (roadmap M3).
 - **`nuncio-cal`** — iCalendar parsing, CalDAV/CardDAV, recurrence (`rrule`), and
-  scheduling. Parsing utilities exist but lack real transport and have TZID bugs
-  (Phase 3).
-- **`nuncio-contacts`** — contacts store, CardDAV sync, vCard generation.
+  scheduling. The engine layer is done (real CalDAV `REPORT` transport, the TZID
+  fix, a `CalendarBackend` trait, `calendar_events` store CRUD); the API vertical
+  and recurrence wiring are roadmap M1.
+- **`nuncio-contacts`** — contacts store, CardDAV sync, vCard generation. Not yet
+  wired into the daemon or persisted across restarts (roadmap M2).
 - **`nuncio-filter`** — the NSQL declarative filter language: parser
   (`sqlparser`-based), multi-pass validator, and evaluation engine. The strongest
-  subsystem; correctness fixes and action execution are Phase 3. See
+  subsystem; correctness fixes (account scoping, `ON ACCOUNT`, non-ASCII offsets,
+  `NOT IN`) are done. Wiring the match-and-act engine into the live sync path so a
+  matching rule actually fires its action is roadmap M4. See
   [`NSQL-Filter-Language-Specification.md`](NSQL-Filter-Language-Specification.md).
 
 ### The daemon
 
 - **`nunciod`** — boots the event bus, opens/recovers the store, loads filter
-  rules, runs background workers, and serves the API. Its central missing piece is
-  real protocol sync: today "sync" only flips a status flag and the outbox worker
-  *simulates* remote mutations. Phase 1 replaces this with a real
-  `IMAP fetch → store → SMTP send` loop.
+  rules, runs background workers, and serves the gRPC API. The
+  `IMAP fetch → store → read → SMTP send` spine is real and works end-to-end
+  (Phase 1–2). The remaining gaps are wiring the filter engine's actions into
+  that live sync path (roadmap M4) and incremental — rather than full-historical
+  — sync (roadmap M5).
 
 ### The published API
 
 - A versioned **gRPC** service defined by Protocol Buffers in `proto/nuncio/v1/`
-  (introduced in Phase 1), served over **loopback TCP (`127.0.0.1`)** with a
+  (delivered in Phase 1), served over **loopback TCP (`127.0.0.1:9420`)** with a
   **bearer-token handshake** — the token minted into the OS keyring on first run
   and sent as gRPC metadata.
 - **Unary RPCs** for commands and queries; **server-streaming RPCs** for push
@@ -77,16 +83,16 @@ parity structural.
 
 - **Single local SQLite database per profile** (e.g. `~/.nuncio/`), WAL mode,
   single-writer through the daemon.
-- **Credentials and keys belong in the OS keyring.** The current tree hardcodes
-  crypto keys in source and never calls the keyring — a critical defect fixed in
-  Phase 0.E before any at-rest-encryption or tamper-evidence claim is valid.
+- **Credentials and keys belong in the OS keyring.** Fixed in Phase 0.E:
+  production code reads/writes real keys via `OsKeyring` (Windows Credential
+  Manager / Keychain / Secret Service); only test code uses `MockKeyring`.
 - **Full-text search** via SQLite FTS5 (trigram). The indexing-vs-encryption
-  strategy is being corrected in Phase 1.B.
+  strategy was corrected in Phase 1.B.
 - **HTML email** must render sandboxed (`<iframe sandbox>`, JS disabled, strict
   CSP) in GUI clients.
 
 ## Diagram
 
-A current, accurate topology diagram will be added once the gRPC layer lands
-(Phase 1). The previous `architecture.png` depicted the superseded socket/4-shell
+A current, accurate topology diagram covering the gRPC layer has not yet been
+added. The previous `architecture.png` depicted the superseded socket/4-shell
 model and was removed.

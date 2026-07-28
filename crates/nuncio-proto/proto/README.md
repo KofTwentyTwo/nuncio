@@ -5,10 +5,13 @@ daemon: `nuncio/v1/nuncio.proto`, defining the `System`, `Accounts`, `Mail`,
 `Filters`, `Export`, and `Audit` services.
 
 The Rust crate `nuncio-proto` (one level up) compiles this `.proto` into the
-in-repo Rust client/server stubs used by `nunciod`, `nuncio-cli`, and the
-other in-repo presentation shells. This README is for anyone generating a
-client in a **different** language against the same contract -- e.g. a
-native Swift/macOS app, a C#/WinUI app, or a TypeScript/Node MCP bridge.
+in-repo Rust client/server stubs used by `nunciod` and `nuncio-cli` -- the
+only two workspace members today. (The former in-repo TUI/GUI/MCP shells were
+moved to `_reference/`, out of the workspace, and will consume this contract
+as separate client repos once it is frozen -- see `docs/ROADMAP.md`.) This
+README is for anyone generating a client in a **different** language against
+the same contract -- e.g. a native Swift/macOS app, a C#/WinUI app, or a
+TypeScript/Node MCP bridge.
 
 `descriptor.bin` alongside the `.proto` file is a compiled
 `FileDescriptorSet` for the whole `nuncio.v1` package, committed as the

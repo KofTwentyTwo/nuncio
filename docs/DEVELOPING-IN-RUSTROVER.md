@@ -14,7 +14,7 @@ style, and Cargo registration are tracked; per-machine state like `workspace.xml
 is gitignored). On a fresh checkout:
 
 1. **Open the folder** in RustRover and let it index. It reads the workspace from
-   the root `Cargo.toml` — you should see the 8 members
+   the root `Cargo.toml` — you should see the 9 members
    (`nuncio-core`, `-mail`, `-cal`, `-contacts`, `-store`, `-filter`, `-proto`,
    `nunciod`, `nuncio-cli`). After any pull that adds/moves crates, use
    **File → Reload Cargo Project** (RustRover usually offers a banner).

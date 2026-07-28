@@ -1,3 +1,9 @@
+> **SUPERSEDED (2026-07-28).** Phase 2 shipped the real `proto/nuncio/v1` contract
+> (see the committed `crates/nuncio-proto/proto/nuncio/v1/nuncio.proto` and
+> [`ROADMAP.md`](ROADMAP.md)). This file is retained only as the historical Phase-0
+> design input that fed it; its "today" references (the old JSON-RPC `:9422` socket,
+> `nuncio.mx`) are obsolete. Do not treat it as a current description of the system.
+
 # API Surface Draft — Candidate `proto/nuncio/v1` RPCs
 
 **Backlog story:** 0.D.1 (GitHub #144) — extract the API-surface draft before

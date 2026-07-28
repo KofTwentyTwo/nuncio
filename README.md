@@ -8,7 +8,8 @@
 > end-to-end product did not work and much of the prior documentation was
 > inaccurate. The project is being rebuilt engine-first. **It is not usable yet,
 > and published pre-1.0 releases are non-functional — do not install them.**
-> See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the plan and
+> See the **[live roadmap](https://koftwentytwo.github.io/nuncio/roadmap/)**
+> (source: [`docs/ROADMAP.md`](docs/ROADMAP.md)) for the plan and
 > [`docs/adr/0001-engine-first-grpc-architecture.md`](docs/adr/0001-engine-first-grpc-architecture.md)
 > for the architecture decision.
 
@@ -41,8 +42,9 @@ Engine libraries composed by the daemon:
 | `crates/nunciod` | The daemon binary — owns state and serves the API |
 | `crates/nuncio-cli` | Reference API client + E2E driver |
 
-The `nuncio-tui`, `nuncio-gui`, and `nuncio-mcp` crates are slated to move to
-separate repositories (roadmap Phase 0/5) and should be treated as reference-only.
+The former `nuncio-tui`, `nuncio-gui`, and `nuncio-mcp` shells have been moved to
+`_reference/` (out of the workspace) and will be rebuilt as separate client
+repositories (roadmap Phase 5).
 
 ## Build & test
 
@@ -58,7 +60,10 @@ Cargo aliases are defined in [`.cargo/config.toml`](.cargo/config.toml).
 
 ## Documentation
 
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — authoritative roadmap and target architecture
+- **[Roadmap — live rendered page](https://koftwentytwo.github.io/nuncio/roadmap/)** — the visual plan to a client-ready backend (GitHub Pages)
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — authoritative roadmap and target architecture (source for the page above)
+- [`docs/STORY-WORKFLOW.md`](docs/STORY-WORKFLOW.md) — how contributors execute a roadmap story (gates, patterns, review flow)
+- [`docs/HANDOFF.md`](docs/HANDOFF.md) — development handoff: current state, branches, and the M1–M7 story index
 - [`docs/BACKLOG.md`](docs/BACKLOG.md) — engineering-ready Phase 0 / Phase 1 stories
 - [`docs/adr/`](docs/adr/) — architecture decision records
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — technical architecture

@@ -19,10 +19,11 @@
 ## Reference (real subsystems, with status caveats)
 
 - **[NSQL Filter Language](NSQL-Filter-Language-Specification)** — the declarative
-  filter language (parser/validator/engine are real; actions and scoping are being
-  finished in Phase 3).
+  filter language (parser/validator/engine are real and account scoping is
+  correct; wiring matched rules to actually fire actions against live mail is
+  roadmap M4).
 - **[Database Self-Healing](Database-Corruption-Self-Healing)** — corruption
-  detection and recovery (real, with two defects being fixed in Phase 1).
+  detection and recovery (real; the two defects tracked for Phase 1 are fixed).
 
 ## The short version
 
