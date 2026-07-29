@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nuncio Backend Roadmap — to a Client-Ready API</title>
+<meta name="description" content="The plan from Nuncio's current spine to a frozen, client-ready gRPC API.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🗺️</text></svg>">
+</head><body>
+<style>
+  :root{
+    --bg:#f6f8f7; --panel:#ffffff; --panel-2:#eef2f0; --ink:#131d1a; --muted:#586d67;
+    --line:#d9e2de; --accent:#127e6f; --accent-soft:#127e6f1a;
+    --done:#2f9d68; --done-bg:#2f9d6818; --prog:#c07a1e; --prog-bg:#c07a1e18;
+    --plan:#5f7bb0; --plan-bg:#5f7bb016; --defer:#8a938f; --defer-bg:#8a938f18;
+    --goal:#127e6f; --goal-bg:#127e6f14;
+    --mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0c1210; --panel:#121a17; --panel-2:#0f1613; --ink:#e8efec; --muted:#8ea39c;
+      --line:#22302b; --accent:#3cbfa8; --accent-soft:#3cbfa81f;
+      --done:#42b97e; --done-bg:#42b97e1f; --prog:#e0a14a; --prog-bg:#e0a14a1c;
+      --plan:#7d9bd6; --plan-bg:#7d9bd61c; --defer:#7f8a86; --defer-bg:#7f8a8622;
+      --goal:#3cbfa8; --goal-bg:#3cbfa816;
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#f6f8f7; --panel:#ffffff; --panel-2:#eef2f0; --ink:#131d1a; --muted:#586d67;
+    --line:#d9e2de; --accent:#127e6f; --accent-soft:#127e6f1a;
+    --done:#2f9d68; --done-bg:#2f9d6818; --prog:#c07a1e; --prog-bg:#c07a1e18;
+    --plan:#5f7bb0; --plan-bg:#5f7bb016; --defer:#8a938f; --defer-bg:#8a938f18;
+    --goal:#127e6f; --goal-bg:#127e6f14;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1210; --panel:#121a17; --panel-2:#0f1613; --ink:#e8efec; --muted:#8ea39c;
+    --line:#22302b; --accent:#3cbfa8; --accent-soft:#3cbfa81f;
+    --done:#42b97e; --done-bg:#42b97e1f; --prog:#e0a14a; --prog-bg:#e0a14a1c;
+    --plan:#7d9bd6; --plan-bg:#7d9bd61c; --defer:#7f8a86; --defer-bg:#7f8a8622;
+    --goal:#3cbfa8; --goal-bg:#3cbfa816;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    line-height:1.55;-webkit-font-smoothing:antialiased;font-size:16px}
+  .wrap{max-width:1080px;margin:0 auto;padding:clamp(20px,4vw,52px) clamp(16px,4vw,40px)}
+  a{color:var(--accent)}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 12px}
+  h1{font-size:clamp(28px,4.5vw,44px);line-height:1.05;margin:0 0 14px;letter-spacing:-.02em;
+    font-weight:720;text-wrap:balance}
+  .lede{font-size:clamp(16px,2vw,19px);color:var(--muted);max-width:64ch;margin:0}
+  .rule{height:1px;background:var(--line);border:0;margin:34px 0}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.14em;text-transform:uppercase;
+    color:var(--muted);margin:0 0 18px;font-weight:600}
+  /* status legend */
+  .legend{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:22px}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;
+    letter-spacing:.04em;padding:4px 10px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+  .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+  .s-done{color:var(--done)} .s-done .dot{background:var(--done)}
+  .s-prog{color:var(--prog)} .s-prog .dot{background:var(--prog)}
+  .s-plan{color:var(--plan)} .s-plan .dot{background:var(--plan)}
+  .s-defer{color:var(--defer)} .s-defer .dot{background:var(--defer)}
+  /* current-state band */
+  .band{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px 24px;margin-top:8px}
+  .band h3{margin:0 0 6px;font-size:18px;letter-spacing:-.01em}
+  .band p{margin:0 0 16px;color:var(--muted);font-size:15px;max-width:70ch}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{font-family:var(--mono);font-size:12px;padding:4px 9px;border-radius:7px;
+    background:var(--panel-2);border:1px solid var(--line);color:var(--ink)}
+  .chip.svc{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+  .donerow{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .donetag{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-family:var(--mono);
+    color:var(--done);background:var(--done-bg);border:1px solid color-mix(in srgb,var(--done) 30%,transparent);
+    padding:4px 10px;border-radius:7px}
+  .donetag::before{content:"✓";font-weight:700}
+  /* milestone rail */
+  .miles{position:relative;margin-top:8px}
+  .miles::before{content:"";position:absolute;left:19px;top:12px;bottom:34px;width:2px;
+    background:linear-gradient(var(--done),var(--prog) 16%,var(--line) 22%);border-radius:2px}
+  @media (max-width:640px){.miles::before{display:none}}
+  .m{position:relative;padding-left:52px;margin-bottom:16px}
+  @media (max-width:640px){.m{padding-left:0}}
+  .node{position:absolute;left:9px;top:20px;width:22px;height:22px;border-radius:50%;
+    background:var(--panel);border:2px solid var(--line);display:grid;place-items:center;
+    font-family:var(--mono);font-size:10px;color:var(--muted);z-index:1}
+  @media (max-width:640px){.node{display:none}}
+  .m.done .node{border-color:var(--done);color:var(--done)}
+  .m.prog .node{border-color:var(--prog);color:var(--prog)}
+  .m.goal .node{border-color:var(--goal);background:var(--goal);color:#fff}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;
+    transition:border-color .15s}
+  .m.goal .card{border-color:color-mix(in srgb,var(--goal) 55%,var(--line));background:var(--goal-bg);
+    box-shadow:0 0 0 1px color-mix(in srgb,var(--goal) 30%,transparent)}
+  .chead{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .ctitle{margin:0;font-size:17px;letter-spacing:-.01em;font-weight:650}
+  .ctitle .code{font-family:var(--mono);color:var(--accent);font-weight:600;font-size:14px;margin-right:8px}
+  .stat{font-family:var(--mono);font-size:11px;letter-spacing:.05em;padding:3px 9px;border-radius:999px;
+    white-space:nowrap;text-transform:uppercase}
+  .stat.done{color:var(--done);background:var(--done-bg)}
+  .stat.prog{color:var(--prog);background:var(--prog-bg)}
+  .stat.plan{color:var(--plan);background:var(--plan-bg)}
+  .stat.goal{color:#fff;background:var(--goal)}
+  .cbody{margin:10px 0 0;color:var(--muted);font-size:14.5px}
+  .exit{margin:12px 0 0;padding:10px 12px;background:var(--panel-2);border-radius:9px;
+    border-left:3px solid var(--accent);font-size:13.5px}
+  .exit b{color:var(--ink);font-weight:640}
+  .issues{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+  .iss{font-family:var(--mono);font-size:11.5px;color:var(--muted);background:var(--panel-2);
+    border:1px solid var(--line);padding:2px 8px;border-radius:6px;text-decoration:none}
+  .iss:hover{color:var(--accent);border-color:var(--accent)}
+  /* footer note */
+  .note{margin-top:8px;font-size:13.5px;color:var(--muted)}
+  .defer{background:var(--defer-bg);border:1px dashed var(--line);border-radius:12px;padding:16px 20px}
+  .defer h3{margin:0 0 6px;font-size:15px;color:var(--ink)}
+  .defer p{margin:0;color:var(--muted);font-size:13.5px}
+  .foot{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);
+    font-family:var(--mono);font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 18px;justify-content:space-between}
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">Nuncio · backend roadmap</p>
+  <h1>From here to a client-ready backend</h1>
+  <p class="lede">The plan to take the daemon, reference CLI, and gRPC API from today's working spine to a
+    <strong style="color:var(--ink)">frozen, versioned contract</strong> that native front-ends can start consuming —
+    with parity guaranteed by the API, not by discipline.</p>
+
+  <div class="legend">
+    <span class="pill s-done"><span class="dot"></span>Done &amp; on <span style="font-family:var(--mono)">dev</span></span>
+    <span class="pill s-prog"><span class="dot"></span>In progress</span>
+    <span class="pill s-plan"><span class="dot"></span>Planned</span>
+    <span class="pill s-defer"><span class="dot"></span>Deferred</span>
+  </div>
+
+  <hr class="rule">
+
+  <h2>Where we are · 2026-07-28</h2>
+  <div class="band">
+    <h3>Phases 0–2 complete — the spine works end to end</h3>
+    <p>The daemon boots gRPC-only on loopback <span class="chip">127.0.0.1:9420</span> behind a keyring-minted
+      bearer token. <code>IMAP → store → read → SMTP send</code> runs end-to-end over gRPC, driven by the
+      <span class="chip">nuncio-cli</span> reference client, tested fully offline. The legacy JSON-RPC IPC is gone,
+      and <span class="chip">nuncio.v1</span> is published with a byte-deterministic contract-stability golden.</p>
+    <div class="chips">
+      <span class="chip svc">System</span><span class="chip svc">Accounts</span><span class="chip svc">Mail</span>
+      <span class="chip svc">Filters</span><span class="chip svc">Export</span><span class="chip svc">Audit</span>
+      <span class="chip" style="color:var(--muted)">— 6 services, each behind the auth interceptor</span>
+    </div>
+    <div class="donerow">
+      <span class="donetag">Phase 0 · Honesty &amp; foundation</span>
+      <span class="donetag">Phase 1 · gRPC skeleton + spine</span>
+      <span class="donetag">Phase 2 · API completeness (spine)</span>
+      <span class="donetag">3.A · Filter correctness</span>
+      <span class="donetag">3.B.1 · Calendar engine (CalDAV + TZID)</span>
+    </div>
+  </div>
+
+  <hr class="rule">
+
+  <h2>The path · seven milestones to the goal line</h2>
+  <div class="miles">
+
+    <div class="m prog">
+      <div class="node">M1</div>
+      <div class="card">
+        <div class="chead">
+          <h3 class="ctitle"><span class="code">M1</span>Finish Calendar</h3>
+          <span class="stat prog">In progress</span>
+        </div>
+        <p class="cbody">Publish the calendar engine over the API: a <code>Calendar</code> gRPC service
+          (Sync / ListEvents / GetEvent — honest surface only) behind the auth interceptor, daemon wiring, CLI
+          commands replacing the stub, and <b>recurrence (rrule) wired into the fetch/store path</b> (today it's dead code).</p>
+        <div class="exit"><b>Exit:</b> a Calendar view over gRPC, offline-tested sync→list→get, recurring events materialize.</div>
+        <div class="issues"><a class="iss">#178</a><span class="iss">3.B.1 done → 3.B.2 next</span></div>
+      </div>
+    </div>
+
+    <div class="m plan">
+      <div class="node">M2</div>
+      <div class="card">
+        <div class="chead">
+          <h3 class="ctitle"><span class="code">M2</span>Contacts · CardDAV</h3>
+          <span class="stat plan">Planned</span>
+        </div>
+        <p class="cbody">Replace the fake CardDAV client (returns one hardcoded contact) with a real, wiremock-tested
+          client + vCard round-trip; persist through the daemon's store (the CLI currently writes a throwaway
+          in-memory DB); add a <code>Contacts</code> service, CLI, and offline E2E.</p>
+        <div class="exit"><b>Exit:</b> contacts sync and persist across restarts, driven over gRPC.</div>
+        <div class="issues"><a class="iss">#179</a></div>
+      </div>
+    </div>
+
+    <div class="m plan">
+      <div class="node">M3</div>
+      <div class="card">
+        <div class="chead">
+          <h3 class="ctitle"><span class="code">M3</span>JMAP</h3>
+          <span class="stat plan">Planned</span>
+        </div>
+        <p class="cbody">A real JMAP HTTP client (session, Email/query/get/set) with the camelCase wire fix, wired into
+          the same <code>MailBackend</code> fetch→store path as IMAP; wiremock-tested.</p>
+        <div class="exit"><b>Exit:</b> a JMAP account fetches → stores → lists offline, via the existing Mail service.</div>
+        <div class="issues"><a class="iss">#180</a></div>
+      </div>
+    </div>
+
+    <div class="m plan">
+      <div class="node">M4</div>
+      <div class="card">
+        <div class="chead">
+          <h3 class="ctitle"><span class="code">M4</span>Filters made live</h3>
+          <span class="stat plan">Planned</span>
+        </div>
+        <p class="cbody">Today rules can be created, validated, and previewed as “MATCH” but <b>never fire</b>. Wire
+          <code>FilterEngine::evaluate</code> into the real sync path so matches trigger their action
+          (move/flag/delete/forward/webhook), fix the header + account-field bugs, and re-expose filter
+          edit/export/import/logs and bulk triage over the service.</p>
+        <div class="exit"><b>Exit:</b> an E2E proves a matching rule fires an action against synced mail — no fabricated preview.</div>
+        <div class="issues"><a class="iss">#175</a><a class="iss">#176</a><a class="iss">#181</a></div>
+      </div>
+    </div>
+
+    <div class="m plan">
+      <div class="node">M5</div>
+      <div class="card">
+        <div class="chead">
+          <h3 class="ctitle"><span class="code">M5</span>Mail lifecycle + incremental sync</h3>
+          <span class="stat plan">Planned</span>
+        </div>
+        <p class="cbody">Round out real account management: edit / delete / test-connection with TLS modes
+          (implicit / STARTTLS / plain) actually wired; explicit send-account selection; and <b>incremental sync</b>
+          (honor <code>since_state</code> instead of re-fetching the whole mailbox every time) with progress and stall timeouts.</p>
+        <div class="exit"><b>Exit:</b> full account lifecycle + incremental sync, offline-E2E-proven, no fabricated IMAP fallbacks.</div>
+        <div class="issues"><a class="iss">#170</a><a class="iss">#169</a><a class="iss">#182</a><a class="iss">#183</a><a class="iss">#184</a></div>
+      </div>
+    </div>
+
+    <div class="m plan">
+      <div class="node">M6</div>
+      <div class="card">
+        <div class="chead">
+          <h3 class="ctitle"><span class="code">M6</span>Security &amp; release hardening</h3>
+          <span class="stat plan">Planned</span>
+        </div>
+        <p class="cbody">Fail-<i>closed</i> everywhere: fix the silent empty-ciphertext data-loss path; a
+          signature-verifying updater that refuses to apply without checksums; zeroize key material; validate vault
+          key lengths; gRPC bind hardening with an interceptor guard; real CIDR-based SSRF checks; sandboxed HTML rendering.</p>
+        <div class="exit"><b>Exit:</b> a security review passes — no fail-open crypto, update, or egress path remains.</div>
+        <div class="issues"><a class="iss">#162</a><a class="iss">#163</a><a class="iss">#164</a><a class="iss">#165</a></div>
+      </div>
+    </div>
+
+    <div class="m goal">
+      <div class="node">★</div>
+      <div class="card">
+        <div class="chead">
+          <h3 class="ctitle"><span class="code">M7</span>API freeze &amp; client-readiness</h3>
+          <span class="stat goal">The goal line</span>
+        </div>
+        <p class="cbody">Freeze <code>nuncio.v1</code>: every backend capability is represented, the contract-stability
+          golden covers the full surface, and the additive-only versioning policy is enforced by test. Verify
+          Swift / C# / TypeScript codegen with a “hello, daemon” per language. <b>The CLI reference client exercises
+          every RPC in offline E2E</b> — the proof the contract is complete and usable. Replace the gamed coverage gate;
+          CI green; tag an honest pre-alpha backend release.</p>
+        <div class="exit"><b>Exit / client-ready:</b> the daemon publishes a <b>frozen, documented, contract-tested gRPC API</b>
+          that the CLI fully exercises offline. <b>Front-end repos may now begin.</b></div>
+        <div class="issues"><a class="iss">#143</a></div>
+      </div>
+    </div>
+
+  </div>
+
+  <hr class="rule">
+
+  <h2>After the goal line</h2>
+  <div class="band" style="margin-bottom:16px">
+    <h3>Phase 5 · Client projects</h3>
+    <p>Separate repositories consume the frozen API, parity guaranteed by the contract:
+      <span class="chip">nuncio-tui</span> (Rust) ·
+      <span class="chip">nuncio-gui-macos</span> (Swift + grpc-swift) ·
+      <span class="chip">nuncio-gui-windows</span> (WinUI / C#) ·
+      <span class="chip">nuncio-mcp</span> (MCP ↔ gRPC bridge).</p>
+  </div>
+  <div class="defer">
+    <h3>Deferred until re-justified · not on the critical path</h3>
+    <p>OpenPGP / S-MIME E2EE (#79), WASM / QuickJS plugins (#80), and local-LLM summarization (#81) remain honestly
+      backlogged as stubs. They re-enter scope only as deliberate, scoped decisions after the backend is client-ready —
+      never built as filler to clear a badge.</p>
+  </div>
+
+  <div class="foot">
+    <span>Contract = the <code>.proto</code> files · a capability is done only when engine + proto + CLI + offline E2E exist and CI is green.</span>
+    <span>nunciod · nuncio.v1 · loopback 127.0.0.1:9420</span>
+  </div>
+</div>
+</body></html>

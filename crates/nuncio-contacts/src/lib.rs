@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
 pub mod carddav;
 pub mod db;
 pub mod models;
@@ -12,21 +14,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_contacts_database_crud_and_fts() {
-        let db = ContactsDatabase::in_memory().await.expect("Failed to create in-memory db");
+        let db = ContactsDatabase::in_memory()
+            .await
+            .expect("Failed to create in-memory db");
 
         let mut contact = Contact::new("James Maes", "james.maes@kof22.com");
         contact.organization = Some("KofTwentyTwo".to_string());
-        db.save_contact(&contact).await.expect("Failed to save contact");
+        db.save_contact(&contact)
+            .await
+            .expect("Failed to save contact");
 
-        let results = db.search_contacts("James").await.expect("Failed to search contacts");
+        let results = db
+            .search_contacts("James")
+            .await
+            .expect("Failed to search contacts");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].display_name, "James Maes");
         assert_eq!(results[0].emails[0].email, "james.maes@kof22.com");
 
-        let harvested = db.harvest_email_address("Alice Smith", "alice@kof22.com").await;
+        let harvested = db
+            .harvest_email_address("Alice Smith", "alice@kof22.com")
+            .await;
         assert!(harvested.is_ok());
 
-        let results2 = db.search_contacts("alice").await.expect("Failed to search harvested");
+        let results2 = db
+            .search_contacts("alice")
+            .await
+            .expect("Failed to search harvested");
         assert_eq!(results2.len(), 1);
         assert_eq!(results2[0].display_name, "Alice Smith");
     }

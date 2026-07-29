@@ -1,11 +1,9 @@
 name: Nuncio Nightly & Snapshot Release Pipeline
 
 on:
-  push:
-    branches:
-      - dev
-  schedule:
-    - cron: '0 2 * * *' # Daily Nightly Build at 02:00 UTC
+  # Auto-nightly is DISABLED during the pre-alpha rebuild: no public releases
+  # until V3, and this pipeline builds the presentation GUI now archived under
+  # _reference/. Manual-only until the release path is restored in Phase 4.
   workflow_dispatch:
 
 permissions:

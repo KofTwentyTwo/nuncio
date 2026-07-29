@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use nuncio_core::model::{Email, Folder};
 use std::sync::{Arc, Mutex};
 
-use crate::backend::MailBackend;
+use crate::backend::{MailBackend, MessageSender, OutboundMessage};
 use crate::parser::MailError;
 
 /// Thread-safe mock mail backend for offline testing.
@@ -116,6 +116,60 @@ impl MailBackend for MockMailBackend {
     }
 }
 
+/// Deterministic mock [`MessageSender`] for offline testing of the outbound
+/// send RPC: records every [`OutboundMessage`] it is given, rather than
+/// touching a real SMTP transport, and can be
+/// configured to simulate a transport failure so callers can prove a failed
+/// send surfaces as a genuine error rather than a fabricated success.
+#[derive(Debug, Clone, Default)]
+pub struct MockMessageSender {
+    sent: Arc<Mutex<Vec<OutboundMessage>>>,
+    should_fail: Arc<Mutex<bool>>,
+}
+
+impl MockMessageSender {
+    /// Create a new `MockMessageSender` with empty storage.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Configure the mock to simulate a transport-level send failure.
+    pub fn set_should_fail(&self, fail: bool) {
+        if let Ok(mut flag) = self.should_fail.lock() {
+            *flag = fail;
+        }
+    }
+
+    /// Retrieve every message recorded by the mock, in send order.
+    pub fn sent_messages(&self) -> Vec<OutboundMessage> {
+        self.sent
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl MessageSender for MockMessageSender {
+    async fn send(&self, message: &OutboundMessage) -> Result<(), MailError> {
+        let should_fail = self
+            .should_fail
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        if *should_fail {
+            return Err(MailError::TransportFailed(
+                "simulated SMTP transport failure".to_string(),
+            ));
+        }
+        let mut sent = self
+            .sent
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        sent.push(message.clone());
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +217,37 @@ mod tests {
         assert!(mock.sync_folders().await.is_err());
         assert!(mock.sync_messages("inbox", None).await.is_err());
         assert!(mock.send_email(&email).await.is_err());
+    }
+
+    fn sample_outbound_message() -> OutboundMessage {
+        OutboundMessage {
+            from: "alice@nuncio.mx".to_string(),
+            to: "bob@nuncio.mx".to_string(),
+            cc: None,
+            subject: "Mock Send".to_string(),
+            body_plain: Some("Mock body".to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_message_sender_records_exact_message_and_supports_failure_simulation() {
+        let mock = MockMessageSender::new();
+        let message = sample_outbound_message();
+
+        mock.send(&message).await.expect("send succeeds");
+        let sent = mock.sent_messages();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0], message);
+
+        mock.set_should_fail(true);
+        let err = mock
+            .send(&message)
+            .await
+            .expect_err("simulated failure must surface as an error");
+        assert!(matches!(err, MailError::TransportFailed(_)));
+        // The failed attempt must never be recorded as "sent".
+        assert_eq!(mock.sent_messages().len(), 1);
     }
 }

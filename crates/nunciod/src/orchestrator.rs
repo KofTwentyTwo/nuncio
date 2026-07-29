@@ -3,6 +3,7 @@
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::recovery::{CorruptedBackupManager, RecoverySummary};
+use nuncio_store::vault::SecretManager;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -12,29 +13,37 @@ pub struct SelfHealingSyncOrchestrator {
     db_path: PathBuf,
     backup_dir: PathBuf,
     event_bus: Arc<EventBus>,
+    secrets: Arc<SecretManager>,
 }
 
 impl SelfHealingSyncOrchestrator {
-    /// Create a new `SelfHealingSyncOrchestrator`.
+    /// Create a new `SelfHealingSyncOrchestrator` backed by the real OS keyring
+    /// ([`SecretManager::production`]). This is the production entry point used by the
+    /// `nunciod` boot sequence.
     pub fn new(db_path: impl Into<PathBuf>, event_bus: Arc<EventBus>) -> Self {
         let backup_dir = CorruptedBackupManager::default_backup_dir();
         Self {
             db_path: db_path.into(),
             backup_dir,
             event_bus,
+            secrets: Arc::new(SecretManager::production()),
         }
     }
 
-    /// Create a new `SelfHealingSyncOrchestrator` with a custom backup directory.
+    /// Create a new `SelfHealingSyncOrchestrator` with a custom backup directory and an
+    /// explicit secret vault. Tests MUST pass a [`SecretManager::mock`]-backed instance so
+    /// they never touch the real OS keyring.
     pub fn with_backup_dir(
         db_path: impl Into<PathBuf>,
         backup_dir: impl Into<PathBuf>,
         event_bus: Arc<EventBus>,
+        secrets: Arc<SecretManager>,
     ) -> Self {
         Self {
             db_path: db_path.into(),
             backup_dir: backup_dir.into(),
             event_bus,
+            secrets,
         }
     }
 
@@ -43,9 +52,11 @@ impl SelfHealingSyncOrchestrator {
     /// Stage 3 stream salvage, Stage 4 remote resync initiation, and Stage 5 IPC event broadcast.
     pub async fn initialize_and_recover(
         &self,
-    ) -> Result<(Arc<DatabaseEngine>, Option<RecoverySummary>), nuncio_store::db::DatabaseError> {
+    ) -> Result<(Arc<DatabaseEngine>, Option<RecoverySummary>), nuncio_store::db::DatabaseError>
+    {
         let (db_engine, recovery_summary) =
-            DatabaseEngine::open_with_backup_dir(&self.db_path, &self.backup_dir).await?;
+            DatabaseEngine::open_with_backup_dir(&self.db_path, &self.backup_dir, &self.secrets)
+                .await?;
         let engine = Arc::new(db_engine);
 
         if let Some(summary) = &recovery_summary {
@@ -75,13 +86,23 @@ impl SelfHealingSyncOrchestrator {
     pub async fn trigger_background_resync(&self, db: &DatabaseEngine) {
         info!("SelfHealingSyncOrchestrator: triggering background remote server resync...");
         if let Ok(accounts) = db.list_accounts().await {
-            info!("Found {} account(s) for remote resync post-recovery.", accounts.len());
+            info!(
+                "Found {} account(s) for remote resync post-recovery.",
+                accounts.len()
+            );
             for account in accounts {
                 let secret_key = &account.keyring_secret_key;
-                tracing::debug!("Keyring secret key verified for account {}: {}", account.id, secret_key);
-                let _ = self.event_bus.send_command(CoreCommand::SyncAccount {
-                    account_id: account.id.clone(),
-                }).await;
+                tracing::debug!(
+                    "Keyring secret key verified for account {}: {}",
+                    account.id,
+                    secret_key
+                );
+                let _ = self
+                    .event_bus
+                    .send_command(CoreCommand::SyncAccount {
+                        account_id: account.id.clone(),
+                    })
+                    .await;
             }
         } else {
             let _ = self.event_bus.send_command(CoreCommand::SyncAll).await;
@@ -100,9 +121,14 @@ mod tests {
         let db_path = dir.path().join("orchestrator_test.db");
         let backup_dir = dir.path().join("backups");
         let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
 
-        let orchestrator = SelfHealingSyncOrchestrator::with_backup_dir(&db_path, &backup_dir, event_bus);
-        let (db, summary) = orchestrator.initialize_and_recover().await.expect("initialize");
+        let orchestrator =
+            SelfHealingSyncOrchestrator::with_backup_dir(&db_path, &backup_dir, event_bus, secrets);
+        let (db, summary) = orchestrator
+            .initialize_and_recover()
+            .await
+            .expect("initialize");
 
         assert!(summary.is_none());
         assert!(db.check_integrity().await.expect("integrity check"));
@@ -115,10 +141,13 @@ mod tests {
         let backup_dir = dir.path().join("backups");
         let event_bus = Arc::new(EventBus::new());
         let mut events = event_bus.subscribe_events();
+        let secrets = Arc::new(SecretManager::mock());
 
         // Populate valid DB first
         {
-            let engine = DatabaseEngine::connect_file(&db_path).await.unwrap();
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .unwrap();
             let acct = nuncio_core::AccountConfig {
                 id: "acct-orch-1".to_string(),
                 name: "Orch Account".to_string(),
@@ -126,6 +155,8 @@ mod tests {
                 protocol: nuncio_core::AccountProtocol::ImapSmtp,
                 server_host: "imap.nuncio.mx".to_string(),
                 server_port: 993,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
                 use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
@@ -146,8 +177,16 @@ mod tests {
         let _ = std::fs::remove_file(format!("{}-wal", db_path.to_string_lossy()));
         let _ = std::fs::remove_file(format!("{}-shm", db_path.to_string_lossy()));
 
-        let orchestrator = SelfHealingSyncOrchestrator::with_backup_dir(&db_path, &backup_dir, event_bus.clone());
-        let (db, summary) = orchestrator.initialize_and_recover().await.expect("recover succeeds");
+        let orchestrator = SelfHealingSyncOrchestrator::with_backup_dir(
+            &db_path,
+            &backup_dir,
+            event_bus.clone(),
+            secrets,
+        );
+        let (db, summary) = orchestrator
+            .initialize_and_recover()
+            .await
+            .expect("recover succeeds");
 
         assert!(summary.is_some());
         let sum = summary.unwrap();
@@ -157,7 +196,9 @@ mod tests {
         // Verify CoreEvent::DatabaseRecovered event was published
         let evt = events.recv().await.expect("event received");
         match evt {
-            CoreEvent::DatabaseRecovered { resync_triggered, .. } => {
+            CoreEvent::DatabaseRecovered {
+                resync_triggered, ..
+            } => {
                 assert!(resync_triggered);
             }
             _ => panic!("Expected CoreEvent::DatabaseRecovered"),

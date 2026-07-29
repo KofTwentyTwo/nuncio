@@ -1,6 +1,6 @@
 # Contributing to Nuncio
 
-Thank you for contributing to Nuncio ([nuncio.mx](https://nuncio.mx))!
+Thank you for contributing to Nuncio!
 
 ## Semantic Versioning 2.0.0 & Tagging
 
@@ -9,7 +9,10 @@ Nuncio follows **Semantic Versioning 2.0.0** (`vMAJOR.MINOR.PATCH`):
 - `MINOR`: Incremented for new functionality added in a backward-compatible manner.
 - `PATCH`: Incremented for backward-compatible bug fixes.
 
-Tagging a commit with `vX.Y.Z` triggers [.github/workflows/release.yml](file:///R:/Git.Local/KofTwentyTwo/nuncio/.github/workflows/release.yml) to automatically compile cross-platform release artifacts (Windows `.zip`/`.msi`, macOS `.tar.gz`/`.dmg`, Linux `.tar.gz`/`.AppImage`), generate release notes from Conventional Commits, compute SHA256 checksums, and publish an official GitHub Release.
+Tagging a commit with `vX.Y.Z` is intended to drive the release workflow under
+`.github/workflows/`. **Pre-alpha note:** the release pipeline is being rebuilt and
+**no functional release exists yet** — see roadmap milestone M7 (issue #209). Do not
+tag releases until the backend is declared client-ready.
 
 ## Architecture Decoupling Rules
 

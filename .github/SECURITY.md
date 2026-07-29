@@ -1,13 +1,17 @@
 # Security Policy
 
-Nuncio ([nuncio.mx](https://nuncio.mx)) takes security and data privacy seriously. Because Nuncio handles sensitive mail payloads, calendar schedules, and authentication credentials across Windows, macOS, and Linux, we maintain strict security disclosures and cryptographic standards.
+Nuncio handles sensitive mail, calendar, and contact data plus authentication
+credentials, so security is a first-class concern. **Status: pre-alpha.** Several
+hardening items — at-rest encryption correctness, key zeroization, a fail-closed
+signature-verifying updater, and transport/egress hardening — are tracked under
+roadmap milestone M6 and are not all complete. **Do not use Nuncio with real
+accounts or sensitive data yet.**
 
 ## Supported Versions
 
 | Version | Supported |
 | :--- | :--- |
-| `0.1.x` | Supported |
-| `< 0.1.0` | Unsupported |
+| all pre-1.0 | **Not supported** — non-functional pre-alpha, under active reconstruction |
 
 ## Reporting a Vulnerability
 

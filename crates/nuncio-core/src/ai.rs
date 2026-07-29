@@ -119,7 +119,9 @@ mod tests {
     #[test]
     fn summarize_thread_returns_valid_structure() {
         let engine = LocalAiEngine::default_local();
-        let summary = engine.summarize_thread("Meeting notes for Q3 project...").unwrap();
+        let summary = engine
+            .summarize_thread("Meeting notes for Q3 project...")
+            .unwrap();
         assert_eq!(summary.bullets.len(), 3);
         assert!(!summary.sentiment.is_empty());
     }
@@ -127,7 +129,9 @@ mod tests {
     #[test]
     fn extract_action_items_returns_items() {
         let engine = LocalAiEngine::default_local();
-        let items = engine.extract_action_items("Please review the audit by Friday.").unwrap();
+        let items = engine
+            .extract_action_items("Please review the audit by Friday.")
+            .unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].task_description, "Review security audit report");
     }

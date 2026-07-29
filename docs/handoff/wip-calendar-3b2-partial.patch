@@ -1,0 +1,317 @@
+diff --git a/crates/nuncio-proto/proto/nuncio/v1/descriptor.bin b/crates/nuncio-proto/proto/nuncio/v1/descriptor.bin
+index ef5989b..0ba304e 100644
+Binary files a/crates/nuncio-proto/proto/nuncio/v1/descriptor.bin and b/crates/nuncio-proto/proto/nuncio/v1/descriptor.bin differ
+diff --git a/crates/nuncio-proto/proto/nuncio/v1/nuncio.proto b/crates/nuncio-proto/proto/nuncio/v1/nuncio.proto
+index 0c63fe0..47957f1 100644
+--- a/crates/nuncio-proto/proto/nuncio/v1/nuncio.proto
++++ b/crates/nuncio-proto/proto/nuncio/v1/nuncio.proto
+@@ -716,3 +716,95 @@ message VerifyChainResponse {
+   // record whose HMAC or chain linkage failed to verify.
+   optional uint64 first_broken_seq = 3;
+ }
++
++// Calendar exposes the daemon's real, persistent calendar event store (the
++// data `Sync` writes into via `DatabaseEngine::save_calendar_event`) over
++// authenticated gRPC, mirroring `Mail`'s read-path-plus-sync shape.
++//
++// SECURITY: this service MUST be mounted behind the SAME
++// `BearerAuthInterceptor` that guards every other service `nunciod`
++// exposes -- every gRPC service `nunciod` exposes MUST be authenticated,
++// with no exceptions carved out for "just one more" unauthenticated
++// service. See `nunciod::grpc::serve_on_listener`.
++service Calendar {
++  // Sync fetches events for one calendar collection from the account's real
++  // CalDAV backend (`nuncio_cal::CalendarBackend`) and persists them via the
++  // store, awaiting full completion before returning -- a successful
++  // response guarantees the synced events are already visible to
++  // `ListEvents`/`GetEvent`. Building a real per-account CalDAV client
++  // requires CalDAV credentials (`nuncio_cal::CalDavAccountConfig`) that
++  // account storage does not yet persist, so a real (non-test-injected)
++  // `Sync` call fails honestly -- `Status::unimplemented` -- rather than
++  // fabricating a synced count or silently returning zero events.
++  rpc Sync(CalendarSyncRequest) returns (CalendarSyncResponse);
++  // ListEvents returns persisted events for `account_id` whose window
++  // overlaps `[start_window, end_window]`, read straight from the store.
++  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
++  // GetEvent returns a single persisted calendar event by ID.
++  rpc GetEvent(GetEventRequest) returns (CalendarEvent);
++}
++
++// Mirrors `nuncio_core::model::CalendarEvent` field-for-field.
++message CalendarEvent {
++  // Event identifier.
++  string id = 1;
++  // Account identifier owning the event.
++  string account_id = 2;
++  // Calendar collection identifier.
++  string calendar_id = 3;
++  // Event title or summary.
++  string summary = 4;
++  // Unix timestamp for event start.
++  int64 start_time = 5;
++  // Unix timestamp for event end.
++  int64 end_time = 6;
++  // Recurrence rule string (RFC 5545 RRULE format).
++  optional string rrule = 7;
++  // Location text.
++  optional string location = 8;
++}
++
++// CalendarSyncRequest. `calendar_id`/`start_window`/`end_window` mirror
++// `nuncio_cal::CalendarBackend::fetch_events`'s parameters exactly;
++// `account_id` names the account whose CalDAV credentials the real
++// (non-test-injected) path resolves.
++message CalendarSyncRequest {
++  // Account identifier owning the calendar collection.
++  string account_id = 1;
++  // Calendar collection identifier to fetch.
++  string calendar_id = 2;
++  // Window start (unix seconds, inclusive).
++  int64 start_window = 3;
++  // Window end (unix seconds, inclusive).
++  int64 end_window = 4;
++}
++
++// CalendarSyncResponse reports the REAL number of events synchronized --
++// never a fabricated count.
++message CalendarSyncResponse {
++  uint64 synced_count = 1;
++}
++
++// ListEventsRequest. Interval-overlap semantics, matching
++// `DatabaseEngine::list_calendar_events`: an event is included if its
++// `[start_time, end_time]` overlaps `[start_window, end_window]` at all, not
++// only if fully contained within it.
++message ListEventsRequest {
++  // Account identifier owning the events.
++  string account_id = 1;
++  // Window start (unix seconds, inclusive).
++  int64 start_window = 2;
++  // Window end (unix seconds, inclusive).
++  int64 end_window = 3;
++}
++
++// ListEventsResponse.
++message ListEventsResponse {
++  repeated CalendarEvent events = 1;
++}
++
++// GetEventRequest.
++message GetEventRequest {
++  // Unique event identifier.
++  string event_id = 1;
++}
+diff --git a/crates/nuncio-proto/src/client.rs b/crates/nuncio-proto/src/client.rs
+index a2c25a4..60187e4 100644
+--- a/crates/nuncio-proto/src/client.rs
++++ b/crates/nuncio-proto/src/client.rs
+@@ -11,6 +11,7 @@
+ 
+ use crate::v1::accounts_client::AccountsClient;
+ use crate::v1::audit_client::AuditClient;
++use crate::v1::calendar_client::CalendarClient;
+ use crate::v1::export_client::ExportClient;
+ use crate::v1::filters_client::FiltersClient;
+ use crate::v1::mail_client::MailClient;
+@@ -112,6 +113,11 @@ pub type AuthenticatedExportClient =
+ pub type AuthenticatedAuditClient =
+     AuditClient<InterceptedService<Channel, BearerTokenInterceptor>>;
+ 
++/// The authenticated `nuncio.v1.Calendar` client type returned by
++/// [`connect_calendar`].
++pub type AuthenticatedCalendarClient =
++    CalendarClient<InterceptedService<Channel, BearerTokenInterceptor>>;
++
+ /// Dials `addr` (a `host:port` pair, e.g. `127.0.0.1:9420`) over plain HTTP
+ /// (the loopback gRPC transport is never TLS-wrapped; auth is via bearer
+ /// token instead) and returns the connected [`Channel`], shared by every
+@@ -238,6 +244,26 @@ pub async fn connect_audit(
+     Ok(AuditClient::with_interceptor(channel, interceptor))
+ }
+ 
++/// Dials the `nuncio.v1.Calendar` gRPC endpoint at `addr` and returns a
++/// client that injects `authorization: Bearer <token>` metadata on every
++/// call.
++///
++/// `Calendar` is guarded by the exact same `BearerAuthInterceptor` as every
++/// other service on the server side (see
++/// `nunciod::grpc::serve_on_listener`), so this shares
++/// [`BearerTokenInterceptor`] and [`dial`] with [`connect_system`] /
++/// [`connect_accounts`] / [`connect_mail`] / [`connect_filters`] /
++/// [`connect_export`] / [`connect_audit`] rather than hand-rolling yet
++/// another auth handshake.
++pub async fn connect_calendar(
++    addr: &str,
++    token: &str,
++) -> Result<AuthenticatedCalendarClient, ConnectError> {
++    let interceptor = BearerTokenInterceptor::new(token)?;
++    let channel = dial(addr).await?;
++    Ok(CalendarClient::with_interceptor(channel, interceptor))
++}
++
+ /// Opens the `nuncio.v1.System/Subscribe` server-streaming RPC on an already
+ /// authenticated client (as returned by [`connect_system`]), reusing the
+ /// bearer-token interceptor already attached to `client` rather than
+@@ -396,6 +422,23 @@ mod tests {
+         assert!(err.to_string().contains("127.0.0.1:1"));
+     }
+ 
++    #[tokio::test]
++    async fn connect_calendar_fails_closed_on_invalid_token() {
++        let err = connect_calendar("127.0.0.1:0", "tok\ntoken")
++            .await
++            .expect_err("invalid token must fail before dialing");
++        assert!(matches!(err, ConnectError::InvalidToken(_)));
++    }
++
++    #[tokio::test]
++    async fn connect_calendar_reports_transport_error_when_daemon_unreachable() {
++        let err = connect_calendar("127.0.0.1:1", "abc123")
++            .await
++            .expect_err("connecting to an unreachable daemon must fail");
++        assert!(matches!(err, ConnectError::Transport { .. }));
++        assert!(err.to_string().contains("127.0.0.1:1"));
++    }
++
+     #[tokio::test]
+     async fn connect_system_reports_invalid_endpoint_for_a_malformed_address() {
+         // An embedded space is not a legal URI authority character, so
+diff --git a/crates/nunciod/src/calendar_sync.rs b/crates/nunciod/src/calendar_sync.rs
+new file mode 100644
+index 0000000..991484a
+--- /dev/null
++++ b/crates/nunciod/src/calendar_sync.rs
+@@ -0,0 +1,133 @@
++//! Real calendar synchronization routine.
++//!
++//! Mirrors `crate::sync`'s mail-sync shape: [`sync_with_backend`] takes `&dyn
++//! CalendarBackend` rather than a concrete engine, so it is exercised
++//! directly in tests with [`nuncio_cal::MockCalendarBackend`] -- no real
++//! network or OS keyring access ever happens inside it. There is
++//! deliberately no production entry point (analogous to `sync::run_account_sync`)
++//! yet: building a real `nuncio_cal::CalDavClient` needs a per-account
++//! `nuncio_cal::CalDavAccountConfig` (CalDAV URL, username, auth token) that
++//! account storage does not currently persist. Until that exists,
++//! `nunciod::grpc::CalendarGrpcService::sync` fails honestly rather than
++//! calling into this module with a fabricated backend.
++
++use nuncio_cal::CalendarBackend;
++use nuncio_core::model::CalendarEvent;
++use nuncio_store::db::DatabaseError;
++use thiserror::Error;
++
++/// Errors that can occur while synchronizing a single calendar collection.
++#[derive(Debug, Error)]
++pub enum CalendarSyncError {
++    /// The calendar backend (CalDAV, or an injected mock) reported an error.
++    #[error("calendar backend error: {0}")]
++    Backend(#[from] nuncio_cal::CalendarError),
++    /// A database persistence error occurred while saving synced events.
++    #[error("database error: {0}")]
++    Store(#[from] DatabaseError),
++}
++
++/// Fetch every event in `calendar_id` whose window overlaps `[start_window,
++/// end_window]` from `backend`, persisting each via
++/// [`nuncio_store::db::DatabaseEngine::save_calendar_event`]. Returns the
++/// number of events processed.
++///
++/// Contains no event-bus or credential logic -- pure fetch-and-persist, so
++/// it is the smallest unit tests can exercise directly with a
++/// [`nuncio_cal::MockCalendarBackend`].
++pub async fn sync_with_backend(
++    db: &nuncio_store::db::DatabaseEngine,
++    backend: &dyn CalendarBackend,
++    calendar_id: &str,
++    start_window: i64,
++    end_window: i64,
++) -> Result<usize, CalendarSyncError> {
++    let events: Vec<CalendarEvent> = backend
++        .fetch_events(calendar_id, start_window, end_window)
++        .await?;
++
++    let mut synced = 0usize;
++    for event in events {
++        db.save_calendar_event(&event).await?;
++        synced += 1;
++    }
++    Ok(synced)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use nuncio_cal::MockCalendarBackend;
++    use nuncio_store::db::DatabaseEngine;
++
++    fn mock_event(id: &str, account_id: &str, calendar_id: &str) -> CalendarEvent {
++        CalendarEvent {
++            id: id.to_string(),
++            account_id: account_id.to_string(),
++            calendar_id: calendar_id.to_string(),
++            summary: format!("Event {id}"),
++            start_time: 1_700_000_000,
++            end_time: 1_700_003_600,
++            rrule: None,
++            location: None,
++        }
++    }
++
++    #[tokio::test]
++    async fn sync_with_backend_persists_mock_events() {
++        let (db, _dir) = DatabaseEngine::connect_ephemeral()
++            .await
++            .expect("ephemeral db");
++
++        let mock = MockCalendarBackend::new();
++        mock.add_event(mock_event("evt-1", "acct-1", "cal-work"));
++        mock.add_event(mock_event("evt-2", "acct-1", "cal-work"));
++
++        let synced = sync_with_backend(&db, &mock, "cal-work", 1_699_999_000, 1_700_004_000)
++            .await
++            .expect("sync succeeds");
++        assert_eq!(synced, 2);
++
++        let persisted = db
++            .list_calendar_events("acct-1", 1_699_999_000, 1_700_004_000)
++            .await
++            .expect("list persisted events");
++        assert_eq!(persisted.len(), 2);
++    }
++
++    #[tokio::test]
++    async fn sync_with_backend_propagates_backend_failure_without_persisting() {
++        let (db, _dir) = DatabaseEngine::connect_ephemeral()
++            .await
++            .expect("ephemeral db");
++
++        let mock = MockCalendarBackend::new();
++        mock.set_should_fail(true);
++
++        let err = sync_with_backend(&db, &mock, "cal-work", 0, 10)
++            .await
++            .expect_err("sync fails");
++        assert!(matches!(err, CalendarSyncError::Backend(_)));
++
++        let persisted = db
++            .list_calendar_events("acct-1", 0, i64::MAX)
++            .await
++            .expect("list persisted events");
++        assert!(persisted.is_empty());
++    }
++
++    #[tokio::test]
++    async fn sync_with_backend_returns_zero_for_empty_window() {
++        let (db, _dir) = DatabaseEngine::connect_ephemeral()
++            .await
++            .expect("ephemeral db");
++
++        let mock = MockCalendarBackend::new();
++        mock.add_event(mock_event("evt-out-of-window", "acct-1", "cal-work"));
++
++        let synced = sync_with_backend(&db, &mock, "cal-work", 0, 10)
++            .await
++            .expect("sync succeeds");
++        assert_eq!(synced, 0);
++    }
++}

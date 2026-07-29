@@ -1,8 +1,10 @@
 //! Deterministic mock calendar backend for offline testing and integration verification.
 
+use async_trait::async_trait;
 use nuncio_core::model::CalendarEvent;
 use std::sync::{Arc, Mutex};
 
+use crate::backend::CalendarBackend;
 use crate::parser::CalendarError;
 
 /// Thread-safe mock calendar backend for offline testing.
@@ -56,14 +58,31 @@ impl MockCalendarBackend {
         let matches = guard
             .iter()
             .filter(|e| {
+                // Interval-overlap (inclusive): an event is in the window if it
+                // starts before the window ends and ends after the window
+                // begins. Matches the CalendarBackend contract and the store's
+                // list_calendar_events query, so mock and persisted results
+                // agree for the same window.
                 e.calendar_id == calendar_id
-                    && e.start_time >= start_window
-                    && e.end_time <= end_window
+                    && e.start_time <= end_window
+                    && e.end_time >= start_window
             })
             .cloned()
             .collect();
 
         Ok(matches)
+    }
+}
+
+#[async_trait]
+impl CalendarBackend for MockCalendarBackend {
+    async fn fetch_events(
+        &self,
+        calendar_id: &str,
+        start_window: i64,
+        end_window: i64,
+    ) -> Result<Vec<CalendarEvent>, CalendarError> {
+        self.list_events(calendar_id, start_window, end_window)
     }
 }
 
@@ -98,6 +117,31 @@ mod tests {
         assert!(mock
             .list_events("cal-work", 1699999000, 1700004000)
             .is_err());
+    }
+
+    /// Proves `MockCalendarBackend` is usable behind the `CalendarBackend` trait object, the
+    /// same way the daemon will inject either it or the real CalDAV client.
+    #[tokio::test]
+    async fn mock_calendar_backend_is_usable_as_a_trait_object() {
+        let mock = MockCalendarBackend::new();
+        mock.add_event(CalendarEvent {
+            id: "evt-trait-1".to_string(),
+            account_id: "acct-1".to_string(),
+            calendar_id: "cal-work".to_string(),
+            summary: "Trait Object Planning".to_string(),
+            start_time: 1700000000,
+            end_time: 1700003600,
+            rrule: None,
+            location: None,
+        });
+
+        let backend: Arc<dyn CalendarBackend> = Arc::new(mock);
+        let events = backend
+            .fetch_events("cal-work", 1699999000, 1700004000)
+            .await
+            .expect("fetch events succeeds");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "evt-trait-1");
     }
 
     #[tokio::test]

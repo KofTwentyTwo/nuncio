@@ -63,7 +63,7 @@ impl ContactsDatabase {
                 emails_json,
                 tokenize='trigram'
             );
-            "#
+            "#,
         )
         .execute(&self.pool)
         .await?;
@@ -73,8 +73,10 @@ impl ContactsDatabase {
     }
 
     pub async fn save_contact(&self, contact: &Contact) -> Result<(), ContactsStoreError> {
-        let emails_json = serde_json::to_string(&contact.emails).unwrap_or_else(|_| "[]".to_string());
-        let phones_json = serde_json::to_string(&contact.phones).unwrap_or_else(|_| "[]".to_string());
+        let emails_json =
+            serde_json::to_string(&contact.emails).unwrap_or_else(|_| "[]".to_string());
+        let phones_json =
+            serde_json::to_string(&contact.phones).unwrap_or_else(|_| "[]".to_string());
         let created_str = contact.created_at.to_rfc3339();
         let updated_str = contact.updated_at.to_rfc3339();
         let last_interacted_str = contact.last_interacted_at.map(|t| t.to_rfc3339());
@@ -95,7 +97,7 @@ impl ContactsDatabase {
                 interaction_count = excluded.interaction_count,
                 last_interacted_at = excluded.last_interacted_at,
                 updated_at = excluded.updated_at
-            "#
+            "#,
         )
         .bind(&contact.id)
         .bind(&contact.account_id)
@@ -144,7 +146,7 @@ impl ContactsDatabase {
             WHERE display_name LIKE ? OR organization LIKE ? OR emails_json LIKE ?
             ORDER BY interaction_count DESC, display_name ASC
             LIMIT 50
-            "#
+            "#,
         )
         .bind(&pattern)
         .bind(&pattern)
@@ -188,14 +190,22 @@ impl ContactsDatabase {
         self.search_contacts("").await
     }
 
-    pub async fn harvest_email_address(&self, display_name: &str, email: &str) -> Result<(), ContactsStoreError> {
+    pub async fn harvest_email_address(
+        &self,
+        display_name: &str,
+        email: &str,
+    ) -> Result<(), ContactsStoreError> {
         if email.trim().is_empty() {
             return Ok(());
         }
 
         let existing = self.search_contacts(email).await?;
         if existing.is_empty() {
-            let name = if display_name.trim().is_empty() { email } else { display_name };
+            let name = if display_name.trim().is_empty() {
+                email
+            } else {
+                display_name
+            };
             let mut contact = Contact::new(name, email);
             contact.interaction_count = 1;
             contact.last_interacted_at = Some(chrono::Utc::now());

@@ -1,15 +1,13 @@
 name: Nuncio Multi-Platform Release Pipeline (Dev, RC, Prod)
 
 on:
+  # Releases are cut ONLY from version tags (vMAJOR.MINOR.PATCH), per the release
+  # policy (no public release until V3). Branch-push and nightly-cron triggers were
+  # removed during the pre-alpha rebuild: they ran on every dev push and failed
+  # (they build the presentation GUI now archived under _reference/).
   push:
-    branches:
-      - main
-      - rc
-      - dev
     tags:
       - 'v*'
-  schedule:
-    - cron: '0 0 * * *' # Daily Nightly Build at 00:00 UTC
   workflow_dispatch:
 
 permissions:

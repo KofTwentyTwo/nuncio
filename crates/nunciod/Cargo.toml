@@ -15,17 +15,24 @@ nuncio-mail = { path = "../nuncio-mail" }
 nuncio-cal = { path = "../nuncio-cal" }
 nuncio-store = { path = "../nuncio-store" }
 nuncio-filter = { path = "../nuncio-filter" }
+nuncio-proto = { path = "../nuncio-proto" }
 arc-swap.workspace = true
 
 
 tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true, features = ["net", "sync"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = "0.3"
 tempfile.workspace = true
+tonic.workspace = true
+async-trait.workspace = true
+subtle.workspace = true
+hex.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 nuncio-cli = { path = "../nuncio-cli" }
-nuncio-mcp = { path = "../nuncio-mcp" }
+sqlx.workspace = true

@@ -28,3 +28,10 @@ Thumbs.db
 **/build/
 package-lock.json
 
+
+# Agent scratch + regenerable build artifacts (keep out of the repo)
+.superpowers/
+excalidraw.log
+_reference/**/gen/
+**/node_modules/
+**/dist/

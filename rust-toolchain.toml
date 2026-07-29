@@ -1,0 +1,11 @@
+# Pin the toolchain so local development, the pre-commit hook, and CI all use
+# the SAME rustc/rustfmt/clippy. Without this, CI installed the latest `stable`
+# (via dtolnay/rust-toolchain@stable) whose rustfmt/clippy formatting and lints
+# diverged from the local 1.97.1 toolchain -- so commits passed the local
+# pre-commit hook yet failed CI's fmt/clippy gates. rustup auto-installs this
+# toolchain (and the listed components) on first cargo invocation, in CI and
+# locally. Bump this deliberately (and reformat/re-lint in the same commit) when
+# adopting a newer toolchain.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

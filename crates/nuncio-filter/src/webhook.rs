@@ -85,7 +85,10 @@ impl WebhookDispatcher {
             .client
             .post(url)
             .header("Content-Type", "application/json")
-            .header("X-Nuncio-Signature", format!("t={timestamp},v1={signature}"))
+            .header(
+                "X-Nuncio-Signature",
+                format!("t={timestamp},v1={signature}"),
+            )
             .body(payload_str)
             .send()
             .await
@@ -103,8 +106,15 @@ impl WebhookDispatcher {
         subject: &str,
         sender: &str,
     ) -> Result<u16, WebhookError> {
-        self.dispatch_with_options(url, rule_id, message_id, subject, sender, &ValidationOptions::default())
-            .await
+        self.dispatch_with_options(
+            url,
+            rule_id,
+            message_id,
+            subject,
+            sender,
+            &ValidationOptions::default(),
+        )
+        .await
     }
 }
 
@@ -116,10 +126,19 @@ mod tests {
     async fn test_blocked_private_ip_webhook() {
         let dispatcher = WebhookDispatcher::new("secret_key_123");
         let result = dispatcher
-            .dispatch("http://127.0.0.1/steal", "rule_1", "msg_1", "Test", "a@b.com")
+            .dispatch(
+                "http://127.0.0.1/steal",
+                "rule_1",
+                "msg_1",
+                "Test",
+                "a@b.com",
+            )
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), WebhookError::SecurityViolation(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            WebhookError::SecurityViolation(_)
+        ));
     }
 }

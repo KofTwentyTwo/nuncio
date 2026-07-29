@@ -1,11 +1,10 @@
 name: Nuncio Desktop GUI Release Pipeline (MSI, DMG, AppImage, Deb)
 
 on:
+  # Desktop installers are built ONLY from version tags (per the release policy).
+  # Branch-push triggers were removed during the pre-alpha rebuild: they ran on
+  # every dev push and failed (the Tauri GUI is archived under _reference/).
   push:
-    branches:
-      - main
-      - rc
-      - dev
     tags:
       - 'v*'
   workflow_dispatch:

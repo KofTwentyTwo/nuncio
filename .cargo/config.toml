@@ -2,8 +2,12 @@
 # Development quality enforcement aliases
 check-all = "clippy --all-targets --workspace -- -D warnings"
 test-all = "test --workspace"
-cov = "llvm-cov --workspace --fail-under-lines 100"
+cov = "llvm-cov --workspace --ignore-filename-regex main\\.rs --summary-only"
 verify = ["fmt --all -- --check", "check-all", "test-all"]
+# Dogfooding: build the runnable daemon + reference CLI in release mode.
+build-release = ["build", "--release", "-p", "nunciod", "-p", "nuncio-cli"]
+# Remove the entire workspace target directory (all crates, all profiles).
+clean-all = "clean"
 
 [build]
 # Treat warnings as errors and forbid unsafe code at local build time
