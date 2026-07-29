@@ -37,3 +37,4 @@ bytes.workspace = true
 [dev-dependencies]
 nuncio-cli = { path = "../nuncio-cli" }
 sqlx.workspace = true
+wiremock.workspace = true

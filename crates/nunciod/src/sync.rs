@@ -132,7 +132,12 @@ fn build_mail_backend(config: &AccountConfig, password: &str) -> Box<dyn MailBac
             &config.email_address,
             password,
         )),
-        AccountProtocol::Jmap => Box::new(JmapEngine::new(&config.id)),
+        AccountProtocol::Jmap => Box::new(JmapEngine::with_credentials(
+            &config.id,
+            &config.server_host,
+            &config.email_address,
+            password,
+        )),
     }
 }
 
@@ -238,14 +243,21 @@ mod tests {
     use nuncio_core::{CoreEvent, EngineStatus, TlsMode};
     use nuncio_mail::MockMailBackend;
     use nuncio_store::db::DatabaseEngine;
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn sample_jmap_account(id: &str) -> AccountConfig {
+        sample_jmap_account_at(id, "jmap.nuncio.mx")
+    }
+
+    fn sample_jmap_account_at(id: &str, host: &str) -> AccountConfig {
         AccountConfig {
             id: id.to_string(),
             name: "JMAP Test Account".to_string(),
             email_address: format!("{id}@nuncio.mx"),
             protocol: AccountProtocol::Jmap,
-            server_host: "jmap.nuncio.mx".to_string(),
+            server_host: host.to_string(),
             server_port: 443,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
@@ -255,6 +267,79 @@ mod tests {
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
         }
+    }
+
+    /// Mount a full JMAP session-discovery + `Mailbox/get` + `Email/query` + `Email/get`
+    /// stub set on `mock_server`, serving exactly one folder ("jmap-inbox") containing one
+    /// message ("jmap-msg-1"). Used by tests that need `JmapEngine::with_credentials` to
+    /// complete a real (wiremock-backed) fetch through `MailBackend`.
+    async fn mount_single_message_jmap_stubs(mock_server: &MockServer, account_id: &str) {
+        let session_body = json!({
+            "username": format!("{account_id}@nuncio.mx"),
+            "primaryAccounts": { "urn:ietf:params:jmap:mail": account_id },
+            "apiUrl": format!("{}/jmap/api", mock_server.uri()),
+            "state": "session-state-1"
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jmap"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&session_body))
+            .mount(mock_server)
+            .await;
+
+        let mailbox_get_body = json!({
+            "methodResponses": [[
+                "Mailbox/get",
+                { "list": [ { "id": "jmap-inbox", "name": "Inbox", "totalEmails": 1, "unreadEmails": 1 } ] },
+                "c1"
+            ]]
+        });
+        Mock::given(method("POST"))
+            .and(path("/jmap/api"))
+            .and(body_partial_json(
+                json!({"methodCalls": [["Mailbox/get", {}, "c1"]]}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&mailbox_get_body))
+            .mount(mock_server)
+            .await;
+
+        let email_query_body = json!({
+            "methodResponses": [["Email/query", {"ids": ["jmap-msg-1"]}, "c1"]]
+        });
+        Mock::given(method("POST"))
+            .and(path("/jmap/api"))
+            .and(body_partial_json(
+                json!({"methodCalls": [["Email/query", {}, "c1"]]}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&email_query_body))
+            .mount(mock_server)
+            .await;
+
+        let email_get_body = json!({
+            "methodResponses": [[
+                "Email/get",
+                {
+                    "state": "sync-state-1",
+                    "list": [{
+                        "id": "jmap-msg-1",
+                        "subject": "Welcome to JMAP Sync",
+                        "from": [{ "email": "support@nuncio.mx" }],
+                        "to": [{ "email": format!("{account_id}@nuncio.mx") }],
+                        "receivedAt": 1700000000i64,
+                        "isUnread": true,
+                        "bodySnippet": "Real wiremock-backed JMAP fetch."
+                    }]
+                },
+                "c1"
+            ]]
+        });
+        Mock::given(method("POST"))
+            .and(path("/jmap/api"))
+            .and(body_partial_json(
+                json!({"methodCalls": [["Email/get", {}, "c1"]]}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&email_get_body))
+            .mount(mock_server)
+            .await;
     }
 
     fn sample_imap_account(id: &str) -> AccountConfig {
@@ -447,12 +532,14 @@ mod tests {
 
     #[tokio::test]
     async fn run_account_sync_persists_real_backend_messages_and_reports_success() {
-        // Uses a real (non-mock) `JmapEngine` -- its `MailBackend` impl
-        // returns deterministic static data with no network I/O, so this
-        // proves `run_account_sync`'s full production wiring (account
-        // lookup -> keyring password -> real backend -> persist -> events)
-        // end-to-end without violating the "no live network calls in
-        // tests" rule.
+        // Uses a real (non-mock) `JmapEngine::with_credentials`, wired exactly like
+        // `build_mail_backend` wires it in production, pointed at a wiremock server standing
+        // in for the real JMAP host. This proves `run_account_sync`'s full production wiring
+        // (account lookup -> keyring password -> real HTTP backend -> persist -> events)
+        // end-to-end without violating the "no live network calls in tests" rule.
+        let mock_server = MockServer::start().await;
+        mount_single_message_jmap_stubs(&mock_server, "acct-jmap-real-1").await;
+
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
             .expect("ephemeral db");
@@ -460,7 +547,7 @@ mod tests {
         let mut events = event_bus.subscribe_events();
         let secrets = SecretManager::mock();
 
-        let config = sample_jmap_account("acct-jmap-real-1");
+        let config = sample_jmap_account_at("acct-jmap-real-1", &mock_server.uri());
         db.save_account(&config).await.expect("save account");
         secrets
             .set_secret(&config.keyring_secret_key, "irrelevant-jmap-token")
@@ -469,11 +556,8 @@ mod tests {
         let synced = run_account_sync(&db, &secrets, &event_bus, "acct-jmap-real-1")
             .await
             .expect("sync succeeds");
-        // JmapEngine::sync_folders() returns 3 static folders; sync_messages
-        // returns the same 1 static message per folder regardless of
-        // folder_id, so 3 folders => 3 processed messages (deduplicated to
-        // 1 stored row by `save_email`'s INSERT OR REPLACE on message id).
-        assert_eq!(synced, 3);
+        // The wiremock stubs advertise 1 folder containing 1 message.
+        assert_eq!(synced, 1);
 
         let persisted = db
             .get_message("jmap-msg-1")
@@ -571,14 +655,19 @@ mod tests {
 
     #[tokio::test]
     async fn run_all_accounts_sync_persists_across_multiple_accounts() {
+        let mock_server_a = MockServer::start().await;
+        let mock_server_b = MockServer::start().await;
+        mount_single_message_jmap_stubs(&mock_server_a, "acct-all-a").await;
+        mount_single_message_jmap_stubs(&mock_server_b, "acct-all-b").await;
+
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
             .expect("ephemeral db");
         let event_bus = EventBus::new();
         let secrets = SecretManager::mock();
 
-        let config_a = sample_jmap_account("acct-all-a");
-        let config_b = sample_jmap_account("acct-all-b");
+        let config_a = sample_jmap_account_at("acct-all-a", &mock_server_a.uri());
+        let config_b = sample_jmap_account_at("acct-all-b", &mock_server_b.uri());
         db.save_account(&config_a).await.expect("save account a");
         db.save_account(&config_b).await.expect("save account b");
         secrets
@@ -589,8 +678,8 @@ mod tests {
             .expect("store credential b");
 
         let total = run_all_accounts_sync(&db, &secrets, &event_bus).await;
-        // 2 accounts * 3 folders each = 6 processed messages.
-        assert_eq!(total, 6);
+        // 2 accounts * 1 folder * 1 message each = 2 processed messages.
+        assert_eq!(total, 2);
         assert_eq!(event_bus.current_state().status, EngineStatus::Idle);
     }
 
