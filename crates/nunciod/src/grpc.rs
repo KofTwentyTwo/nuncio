@@ -449,8 +449,7 @@ fn map_calendar_event_to_proto(event: nuncio_core::model::CalendarEvent) -> Cale
 /// that also happens to overlap the window in `all_in_window` is never emitted a second time
 /// alongside its expanded occurrences.
 ///
-/// A recurring event whose `rrule` fails to parse degrades to the raw stored master (mirroring
-/// [`RecurrenceEngine::expand_occurrences`]'s own no-occurrences-found fallback) with a warning
+/// A recurring event whose `rrule` fails to parse degrades to the raw stored master (a genuine persisted row -- just unexpanded, not fabricated data) with a warning
 /// logged, rather than failing the whole query for one malformed rule among many.
 fn expand_events_for_window(
     all_in_window: Vec<nuncio_core::model::CalendarEvent>,
