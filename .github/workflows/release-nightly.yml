@@ -48,8 +48,6 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/nuncio-cli dist/nuncio-cli
-          cp target/${{ matrix.target }}/release/nuncio-tui dist/nuncio-tui
-          cp target/${{ matrix.target }}/release/nuncio-mcp dist/nuncio-mcp
           cp target/${{ matrix.target }}/release/nunciod dist/nunciod
           tar -czf ${{ matrix.artifact_name }} -C dist .
 
@@ -59,8 +57,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist
           Copy-Item target/${{ matrix.target }}/release/nuncio-cli.exe dist/nuncio-cli.exe
-          Copy-Item target/${{ matrix.target }}/release/nuncio-tui.exe dist/nuncio-tui.exe
-          Copy-Item target/${{ matrix.target }}/release/nuncio-mcp.exe dist/nuncio-mcp.exe
           Copy-Item target/${{ matrix.target }}/release/nunciod.exe dist/nunciod.exe
           Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact_name }}
 

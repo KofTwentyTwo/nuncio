@@ -1264,13 +1264,25 @@ mod tests {
     async fn spawn_test_server(
         event_bus: Arc<EventBus>,
         token: &str,
-    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
+        // The `TempDir` guard must outlive this function: the spawned server
+        // task keeps using `db` long after we return, and on Linux dropping
+        // the guard here unlinks the directory backing the sqlite file out
+        // from under it, so any connection the pool opens afterward fails
+        // with "unable to open database file". Return it to the caller so it
+        // stays alive for the test's duration.
+        let (db, dir) = DatabaseEngine::connect_ephemeral()
             .await
             .expect("connect ephemeral test db");
         let secrets = Arc::new(SecretManager::mock());
         let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
-        spawn_test_server_with(event_bus, Arc::new(db), filter_engine, secrets, token).await
+        let (addr, handle) =
+            spawn_test_server_with(event_bus, Arc::new(db), filter_engine, secrets, token).await;
+        (addr, handle, dir)
     }
 
     /// Spawns a test server on an ephemeral loopback port backed by the
@@ -1356,7 +1368,7 @@ mod tests {
     #[tokio::test]
     async fn get_status_rejects_missing_bearer_token() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = SystemClient::connect(format!("http://{addr}"))
             .await
@@ -1371,7 +1383,7 @@ mod tests {
     #[tokio::test]
     async fn get_status_rejects_wrong_bearer_token() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = SystemClient::connect(format!("http://{addr}"))
             .await
@@ -1393,7 +1405,7 @@ mod tests {
     #[tokio::test]
     async fn get_status_rejects_malformed_authorization_header() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = SystemClient::connect(format!("http://{addr}"))
             .await
@@ -1418,7 +1430,7 @@ mod tests {
         event_bus.process_command(CoreCommand::SyncAll);
         assert_eq!(event_bus.current_state().status, EngineStatus::Syncing);
 
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = SystemClient::connect(format!("http://{addr}"))
             .await
@@ -1503,7 +1515,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_streams_mapped_core_events_from_the_live_event_bus() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus.clone(), "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus.clone(), "correct-token").await;
 
         let mut client = SystemClient::connect(format!("http://{addr}"))
             .await
@@ -1546,7 +1558,7 @@ mod tests {
         // `GetStatus` because both are defined on the single `System`
         // service (no separate, un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = SystemClient::connect(format!("http://{addr}"))
             .await
@@ -1569,7 +1581,7 @@ mod tests {
         // `GetStatus` calls complete correctly and without corrupting one
         // another.
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus.clone(), "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus.clone(), "correct-token").await;
 
         // Open (and await) the subscription first, on its own connection,
         // so the server-side registration has deterministically happened
@@ -1663,7 +1675,7 @@ mod tests {
         // Confirms `Accounts` is mounted behind its own `BearerAuthInterceptor`
         // exactly like `System` (no un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = AccountsClient::connect(format!("http://{addr}"))
             .await
@@ -1684,7 +1696,7 @@ mod tests {
     #[tokio::test]
     async fn list_accounts_rejects_missing_bearer_token() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = AccountsClient::connect(format!("http://{addr}"))
             .await
@@ -1699,7 +1711,7 @@ mod tests {
     #[tokio::test]
     async fn add_account_rejects_empty_password() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = AccountsClient::connect(format!("http://{addr}"))
             .await
@@ -1717,7 +1729,7 @@ mod tests {
     #[tokio::test]
     async fn add_account_rejects_missing_config() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = AccountsClient::connect(format!("http://{addr}"))
             .await
@@ -1944,7 +1956,7 @@ mod tests {
         // Confirms `Mail` is mounted behind its own `BearerAuthInterceptor`
         // exactly like `System` and `Accounts` (no un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -2013,7 +2025,7 @@ mod tests {
     #[tokio::test]
     async fn get_message_reports_not_found_for_unknown_message_id() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -2030,7 +2042,7 @@ mod tests {
     #[tokio::test]
     async fn mark_read_reports_not_found_for_unknown_message_id() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -2048,7 +2060,7 @@ mod tests {
     #[tokio::test]
     async fn list_messages_rejects_empty_folder_id() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -2215,7 +2227,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_rejects_empty_to() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -2232,7 +2244,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_rejects_empty_subject() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -2253,7 +2265,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_reports_honest_error_when_no_account_configured() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -2330,7 +2342,7 @@ mod tests {
     #[tokio::test]
     async fn sync_without_override_and_without_accounts_reports_zero_synced() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -2350,7 +2362,7 @@ mod tests {
     #[tokio::test]
     async fn sync_without_override_reports_error_for_unknown_account() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = MailClient::connect(format!("http://{addr}"))
             .await
@@ -2632,8 +2644,14 @@ mod tests {
         tokio::task::JoinHandle<()>,
         Arc<DatabaseEngine>,
         Arc<FilterEngine>,
+        tempfile::TempDir,
     ) {
-        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+        // The `TempDir` guard must outlive this function: on Linux, dropping it
+        // here would unlink the directory backing the sqlite file while `db`
+        // is still in use, so any pool connection opened *after* this
+        // function returns fails with "unable to open database file". Return
+        // it to the caller instead so it stays alive for the test's duration.
+        let (db, dir) = DatabaseEngine::connect_ephemeral()
             .await
             .expect("connect ephemeral test db");
         let db = Arc::new(db);
@@ -2647,7 +2665,7 @@ mod tests {
             token,
         )
         .await;
-        (addr, handle, db, filter_engine)
+        (addr, handle, db, filter_engine, dir)
     }
 
     #[tokio::test]
@@ -2655,7 +2673,7 @@ mod tests {
         // Confirms `Filters` is mounted behind its own `BearerAuthInterceptor`
         // exactly like `System`/`Accounts`/`Mail` (no un-intercepted
         // service).
-        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
 
         let mut client = FiltersClient::connect(format!("http://{addr}"))
             .await
@@ -2711,7 +2729,8 @@ mod tests {
     /// back to empty.
     #[tokio::test]
     async fn create_list_and_delete_rule_round_trip_and_keep_the_live_engine_in_sync() {
-        let (addr, _handle, _db, filter_engine) = spawn_filters_test_server("correct-token").await;
+        let (addr, _handle, _db, filter_engine, _dir) =
+            spawn_filters_test_server("correct-token").await;
 
         let mut client = FiltersClient::connect(format!("http://{addr}"))
             .await
@@ -2790,7 +2809,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_rule_rejects_invalid_nsql_and_persists_nothing() {
-        let (addr, _handle, _db, filter_engine) = spawn_filters_test_server("correct-token").await;
+        let (addr, _handle, _db, filter_engine, _dir) =
+            spawn_filters_test_server("correct-token").await;
 
         let mut client = FiltersClient::connect(format!("http://{addr}"))
             .await
@@ -2834,7 +2854,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_rule_rejects_empty_id() {
-        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
 
         let mut client = FiltersClient::connect(format!("http://{addr}"))
             .await
@@ -2854,7 +2874,7 @@ mod tests {
     /// doc comment). Also proves validation never persists anything.
     #[tokio::test]
     async fn validate_rule_reports_honest_ok_and_error_verdicts_without_persisting() {
-        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
 
         let mut client = FiltersClient::connect(format!("http://{addr}"))
             .await
@@ -2897,7 +2917,7 @@ mod tests {
     /// `Mail/GetMessage` reads) without ever persisting the rule itself.
     #[tokio::test]
     async fn preview_rule_dry_runs_against_a_stored_message_without_persisting() {
-        let (addr, _handle, db, _engine) = spawn_filters_test_server("correct-token").await;
+        let (addr, _handle, db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
 
         db.save_email(&nuncio_core::model::Email {
             id: "msg-preview-1".to_string(),
@@ -2963,7 +2983,7 @@ mod tests {
     /// message rather than failing the RPC.
     #[tokio::test]
     async fn preview_rule_falls_back_to_a_synthetic_message_when_none_is_stored() {
-        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
 
         let mut client = FiltersClient::connect(format!("http://{addr}"))
             .await
@@ -2994,7 +3014,7 @@ mod tests {
 
     #[tokio::test]
     async fn preview_rule_and_validate_rule_reject_invalid_nsql_syntax() {
-        let (addr, _handle, _db, _engine) = spawn_filters_test_server("correct-token").await;
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
 
         let mut client = FiltersClient::connect(format!("http://{addr}"))
             .await
@@ -3019,7 +3039,7 @@ mod tests {
         // Confirms `Export` is mounted behind its own `BearerAuthInterceptor`
         // exactly like every other service (no un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = ExportClient::connect(format!("http://{addr}"))
             .await
@@ -3038,7 +3058,7 @@ mod tests {
     #[tokio::test]
     async fn export_mailbox_rejects_empty_output_path() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = ExportClient::connect(format!("http://{addr}"))
             .await
@@ -3057,7 +3077,7 @@ mod tests {
     #[tokio::test]
     async fn export_mailbox_rejects_unspecified_format() {
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = ExportClient::connect(format!("http://{addr}"))
             .await
@@ -3200,7 +3220,7 @@ mod tests {
         // Confirms `Audit` is mounted behind its own `BearerAuthInterceptor`
         // exactly like every other service (no un-intercepted service).
         let event_bus = Arc::new(EventBus::new());
-        let (addr, _handle) = spawn_test_server(event_bus, "correct-token").await;
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
 
         let mut client = AuditClient::connect(format!("http://{addr}"))
             .await
