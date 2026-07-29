@@ -5,11 +5,13 @@
 //!
 //! This is the daemon's sole client-facing transport.
 
+use nuncio_cal::CalendarBackend;
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
 use nuncio_mail::{MailBackend, MessageSender};
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::audit_server::{Audit, AuditServer};
+use nuncio_proto::v1::calendar_server::{Calendar, CalendarServer};
 use nuncio_proto::v1::event::Kind;
 use nuncio_proto::v1::export_server::{Export, ExportServer};
 use nuncio_proto::v1::filters_server::{Filters, FiltersServer};
@@ -18,11 +20,13 @@ use nuncio_proto::v1::system_server::{System, SystemServer};
 use nuncio_proto::v1::{
     export_request, AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
     AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto,
-    AuditRecord as AuditRecordProto, BatchFilterProgress, CreateRuleRequest, CreateRuleResponse,
+    AuditRecord as AuditRecordProto, BatchFilterProgress, CalendarEvent as CalendarEventProto,
+    CalendarSyncRequest, CalendarSyncResponse, CreateRuleRequest, CreateRuleResponse,
     DatabaseRecovered, DeleteRuleRequest, DeleteRuleResponse, Event, EventError,
     ExportFormat as ExportFormatProto, ExportRequest, ExportResponse, FilterExecuted,
-    FilterRule as FilterRuleProto, Folder as FolderProto, GetMessageRequest, GetMessageResponse,
-    GetStatusRequest, GetStatusResponse, ListAccountsRequest, ListAccountsResponse,
+    FilterRule as FilterRuleProto, Folder as FolderProto, GetEventRequest, GetEventResponse,
+    GetMessageRequest, GetMessageResponse, GetStatusRequest, GetStatusResponse,
+    ListAccountsRequest, ListAccountsResponse, ListEventsRequest, ListEventsResponse,
     ListFoldersRequest, ListFoldersResponse, ListMessagesRequest, ListMessagesResponse,
     ListRecordsRequest, ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest,
     MarkReadResponse, Message as MessageProto, MessageFlagsChanged, MessageSearchHit,
@@ -415,6 +419,141 @@ fn map_folder_to_proto(folder: nuncio_core::model::Folder) -> FolderProto {
         name: folder.name,
         total_messages: folder.total_messages as u64,
         unread_messages: folder.unread_messages as u64,
+    }
+}
+
+/// Maps a `nuncio_core::model::CalendarEvent` onto its wire-format
+/// `nuncio.v1.CalendarEvent` representation. Field-for-field, no
+/// decryption/derivation to do here -- calendar events are never encrypted
+/// at rest (see `DatabaseEngine::save_calendar_event`'s doc comment).
+fn map_calendar_event_to_proto(event: nuncio_core::model::CalendarEvent) -> CalendarEventProto {
+    CalendarEventProto {
+        id: event.id,
+        account_id: event.account_id,
+        calendar_id: event.calendar_id,
+        summary: event.summary,
+        start_time: event.start_time,
+        end_time: event.end_time,
+        rrule: event.rrule,
+        location: event.location,
+    }
+}
+
+/// Test-only injection point for the daemon's calendar sync backend,
+/// mirroring [`MailEngineOverrides`]'s shape.
+///
+/// Production (every existing caller of [`serve`] / [`serve_on_listener`])
+/// never constructs a non-default instance: [`Default`] yields
+/// `calendar_backend: None`, which routes `Calendar/Sync` to an honest
+/// error, since there is currently no persisted per-account CalDAV
+/// configuration to build a real backend from. Only a full-daemon E2E test
+/// supplies `Some(..)`, standing in a [`nuncio_cal::MockCalendarBackend`]
+/// for real network I/O.
+#[derive(Clone, Default)]
+pub struct CalendarEngineOverrides {
+    /// When `Some`, `Calendar/Sync` fetches from this backend instead of
+    /// returning an honest "no CalDAV configuration" error.
+    pub calendar_backend: Option<Arc<dyn CalendarBackend>>,
+}
+
+impl std::fmt::Debug for CalendarEngineOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CalendarEngineOverrides")
+            .field("calendar_backend", &self.calendar_backend.is_some())
+            .finish()
+    }
+}
+
+/// `nuncio.v1.Calendar` gRPC service implementation backed by the daemon's
+/// live [`DatabaseEngine`] calendar-event read/write methods.
+///
+/// `ListEvents`/`GetEvent` always read genuinely persisted data. `Sync`
+/// fetches from [`CalendarEngineOverrides::calendar_backend`] when injected;
+/// otherwise it returns an honest error, since there is no persisted
+/// per-account CalDAV configuration to build a real backend from yet (see
+/// `nunciod::calendar_sync`'s doc comment).
+struct CalendarGrpcService {
+    db: Arc<DatabaseEngine>,
+    overrides: CalendarEngineOverrides,
+}
+
+#[tonic::async_trait]
+impl Calendar for CalendarGrpcService {
+    async fn sync(
+        &self,
+        request: Request<CalendarSyncRequest>,
+    ) -> Result<Response<CalendarSyncResponse>, Status> {
+        let req = request.into_inner();
+
+        let synced = match &self.overrides.calendar_backend {
+            Some(backend) => crate::calendar_sync::sync_with_backend(
+                &self.db,
+                backend.as_ref(),
+                &req.calendar_id,
+                req.start_window,
+                req.end_window,
+            )
+            .await
+            .map_err(|e| Status::internal(format!("calendar sync failed: {e}")))?,
+            None => {
+                return Err(Status::internal(format!(
+                    "no CalDAV configuration exists for account '{}'; per-account CalDAV \
+                     configuration is not yet implemented",
+                    req.account_id
+                )));
+            }
+        };
+
+        Ok(Response::new(CalendarSyncResponse {
+            synced_count: synced as u64,
+        }))
+    }
+
+    async fn list_events(
+        &self,
+        request: Request<ListEventsRequest>,
+    ) -> Result<Response<ListEventsResponse>, Status> {
+        let req = request.into_inner();
+        if req.account_id.is_empty() {
+            return Err(Status::invalid_argument("account_id is required"));
+        }
+        // `DatabaseEngine::list_calendar_events` filters by account_id and
+        // time window only -- there is no per-calendar-collection filter in
+        // the store today, so `req.calendar_id` is not applied here. This
+        // never fabricates data; it genuinely returns every persisted event
+        // for the account in the requested window, same as `req.calendar_id`
+        // being absent from the query would.
+
+        let events = self
+            .db
+            .list_calendar_events(&req.account_id, req.start_window, req.end_window)
+            .await
+            .map_err(|e| Status::internal(format!("failed to list calendar events: {e}")))?
+            .into_iter()
+            .map(map_calendar_event_to_proto)
+            .collect();
+
+        Ok(Response::new(ListEventsResponse { events }))
+    }
+
+    async fn get_event(
+        &self,
+        request: Request<GetEventRequest>,
+    ) -> Result<Response<GetEventResponse>, Status> {
+        let req = request.into_inner();
+        if req.event_id.is_empty() {
+            return Err(Status::invalid_argument("event_id is required"));
+        }
+
+        let event = self
+            .db
+            .get_calendar_event(&req.event_id)
+            .await
+            .map_err(|e| Status::not_found(format!("event '{}' not found: {e}", req.event_id)))?;
+
+        Ok(Response::new(GetEventResponse {
+            event: Some(map_calendar_event_to_proto(event)),
+        }))
     }
 }
 
@@ -1104,8 +1243,9 @@ impl tonic::service::Interceptor for BearerAuthInterceptor {
 
 /// Binds a loopback TCP listener at `addr` and serves the `nuncio.v1.System`,
 /// `nuncio.v1.Accounts`, `nuncio.v1.Mail`, `nuncio.v1.Filters`,
-/// `nuncio.v1.Export`, and `nuncio.v1.Audit` gRPC services on it, all
-/// authenticated by `token`, until the transport server errors.
+/// `nuncio.v1.Export`, `nuncio.v1.Audit`, and `nuncio.v1.Calendar` gRPC
+/// services on it, all authenticated by `token`, until the transport server
+/// errors.
 ///
 /// `addr` MUST be a loopback address (e.g. `127.0.0.1:PORT`); callers are
 /// responsible for passing loopback-only addresses (see
@@ -1128,8 +1268,8 @@ pub async fn serve(
 }
 
 /// Serves the `nuncio.v1.System`, `nuncio.v1.Accounts`, `nuncio.v1.Mail`,
-/// `nuncio.v1.Filters`, `nuncio.v1.Export`, and `nuncio.v1.Audit` gRPC
-/// services on an already-bound [`TcpListener`].
+/// `nuncio.v1.Filters`, `nuncio.v1.Export`, `nuncio.v1.Audit`, and
+/// `nuncio.v1.Calendar` gRPC services on an already-bound [`TcpListener`].
 ///
 /// # Security
 ///
@@ -1161,17 +1301,21 @@ pub async fn serve_on_listener(
         secrets,
         token,
         MailEngineOverrides::default(),
+        CalendarEngineOverrides::default(),
     )
     .await
 }
 
 /// Identical to [`serve_on_listener`], except the `nuncio.v1.Mail` service's
-/// inbound sync and outbound send engines can be overridden.
-/// [`serve_on_listener`] is simply this function called
-/// with `MailEngineOverrides::default()` (i.e. every field `None`, which is
-/// production's exact prior behavior); this function exists so a
-/// full-daemon offline E2E test can supply `Some(..)` without changing
-/// [`serve_on_listener`]'s signature for its many existing callers.
+/// inbound sync and outbound send engines, and the `nuncio.v1.Calendar`
+/// service's sync backend, can be overridden.
+/// [`serve_on_listener`] is simply this function called with
+/// `MailEngineOverrides::default()` / `CalendarEngineOverrides::default()`
+/// (i.e. every field `None`, which is production's exact prior behavior);
+/// this function exists so a full-daemon offline E2E test can supply
+/// `Some(..)` without changing [`serve_on_listener`]'s signature for its many
+/// existing callers.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_on_listener_with_overrides(
     listener: TcpListener,
     event_bus: Arc<EventBus>,
@@ -1180,6 +1324,7 @@ pub async fn serve_on_listener_with_overrides(
     secrets: Arc<SecretManager>,
     token: impl Into<Arc<str>>,
     overrides: MailEngineOverrides,
+    calendar_overrides: CalendarEngineOverrides,
 ) -> Result<(), GrpcServeError> {
     let token: Arc<str> = token.into();
 
@@ -1228,9 +1373,19 @@ pub async fn serve_on_listener_with_overrides(
     // Audit: mounted behind its own `BearerAuthInterceptor`, exactly like
     // every other service above -- see the hard invariant documented on
     // this function's doc comment.
-    let audit_service = AuditGrpcService { db };
-    let audit_interceptor = BearerAuthInterceptor::new(token);
+    let audit_service = AuditGrpcService { db: db.clone() };
+    let audit_interceptor = BearerAuthInterceptor::new(token.clone());
     let audit_svc = AuditServer::with_interceptor(audit_service, audit_interceptor);
+
+    // Calendar: mounted behind its own `BearerAuthInterceptor`, exactly like
+    // every other service above -- see the hard invariant documented on
+    // this function's doc comment.
+    let calendar_service = CalendarGrpcService {
+        db,
+        overrides: calendar_overrides,
+    };
+    let calendar_interceptor = BearerAuthInterceptor::new(token);
+    let calendar_svc = CalendarServer::with_interceptor(calendar_service, calendar_interceptor);
 
     Server::builder()
         .add_service(system_svc)
@@ -1239,6 +1394,7 @@ pub async fn serve_on_listener_with_overrides(
         .add_service(filters_svc)
         .add_service(export_svc)
         .add_service(audit_svc)
+        .add_service(calendar_svc)
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await
         .map_err(GrpcServeError::Transport)
@@ -1321,6 +1477,32 @@ mod tests {
         token: &str,
         overrides: MailEngineOverrides,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_test_server_with_all_overrides(
+            event_bus,
+            db,
+            filter_engine,
+            secrets,
+            token,
+            overrides,
+            CalendarEngineOverrides::default(),
+        )
+        .await
+    }
+
+    /// Spawns a test server on an ephemeral loopback port backed by the
+    /// given `db`/`filter_engine`/`secrets`/`overrides`/`calendar_overrides`:
+    /// the helper every test that injects a
+    /// [`CalendarEngineOverrides::calendar_backend`] uses to prove `Sync`
+    /// drives an injected test double over the real authenticated gRPC API.
+    async fn spawn_test_server_with_all_overrides(
+        event_bus: Arc<EventBus>,
+        db: Arc<DatabaseEngine>,
+        filter_engine: Arc<FilterEngine>,
+        secrets: Arc<SecretManager>,
+        token: &str,
+        overrides: MailEngineOverrides,
+        calendar_overrides: CalendarEngineOverrides,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral loopback port");
@@ -1335,6 +1517,7 @@ mod tests {
                 secrets,
                 token,
                 overrides,
+                calendar_overrides,
             )
             .await;
         });
@@ -2017,6 +2200,52 @@ mod tests {
 
         let err = client
             .sync(SyncRequest { account_id: None })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn calendar_rpcs_reject_missing_bearer_token() {
+        // Confirms `Calendar` is mounted behind its own
+        // `BearerAuthInterceptor` exactly like every other service (no
+        // un-intercepted service).
+        use nuncio_proto::v1::calendar_client::CalendarClient;
+        use nuncio_proto::v1::{CalendarSyncRequest, GetEventRequest, ListEventsRequest};
+
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = CalendarClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .list_events(ListEventsRequest {
+                account_id: "acct-1".to_string(),
+                calendar_id: "cal-1".to_string(),
+                start_window: 0,
+                end_window: i64::MAX,
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .get_event(GetEventRequest {
+                event_id: "evt-1".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .sync(CalendarSyncRequest {
+                account_id: "acct-1".to_string(),
+                calendar_id: "cal-1".to_string(),
+                start_window: 0,
+                end_window: i64::MAX,
+            })
             .await
             .expect_err("missing bearer token must be rejected");
         assert_eq!(err.code(), Code::Unauthenticated);
@@ -3394,5 +3623,289 @@ mod tests {
         assert!(!response.valid);
         assert_eq!(response.record_count, 1);
         assert_eq!(response.first_broken_seq, Some(1));
+    }
+
+    // ---- Calendar ----
+
+    fn sample_calendar_event(
+        id: &str,
+        account_id: &str,
+        calendar_id: &str,
+        start: i64,
+        end: i64,
+    ) -> nuncio_core::model::CalendarEvent {
+        nuncio_core::model::CalendarEvent {
+            id: id.to_string(),
+            account_id: account_id.to_string(),
+            calendar_id: calendar_id.to_string(),
+            summary: format!("Summary for {id}"),
+            start_time: start,
+            end_time: end,
+            rrule: None,
+            location: None,
+        }
+    }
+
+    /// `ListEvents` reads only genuinely persisted events via
+    /// `DatabaseEngine::list_calendar_events` -- never fabricated data.
+    #[tokio::test]
+    async fn list_events_returns_only_persisted_events_in_window() {
+        use nuncio_proto::v1::calendar_client::CalendarClient;
+        use nuncio_proto::v1::ListEventsRequest;
+
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        db.save_calendar_event(&sample_calendar_event(
+            "evt-in-window",
+            "acct-cal-1",
+            "cal-work",
+            1_700_000_000,
+            1_700_003_600,
+        ))
+        .await
+        .expect("save event in window");
+        db.save_calendar_event(&sample_calendar_event(
+            "evt-out-of-window",
+            "acct-cal-1",
+            "cal-work",
+            1_800_000_000,
+            1_800_003_600,
+        ))
+        .await
+        .expect("save event out of window");
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = CalendarClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let response = client
+            .list_events(authed_bearer_request(ListEventsRequest {
+                account_id: "acct-cal-1".to_string(),
+                calendar_id: "cal-work".to_string(),
+                start_window: 1_699_999_000,
+                end_window: 1_700_004_000,
+            }))
+            .await
+            .expect("list_events succeeds")
+            .into_inner();
+
+        assert_eq!(response.events.len(), 1);
+        assert_eq!(response.events[0].id, "evt-in-window");
+    }
+
+    #[tokio::test]
+    async fn list_events_rejects_empty_account_id() {
+        use nuncio_proto::v1::calendar_client::CalendarClient;
+        use nuncio_proto::v1::ListEventsRequest;
+
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = CalendarClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .list_events(authed_bearer_request(ListEventsRequest {
+                account_id: String::new(),
+                calendar_id: "cal-work".to_string(),
+                start_window: 0,
+                end_window: i64::MAX,
+            }))
+            .await
+            .expect_err("empty account_id must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_event_returns_persisted_event() {
+        use nuncio_proto::v1::calendar_client::CalendarClient;
+        use nuncio_proto::v1::GetEventRequest;
+
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        db.save_calendar_event(&sample_calendar_event(
+            "evt-get-1",
+            "acct-cal-1",
+            "cal-work",
+            1_700_000_000,
+            1_700_003_600,
+        ))
+        .await
+        .expect("save event");
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = CalendarClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let response = client
+            .get_event(authed_bearer_request(GetEventRequest {
+                event_id: "evt-get-1".to_string(),
+            }))
+            .await
+            .expect("get_event succeeds")
+            .into_inner();
+
+        let event = response.event.expect("event present in response");
+        assert_eq!(event.id, "evt-get-1");
+        assert_eq!(event.summary, "Summary for evt-get-1");
+    }
+
+    #[tokio::test]
+    async fn get_event_reports_not_found_for_unknown_event_id() {
+        use nuncio_proto::v1::calendar_client::CalendarClient;
+        use nuncio_proto::v1::GetEventRequest;
+
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = CalendarClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .get_event(authed_bearer_request(GetEventRequest {
+                event_id: "does-not-exist".to_string(),
+            }))
+            .await
+            .expect_err("unknown event id must be rejected");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    /// With no `CalendarEngineOverrides::calendar_backend` injected, `Sync`
+    /// returns an honest error -- there is no persisted per-account CalDAV
+    /// configuration to build a real backend from -- never a fabricated
+    /// `synced_count`.
+    #[tokio::test]
+    async fn calendar_sync_without_override_reports_honest_error() {
+        use nuncio_proto::v1::calendar_client::CalendarClient;
+        use nuncio_proto::v1::CalendarSyncRequest;
+
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = CalendarClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .sync(authed_bearer_request(CalendarSyncRequest {
+                account_id: "acct-cal-no-config".to_string(),
+                calendar_id: "cal-work".to_string(),
+                start_window: 0,
+                end_window: i64::MAX,
+            }))
+            .await
+            .expect_err("sync with no injected backend and no CalDAV config must fail");
+        assert_eq!(err.code(), Code::Internal);
+        assert!(err.message().contains("acct-cal-no-config"));
+        assert!(err.message().contains("no CalDAV configuration"));
+    }
+
+    /// With a [`CalendarEngineOverrides::calendar_backend`] injected, `Sync`
+    /// genuinely fetches from it (via `calendar_sync::sync_with_backend`)
+    /// and awaits full completion before returning, so the synced events are
+    /// immediately visible to `ListEvents`/`GetEvent` -- exactly the
+    /// mechanism a full-daemon offline E2E test uses.
+    #[tokio::test]
+    async fn calendar_sync_with_injected_backend_persists_and_is_immediately_visible() {
+        use nuncio_proto::v1::calendar_client::CalendarClient;
+        use nuncio_proto::v1::{CalendarSyncRequest, GetEventRequest, ListEventsRequest};
+
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let secrets = Arc::new(SecretManager::mock());
+
+        let mock_backend = nuncio_cal::MockCalendarBackend::new();
+        mock_backend.add_event(sample_calendar_event(
+            "evt-sync-injected-1",
+            "acct-cal-injected",
+            "cal-work",
+            1_700_000_000,
+            1_700_003_600,
+        ));
+
+        let calendar_overrides = CalendarEngineOverrides {
+            calendar_backend: Some(Arc::new(mock_backend)),
+        };
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with_all_overrides(
+            Arc::new(EventBus::new()),
+            db,
+            filter_engine,
+            secrets,
+            "correct-token",
+            MailEngineOverrides::default(),
+            calendar_overrides,
+        )
+        .await;
+
+        let mut client = CalendarClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let response = client
+            .sync(authed_bearer_request(CalendarSyncRequest {
+                account_id: "acct-cal-injected".to_string(),
+                calendar_id: "cal-work".to_string(),
+                start_window: 1_699_999_000,
+                end_window: 1_700_004_000,
+            }))
+            .await
+            .expect("sync succeeds")
+            .into_inner();
+        assert_eq!(response.synced_count, 1);
+
+        // Immediately visible, no fixed sleep.
+        let list_response = client
+            .list_events(authed_bearer_request(ListEventsRequest {
+                account_id: "acct-cal-injected".to_string(),
+                calendar_id: "cal-work".to_string(),
+                start_window: 1_699_999_000,
+                end_window: 1_700_004_000,
+            }))
+            .await
+            .expect("list_events succeeds")
+            .into_inner();
+        assert_eq!(list_response.events.len(), 1);
+        assert_eq!(list_response.events[0].id, "evt-sync-injected-1");
+
+        let get_response = client
+            .get_event(authed_bearer_request(GetEventRequest {
+                event_id: "evt-sync-injected-1".to_string(),
+            }))
+            .await
+            .expect("get_event succeeds")
+            .into_inner();
+        assert_eq!(
+            get_response
+                .event
+                .expect("event present in response")
+                .summary,
+            "Summary for evt-sync-injected-1"
+        );
     }
 }

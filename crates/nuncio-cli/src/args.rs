@@ -335,13 +335,56 @@ pub enum FolderSubcommand {
 }
 
 /// Calendar subcommands (`nuncio cal <verb>`).
+///
+/// `account`/`calendar` currently have no persisted CalDAV account/collection
+/// concept to look up defaults from (see `nunciod::calendar_sync`'s doc
+/// comment), so both are plain flags rather than resolved from configured
+/// account state; `start`/`end` default to a window spanning "everything"
+/// (`0` .. `i64::MAX` unix seconds) so `list`/`sync` are usable with no flags
+/// at all once an account/calendar id is supplied.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CalSubcommand {
-    /// List upcoming calendar events.
-    List,
+    /// List calendar events for an account within an optional time window.
+    List {
+        /// Account identifier owning the calendar.
+        #[arg(short, long, help = "Account identifier")]
+        account: String,
+        /// Calendar collection identifier.
+        #[arg(
+            short,
+            long,
+            default_value = "default",
+            help = "Calendar collection identifier"
+        )]
+        calendar: String,
+        /// Window start (unix seconds, inclusive).
+        #[arg(long, default_value_t = 0, help = "Window start (unix seconds)")]
+        start: i64,
+        /// Window end (unix seconds, inclusive).
+        #[arg(long, default_value_t = i64::MAX, help = "Window end (unix seconds)")]
+        end: i64,
+    },
     /// Synchronize local calendar cache with remote CalDAV server.
-    Sync,
+    Sync {
+        /// Account identifier owning the calendar.
+        #[arg(short, long, help = "Account identifier")]
+        account: String,
+        /// Calendar collection identifier.
+        #[arg(
+            short,
+            long,
+            default_value = "default",
+            help = "Calendar collection identifier"
+        )]
+        calendar: String,
+        /// Window start (unix seconds, inclusive).
+        #[arg(long, default_value_t = 0, help = "Window start (unix seconds)")]
+        start: i64,
+        /// Window end (unix seconds, inclusive).
+        #[arg(long, default_value_t = i64::MAX, help = "Window end (unix seconds)")]
+        end: i64,
+    },
 }
 
 /// System subcommands (`nuncio system <verb>`).

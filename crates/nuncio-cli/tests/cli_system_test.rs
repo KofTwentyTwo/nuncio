@@ -42,17 +42,11 @@ async fn system_test_cli_noun_verb_execution_matrix() {
     // separately below via `ephemeral_with` + `SecretManager::mock()`
     // rather than through this `ephemeral()`-constructed runner.
 
-    // 5. Calendar list & sync
-    let out: String = runner
-        .execute_command(
-            &Commands::Cal {
-                action: CalSubcommand::List,
-            },
-            true,
-        )
-        .await;
-    let json: Value = serde_json::from_str(&out).expect("valid json");
-    assert_eq!(json["status"], "ok");
+    // 5. Calendar list & sync are real gRPC clients of the `nunciod`
+    // daemon's `Calendar` API, so -- exactly like Folder/Mail above -- they
+    // are exercised separately below via `ephemeral_with` +
+    // `SecretManager::mock()` rather than through this
+    // `ephemeral()`-constructed runner.
 }
 
 /// `system status` is a real gRPC client of the `nunciod` daemon. With no
@@ -144,10 +138,10 @@ async fn account_add_and_list_report_honest_errors_when_daemon_unreachable() {
     assert!(!add_out.contains("irrelevant-unreachable-daemon"));
 }
 
-/// `folder list`, `mail list`, `mail read`, `mail search`, and `mail mark`
-/// are real gRPC clients of the `nunciod` daemon's `Mail` API. With no
-/// daemon reachable, all of them must report a clear, honest error rather
-/// than fabricating an empty result.
+/// `folder list`, `mail list`, `mail read`, `mail search`, `mail mark`, and
+/// `cal list`/`cal sync` are real gRPC clients of the `nunciod` daemon's
+/// `Mail`/`Calendar` APIs. With no daemon reachable, all of them must report
+/// a clear, honest error rather than fabricating an empty result.
 #[tokio::test]
 async fn mail_and_folder_report_honest_errors_when_daemon_unreachable() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -227,6 +221,38 @@ async fn mail_and_folder_report_honest_errors_when_daemon_unreachable() {
                         id: "msg-1".to_string(),
                         read: true,
                         unread: false,
+                    },
+                },
+                true,
+            )
+            .await,
+    );
+
+    assert_honest_error(
+        runner
+            .execute_command(
+                &Commands::Cal {
+                    action: CalSubcommand::List {
+                        account: "acct-1".to_string(),
+                        calendar: "default".to_string(),
+                        start: 0,
+                        end: i64::MAX,
+                    },
+                },
+                true,
+            )
+            .await,
+    );
+
+    assert_honest_error(
+        runner
+            .execute_command(
+                &Commands::Cal {
+                    action: CalSubcommand::Sync {
+                        account: "acct-1".to_string(),
+                        calendar: "default".to_string(),
+                        start: 0,
+                        end: i64::MAX,
                     },
                 },
                 true,

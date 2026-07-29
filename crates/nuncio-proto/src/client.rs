@@ -11,6 +11,7 @@
 
 use crate::v1::accounts_client::AccountsClient;
 use crate::v1::audit_client::AuditClient;
+use crate::v1::calendar_client::CalendarClient;
 use crate::v1::export_client::ExportClient;
 use crate::v1::filters_client::FiltersClient;
 use crate::v1::mail_client::MailClient;
@@ -111,6 +112,11 @@ pub type AuthenticatedExportClient =
 /// [`connect_audit`].
 pub type AuthenticatedAuditClient =
     AuditClient<InterceptedService<Channel, BearerTokenInterceptor>>;
+
+/// The authenticated `nuncio.v1.Calendar` client type returned by
+/// [`connect_calendar`].
+pub type AuthenticatedCalendarClient =
+    CalendarClient<InterceptedService<Channel, BearerTokenInterceptor>>;
 
 /// Dials `addr` (a `host:port` pair, e.g. `127.0.0.1:9420`) over plain HTTP
 /// (the loopback gRPC transport is never TLS-wrapped; auth is via bearer
@@ -236,6 +242,26 @@ pub async fn connect_audit(
     let interceptor = BearerTokenInterceptor::new(token)?;
     let channel = dial(addr).await?;
     Ok(AuditClient::with_interceptor(channel, interceptor))
+}
+
+/// Dials the `nuncio.v1.Calendar` gRPC endpoint at `addr` and returns a
+/// client that injects `authorization: Bearer <token>` metadata on every
+/// call.
+///
+/// `Calendar` is guarded by the exact same `BearerAuthInterceptor` as every
+/// other service on the server side (see
+/// `nunciod::grpc::serve_on_listener_with_overrides`), so this shares
+/// [`BearerTokenInterceptor`] and [`dial`] with [`connect_system`] /
+/// [`connect_accounts`] / [`connect_mail`] / [`connect_filters`] /
+/// [`connect_export`] / [`connect_audit`] rather than hand-rolling yet
+/// another auth handshake.
+pub async fn connect_calendar(
+    addr: &str,
+    token: &str,
+) -> Result<AuthenticatedCalendarClient, ConnectError> {
+    let interceptor = BearerTokenInterceptor::new(token)?;
+    let channel = dial(addr).await?;
+    Ok(CalendarClient::with_interceptor(channel, interceptor))
 }
 
 /// Opens the `nuncio.v1.System/Subscribe` server-streaming RPC on an already
@@ -390,6 +416,23 @@ mod tests {
     #[tokio::test]
     async fn connect_audit_reports_transport_error_when_daemon_unreachable() {
         let err = connect_audit("127.0.0.1:1", "abc123")
+            .await
+            .expect_err("connecting to an unreachable daemon must fail");
+        assert!(matches!(err, ConnectError::Transport { .. }));
+        assert!(err.to_string().contains("127.0.0.1:1"));
+    }
+
+    #[tokio::test]
+    async fn connect_calendar_fails_closed_on_invalid_token() {
+        let err = connect_calendar("127.0.0.1:0", "tok\ntoken")
+            .await
+            .expect_err("invalid token must fail before dialing");
+        assert!(matches!(err, ConnectError::InvalidToken(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_calendar_reports_transport_error_when_daemon_unreachable() {
+        let err = connect_calendar("127.0.0.1:1", "abc123")
             .await
             .expect_err("connecting to an unreachable daemon must fail");
         assert!(matches!(err, ConnectError::Transport { .. }));
