@@ -2,9 +2,9 @@ name: CI Quality Gates & Build Pipeline
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main, dev, rc ]
   pull_request:
-    branches: [ main, dev ]
+    branches: [ main, dev, rc ]
 
 env:
   CARGO_TERM_COLOR: always
