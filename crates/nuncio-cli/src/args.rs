@@ -135,19 +135,38 @@ pub enum Commands {
 }
 
 /// Contact subcommands (`nuncio contact <verb>`).
+///
+/// Every verb is scoped to an `--account`, mirroring `CalSubcommand`: the
+/// daemon's real contact store (`DatabaseEngine::list_contacts`/
+/// `get_contact`/`save_contact`) is itself account-scoped, so there is no
+/// honest way to list/search/add a contact without naming which account's
+/// address book it belongs to.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ContactSubcommand {
-    /// List contacts from local address book.
-    List,
+    /// List contacts in an account's address book.
+    List {
+        /// Account identifier owning the address book.
+        #[arg(short, long, help = "Account identifier")]
+        account: String,
+    },
     /// Search contacts by name, email, or organization.
+    ///
+    /// There is no server-side search RPC in the `Contacts` gRPC surface;
+    /// this filters the account's full `ListContacts` result client-side.
     Search {
+        /// Account identifier owning the address book.
+        #[arg(short, long, help = "Account identifier")]
+        account: String,
         /// Search query string.
         #[arg(short, long, help = "Search query string")]
         query: String,
     },
-    /// Add a new contact entry to address book.
+    /// Add a new contact entry to an account's address book.
     Add {
+        /// Account identifier owning the address book.
+        #[arg(short, long, help = "Account identifier")]
+        account: String,
         /// Contact display name.
         #[arg(short, long, help = "Display name")]
         name: String,
@@ -157,6 +176,13 @@ pub enum ContactSubcommand {
         /// Optional organization.
         #[arg(short, long, help = "Organization")]
         org: Option<String>,
+    },
+    /// Synchronize an account's local contact cache with its remote CardDAV
+    /// server.
+    Sync {
+        /// Account identifier owning the address book.
+        #[arg(short, long, help = "Account identifier")]
+        account: String,
     },
 }
 

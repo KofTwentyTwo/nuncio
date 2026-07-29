@@ -735,6 +735,152 @@ message GetEventResponse {
   CalendarEvent event = 1;
 }
 
+// Contacts exposes the READ path over the daemon's real, persistent contact
+// store (`DatabaseEngine::save_contact`/`list_contacts`/`get_contact`), plus
+// a real `Sync` that fetches contacts from a `ContactsBackend` and persists
+// them, and a `CreateContact` that persists a locally-authored contact
+// directly to that same store.
+//
+// This is an honest surface: there is currently no way to persist a
+// per-account CardDAV address book collection URL/credential, so `Sync` in
+// production (no injected test backend) has no real CardDAV connection to
+// make and returns an error rather than a fabricated success.
+// `CreateContact` is NOT a CardDAV write-back -- it only ever writes to the
+// daemon's own local store, the same way the address book has always worked
+// here, just now actually persisted through the daemon's real store instead
+// of a disposable per-process in-memory database. There is deliberately no
+// RPC to delete a contact or to push a locally-authored contact back to a
+// remote CardDAV server.
+//
+// SECURITY: this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards every other service `nunciod` exposes
+// -- no exceptions carved out for "just one more" unauthenticated service.
+// See `nunciod::grpc::serve_on_listener`.
+service Contacts {
+  // Sync fetches contacts for `account_id` from the account's contacts
+  // backend and persists them via the store. With no per-account CardDAV
+  // configuration available in production, this returns `Status::internal`
+  // describing that gap unless a test double has been injected -- never a
+  // fabricated `synced_count`.
+  rpc Sync(ContactsSyncRequest) returns (ContactsSyncResponse);
+  // ListContacts returns persisted contacts for `account_id`, ordered by
+  // interaction count then display name -- always genuinely persisted data,
+  // never fabricated.
+  rpc ListContacts(ListContactsRequest) returns (ListContactsResponse);
+  // GetContact returns a single persisted contact by ID.
+  rpc GetContact(GetContactRequest) returns (GetContactResponse);
+  // CreateContact persists a new, locally-authored contact directly to the
+  // daemon's store. This is real local persistence, not a fabricated CardDAV
+  // write-back -- the created contact is never pushed to a remote server.
+  rpc CreateContact(CreateContactRequest) returns (CreateContactResponse);
+}
+
+// Mirrors `nuncio_contacts::models::ContactEmail`.
+message ContactEmail {
+  // Email address.
+  string email = 1;
+  // Address label (e.g. "work", "home", "other").
+  string label = 2;
+  // Whether this is the contact's primary email address.
+  bool is_primary = 3;
+}
+
+// Mirrors `nuncio_contacts::models::ContactPhone`.
+message ContactPhone {
+  // Phone number.
+  string phone = 1;
+  // Number label (e.g. "mobile", "work", "home").
+  string label = 2;
+  // Whether this is the contact's primary phone number.
+  bool is_primary = 3;
+}
+
+// Mirrors `nuncio_contacts::models::Contact` field-for-field, except the
+// internal bookkeeping timestamps (`created_at`/`updated_at`/
+// `last_interacted_at`) are deliberately omitted -- no real client use case
+// for them was identified for this vertical; they can be added additively
+// later if one arises.
+message Contact {
+  // Contact unique identifier.
+  string id = 1;
+  // Account identifier owning this contact's address book entry.
+  optional string account_id = 2;
+  // Display name.
+  string display_name = 3;
+  // Given (first) name.
+  optional string given_name = 4;
+  // Family (last) name.
+  optional string family_name = 5;
+  // Organization / company name.
+  optional string organization = 6;
+  // Job title.
+  optional string job_title = 7;
+  // Free-form notes.
+  optional string notes = 8;
+  // Avatar image URL.
+  optional string avatar_url = 9;
+  // Email addresses.
+  repeated ContactEmail emails = 10;
+  // Phone numbers.
+  repeated ContactPhone phones = 11;
+  // Favorite/starred flag.
+  bool is_favorite = 12;
+  // Number of recorded interactions with this contact.
+  uint64 interaction_count = 13;
+}
+
+// ContactsSyncRequest mirrors `SyncRequest`'s shape (unlike Calendar's
+// collection-scoped sync) since `ContactsBackend::fetch_contacts` is
+// account-scoped, not collection-scoped.
+message ContactsSyncRequest {
+  string account_id = 1;
+}
+
+// ContactsSyncResponse reports how many contacts were synchronized.
+message ContactsSyncResponse {
+  uint64 synced_count = 1;
+}
+
+// ListContactsRequest. Contacts are always scoped to the account whose
+// address book they belong to, mirroring the store's `list_contacts`
+// signature.
+message ListContactsRequest {
+  string account_id = 1;
+}
+
+// ListContactsResponse.
+message ListContactsResponse {
+  repeated Contact contacts = 1;
+}
+
+// GetContactRequest.
+message GetContactRequest {
+  string contact_id = 1;
+}
+
+// GetContactResponse.
+message GetContactResponse {
+  Contact contact = 1;
+}
+
+// CreateContactRequest carries the fields needed to author a brand-new local
+// contact. `emails`/`phones` follow `Contact`'s shape so multiple addresses
+// could be supplied, though the CLI's `contact add` command only ever sends
+// a single primary email today.
+message CreateContactRequest {
+  string account_id = 1;
+  string display_name = 2;
+  optional string organization = 3;
+  repeated ContactEmail emails = 4;
+  repeated ContactPhone phones = 5;
+}
+
+// CreateContactResponse carries the persisted contact, including its
+// daemon-assigned `id`.
+message CreateContactResponse {
+  Contact contact = 1;
+}
+
 // Audit exposes the daemon's real WORM (Write Once, Read Many) HMAC-chained
 // tamper-evident audit ledger (`nuncio_core::worm_audit`, via
 // `DatabaseEngine`'s `worm_audit_records` table) over authenticated gRPC.
