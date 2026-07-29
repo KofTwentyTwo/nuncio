@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 nuncio-core = { path = "../nuncio-core" }
 nuncio-filter = { path = "../nuncio-filter" }
+nuncio-contacts = { path = "../nuncio-contacts" }
 tokio.workspace = true
 sqlx.workspace = true
 serde.workspace = true
