@@ -1,12 +1,22 @@
+//! Contacts (CardDAV / RFC 6350 vCard) engine: a real CardDAV `REPORT` client, a vCard
+//! parser/generator round trip, and a protocol-agnostic [`ContactsBackend`] trait.
+
+#![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod backend;
 pub mod carddav;
 pub mod db;
+pub mod mock;
 pub mod models;
+pub mod parser;
 
+pub use backend::ContactsBackend;
 pub use carddav::{CardDavAccountConfig, CardDavClient, CardDavError};
 pub use db::{ContactsDatabase, ContactsStoreError};
+pub use mock::MockContactsBackend;
 pub use models::{Contact, ContactEmail, ContactGroup, ContactPhone};
+pub use parser::VCardParserAdapter;
 
 #[cfg(test)]
 mod tests {

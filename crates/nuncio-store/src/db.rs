@@ -115,6 +115,52 @@ fn resolve_engine_keys(
     Ok((storage_key, worm_key, ledger_key))
 }
 
+/// Reconstruct a [`nuncio_contacts::Contact`] from a `contacts` table row.
+///
+/// `created_at`/`updated_at`/`last_interacted_at` are stored as RFC 3339 strings written by
+/// [`DatabaseEngine::save_contact`] itself, so a parse failure here would indicate corrupted
+/// storage rather than bad input; falling back to "now" for that edge case (rather than
+/// propagating a parse error through every read) mirrors the tolerant `unwrap_or_default`
+/// JSON-decode style already used for `emails_json`/`phones_json` below.
+fn contact_from_row(row: &sqlx::sqlite::SqliteRow) -> nuncio_contacts::Contact {
+    let emails_json: String = row.get("emails_json");
+    let phones_json: String = row.get("phones_json");
+    let emails: Vec<nuncio_contacts::ContactEmail> =
+        serde_json::from_str(&emails_json).unwrap_or_default();
+    let phones: Vec<nuncio_contacts::ContactPhone> =
+        serde_json::from_str(&phones_json).unwrap_or_default();
+    let is_favorite: i64 = row.get("is_favorite");
+    let interaction_count: i64 = row.get("interaction_count");
+    let last_interacted_at: Option<String> = row.get("last_interacted_at");
+    let created_at: String = row.get("created_at");
+    let updated_at: String = row.get("updated_at");
+
+    let parse_rfc3339 = |s: &str| -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now())
+    };
+
+    nuncio_contacts::Contact {
+        id: row.get("id"),
+        account_id: row.get("account_id"),
+        display_name: row.get("display_name"),
+        given_name: row.get("given_name"),
+        family_name: row.get("family_name"),
+        organization: row.get("organization"),
+        job_title: row.get("job_title"),
+        notes: row.get("notes"),
+        avatar_url: row.get("avatar_url"),
+        emails,
+        phones,
+        is_favorite: is_favorite != 0,
+        interaction_count: interaction_count as u64,
+        last_interacted_at: last_interacted_at.as_deref().map(parse_rfc3339),
+        created_at: parse_rfc3339(&created_at),
+        updated_at: parse_rfc3339(&updated_at),
+    }
+}
+
 /// Structured result of re-verifying the entire persisted WORM audit
 /// ledger's hash chain. See
 /// [`DatabaseEngine::verify_worm_audit_chain_report`].
@@ -518,6 +564,54 @@ impl DatabaseEngine {
                 DELETE FROM events_fts WHERE id = old.id;
                 INSERT INTO events_fts(id, summary, location)
                 VALUES (new.id, new.summary, COALESCE(new.location, ''));
+            END;
+
+            -- Contacts (nuncio_contacts::Contact). Emails/phones are stored as JSON columns
+            -- (mirroring the schema already proven in nuncio-contacts's own, now-superseded
+            -- ContactsDatabase) rather than normalized child tables, since a contact's email/
+            -- phone list is always read and written as a whole with its parent record. Like
+            -- calendar summary/location, none of this is encrypted at rest, so trigger-based
+            -- FTS mirroring introduces no confidentiality regression.
+            CREATE TABLE IF NOT EXISTS contacts (
+                id TEXT PRIMARY KEY NOT NULL,
+                account_id TEXT,
+                display_name TEXT NOT NULL,
+                given_name TEXT,
+                family_name TEXT,
+                organization TEXT,
+                job_title TEXT,
+                notes TEXT,
+                avatar_url TEXT,
+                emails_json TEXT NOT NULL DEFAULT '[]',
+                phones_json TEXT NOT NULL DEFAULT '[]',
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                interaction_count INTEGER NOT NULL DEFAULT 0,
+                last_interacted_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS contacts_fts USING fts5(
+                id UNINDEXED,
+                display_name,
+                organization,
+                emails_json,
+                tokenize = 'trigram'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS contacts_ai AFTER INSERT ON contacts BEGIN
+                INSERT INTO contacts_fts(id, display_name, organization, emails_json)
+                VALUES (new.id, new.display_name, COALESCE(new.organization, ''), new.emails_json);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS contacts_ad AFTER DELETE ON contacts BEGIN
+                DELETE FROM contacts_fts WHERE id = old.id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS contacts_au AFTER UPDATE ON contacts BEGIN
+                DELETE FROM contacts_fts WHERE id = old.id;
+                INSERT INTO contacts_fts(id, display_name, organization, emails_json)
+                VALUES (new.id, new.display_name, COALESCE(new.organization, ''), new.emails_json);
             END;
             "#,
         )
@@ -1032,6 +1126,103 @@ impl DatabaseEngine {
             rrule: row.6,
             location: row.7,
         })
+    }
+
+    /// Save a [`nuncio_contacts::Contact`] to SQLite (INSERT OR REPLACE).
+    ///
+    /// `nuncio-store` is otherwise limited to depending only on `nuncio-core` domain types;
+    /// this method (and [`Self::list_contacts`]/[`Self::get_contact`]) is a deliberate,
+    /// narrow exception, taking a direct dependency on `nuncio_contacts::Contact` because that
+    /// type has not (yet) been promoted to `nuncio-core` the way `CalendarEvent`/`Email` have.
+    pub async fn save_contact(
+        &self,
+        contact: &nuncio_contacts::Contact,
+    ) -> Result<(), DatabaseError> {
+        let emails_json =
+            serde_json::to_string(&contact.emails).unwrap_or_else(|_| "[]".to_string());
+        let phones_json =
+            serde_json::to_string(&contact.phones).unwrap_or_else(|_| "[]".to_string());
+        let last_interacted_str = contact.last_interacted_at.map(|t| t.to_rfc3339());
+
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO contacts
+            (id, account_id, display_name, given_name, family_name, organization, job_title,
+             notes, avatar_url, emails_json, phones_json, is_favorite, interaction_count,
+             last_interacted_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&contact.id)
+        .bind(&contact.account_id)
+        .bind(&contact.display_name)
+        .bind(&contact.given_name)
+        .bind(&contact.family_name)
+        .bind(&contact.organization)
+        .bind(&contact.job_title)
+        .bind(&contact.notes)
+        .bind(&contact.avatar_url)
+        .bind(&emails_json)
+        .bind(&phones_json)
+        .bind(contact.is_favorite)
+        .bind(contact.interaction_count as i64)
+        .bind(&last_interacted_str)
+        .bind(contact.created_at.to_rfc3339())
+        .bind(contact.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(())
+    }
+
+    /// Query persisted contacts belonging to `account_id`, most-recently-interacted first.
+    ///
+    /// See the confidentiality/dependency note on [`Self::save_contact`].
+    pub async fn list_contacts(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<nuncio_contacts::Contact>, DatabaseError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, account_id, display_name, given_name, family_name, organization,
+                   job_title, notes, avatar_url, emails_json, phones_json, is_favorite,
+                   interaction_count, last_interacted_at, created_at, updated_at
+            FROM contacts
+            WHERE account_id = ?
+            ORDER BY interaction_count DESC, display_name ASC
+            "#,
+        )
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows.iter().map(contact_from_row).collect())
+    }
+
+    /// Retrieve a single contact by ID.
+    ///
+    /// See the confidentiality/dependency note on [`Self::save_contact`].
+    pub async fn get_contact(
+        &self,
+        contact_id: &str,
+    ) -> Result<nuncio_contacts::Contact, DatabaseError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, account_id, display_name, given_name, family_name, organization,
+                   job_title, notes, avatar_url, emails_json, phones_json, is_favorite,
+                   interaction_count, last_interacted_at, created_at, updated_at
+            FROM contacts
+            WHERE id = ?
+            "#,
+        )
+        .bind(contact_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(contact_from_row(&row))
     }
 
     /// Update a single message's read/unread flag in place.
@@ -2020,6 +2211,104 @@ mod tests {
             .get_calendar_event("evt-does-not-exist")
             .await
             .expect_err("missing event must be a real error");
+        assert!(matches!(
+            err,
+            DatabaseError::Query(sqlx::Error::RowNotFound)
+        ));
+    }
+
+    fn sample_contact(id: &str, account_id: &str) -> nuncio_contacts::Contact {
+        let mut contact = nuncio_contacts::Contact::new("Architecture Contact", "arch@nuncio.mx");
+        contact.id = id.to_string();
+        contact.account_id = Some(account_id.to_string());
+        contact.organization = Some("KofTwentyTwo".to_string());
+        contact
+    }
+
+    /// Count rows in `contacts_fts` matching a trigram search term, proving the real write
+    /// path (not a raw-SQL test insert) keeps the trigger-populated FTS index in sync -- the
+    /// same proof pattern as `save_get_list_and_search_calendar_event`, without depending on
+    /// `SearchEngine` gaining a contacts-specific method (out of scope for this story).
+    async fn contacts_fts_hit_count(engine: &DatabaseEngine, term: &str) -> i64 {
+        let pattern = format!("%{term}%");
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM contacts_fts WHERE display_name LIKE ?")
+                .bind(&pattern)
+                .fetch_one(engine.pool())
+                .await
+                .unwrap();
+        row.0
+    }
+
+    /// A saved contact is retrievable by both `get_contact` and `list_contacts`, and its FTS
+    /// mirror is kept in sync by the real write path (not a raw-SQL test insert).
+    #[tokio::test]
+    async fn save_get_list_and_search_contact() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let contact = sample_contact("ct-db-100", "acct-1");
+        engine
+            .save_contact(&contact)
+            .await
+            .expect("save contact succeeds");
+
+        let fetched = engine
+            .get_contact("ct-db-100")
+            .await
+            .expect("get contact succeeds");
+        assert_eq!(fetched.display_name, contact.display_name);
+        assert_eq!(fetched.account_id, contact.account_id);
+        assert_eq!(fetched.emails[0].email, contact.emails[0].email);
+
+        let listed = engine
+            .list_contacts("acct-1")
+            .await
+            .expect("list contacts succeeds");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "ct-db-100");
+
+        // Different account -> no match.
+        let other_account = engine
+            .list_contacts("acct-other")
+            .await
+            .expect("list contacts succeeds");
+        assert!(other_account.is_empty());
+
+        assert_eq!(contacts_fts_hit_count(&engine, "Architecture").await, 1);
+    }
+
+    /// Re-saving a contact with the same ID (an update, not a fresh insert) replaces both the
+    /// row and its FTS entry rather than duplicating either.
+    #[tokio::test]
+    async fn save_contact_upserts_existing_row_and_fts_entry() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let mut contact = sample_contact("ct-db-200", "acct-1");
+        engine.save_contact(&contact).await.unwrap();
+
+        contact.display_name = "Renamed Contact".to_string();
+        engine.save_contact(&contact).await.unwrap();
+
+        let fetched = engine.get_contact("ct-db-200").await.unwrap();
+        assert_eq!(fetched.display_name, "Renamed Contact");
+
+        assert_eq!(
+            contacts_fts_hit_count(&engine, "Architecture Contact").await,
+            0
+        );
+        assert_eq!(contacts_fts_hit_count(&engine, "Renamed").await, 1);
+    }
+
+    /// `get_contact` for an ID that was never saved reports `sqlx::Error::RowNotFound` rather
+    /// than silently fabricating an empty/default contact.
+    #[tokio::test]
+    async fn get_contact_reports_not_found_for_missing_contact() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let err = engine
+            .get_contact("ct-does-not-exist")
+            .await
+            .expect_err("missing contact must be a real error");
         assert!(matches!(
             err,
             DatabaseError::Query(sqlx::Error::RowNotFound)

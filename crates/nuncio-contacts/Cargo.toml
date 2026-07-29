@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 nuncio-core = { path = "../nuncio-core" }
@@ -21,3 +25,4 @@ async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = { workspace = true }
