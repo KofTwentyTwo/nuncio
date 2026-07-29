@@ -1,6 +1,6 @@
 //! Headless engine runner executing CLI commands against core services.
 
-use nuncio_core::{CoreCommand, EventBus};
+use nuncio_core::EventBus;
 use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
 use nuncio_store::{DatabaseEngine, DatabaseError};
 use serde_json::json;
@@ -54,6 +54,22 @@ fn message_proto_to_json(message: &nuncio_proto::v1::Message) -> serde_json::Val
         "read": message.read,
         "body_plain": message.body_plain,
         "body_html": message.body_html,
+    })
+}
+
+/// Renders a `nuncio.v1.CalendarEvent` (as returned by the daemon's
+/// `Calendar` gRPC service) into the JSON shape used by `cal list`'s
+/// `--json` output.
+fn calendar_event_proto_to_json(event: &nuncio_proto::v1::CalendarEvent) -> serde_json::Value {
+    json!({
+        "id": event.id,
+        "account_id": event.account_id,
+        "calendar_id": event.calendar_id,
+        "summary": event.summary,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "rrule": event.rrule,
+        "location": event.location,
     })
 }
 
@@ -348,20 +364,23 @@ impl HeadlessRunner {
                 FolderSubcommand::List => self.handle_folders_list(json_mode).await,
             },
             Commands::Cal { action } => match action {
-                CalSubcommand::List => {
-                    if json_mode {
-                        format_json(&json!({ "events": [] }))
-                    } else {
-                        "Calendar Events: 0 events found".to_string()
-                    }
+                CalSubcommand::List {
+                    account,
+                    calendar,
+                    start,
+                    end,
+                } => {
+                    self.handle_cal_list(account, calendar, *start, *end, json_mode)
+                        .await
                 }
-                CalSubcommand::Sync => {
-                    self.event_bus.process_command(CoreCommand::SyncAll);
-                    if json_mode {
-                        format_json(&json!({ "status": "calendar_sync_started" }))
-                    } else {
-                        "Calendar synchronization started.".to_string()
-                    }
+                CalSubcommand::Sync {
+                    account,
+                    calendar,
+                    start,
+                    end,
+                } => {
+                    self.handle_cal_sync(account, calendar, *start, *end, json_mode)
+                        .await
                 }
             },
             Commands::System { action } => match action {
@@ -1585,6 +1604,115 @@ impl HeadlessRunner {
             .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
     }
 
+    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// `nuncio.v1.Calendar` service at `self.grpc_addr`, shared by
+    /// [`Self::handle_cal_list`] and [`Self::handle_cal_sync`].
+    async fn connect_calendar_client(
+        &self,
+    ) -> Result<nuncio_proto::client::AuthenticatedCalendarClient, String> {
+        let token_bytes = self
+            .secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
+        let token = hex::encode(token_bytes);
+
+        nuncio_proto::client::connect_calendar(&self.grpc_addr, &token)
+            .await
+            .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
+    }
+
+    /// `cal list`: a real thin gRPC client of the running `nunciod` daemon's
+    /// `nuncio.v1.Calendar/ListEvents` API. Returns only genuinely persisted
+    /// events from the daemon's real store -- never a fabricated
+    /// "0 events found".
+    async fn handle_cal_list(
+        &self,
+        account: &str,
+        calendar: &str,
+        start: i64,
+        end: i64,
+        json_mode: bool,
+    ) -> String {
+        let mut client = match self.connect_calendar_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .list_events(nuncio_proto::v1::ListEventsRequest {
+                account_id: account.to_string(),
+                calendar_id: calendar.to_string(),
+                start_window: start,
+                end_window: end,
+            })
+            .await
+        {
+            Ok(response) => {
+                let events = response.into_inner().events;
+                if json_mode {
+                    let events_json: Vec<serde_json::Value> =
+                        events.iter().map(calendar_event_proto_to_json).collect();
+                    format_json(&json!({
+                        "account": account,
+                        "calendar": calendar,
+                        "events": events_json
+                    }))
+                } else {
+                    format!("Calendar Events: {} event(s) found", events.len())
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected list_events: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `cal sync`: a real thin gRPC client of the running `nunciod` daemon's
+    /// `nuncio.v1.Calendar/Sync` API. With no persisted per-account CalDAV
+    /// configuration, the daemon's production `Sync` path returns an honest
+    /// error -- this NEVER prints a fabricated "Calendar synchronization
+    /// started" the way this command used to.
+    async fn handle_cal_sync(
+        &self,
+        account: &str,
+        calendar: &str,
+        start: i64,
+        end: i64,
+        json_mode: bool,
+    ) -> String {
+        let mut client = match self.connect_calendar_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .sync(nuncio_proto::v1::CalendarSyncRequest {
+                account_id: account.to_string(),
+                calendar_id: calendar.to_string(),
+                start_window: start,
+                end_window: end,
+            })
+            .await
+        {
+            Ok(response) => {
+                let synced_count = response.into_inner().synced_count;
+                if json_mode {
+                    format_json(&json!({
+                        "status": "calendar_sync_complete",
+                        "synced_count": synced_count,
+                    }))
+                } else {
+                    format!("Calendar synchronization complete: {synced_count} event(s) synced")
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected calendar sync: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
     /// Formats an error message consistently for both JSON and human-text
     /// output modes.
     fn render_error(message: &str, json_mode: bool) -> String {
@@ -1781,26 +1909,14 @@ mod tests {
         // `SecretManager::mock()` against a live stub `Mail` gRPC server
         // (`mail_rpcs_round_trip_over_grpc_to_a_stub_daemon`).
 
-        // Cal Noun Commands
-        let cal_list = runner
-            .execute_command(
-                &Commands::Cal {
-                    action: CalSubcommand::List,
-                },
-                true,
-            )
-            .await;
-        assert!(cal_list.contains(r#""events":[]"#));
-
-        let cal_sync = runner
-            .execute_command(
-                &Commands::Cal {
-                    action: CalSubcommand::Sync,
-                },
-                true,
-            )
-            .await;
-        assert!(cal_sync.contains(r#""status":"calendar_sync_started""#));
+        // Cal Noun Commands: `List`/`Sync` are real gRPC clients of the
+        // `nunciod` daemon's `Calendar` API -- exactly like the Mail Noun
+        // Commands above, they must never run against this
+        // `ephemeral()`-constructed runner's production `SecretManager` or
+        // its (unreachable in CI) default gRPC address. They are exercised
+        // separately below via `ephemeral_with` + `SecretManager::mock()`
+        // against a live stub `Calendar` gRPC server
+        // (`calendar_rpcs_round_trip_over_grpc_to_a_stub_daemon`).
 
         // System Noun Commands are exercised separately below via
         // `ephemeral_with` + `SecretManager::mock()`: `system status` is a
@@ -2424,6 +2540,170 @@ mod tests {
         assert_eq!(recorded_send.to, "alice@nuncio.mx");
         assert_eq!(recorded_send.subject, "Quarterly Roadmap");
         assert_eq!(recorded_send.body_text, "Let's discuss the roadmap.");
+    }
+
+    /// Reference-client proof: boots a stub `nuncio.v1.Calendar` gRPC server
+    /// (mirroring the `Mail` stub pattern above) and drives the real
+    /// `HeadlessRunner`'s `cal list`/`cal sync` gRPC client paths against it.
+    ///
+    /// Real persistence and the honest-error-when-no-backend-injected
+    /// behavior are proven by `nunciod`'s own `grpc::tests`; this test exists
+    /// purely to prove the CLI's connect + call + JSON-format happy path,
+    /// and that the exact account/calendar/window it was given reaches the
+    /// daemon over the wire.
+    #[tokio::test]
+    async fn calendar_rpcs_round_trip_over_grpc_to_a_stub_daemon() {
+        use nuncio_proto::v1::calendar_server::{Calendar as CalendarService, CalendarServer};
+        use nuncio_proto::v1::{
+            CalendarEvent as CalendarEventProto, CalendarSyncRequest, CalendarSyncResponse,
+            GetEventRequest, GetEventResponse, ListEventsRequest, ListEventsResponse,
+        };
+        use std::sync::Mutex;
+
+        fn stub_event() -> CalendarEventProto {
+            CalendarEventProto {
+                id: "evt-stub-1".to_string(),
+                account_id: "acct-stub-1".to_string(),
+                calendar_id: "cal-stub".to_string(),
+                summary: "Stub Meeting".to_string(),
+                start_time: 1_700_000_000,
+                end_time: 1_700_003_600,
+                rrule: None,
+                location: Some("Room 1".to_string()),
+            }
+        }
+
+        /// Minimal test-only stub of `nuncio.v1.Calendar`: records the last
+        /// `ListEventsRequest`/`CalendarSyncRequest` it received (so this
+        /// test can assert on exactly what the CLI sent over the wire) and
+        /// otherwise returns fixed responses.
+        #[derive(Default)]
+        struct StubCalendar {
+            last_list_events: Arc<Mutex<Option<ListEventsRequest>>>,
+            last_sync: Arc<Mutex<Option<CalendarSyncRequest>>>,
+        }
+
+        #[tonic::async_trait]
+        impl CalendarService for StubCalendar {
+            async fn sync(
+                &self,
+                request: tonic::Request<CalendarSyncRequest>,
+            ) -> Result<tonic::Response<CalendarSyncResponse>, tonic::Status> {
+                let req = request.into_inner();
+                *self.last_sync.lock().unwrap_or_else(|e| e.into_inner()) = Some(req);
+                Ok(tonic::Response::new(CalendarSyncResponse {
+                    synced_count: 2,
+                }))
+            }
+
+            async fn list_events(
+                &self,
+                request: tonic::Request<ListEventsRequest>,
+            ) -> Result<tonic::Response<ListEventsResponse>, tonic::Status> {
+                let req = request.into_inner();
+                *self
+                    .last_list_events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(req);
+                Ok(tonic::Response::new(ListEventsResponse {
+                    events: vec![stub_event()],
+                }))
+            }
+
+            async fn get_event(
+                &self,
+                request: tonic::Request<GetEventRequest>,
+            ) -> Result<tonic::Response<GetEventResponse>, tonic::Status> {
+                let req = request.into_inner();
+                if req.event_id == "evt-stub-1" {
+                    Ok(tonic::Response::new(GetEventResponse {
+                        event: Some(stub_event()),
+                    }))
+                } else {
+                    Err(tonic::Status::not_found(format!(
+                        "event '{}' not found",
+                        req.event_id
+                    )))
+                }
+            }
+        }
+
+        let stub = StubCalendar::default();
+        let list_probe = stub.last_list_events.clone();
+        let sync_probe = stub.last_sync.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(CalendarServer::new(stub))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+                .await
+                .expect("ephemeral runner initializes");
+
+        // `cal list`: proves the CLI is a real gRPC client of
+        // `Calendar/ListEvents` -- the exact account/calendar/window
+        // supplied reaches the daemon over the wire, and the daemon's real
+        // returned events (NOT a fabricated "0 events found") appear in the
+        // CLI's output.
+        let cal_list = runner
+            .execute_command(
+                &Commands::Cal {
+                    action: CalSubcommand::List {
+                        account: "acct-stub-1".to_string(),
+                        calendar: "cal-stub".to_string(),
+                        start: 0,
+                        end: i64::MAX,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(cal_list.contains("evt-stub-1"));
+        assert!(cal_list.contains("Stub Meeting"));
+        let recorded_list = list_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received a list_events request");
+        assert_eq!(recorded_list.account_id, "acct-stub-1");
+        assert_eq!(recorded_list.calendar_id, "cal-stub");
+        assert_eq!(recorded_list.start_window, 0);
+        assert_eq!(recorded_list.end_window, i64::MAX);
+
+        // `cal sync`: proves the CLI is a real gRPC client of
+        // `Calendar/Sync` and reports the daemon's real `synced_count`,
+        // rather than fabricating a "calendar_sync_started" status by only
+        // flipping this runner's own throwaway local `EventBus`.
+        let cal_sync = runner
+            .execute_command(
+                &Commands::Cal {
+                    action: CalSubcommand::Sync {
+                        account: "acct-stub-1".to_string(),
+                        calendar: "cal-stub".to_string(),
+                        start: 0,
+                        end: i64::MAX,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(cal_sync.contains(r#""status":"calendar_sync_complete""#));
+        assert!(cal_sync.contains(r#""synced_count":2"#));
+        let recorded_sync = sync_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received a sync request");
+        assert_eq!(recorded_sync.account_id, "acct-stub-1");
+        assert_eq!(recorded_sync.calendar_id, "cal-stub");
     }
 
     /// Reference-client proof: boots a stub `nuncio.v1.Filters` gRPC server

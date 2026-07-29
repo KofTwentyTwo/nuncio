@@ -644,6 +644,97 @@ message ExportResponse {
   uint64 bytes_written = 3;
 }
 
+// Calendar exposes the READ path over the daemon's real, persistent calendar
+// event store (`DatabaseEngine::save_calendar_event`/`list_calendar_events`/
+// `get_calendar_event`), plus a real `Sync` that fetches events from a
+// `CalendarBackend` and persists them.
+//
+// This is an honest surface: there is currently no way to persist a
+// per-account CalDAV collection URL/credential, so `Sync` in production (no
+// injected test backend) has no real CalDAV connection to make and returns
+// an error rather than a fabricated success. There are deliberately no
+// create/delete RPCs here -- this service does not add real CalDAV write
+// support.
+//
+// SECURITY: this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards every other service `nunciod` exposes
+// -- no exceptions carved out for "just one more" unauthenticated service.
+// See `nunciod::grpc::serve_on_listener`.
+service Calendar {
+  // Sync fetches events for `calendar_id` within `[start_window, end_window]`
+  // from the account's calendar backend and persists them via the store.
+  // With no per-account CalDAV configuration available in production, this
+  // returns `Status::internal` describing that gap unless a test double has
+  // been injected -- never a fabricated `synced_count`.
+  rpc Sync(CalendarSyncRequest) returns (CalendarSyncResponse);
+  // ListEvents returns persisted events for `account_id` whose window
+  // overlaps `[start_window, end_window]`, ordered by start time -- always
+  // genuinely persisted data, never fabricated.
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  // GetEvent returns a single persisted event by ID.
+  rpc GetEvent(GetEventRequest) returns (GetEventResponse);
+}
+
+// Mirrors `nuncio_core::model::CalendarEvent` field-for-field. Named
+// `CalendarEvent` (matching the core model) rather than `Event` -- `Event` is
+// already taken by `System`'s push-event wrapper.
+message CalendarEvent {
+  // Event identifier.
+  string id = 1;
+  // Account identifier owning the event.
+  string account_id = 2;
+  // Calendar collection identifier.
+  string calendar_id = 3;
+  // Event title or summary.
+  string summary = 4;
+  // Unix timestamp for event start.
+  int64 start_time = 5;
+  // Unix timestamp for event end.
+  int64 end_time = 6;
+  // Recurrence rule string (RFC 5545 RRULE format).
+  optional string rrule = 7;
+  // Location text.
+  optional string location = 8;
+}
+
+// CalendarSyncRequest carries the calendar collection and time window to
+// sync, since `CalendarBackend::fetch_events` is inherently scoped that way
+// (unlike `Mail`'s account-wide `Sync`).
+message CalendarSyncRequest {
+  string account_id = 1;
+  string calendar_id = 2;
+  int64 start_window = 3;
+  int64 end_window = 4;
+}
+
+// CalendarSyncResponse reports how many events were synchronized.
+message CalendarSyncResponse {
+  uint64 synced_count = 1;
+}
+
+// ListEventsRequest.
+message ListEventsRequest {
+  string account_id = 1;
+  string calendar_id = 2;
+  int64 start_window = 3;
+  int64 end_window = 4;
+}
+
+// ListEventsResponse.
+message ListEventsResponse {
+  repeated CalendarEvent events = 1;
+}
+
+// GetEventRequest.
+message GetEventRequest {
+  string event_id = 1;
+}
+
+// GetEventResponse.
+message GetEventResponse {
+  CalendarEvent event = 1;
+}
+
 // Audit exposes the daemon's real WORM (Write Once, Read Many) HMAC-chained
 // tamper-evident audit ledger (`nuncio_core::worm_audit`, via
 // `DatabaseEngine`'s `worm_audit_records` table) over authenticated gRPC.

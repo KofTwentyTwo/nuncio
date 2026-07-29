@@ -2,6 +2,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod calendar_sync;
 pub mod grpc;
 pub mod orchestrator;
 pub mod send;
