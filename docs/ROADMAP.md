@@ -27,8 +27,9 @@ property of the **contract**, not of anyone's discipline.
 These are non-negotiable and apply to every item below:
 
 1. **A capability is done only when engine + proto + CLI command + offline E2E
-   test all exist together**, and `cargo verify` (fmt + clippy `-D warnings`
-   all-targets + `test-all`) is green.
+   test all exist together**, and the local gate (`cargo fmt --all -- --check`,
+   `cargo check-all` (clippy `-D warnings` all-targets), `cargo test-all`) is
+   green.
 2. **No fabricated success.** A path that cannot do the real thing returns an
    honest `Unimplemented`/error — never canned data, never a fake "sent".
 3. **The `.proto` files are the contract.** The `nuncio-proto` contract-stability
@@ -188,5 +189,6 @@ scheduled here or folded back into the engine as they earn their place.
 
 Each milestone maps to GitHub issues (numbers above). Every capability is built
 via one implementer + a spec/quality review gate + an offline E2E, committed only
-when `cargo verify` is green and the proto golden is consistent. Issues close
-only after the review step — never on a green build alone.
+when the local gate (fmt + clippy `-D warnings` + tests) is green and the proto
+golden is consistent. Issues close only after the review step — never on a green
+build alone.

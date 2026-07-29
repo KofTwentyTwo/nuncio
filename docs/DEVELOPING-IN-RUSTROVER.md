@@ -110,9 +110,17 @@ RustRover's Cargo test integration is the fastest inner loop.
 ## 5. Quality gates (run before you commit/push)
 
 The Git pre-commit hook runs `fmt` + `clippy -D warnings` (all targets) + the full
-test suite on every `git commit`, so make these green first:
+test suite on every `git commit`, so make these green first. There is no combined
+`cargo verify` alias — a Cargo alias is a single command's argv and can't chain
+subcommands, so run the three checks separately (this is exactly what the
+pre-commit hook does):
 
-- **Cargo Verify (fmt + clippy + tests)** — the whole gate in one click (= `cargo verify`).
+```bash
+cargo fmt --all -- --check
+cargo check-all
+cargo test-all
+```
+
 - **Cargo Check All** — just clippy, all targets, warnings-as-errors.
 - **Cargo Test All** — the suite.
 - **Cargo Coverage** — informational `llvm-cov` (needs `cargo-llvm-cov`; not a gate).
@@ -120,8 +128,8 @@ test suite on every `git commit`, so make these green first:
   (= `cargo build-release`), i.e. what you ship for real dogfooding.
 
 Because the toolchain is pinned (1.97.1) and native, **green here == green in CI** —
-so a clean *Cargo Verify* means a clean commit and (once CI minutes are back) a
-clean pipeline.
+so running `cargo fmt --all -- --check` plus *Cargo Check All* and *Cargo Test All*
+clean means a clean commit and (once CI minutes are back) a clean pipeline.
 
 ---
 
@@ -137,8 +145,10 @@ clean pipeline.
 | Cargo Build Release (daemon + CLI) | `build-release` | no |
 | Cargo Check All | `check-all` | no |
 | Cargo Test All | `test-all` | no |
-| Cargo Verify (fmt + clippy + tests) | `verify` | no |
 | Cargo Coverage | `cov` (informational) | no |
+
+There is no run configuration for the fmt check (`cargo fmt --all -- --check`) —
+run it from the Terminal alongside *Cargo Check All* and *Cargo Test All*.
 
 To make your own: **Run → Edit Configurations → + → Cargo Command**, set the
 command (e.g. `run -p nuncio-cli -- mail read --id abc`), and tick *Store as
@@ -151,7 +161,8 @@ project file* to share it (it lands in `.idea/runConfigurations/`).
 1. Edit code; the editor lints (clippy) and formats-on-save as you go.
 2. Run the nearest **test via its gutter icon** to check your change; **Debug** it
    if you need to step through.
-3. When the feature/fix is done, run **Cargo Verify** — that's the commit gate.
+3. When the feature/fix is done, run `cargo fmt --all -- --check`, **Cargo Check
+   All**, and **Cargo Test All** — that's the commit gate.
 4. Commit (the hook re-runs the gate). Conventional Commits, feature branches off
    `dev` (see `CLAUDE.md`).
 5. To see it end-to-end, run **nunciod** and drive it from the Terminal.
@@ -170,7 +181,8 @@ project file* to share it (it lands in `.idea/runConfigurations/`).
 - **"Where's the TUI/GUI?"** Archived under `_reference/`; they'll be rebuilt as
   separate native client repos (roadmap Phase 5). They are not in the workspace.
 - **CI is currently paused** (GitHub Actions minutes). That's fine — the pinned
-  native toolchain makes your local *Cargo Verify* equivalent to CI.
+  native toolchain makes your local `fmt --check` + *Cargo Check All* + *Cargo Test
+  All* run equivalent to CI.
 
 ---
 

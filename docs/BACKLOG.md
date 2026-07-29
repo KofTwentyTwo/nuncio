@@ -9,7 +9,8 @@ Ordered, executable stories for the first two phases of [`ROADMAP.md`](ROADMAP.m
 Each story has acceptance criteria (AC) and a rough size (S ≤1d, M ≈2–4d, L ≈1wk).
 Do them roughly top-to-bottom; within an epic, stories are mostly independent
 unless noted. **Definition of done for every story:** engine + (where applicable)
-proto + CLI + offline test, and `cargo verify` green.
+proto + CLI + offline test, and the local gate green (`cargo fmt --all -- --check`,
+`cargo check-all`, `cargo test-all`).
 
 ---
 
@@ -41,7 +42,7 @@ proto + CLI + offline test, and `cargo verify` green.
   `nuncio-core`). **AC:** `cargo check-all` exits 0 locally and in CI.
 - **0.C.2 Align CI to the local gate** (S). CI runs `cargo clippy --workspace`
   without `--all-targets`; make CI run `cargo check-all` so CI and local are
-  identical. **AC:** CI and `cargo verify` enforce the same lints.
+  identical. **AC:** CI and the local gate enforce the same lints.
 - **0.C.3 Replace the coverage gate** (M). Drop the gamed 100%-line gate (it
   excludes all `main.rs` and incentivized stub+matching-test theater) for a
   realistic threshold on engine crates plus a **required** mock-server E2E job.
