@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let db_sync = db.clone();
         let secrets_sync = account_secrets.clone();
         let event_bus_sync = event_bus.clone();
+        let filter_engine_sync = filter_engine.clone();
         let _sync_command_task = tokio::spawn(async move {
             while let Some(cmd) = command_rx.recv().await {
                 match cmd {
@@ -62,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             &db_sync,
                             &secrets_sync,
                             &event_bus_sync,
+                            &filter_engine_sync,
                         )
                         .await;
                         tracing::info!("SyncAll completed: {} message(s) synced", synced);
@@ -71,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             &db_sync,
                             &secrets_sync,
                             &event_bus_sync,
+                            &filter_engine_sync,
                             &account_id,
                         )
                         .await

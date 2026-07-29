@@ -19,6 +19,7 @@
 //! real backend; they then delegate the actual fetch/persist/event-emission
 //! work to [`sync_with_backend`].
 use nuncio_core::{AccountConfig, AccountProtocol, CoreCommand, EventBus};
+use nuncio_filter::{FilterEngine, OutboxManager, RuleAction};
 use nuncio_mail::{ImapEngine, JmapEngine, MailBackend, MailError};
 use nuncio_store::db::DatabaseError;
 use nuncio_store::vault::{SecretManager, VaultError};
@@ -41,12 +42,141 @@ pub enum SyncError {
     Store(#[from] DatabaseError),
 }
 
+/// Map a [`RuleAction`] to the short mutation tag persisted on
+/// [`nuncio_filter::PendingRemoteMutation::mutation_type`] and the outbox
+/// target parameter, for every action that is not applied immediately.
+///
+/// Nothing downstream currently parses `mutation_type` back into a
+/// `RuleAction`, so these tags are a fixed vocabulary owned by this module;
+/// keep them stable once the outbox worker starts consuming them.
+fn remote_action_tag(action: &RuleAction) -> Option<(&'static str, Option<String>)> {
+    match action {
+        RuleAction::MoveTo(folder) => Some(("MOVE", Some(folder.clone()))),
+        RuleAction::CopyTo(folder) => Some(("COPY", Some(folder.clone()))),
+        RuleAction::Flag => Some(("FLAG", None)),
+        RuleAction::Unflag => Some(("UNFLAG", None)),
+        RuleAction::Delete => Some(("DELETE", None)),
+        RuleAction::ForwardTo(address) => Some(("FORWARD", Some(address.clone()))),
+        RuleAction::CallWebhook(url) => Some(("WEBHOOK", Some(url.clone()))),
+        RuleAction::MarkRead | RuleAction::MarkUnread => None,
+    }
+}
+
+/// Evaluate `email` against `filter_engine` and route every matched rule's
+/// actions to their real, persisted effect.
+///
+/// `MarkRead`/`MarkUnread` apply immediately to the stored message via
+/// [`DatabaseEngine::set_message_read`]. Every other action enqueues a real
+/// [`nuncio_filter::PendingRemoteMutation`] through the existing outbox
+/// (`OutboxManager::create_mutation` + `DatabaseEngine::save_pending_mutation`)
+/// for the background outbox worker to pick up -- this function never
+/// performs the real remote IMAP/JMAP mutation or webhook call itself.
+/// Every match also appends a [`nuncio_filter::FilterExecutionLog`] entry via
+/// `DatabaseEngine::save_filter_execution_log`, so there is an audit trail of
+/// what fired independent of whether the outbox item is ever drained.
+///
+/// A bookkeeping failure on one action (a DB write error) is logged via
+/// `tracing::warn!` and does not stop the remaining actions/rules from being
+/// applied -- one broken write must never silently swallow the rest of a
+/// sync's filtering. The return value counts only actions that were fully
+/// applied AND logged; a partially-failed match (e.g. the mutation persists
+/// but the execution log write fails) is not counted as success, keeping the
+/// count honest for callers that log or assert on it.
+///
+/// Standalone and reusable by design: this is the exact evaluate-and-route
+/// logic other sync paths (e.g. a bulk retroactive triage over the whole
+/// store) need, so it takes only a `DatabaseEngine`/`FilterEngine`/`Email`
+/// and has no dependency on the live inbound-sync call chain.
+pub async fn apply_filter_actions(
+    db: &nuncio_store::db::DatabaseEngine,
+    filter_engine: &FilterEngine,
+    email: &nuncio_core::model::Email,
+) -> usize {
+    let mut applied = 0usize;
+
+    for (rule, actions) in filter_engine.evaluate(email) {
+        for action in actions {
+            let immediate_ok = match &action {
+                RuleAction::MarkRead => match db.set_message_read(&email.id, true).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            "filter rule '{}' MARK READ failed for message '{}': {e}",
+                            rule.id,
+                            email.id
+                        );
+                        false
+                    }
+                },
+                RuleAction::MarkUnread => match db.set_message_read(&email.id, false).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            "filter rule '{}' MARK UNREAD failed for message '{}': {e}",
+                            rule.id,
+                            email.id
+                        );
+                        false
+                    }
+                },
+                _ => {
+                    // Remote actions are handled below via the outbox; this
+                    // branch only tracks whether the immediate-action write
+                    // itself succeeded (there is none for a remote action,
+                    // so it is unconditionally "not applicable" here).
+                    true
+                }
+            };
+
+            if !immediate_ok {
+                continue;
+            }
+
+            let mut action_ok = true;
+            if let Some((tag, target)) = remote_action_tag(&action) {
+                let mutation = OutboxManager::create_mutation(&rule.id, &email.id, tag, target);
+                if let Err(e) = db.save_pending_mutation(&mutation).await {
+                    tracing::warn!(
+                        "filter rule '{}' failed to enqueue outbox mutation for message '{}': {e}",
+                        rule.id,
+                        email.id
+                    );
+                    action_ok = false;
+                }
+            }
+
+            if !action_ok {
+                continue;
+            }
+
+            let action_desc = action.to_nsql();
+            if let Err(e) = db
+                .save_filter_execution_log(&rule.id, &email.id, &action_desc)
+                .await
+            {
+                tracing::warn!(
+                    "filter rule '{}' matched message '{}' but failed to write execution log: {e}",
+                    rule.id,
+                    email.id
+                );
+                continue;
+            }
+
+            applied += 1;
+        }
+    }
+
+    applied
+}
+
 /// Fetch every folder and every message in every folder from `backend`,
-/// persisting each message via [`DatabaseEngine::save_email`]. Returns the
-/// total number of messages processed (a message id "processed" more than
-/// once, e.g. by a backend that returns the same id from multiple folders,
-/// is counted once per occurrence -- `save_email` itself is `INSERT OR
-/// REPLACE`, so storage stays deduplicated by message id regardless).
+/// persisting each message via [`DatabaseEngine::save_email`] and then
+/// evaluating it against `filter_engine` via [`apply_filter_actions`].
+/// Returns the total number of messages processed (a message id "processed"
+/// more than once, e.g. by a backend that returns the same id from multiple
+/// folders, is counted once per occurrence -- `save_email` itself is
+/// `INSERT OR REPLACE`, so storage stays deduplicated by message id
+/// regardless).
 ///
 /// Contains no event-bus or credential logic -- pure fetch-and-persist, so
 /// it is the smallest unit tests can exercise directly with a
@@ -54,6 +184,7 @@ pub enum SyncError {
 async fn fetch_and_persist(
     db: &nuncio_store::db::DatabaseEngine,
     backend: &dyn MailBackend,
+    filter_engine: &FilterEngine,
 ) -> Result<usize, SyncError> {
     let folders = backend.sync_folders().await?;
     let mut synced = 0usize;
@@ -61,6 +192,7 @@ async fn fetch_and_persist(
         let (emails, _state) = backend.sync_messages(&folder.id, None).await?;
         for email in emails {
             db.save_email(&email).await?;
+            apply_filter_actions(db, filter_engine, &email).await;
             synced += 1;
         }
     }
@@ -85,6 +217,7 @@ pub async fn sync_with_backend(
     db: &nuncio_store::db::DatabaseEngine,
     event_bus: &EventBus,
     backend: &dyn MailBackend,
+    filter_engine: &FilterEngine,
     account_id: Option<String>,
 ) -> Result<usize, SyncError> {
     match &account_id {
@@ -94,7 +227,7 @@ pub async fn sync_with_backend(
         None => event_bus.process_command(CoreCommand::SyncAll),
     }
 
-    let result = fetch_and_persist(db, backend).await;
+    let result = fetch_and_persist(db, backend, filter_engine).await;
 
     if let Err(e) = &result {
         event_bus.process_command(CoreCommand::ReportError {
@@ -148,6 +281,7 @@ pub async fn run_account_sync(
     db: &nuncio_store::db::DatabaseEngine,
     secrets: &SecretManager,
     event_bus: &EventBus,
+    filter_engine: &FilterEngine,
     account_id: &str,
 ) -> Result<usize, SyncError> {
     let setup = async {
@@ -163,6 +297,7 @@ pub async fn run_account_sync(
                 db,
                 event_bus,
                 backend.as_ref(),
+                filter_engine,
                 Some(account_id.to_string()),
             )
             .await
@@ -187,6 +322,7 @@ pub async fn run_all_accounts_sync(
     db: &nuncio_store::db::DatabaseEngine,
     secrets: &SecretManager,
     event_bus: &EventBus,
+    filter_engine: &FilterEngine,
 ) -> usize {
     event_bus.process_command(CoreCommand::SyncAll);
 
@@ -197,7 +333,7 @@ pub async fn run_all_accounts_sync(
                 match secrets.get_secret(&config.keyring_secret_key) {
                     Ok(password) => {
                         let backend = build_mail_backend(&config, &password);
-                        match fetch_and_persist(db, backend.as_ref()).await {
+                        match fetch_and_persist(db, backend.as_ref(), filter_engine).await {
                             Ok(count) => total_synced += count,
                             Err(e) => {
                                 event_bus.process_command(CoreCommand::ReportError {
@@ -238,6 +374,12 @@ mod tests {
     use nuncio_core::{CoreEvent, EngineStatus, TlsMode};
     use nuncio_mail::MockMailBackend;
     use nuncio_store::db::DatabaseEngine;
+
+    /// A `FilterEngine` with no rules, for tests that exercise sync
+    /// mechanics unrelated to filtering.
+    fn empty_filter_engine() -> FilterEngine {
+        FilterEngine::new(Vec::new()).expect("empty rule set")
+    }
 
     fn sample_jmap_account(id: &str) -> AccountConfig {
         AccountConfig {
@@ -309,9 +451,16 @@ mod tests {
         mock.add_message(mock_email("m1", "inbox", "Hello"));
         mock.add_message(mock_email("m2", "inbox", "World"));
 
-        let synced = sync_with_backend(&db, &event_bus, &mock, Some("acct-mock-1".to_string()))
-            .await
-            .expect("sync succeeds");
+        let filter_engine = empty_filter_engine();
+        let synced = sync_with_backend(
+            &db,
+            &event_bus,
+            &mock,
+            &filter_engine,
+            Some("acct-mock-1".to_string()),
+        )
+        .await
+        .expect("sync succeeds");
         assert_eq!(synced, 2);
 
         let persisted = db
@@ -354,7 +503,8 @@ mod tests {
             unread_messages: 0,
         });
 
-        let synced = sync_with_backend(&db, &event_bus, &mock, None)
+        let filter_engine = empty_filter_engine();
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
             .await
             .expect("sync succeeds");
         assert_eq!(synced, 0);
@@ -380,9 +530,16 @@ mod tests {
         let mock = MockMailBackend::new();
         mock.set_should_fail(true);
 
-        let err = sync_with_backend(&db, &event_bus, &mock, Some("acct-fail".to_string()))
-            .await
-            .expect_err("sync fails");
+        let filter_engine = empty_filter_engine();
+        let err = sync_with_backend(
+            &db,
+            &event_bus,
+            &mock,
+            &filter_engine,
+            Some("acct-fail".to_string()),
+        )
+        .await
+        .expect_err("sync fails");
         assert!(err.to_string().contains("mail backend error"));
 
         assert_eq!(
@@ -466,9 +623,16 @@ mod tests {
             .set_secret(&config.keyring_secret_key, "irrelevant-jmap-token")
             .expect("store credential in mock vault");
 
-        let synced = run_account_sync(&db, &secrets, &event_bus, "acct-jmap-real-1")
-            .await
-            .expect("sync succeeds");
+        let filter_engine = empty_filter_engine();
+        let synced = run_account_sync(
+            &db,
+            &secrets,
+            &event_bus,
+            &filter_engine,
+            "acct-jmap-real-1",
+        )
+        .await
+        .expect("sync succeeds");
         // JmapEngine::sync_folders() returns 3 static folders; sync_messages
         // returns the same 1 static message per folder regardless of
         // folder_id, so 3 folders => 3 processed messages (deduplicated to
@@ -505,9 +669,16 @@ mod tests {
         let mut events = event_bus.subscribe_events();
         let secrets = SecretManager::mock();
 
-        let err = run_account_sync(&db, &secrets, &event_bus, "acct-does-not-exist")
-            .await
-            .expect_err("unknown account fails");
+        let filter_engine = empty_filter_engine();
+        let err = run_account_sync(
+            &db,
+            &secrets,
+            &event_bus,
+            &filter_engine,
+            "acct-does-not-exist",
+        )
+        .await
+        .expect_err("unknown account fails");
         assert!(matches!(err, SyncError::AccountNotFound(_)));
 
         match events.recv().await.expect("error event") {
@@ -533,7 +704,8 @@ mod tests {
         db.save_account(&config).await.expect("save account");
         // Deliberately never calls `secrets.set_secret(...)`.
 
-        let err = run_account_sync(&db, &secrets, &event_bus, "acct-no-cred-1")
+        let filter_engine = empty_filter_engine();
+        let err = run_account_sync(&db, &secrets, &event_bus, &filter_engine, "acct-no-cred-1")
             .await
             .expect_err("missing credential fails");
         assert!(matches!(err, SyncError::Vault(_)));
@@ -556,7 +728,8 @@ mod tests {
         let mut events = event_bus.subscribe_events();
         let secrets = SecretManager::mock();
 
-        let total = run_all_accounts_sync(&db, &secrets, &event_bus).await;
+        let filter_engine = empty_filter_engine();
+        let total = run_all_accounts_sync(&db, &secrets, &event_bus, &filter_engine).await;
         assert_eq!(total, 0);
 
         assert_eq!(
@@ -588,7 +761,8 @@ mod tests {
             .set_secret(&config_b.keyring_secret_key, "token-b")
             .expect("store credential b");
 
-        let total = run_all_accounts_sync(&db, &secrets, &event_bus).await;
+        let filter_engine = empty_filter_engine();
+        let total = run_all_accounts_sync(&db, &secrets, &event_bus, &filter_engine).await;
         // 2 accounts * 3 folders each = 6 processed messages.
         assert_eq!(total, 6);
         assert_eq!(event_bus.current_state().status, EngineStatus::Idle);
@@ -607,7 +781,8 @@ mod tests {
         db.save_account(&config).await.expect("save account");
         // No credential stored in the vault for this account.
 
-        let total = run_all_accounts_sync(&db, &secrets, &event_bus).await;
+        let filter_engine = empty_filter_engine();
+        let total = run_all_accounts_sync(&db, &secrets, &event_bus, &filter_engine).await;
         assert_eq!(total, 0);
 
         assert_eq!(
@@ -623,6 +798,160 @@ mod tests {
         assert_eq!(
             events.recv().await.expect("complete event"),
             CoreEvent::SyncCompleted { account_id: None }
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_with_backend_fires_immediate_mark_read_action_on_match() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+
+        let rule = nuncio_filter::NsqlParser::parse_rule(
+            "Urgent Auto-Read",
+            1,
+            "WHERE subject CONTAINS 'Urgent' ACTION MARK READ",
+        )
+        .expect("parse rule");
+        let filter_engine = FilterEngine::new(vec![rule]).expect("compile rule");
+
+        let mock = MockMailBackend::new();
+        mock.add_folder(Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 1,
+            unread_messages: 1,
+        });
+        mock.add_message(mock_email("m-urgent", "inbox", "Urgent: server down"));
+
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+            .await
+            .expect("sync succeeds");
+        assert_eq!(synced, 1);
+
+        let stored = db.get_message("m-urgent").await.expect("message persisted");
+        assert!(
+            stored.read,
+            "MARK READ action must genuinely flip the stored read flag"
+        );
+
+        let logs = db
+            .list_filter_execution_logs(10)
+            .await
+            .expect("list execution logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message_id, "m-urgent");
+
+        let pending = db
+            .list_pending_mutations(10)
+            .await
+            .expect("list pending mutations");
+        assert!(
+            pending.is_empty(),
+            "an immediate action must not enqueue an outbox mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_with_backend_enqueues_outbox_mutation_for_remote_action_on_match() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+
+        let rule = nuncio_filter::NsqlParser::parse_rule(
+            "Archive Rule",
+            1,
+            "WHERE subject CONTAINS 'Archive Me' ACTION MOVE TO 'Archive'",
+        )
+        .expect("parse rule");
+        let filter_engine = FilterEngine::new(vec![rule]).expect("compile rule");
+
+        let mock = MockMailBackend::new();
+        mock.add_folder(Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 1,
+            unread_messages: 1,
+        });
+        mock.add_message(mock_email("m-archive", "inbox", "Please Archive Me"));
+
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+            .await
+            .expect("sync succeeds");
+        assert_eq!(synced, 1);
+
+        let pending = db
+            .list_pending_mutations(10)
+            .await
+            .expect("list pending mutations");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "m-archive");
+        assert_eq!(pending[0].mutation_type, "MOVE");
+        assert_eq!(pending[0].status, "pending");
+        assert!(pending[0].payload.contains("Archive"));
+
+        let logs = db
+            .list_filter_execution_logs(10)
+            .await
+            .expect("list execution logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message_id, "m-archive");
+
+        // The remote action must not have applied a local read-flag change.
+        let stored = db
+            .get_message("m-archive")
+            .await
+            .expect("message persisted");
+        assert!(!stored.read);
+    }
+
+    #[tokio::test]
+    async fn sync_with_backend_non_matching_message_produces_no_filter_side_effects() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+
+        let rule = nuncio_filter::NsqlParser::parse_rule(
+            "Urgent Auto-Read",
+            1,
+            "WHERE subject CONTAINS 'Urgent' ACTION MARK READ",
+        )
+        .expect("parse rule");
+        let filter_engine = FilterEngine::new(vec![rule]).expect("compile rule");
+
+        let mock = MockMailBackend::new();
+        mock.add_folder(Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 1,
+            unread_messages: 1,
+        });
+        mock.add_message(mock_email("m-plain", "inbox", "Just a normal update"));
+
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+            .await
+            .expect("sync succeeds");
+        assert_eq!(synced, 1);
+
+        let stored = db.get_message("m-plain").await.expect("message persisted");
+        assert!(!stored.read, "non-matching message must stay untouched");
+
+        let logs = db
+            .list_filter_execution_logs(10)
+            .await
+            .expect("list execution logs");
+        assert!(logs.is_empty(), "no rule matched, so no log should exist");
+
+        let pending = db
+            .list_pending_mutations(10)
+            .await
+            .expect("list pending mutations");
+        assert!(
+            pending.is_empty(),
+            "no rule matched, so no mutation should be enqueued"
         );
     }
 }
