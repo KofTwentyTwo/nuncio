@@ -1,5 +1,7 @@
 //! WireMock integration test suite for JMAP (RFC 8620 / 8621) protocol engine.
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use nuncio_mail::JmapEngine;
 use serde_json::json;
 use wiremock::matchers::{method, path};

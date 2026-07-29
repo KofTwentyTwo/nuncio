@@ -21,65 +21,14 @@ pub struct SearchEngine<'a> {
 
 impl<'a> SearchEngine<'a> {
     /// Create a new `SearchEngine` bound to a `DatabaseEngine`.
+    ///
+    /// Unlike earlier versions of this type, `SearchEngine` no longer lazily creates the FTS5
+    /// virtual tables on first use: [`DatabaseEngine::migrate`] creates `messages_fts` and
+    /// `events_fts` (and backfills `messages_fts` for any pre-existing rows) up front, so every
+    /// message or event ever written is searchable as soon as the engine is open, not just
+    /// those saved after the first search call.
     pub fn new(db: &'a DatabaseEngine) -> Self {
         Self { db }
-    }
-
-    /// Initialize FTS5 virtual tables and sync triggers.
-    pub async fn setup_fts_tables(&self) -> Result<(), DatabaseError> {
-        sqlx::query(
-            r#"
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                id UNINDEXED,
-                subject,
-                sender,
-                body_plain,
-                tokenize = 'trigram'
-            );
-
-            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-                INSERT INTO messages_fts(id, subject, sender, body_plain)
-                VALUES (new.id, new.subject, new.sender, COALESCE(new.body_plain, ''));
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                DELETE FROM messages_fts WHERE id = old.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-                DELETE FROM messages_fts WHERE id = old.id;
-                INSERT INTO messages_fts(id, subject, sender, body_plain)
-                VALUES (new.id, new.subject, new.sender, COALESCE(new.body_plain, ''));
-            END;
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
-                id UNINDEXED,
-                summary,
-                location,
-                tokenize = 'trigram'
-            );
-
-            CREATE TRIGGER IF NOT EXISTS events_ai AFTER INSERT ON calendar_events BEGIN
-                INSERT INTO events_fts(id, summary, location)
-                VALUES (new.id, new.summary, COALESCE(new.location, ''));
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS events_ad AFTER DELETE ON calendar_events BEGIN
-                DELETE FROM events_fts WHERE id = old.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS events_au AFTER UPDATE ON calendar_events BEGIN
-                DELETE FROM events_fts WHERE id = old.id;
-                INSERT INTO events_fts(id, summary, location)
-                VALUES (new.id, new.summary, COALESCE(new.location, ''));
-            END;
-            "#,
-        )
-        .execute(self.db.pool())
-        .await
-        .map_err(DatabaseError::Query)?;
-
-        Ok(())
     }
 
     /// Sanitize user search inputs to prevent SQLite FTS5 query operator syntax errors.
@@ -151,55 +100,132 @@ impl<'a> SearchEngine<'a> {
 mod tests {
     use super::*;
 
+    fn sample_email(id: &str, subject: &str, body_plain: &str) -> nuncio_core::model::Email {
+        nuncio_core::model::Email {
+            id: id.to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "inbox".to_string(),
+            subject: subject.to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1_700_000_000,
+            read: false,
+            body_plain: Some(body_plain.to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// The crux test: proves body search works over the REAL `save_email` write path (no
+    /// raw-SQL plaintext injection bypassing encryption), while the stored body column stays
+    /// ciphertext. This is what the old `fts5_message_search_and_triggers` test failed to
+    /// prove -- it inserted plaintext directly via raw SQL, which trivially "worked" but never
+    /// exercised (or caught the bug in) the encrypt-then-index write path.
     #[tokio::test]
-    async fn fts5_message_search_and_triggers() {
+    async fn fts5_message_body_search_via_real_save_email_write_path() {
         let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
         let search = SearchEngine::new(&db);
-        search.setup_fts_tables().await.unwrap();
 
-        // Empty search returns empty results
+        // Empty search returns empty results, with no setup call needed: migrate() already
+        // created the FTS5 tables eagerly.
         assert!(search.search_messages("").await.unwrap().is_empty());
 
-        // Insert message
-        sqlx::query(
-            "INSERT INTO messages (id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain)
-             VALUES ('msg-1', 'acct-1', 'inbox', 'Quarterly Financial Meeting', 'alice@nuncio.mx', 'bob@nuncio.mx', 1700000000, 0, 'Discuss budget revenue')",
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        let email = sample_email(
+            "msg-1",
+            "Quarterly Financial Meeting",
+            "Let's discuss the annual budget revenue forecast",
+        );
+        db.save_email(&email).await.unwrap();
 
-        // Search trigram match
-        let hits = search.search_messages("Financial").await.unwrap();
+        // Body search matches a plaintext body term -- proves the FTS index holds real,
+        // decrypted-at-write-time plaintext trigrams, not the AES-256-GCM ciphertext that is
+        // actually stored in messages.body_plain.
+        let hits = search.search_messages("revenue").await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "msg-1");
         assert_eq!(hits[0].title, "Quarterly Financial Meeting");
 
-        // Update message trigger
-        sqlx::query("UPDATE messages SET subject = 'Updated Strategy Review' WHERE id = 'msg-1'")
-            .execute(db.pool())
-            .await
-            .unwrap();
+        // Subject search still matches: subject/sender were never encrypted.
+        let subject_hits = search.search_messages("Financial").await.unwrap();
+        assert_eq!(subject_hits.len(), 1);
 
-        let updated_hits = search.search_messages("Strategy").await.unwrap();
-        assert_eq!(updated_hits.len(), 1);
-        assert_eq!(updated_hits[0].title, "Updated Strategy Review");
+        // The body column at rest must remain encrypted ciphertext -- never the plaintext
+        // search term, and never equal to the original plaintext body.
+        let (stored_body,): (String,) =
+            sqlx::query_as("SELECT body_plain FROM messages WHERE id = 'msg-1'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_ne!(stored_body, email.body_plain.clone().unwrap());
+        assert!(!stored_body.to_lowercase().contains("revenue"));
 
-        // Delete message trigger
+        // Re-saving via save_email (an update, not a fresh insert) replaces the FTS row rather
+        // than duplicating or leaving a stale entry: the old term no longer matches, the new
+        // one does.
+        let mut updated = email.clone();
+        updated.body_plain = Some("Updated strategy review notes".to_string());
+        db.save_email(&updated).await.unwrap();
+
+        assert!(search.search_messages("revenue").await.unwrap().is_empty());
+        let new_hits = search.search_messages("strategy").await.unwrap();
+        assert_eq!(new_hits.len(), 1);
+        assert_eq!(new_hits[0].id, "msg-1");
+
+        // Delete message trigger still cleans up the FTS row (subject/sender/id only -- no
+        // ciphertext involved).
         sqlx::query("DELETE FROM messages WHERE id = 'msg-1'")
             .execute(db.pool())
             .await
             .unwrap();
 
-        let deleted_hits = search.search_messages("Strategy").await.unwrap();
+        let deleted_hits = search.search_messages("strategy").await.unwrap();
         assert!(deleted_hits.is_empty());
+    }
+
+    /// Proves the backfill half of the fix: a message saved through the real write path,
+    /// whose FTS entry is then lost (simulating either a row written before the FTS5 index
+    /// existed, or one written by a process that bypassed `save_email`'s explicit indexing),
+    /// is NOT searchable until a migration pass runs -- at which point `backfill_message_fts`
+    /// decrypts the ciphertext body column with this engine's real storage key and repopulates
+    /// the plaintext-derived trigram index, with no search call ever required to trigger it.
+    #[tokio::test]
+    async fn fts5_backfill_indexes_preexisting_rows_missing_from_the_index() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let email = sample_email(
+            "msg-legacy-1",
+            "Legacy Roadmap Notes",
+            "Confidential quarterly roadmap details",
+        );
+        db.save_email(&email).await.unwrap();
+
+        // Simulate pre-existing data whose FTS entry is missing (e.g. written before the FTS5
+        // index existed) by dropping its messages_fts row directly.
+        sqlx::query("DELETE FROM messages_fts WHERE id = 'msg-legacy-1'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let search = SearchEngine::new(&db);
+        assert!(
+            search.search_messages("roadmap").await.unwrap().is_empty(),
+            "message must be unsearchable once its FTS entry is missing"
+        );
+
+        // Re-running migration (idempotent) must backfill the missing row from the encrypted
+        // body column -- this is the exact code path a fresh process re-opening this database
+        // takes via DatabaseEngine::open/connect_file, with no search call involved.
+        db.migrate().await.unwrap();
+
+        let hits = search.search_messages("roadmap").await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "msg-legacy-1");
+        assert_eq!(hits[0].title, "Legacy Roadmap Notes");
     }
 
     #[tokio::test]
     async fn fts5_event_search_and_triggers() {
         let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
         let search = SearchEngine::new(&db);
-        search.setup_fts_tables().await.unwrap();
 
         // Empty search returns empty results
         assert!(search.search_events("").await.unwrap().is_empty());

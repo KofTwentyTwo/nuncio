@@ -16,9 +16,11 @@ nuncio-cal = { path = "../nuncio-cal" }
 nuncio-store = { path = "../nuncio-store" }
 nuncio-filter = { path = "../nuncio-filter" }
 nuncio-contacts = { path = "../nuncio-contacts" }
+nuncio-proto = { path = "../nuncio-proto" }
 
 tokio.workspace = true
 sqlx.workspace = true
+tonic.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,5 +28,10 @@ thiserror.workspace = true
 tracing.workspace = true
 rpassword.workspace = true
 chrono.workspace = true
+hex.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+tokio-stream = { workspace = true, features = ["net"] }
 
 

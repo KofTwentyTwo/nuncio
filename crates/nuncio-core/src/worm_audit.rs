@@ -10,9 +10,6 @@ use thiserror::Error;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Default HMAC key used for WORM audit log block linking when no custom key is specified.
-pub const DEFAULT_WORM_KEY: &[u8] = b"nuncio-worm-cryptographic-audit-key-v1";
-
 /// Error types emitted during WORM audit log creation and verification.
 #[derive(Error, Debug, PartialEq, Eq, Clone)]
 pub enum WormAuditError {
@@ -137,7 +134,10 @@ impl WormAuditRecord {
 }
 
 /// Verify an entire sequence chain of WORM audit records.
-pub fn verify_worm_chain(records: &[WormAuditRecord], secret_key: &[u8]) -> Result<(), WormAuditError> {
+pub fn verify_worm_chain(
+    records: &[WormAuditRecord],
+    secret_key: &[u8],
+) -> Result<(), WormAuditError> {
     let mut last_hash = "GENESIS".to_string();
 
     for record in records {
@@ -203,16 +203,9 @@ mod tests {
     #[test]
     fn test_worm_chain_verification_passes() {
         let key = b"secret-test-key";
-        let r1 = WormAuditRecord::create_signed(
-            key,
-            1,
-            100,
-            "system",
-            "db.init",
-            b"data1",
-            "GENESIS",
-        )
-        .unwrap();
+        let r1 =
+            WormAuditRecord::create_signed(key, 1, 100, "system", "db.init", b"data1", "GENESIS")
+                .unwrap();
 
         let r2 = WormAuditRecord::create_signed(
             key,

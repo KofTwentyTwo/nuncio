@@ -1,176 +1,76 @@
 # Nuncio
 
-<p align="center">
-  <img src="assets/nuncio_app_icon.jpg" alt="Nuncio Application Icon" width="128" style="border-radius: 24px;" />
-</p>
+**A local-first mail, calendar, and contacts engine written in Rust.**
 
-<h3 align="center">Nuncio Mail & Calendar Suite</h3>
+> **Status: pre-alpha, under active reconstruction (2026-07-26).**
+> Nuncio began as an AI-generated proof of concept. A forensic assessment found
+> that while several library-layer components are genuinely well-built, the
+> end-to-end product did not work and much of the prior documentation was
+> inaccurate. The project is being rebuilt engine-first. **It is not usable yet,
+> and published pre-1.0 releases are non-functional — do not install them.**
+> See the **[live roadmap](https://koftwentytwo.github.io/nuncio/roadmap/)**
+> (source: [`docs/ROADMAP.md`](docs/ROADMAP.md)) for the plan and
+> [`docs/adr/0001-engine-first-grpc-architecture.md`](docs/adr/0001-engine-first-grpc-architecture.md)
+> for the architecture decision.
 
-<p align="center">
-  <b>High-Performance Library-First Messenger and Calendar Courier for Developers, Power Users, and AI Agents</b>
-</p>
+## What Nuncio is
 
-<p align="center">
-  <a href="https://nuncio.mx">Official Site: nuncio.mx</a> •
-  <a href="https://github.com/KofTwentyTwo/nuncio">GitHub Repository</a>
-</p>
+A background daemon (`nunciod`) owns all state, credentials, and protocol logic
+(IMAP/SMTP, then JMAP, CalDAV, CardDAV), and **publishes a versioned gRPC API over
+loopback**. User interfaces are separate native client projects that consume that
+API — they hold no business logic and no data of their own. This makes feature
+parity across clients a property of the published contract rather than a matter of
+discipline.
 
-> **Etymology**: Derived from the Latin verb ***nūntiō*** ("I announce", "I declare", "I deliver a message") and noun ***nūntius*** ("messenger", "courier", "bearer of tidings"). Nuncio is built as the ultimate cross-platform messenger and calendar courier across Linux, macOS, and Windows.
+The only client in this repository is `nuncio-cli`, which serves as the reference
+API consumer and the driver for end-to-end tests. Native GUIs (macOS/Windows), a
+TUI, and an MCP bridge will live in separate repositories once the engine and its
+API are solid.
 
----
+## Workspace layout
 
-## Visual Application Preview
+Engine libraries composed by the daemon:
 
-![Nuncio Desktop Application UI Preview](assets/nuncio_gui_hero.jpg)
-
----
-
-## 4 Great Interfaces + Central Daemon Topology
-
-Nuncio operates on a **Hybrid Daemon-First Architecture**. Centralized state management, SQLite WAL persistence, credential security enclaves, and protocol synchronizers reside inside a standalone background daemon (`nunciod`). Four decoupled interfaces communicate with `nunciod` over native IPC socket streams:
-
-```mermaid
-graph TD
-    subgraph Four Great Interfaces
-        CLI["nuncio-cli (POSIX CLI)"]
-        TUI["nuncio-tui (Ratatui TUI)"]
-        GUI["nuncio-gui (Tauri v2 Desktop GUI)"]
-        MCP["nuncio-mcp (Native MCP LLM Agent Interface)"]
-    end
-
-    subgraph IPC Client Engine
-        Client["IpcClient (Auto-Spawn + Retry Loop + JSON-RPC 2.0 Framing)"]
-    end
-
-    subgraph Native OS Sockets
-        UnixSocket["POSIX: UNIX Domain Socket (~/.nuncio/nuncio.sock)"]
-        WinPipe["Windows: Named Pipe (\\\\.\\pipe\\nuncio-ipc)"]
-    end
-
-    subgraph Central Background Daemon
-        DaemonServer["IpcDaemonServer (Security Enclave)"]
-        DaemonProcess["nunciod Daemon Process"]
-        EventBus["nuncio-core EventBus"]
-    end
-
-    subgraph Core Engine & Protocol Libraries
-        MailEngine["nuncio-mail (IMAP / SMTP / JMAP)"]
-        CalEngine["nuncio-cal (CalDAV / iCal / rrule)"]
-        StoreEngine["nuncio-store (SQLite WAL / FTS5 Trigram / Age Cipher)"]
-    end
-
-    CLI --> Client
-    TUI --> Client
-    GUI --> Client
-    MCP --> Client
-
-    Client --> UnixSocket
-    Client --> WinPipe
-
-    UnixSocket --> DaemonServer
-    WinPipe --> DaemonServer
-
-    DaemonServer --> DaemonProcess
-    DaemonProcess --> EventBus
-
-    EventBus --> MailEngine
-    EventBus --> CalEngine
-    EventBus --> StoreEngine
-```
-
-1. **`nuncio-cli` (POSIX CLI)**: Scriptable `<Noun> <Verb>` commands with deterministic `--json` output and offline-resilient local SQLite reads.
-2. **`nuncio-tui` (Terminal TUI)**: Keyboard-first 3-pane split view built in Ratatui with Vim navigation (`j`/`k`/`h`/`l`) and live `CoreEvent` push updates.
-3. **`nuncio-gui` (Tauri v2 Desktop GUI)**: Cross-platform native window host with React 18 + Vite + TypeScript frontend, glassmorphic styling, and strict HTML `<iframe sandbox>` CSP email rendering.
-4. **`nuncio-mcp` (Native LLM Agent UI)**: Model Context Protocol (MCP) JSON-RPC 2.0 stdio server exposing tools (`nuncio_mail_send`, `nuncio_cal_create_event`), resources (`nuncio://mail/inbox`), and prompts for local AI agents (Claude, Cursor, Antigravity).
-5. **`nunciod` (Central Daemon Binary)**: Standalone background process owning SQLite WAL storage, security enclaves, background protocol sync loops, and multi-client IPC socket streams.
-
----
-
-## Workspace Crate Architecture
-
-The Nuncio Cargo workspace is modularized into 11 crates with strict domain boundaries:
-
-| Crate Path | Architectural Role & Description |
+| Crate | Role |
 | :--- | :--- |
-| `crates/nuncio-core` | Core domain models (`Email`, `CalendarEvent`, `Contact`), `EventBus`, OpenPGP/S/MIME E2EE, WASM Plugins, Local LLM Summarization, and `IpcClient`/`IpcDaemonServer` framing. |
-| `crates/nuncio-mail` | IMAP4rev1, JMAP (RFC 8620/8621), SMTP transport engines, and MIME stream parser. |
-| `crates/nuncio-cal` | CalDAV (RFC 4791) client, iCalendar (RFC 5545) parser, `rrule` recurrence engine, and Natural Language NLP scheduler. |
-| `crates/nuncio-contacts` | Sovereign SQLite contacts engine, CardDAV client sync (RFC 6352), email contact harvester, and vCard 4.0 generator. |
-| `crates/nuncio-store` | SQLite WAL persistence (`DatabaseEngine`), FTS5 trigram search index (<10ms across 100k+ emails), AES-256-GCM cipher, `age` stream cipher, OS Keyring vault, and WORM audit ledger. |
-| `crates/nuncio-filter` | Declarative NSQL filter engine (`sqlparser 0.54`), AST actions, 6-pass validator, dry-run tester, and HMAC webhooks. |
-| `crates/nuncio-cli` | Pure Noun + Verb CLI runner and Unix pipe scripting engine. |
-| `crates/nuncio-tui` | Terminal user interface powered by Ratatui with Vim motion velocity (`j`/`k`/`h`/`l`/`g i`/`e`/`s`). |
-| `crates/nuncio-gui` | Native desktop GUI application shell powered by Tauri v2 and React. |
-| `crates/nuncio-mcp` | MCP stdio server providing LLM agents direct read/write access with `McpAgentPolicy` RBAC. |
-| `crates/nunciod` | Standalone background daemon binary server. |
+| `crates/nuncio-core` | Domain models, event bus, IPC/API layer, cross-cutting services |
+| `crates/nuncio-store` | SQLite (WAL) persistence, FTS search, ciphers, corruption recovery, keyring vault |
+| `crates/nuncio-mail` | IMAP, JMAP, SMTP protocol engines and MIME handling |
+| `crates/nuncio-cal` | iCalendar, CalDAV, CardDAV, recurrence, scheduling |
+| `crates/nuncio-contacts` | Contacts store, CardDAV sync, vCard |
+| `crates/nuncio-filter` | NSQL declarative filter language (parser, validator, engine) |
+| `crates/nunciod` | The daemon binary — owns state and serves the API |
+| `crates/nuncio-cli` | Reference API client + E2E driver |
 
----
+The former `nuncio-tui`, `nuncio-gui`, and `nuncio-mcp` shells have been moved to
+`_reference/` (out of the workspace) and will be rebuilt as separate client
+repositories (roadmap Phase 5).
 
-## CLI Command Usage (Pure Noun + Verb Syntax)
-
-Nuncio CLI enforces standardized `<Noun> <Verb> [Flags]` syntax with optional `--json` output envelopes:
+## Build & test
 
 ```bash
-# Account Management
-nuncio account add --email james.maes@kof22.com --imap-host mail.kof22.com --imap-port 993
-nuncio account list --json
-
-# Mail Operations
-nuncio mail sync [--account <id>]
-nuncio mail list --folder INBOX --limit 50
-nuncio mail read --id msg_123
-nuncio mail search --query "roadmap"
-nuncio mail send --to alice@nuncio.mx --subject "Release Update" --body "Message body"
-
-# Calendar Operations
-nuncio cal list --calendar work
-nuncio cal create --summary "Team Standup" --start 1774348800 --end 1774352400
-
-# System Status
-nuncio system status --json
-nuncio daemon
+cargo build --workspace          # build everything
+cargo check-all                  # clippy, all targets, warnings-as-errors (the gate)
+cargo test-all                   # run the whole test suite
+cargo test -p nuncio-store       # test a single crate
 ```
 
----
+There is no `cargo verify` alias (Cargo aliases can't chain subcommands). Run the
+full local gate as three separate commands — `cargo fmt --all -- --check`,
+`cargo check-all`, `cargo test-all` — which is exactly what the pre-commit hook runs.
 
-## Quality Gates & Verification Commands
+Cargo aliases are defined in [`.cargo/config.toml`](.cargo/config.toml).
 
-Build configurations enforce strict zero-warning policy (`-D warnings -F unsafe_code -D unused_must_use`):
+## Documentation
 
-```bash
-# 1. Compiler & Linter Quality Gate (Zero warnings allowed)
-cargo check --workspace
-cargo clippy --workspace -- -D warnings
+- **[Roadmap — live rendered page](https://koftwentytwo.github.io/nuncio/roadmap/)** — the visual plan to a client-ready backend (GitHub Pages)
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — authoritative roadmap and target architecture (source for the page above)
+- [`docs/STORY-WORKFLOW.md`](docs/STORY-WORKFLOW.md) — how contributors execute a roadmap story (gates, patterns, review flow)
+- [`docs/HANDOFF.md`](docs/HANDOFF.md) — development handoff: current state, branches, and the M1–M7 story index
+- [`docs/BACKLOG.md`](docs/BACKLOG.md) — engineering-ready Phase 0 / Phase 1 stories
+- [`docs/adr/`](docs/adr/) — architecture decision records
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — technical architecture
 
-# 2. Run Full Integration Test Suite (100 tests across 9 crates)
-cargo test --workspace
+## License
 
-# 3. Formatter Gate
-cargo fmt --all --check
-```
-
----
-
-## Master Architectural Documentation & Roadmaps
-
-- **[Enhanced Production Roadmap (V1, V2, V3)](docs/PLAN-enhanced-roadmap-v1-v2-v3.md)**: Deep commercial feature specification benchmarked against Superhuman, Mimestream, Apple Mail, Outlook, Hey, Cron, and Fantastical.
-- **[Hybrid Daemon Architecture Blueprint](docs/PLAN-hybrid-daemon-architecture.md)**: Sockets, framing, auto-spawning, and security enclave design.
-- **[Executive Audit Review Report](docs/EXECUTIVE-AUDIT-REVIEW.md)**: Authoritative technical audit scorecard across architecture, security, code quality, UI/UX, and performance.
-- **[Architecture Specification](docs/ARCHITECTURE.md)**: Domain encapsulation, Hexagonal Ports & Adapters model, and IPC streaming contracts.
-
----
-
-## Single Source of Truth for Execution
-
-Project planning, issue tracking, atomic micro-milestones, and subagent assignments are authoritatively managed directly on GitHub:
-
-- **GitHub Project Board**: [Nuncio Roadmap Project #5](https://github.com/users/KofTwentyTwo/projects/5)
-- **GitHub Milestones**: [KofTwentyTwo/nuncio/milestones](https://github.com/KofTwentyTwo/nuncio/milestones) (`v0.1.0` through `v1.0.0`)
-- **GitHub Issues**: [KofTwentyTwo/nuncio/issues](https://github.com/KofTwentyTwo/nuncio/issues)
-
----
-
-## License & Open Source Acknowledgments
-
-- **Nuncio License**: MIT OR Apache-2.0
-- **Third-Party Open Source Libraries**: See **[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)** for full credits and license terms (Tokio, Ratatui, Tauri v2, SQLx, Lettre, async-imap, RustCrypto AES-GCM, age, Zeroize, Keyring, React, Lucide, Vite).
+MIT OR Apache-2.0.

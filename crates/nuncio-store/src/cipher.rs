@@ -60,30 +60,26 @@ impl PayloadCipher {
             .map_err(|e| CipherError::DecryptionFailed(e.to_string()))
     }
 
-    /// Default static key derivation for local database column encryption at rest.
-    pub const DEFAULT_STORAGE_KEY: [u8; 32] = [
-        0x4e, 0x55, 0x4e, 0x43, 0x49, 0x4f, 0x5f, 0x53, 0x45, 0x43, 0x55, 0x52, 0x45, 0x5f, 0x4b,
-        0x45, 0x5f, 0x32, 0x30, 0x32, 0x36, 0x5f, 0x53, 0x54, 0x4f, 0x52, 0x41, 0x47, 0x45, 0x5f,
-        0x31, 0x32,
-    ];
-
-    /// Encrypt text payload for database column storage at rest.
-    pub fn encrypt_text_at_rest(text: &str) -> String {
+    /// Encrypt text payload for database column storage at rest using a caller-supplied
+    /// AES-256-GCM key. The key MUST be sourced from a [`crate::vault::SecretManager`]-backed
+    /// vault (never a compiled-in default) so that at-rest ciphertext cannot be decrypted
+    /// without access to the OS keyring.
+    pub fn encrypt_text_at_rest(key: &[u8; 32], text: &str) -> String {
         if text.is_empty() {
             return String::new();
         }
-        let encrypted =
-            Self::encrypt_bytes(&Self::DEFAULT_STORAGE_KEY, text.as_bytes()).unwrap_or_default();
+        let encrypted = Self::encrypt_bytes(key, text.as_bytes()).unwrap_or_default();
         hex::encode(encrypted)
     }
 
-    /// Decrypt text payload from database column storage at rest.
-    pub fn decrypt_text_at_rest(stored: &str) -> String {
+    /// Decrypt text payload from database column storage at rest using a caller-supplied
+    /// AES-256-GCM key. See [`PayloadCipher::encrypt_text_at_rest`].
+    pub fn decrypt_text_at_rest(key: &[u8; 32], stored: &str) -> String {
         if stored.is_empty() {
             return String::new();
         }
         if let Ok(bytes) = hex::decode(stored) {
-            if let Ok(decrypted) = Self::decrypt_bytes(&Self::DEFAULT_STORAGE_KEY, &bytes) {
+            if let Ok(decrypted) = Self::decrypt_bytes(key, &bytes) {
                 if let Ok(s) = String::from_utf8(decrypted) {
                     return s;
                 }
@@ -238,14 +234,29 @@ mod tests {
 
     #[test]
     fn text_at_rest_encryption_decryption_roundtrip() {
+        let key = [7u8; 32];
         let text = "Sensitive Email Body Payload";
-        let encrypted = PayloadCipher::encrypt_text_at_rest(text);
+        let encrypted = PayloadCipher::encrypt_text_at_rest(&key, text);
         assert_ne!(text, encrypted);
 
-        let decrypted = PayloadCipher::decrypt_text_at_rest(&encrypted);
+        let decrypted = PayloadCipher::decrypt_text_at_rest(&key, &encrypted);
         assert_eq!(text, decrypted);
 
-        assert_eq!(PayloadCipher::encrypt_text_at_rest(""), "");
-        assert_eq!(PayloadCipher::decrypt_text_at_rest(""), "");
+        assert_eq!(PayloadCipher::encrypt_text_at_rest(&key, ""), "");
+        assert_eq!(PayloadCipher::decrypt_text_at_rest(&key, ""), "");
+    }
+
+    #[test]
+    fn text_at_rest_wrong_key_fails_to_decrypt() {
+        // Proves there is no compiled-in default key: ciphertext produced under one
+        // caller-supplied key cannot be recovered using a different key.
+        let key_a = [1u8; 32];
+        let key_b = [2u8; 32];
+        let text = "Confidential ledger payload";
+
+        let encrypted = PayloadCipher::encrypt_text_at_rest(&key_a, text);
+        let decrypted_with_wrong_key = PayloadCipher::decrypt_text_at_rest(&key_b, &encrypted);
+
+        assert_eq!(decrypted_with_wrong_key, "");
     }
 }

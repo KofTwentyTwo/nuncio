@@ -119,9 +119,7 @@ impl UpdateEngine {
     /// Initialize a new `UpdateEngine` with standard User-Agent header.
     pub fn new() -> Result<Self, UpdateError> {
         let user_agent = format!("nuncio-updater/{}", env!("CARGO_PKG_VERSION"));
-        let client = reqwest::Client::builder()
-            .user_agent(user_agent)
-            .build()?;
+        let client = reqwest::Client::builder().user_agent(user_agent).build()?;
         Ok(Self {
             client,
             base_url: None,
@@ -455,15 +453,12 @@ pub fn extract_binary_from_zip(
 
 /// Atomically replace target executable file with new binary data.
 pub fn replace_executable(target_path: &Path, new_binary_bytes: &[u8]) -> Result<(), UpdateError> {
-    let parent_dir = target_path
-        .parent()
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            UpdateError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Target path has no parent directory",
-            ))
-        })?;
+    let parent_dir = target_path.parent().map(PathBuf::from).ok_or_else(|| {
+        UpdateError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Target path has no parent directory",
+        ))
+    })?;
 
     let temp_name = format!(
         ".tmp_update_{}",
@@ -573,12 +568,18 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nuncio-x86_64-
             header.set_mode(0o755);
             header.set_cksum();
 
-            builder.append_data(&mut header, "nuncio-cli", &data[..]).unwrap();
+            builder
+                .append_data(&mut header, "nuncio-cli", &data[..])
+                .unwrap();
             builder.finish().unwrap();
         }
 
-        let extracted = extract_binary(&tar_bytes, "nuncio-cli", "nuncio-x86_64-unknown-linux-gnu.tar.gz")
-            .expect("extraction succeeds");
+        let extracted = extract_binary(
+            &tar_bytes,
+            "nuncio-cli",
+            "nuncio-x86_64-unknown-linux-gnu.tar.gz",
+        )
+        .expect("extraction succeeds");
         assert_eq!(extracted, b"binary content payload");
     }
 
@@ -592,13 +593,18 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nuncio-x86_64-
         {
             let cursor = std::io::Cursor::new(&mut zip_bytes);
             let mut zip = ZipWriter::new(cursor);
-            zip.start_file("nuncio-cli.exe", SimpleFileOptions::default()).unwrap();
+            zip.start_file("nuncio-cli.exe", SimpleFileOptions::default())
+                .unwrap();
             zip.write_all(b"windows binary payload").unwrap();
             zip.finish().unwrap();
         }
 
-        let extracted = extract_binary(&zip_bytes, "nuncio-cli.exe", "nuncio-x86_64-pc-windows-msvc.zip")
-            .expect("zip extraction succeeds");
+        let extracted = extract_binary(
+            &zip_bytes,
+            "nuncio-cli.exe",
+            "nuncio-x86_64-pc-windows-msvc.zip",
+        )
+        .expect("zip extraction succeeds");
         assert_eq!(extracted, b"windows binary payload");
     }
 
@@ -641,8 +647,12 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nuncio-x86_64-
             .mount(&mock_server)
             .await;
 
-        let updater = UpdateEngine::with_base_url(format!("{}/releases/latest", mock_server.uri())).unwrap();
-        let result = updater.check_for_updates().await.expect("check updates succeeds");
+        let updater =
+            UpdateEngine::with_base_url(format!("{}/releases/latest", mock_server.uri())).unwrap();
+        let result = updater
+            .check_for_updates()
+            .await
+            .expect("check updates succeeds");
 
         assert!(result.update_available);
         assert_eq!(result.latest_version, "99.0.0");

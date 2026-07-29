@@ -43,7 +43,9 @@ impl FilterField {
             "account" | "account_id" => Some(Self::Account),
             _ if s_lower.starts_with("header[") && s_lower.ends_with(']') => {
                 let key = &s[7..s.len() - 1];
-                Some(Self::Header(key.trim_matches('\'').trim_matches('"').to_string()))
+                Some(Self::Header(
+                    key.trim_matches('\'').trim_matches('"').to_string(),
+                ))
             }
             _ => None,
         }
@@ -89,6 +91,8 @@ pub enum FilterOperator {
     LessThanOrEqual,
     /// In set (`IN`).
     In,
+    /// Not in set (`NOT IN`); the logical complement of `In`.
+    NotIn,
 }
 
 impl FilterOperator {
@@ -105,6 +109,7 @@ impl FilterOperator {
             Self::GreaterThanOrEqual => ">=",
             Self::LessThanOrEqual => "<=",
             Self::In => "IN",
+            Self::NotIn => "NOT IN",
         }
     }
 }
@@ -128,9 +133,18 @@ impl FilterValue {
         match self {
             Self::String(s) => format!("'{}'", s.replace('\'', "\\'")),
             Self::Number(n) => n.to_string(),
-            Self::Boolean(b) => if *b { "true".to_string() } else { "false".to_string() },
+            Self::Boolean(b) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
             Self::List(list) => {
-                let items: Vec<String> = list.iter().map(|s| format!("'{}'", s.replace('\'', "\\'"))).collect();
+                let items: Vec<String> = list
+                    .iter()
+                    .map(|s| format!("'{}'", s.replace('\'', "\\'")))
+                    .collect();
                 format!("({})", items.join(", "))
             }
         }
@@ -176,13 +190,20 @@ impl ConditionNode {
     /// Render condition tree as NSQL WHERE clause expression.
     pub fn to_nsql(&self) -> String {
         match self {
-            Self::Leaf(leaf) => format!("{} {} {}", leaf.field.to_nsql(), leaf.operator.to_nsql(), leaf.value.to_nsql()),
+            Self::Leaf(leaf) => format!(
+                "{} {} {}",
+                leaf.field.to_nsql(),
+                leaf.operator.to_nsql(),
+                leaf.value.to_nsql()
+            ),
             Self::And(nodes) => {
-                let parts: Vec<String> = nodes.iter().map(|n| format!("({})", n.to_nsql())).collect();
+                let parts: Vec<String> =
+                    nodes.iter().map(|n| format!("({})", n.to_nsql())).collect();
                 parts.join(" AND ")
             }
             Self::Or(nodes) => {
-                let parts: Vec<String> = nodes.iter().map(|n| format!("({})", n.to_nsql())).collect();
+                let parts: Vec<String> =
+                    nodes.iter().map(|n| format!("({})", n.to_nsql())).collect();
                 parts.join(" OR ")
             }
             Self::Not(node) => format!("NOT ({})", node.to_nsql()),
@@ -258,17 +279,17 @@ pub struct FilterRule {
 impl FilterRule {
     /// Check whether this rule matches a given target account.
     pub fn matches_account(&self, account_id: &str) -> bool {
-        if self.target_account == "*" || self.target_account == "%" || self.target_account.is_empty() {
+        if self.target_account == "*"
+            || self.target_account == "%"
+            || self.target_account.is_empty()
+        {
             return true;
         }
         if self.target_account.eq_ignore_ascii_case(account_id) {
             return true;
         }
         if self.target_account.contains('*') || self.target_account.contains('%') {
-            let pattern = self
-                .target_account
-                .replace('*', ".*")
-                .replace('%', ".*");
+            let pattern = self.target_account.replace(['*', '%'], ".*");
             if let Ok(re) = regex::Regex::new(&format!("(?i)^{pattern}$")) {
                 return re.is_match(account_id);
             }

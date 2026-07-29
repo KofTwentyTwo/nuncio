@@ -1,0 +1,21 @@
+[package]
+name = "nuncio-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nuncio-core = { path = "../../crates/nuncio-core" }
+nuncio-mail = { path = "../../crates/nuncio-mail" }
+nuncio-cal = { path = "../../crates/nuncio-cal" }
+nuncio-store = { path = "../../crates/nuncio-store" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,7 +1,7 @@
 //! CardDAV (vCard RFC 6350) contact sync and XML query parser.
 
-use serde::{Deserialize, Serialize};
 use crate::parser::CalendarError;
+use serde::{Deserialize, Serialize};
 
 /// Contact entity representation synced over CardDAV.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,7 +34,8 @@ impl CardDavClient {
         <d:getetag />
         <card:address-data />
     </d:prop>
-</card:addressbook-query>"#.to_string()
+</card:addressbook-query>"#
+            .to_string()
     }
 
     /// Parse raw vCard string into domain [`Contact`] entity.
@@ -66,7 +67,9 @@ impl CardDavClient {
         }
 
         if name.is_empty() && email.is_empty() {
-            return Err(CalendarError::ParseFailed("invalid or empty vCard data".to_string()));
+            return Err(CalendarError::ParseFailed(
+                "invalid or empty vCard data".to_string(),
+            ));
         }
 
         if name.is_empty() {
@@ -136,7 +139,9 @@ END:VCARD</card:address-data>
             </d:response>
         </d:multistatus>"#;
 
-        let contacts = client.parse_multistatus_response(xml).expect("parse multistatus");
+        let contacts = client
+            .parse_multistatus_response(xml)
+            .expect("parse multistatus");
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].name, "Alice Dev");
     }

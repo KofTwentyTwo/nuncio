@@ -1,0 +1,718 @@
+syntax = "proto3";
+
+package nuncio.v1;
+
+// System service exposes daemon-level introspection RPCs.
+//
+// This is the foundation of the versioned gRPC API (see
+// docs/adr/0001-engine-first-grpc-architecture.md). Additional services and
+// RPCs will be added under the `nuncio.v1` package incrementally; breaking
+// changes will be introduced under a new `nuncio.v2` package rather than
+// mutating this one.
+//
+// `Subscribe` is deliberately defined on THIS service (rather than a separate
+// one) so that it is automatically covered by the same server-side bearer
+// auth interceptor that guards `GetStatus`, instead of risking a second,
+// un-intercepted service being mounted by mistake.
+service System {
+  // GetStatus reports basic daemon/engine health information.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  // Subscribe opens a live, server-streaming push feed of daemon domain
+  // events (see `nuncio_core::CoreEvent`) for the lifetime of the call. The
+  // stream ends when the client disconnects or the daemon's event bus is
+  // shut down.
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+}
+
+// GetStatusRequest currently carries no parameters. Fields may be added
+// here later (e.g. requested detail level).
+message GetStatusRequest {}
+
+// GetStatusResponse reports the current health and build identity of the
+// running nunciod engine.
+message GetStatusResponse {
+  // Human-readable engine status (e.g. "ok", "degraded").
+  string engine_status = 1;
+  // The nunciod build/crate version serving this response.
+  string version = 2;
+}
+
+// SubscribeRequest currently carries no parameters. Fields may be added
+// here later (e.g. event-kind filtering).
+message SubscribeRequest {}
+
+// Event faithfully mirrors `nuncio_core::CoreEvent`: exactly one variant
+// message is populated per event, carrying that variant's fields. New
+// `CoreEvent` variants MUST be added here as a new oneof case (never by
+// repurposing an existing field number) to keep the wire contract stable.
+message Event {
+  oneof kind {
+    SyncStarted sync_started = 1;
+    SyncCompleted sync_completed = 2;
+    MessageFlagsChanged message_flags_changed = 3;
+    FilterExecuted filter_executed = 4;
+    BatchFilterProgress batch_filter_progress = 5;
+    DatabaseRecovered database_recovered = 6;
+    UpdateAvailable update_available = 7;
+    EventError error = 8;
+    ShuttingDown shutting_down = 9;
+  }
+}
+
+// Mirrors `CoreEvent::SyncStarted`.
+message SyncStarted {
+  // Account ID if scoped to a specific account; absent when synchronizing
+  // all accounts.
+  optional string account_id = 1;
+}
+
+// Mirrors `CoreEvent::SyncCompleted`.
+message SyncCompleted {
+  // Account ID if scoped to a specific account; absent when synchronizing
+  // all accounts.
+  optional string account_id = 1;
+}
+
+// Mirrors `CoreEvent::MessageFlagsChanged`.
+message MessageFlagsChanged {
+  // Message identifier.
+  string message_id = 1;
+  // New read state.
+  bool read = 2;
+}
+
+// Mirrors `CoreEvent::FilterExecuted`.
+message FilterExecuted {
+  // Filter rule identifier.
+  string rule_id = 1;
+  // Email message identifier.
+  string message_id = 2;
+  // Action description.
+  string action_taken = 3;
+}
+
+// Mirrors `CoreEvent::BatchFilterProgress`.
+message BatchFilterProgress {
+  // Messages processed so far in the batch.
+  uint64 processed = 1;
+  // Total message count in batch.
+  uint64 total = 2;
+  // Total matching rule executions.
+  uint64 matched = 3;
+}
+
+// Mirrors `CoreEvent::DatabaseRecovered`.
+message DatabaseRecovered {
+  // Forensic backup path.
+  string backup_path = 1;
+  // Number of filter rules salvaged from corrupted DB.
+  uint64 salvaged_rules_count = 2;
+  // Whether automated resync was triggered.
+  bool resync_triggered = 3;
+}
+
+// Mirrors `CoreEvent::UpdateAvailable`.
+message UpdateAvailable {
+  // Latest available release version (e.g. "0.2.0").
+  string version = 1;
+  // Release notes / changelog.
+  string release_notes = 2;
+}
+
+// Mirrors `CoreEvent::Error`. Named `EventError` (rather than `Error`) to
+// avoid colliding with the `Error` trait/derive macro name that is
+// ubiquitous in hand-written Rust using this generated module.
+message EventError {
+  // Error message text.
+  string message = 1;
+}
+
+// Mirrors `CoreEvent::ShuttingDown`, which carries no fields.
+message ShuttingDown {}
+
+// Accounts manages persisted mail/calendar account configurations.
+//
+// SECURITY: this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards `System` -- every gRPC service `nunciod`
+// exposes MUST be authenticated, with no exceptions carved out for "just one
+// more" unauthenticated service. See `nunciod::grpc::serve_on_listener`.
+service Accounts {
+  // AddAccount persists a new account configuration to the daemon's
+  // database and stores its password credential in the OS keyring vault.
+  // The password is NEVER written to the database and NEVER echoed back.
+  rpc AddAccount(AddAccountRequest) returns (AddAccountResponse);
+  // ListAccounts returns every persisted account configuration. Password
+  // credentials are NEVER included in this response.
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+}
+
+// Mirrors `nuncio_core::AccountProtocol`.
+enum AccountProtocol {
+  ACCOUNT_PROTOCOL_UNSPECIFIED = 0;
+  ACCOUNT_PROTOCOL_JMAP = 1;
+  ACCOUNT_PROTOCOL_IMAP_SMTP = 2;
+}
+
+// Mirrors `nuncio_core::TlsMode`.
+enum TlsMode {
+  TLS_MODE_UNSPECIFIED = 0;
+  TLS_MODE_IMPLICIT_TLS = 1;
+  TLS_MODE_START_TLS = 2;
+  TLS_MODE_PLAIN = 3;
+}
+
+// Mirrors `nuncio_core::AccountConfig` field-for-field, MINUS the password
+// credential: this message is used both as the request payload (alongside
+// a separate `password` field) and as the response payload of
+// `ListAccounts`, and the password MUST NEVER appear in the latter.
+message AccountConfig {
+  // Unique identifier for the account configuration.
+  string id = 1;
+  // User-friendly display name (e.g. "Work Mail").
+  string name = 2;
+  // Primary email address associated with the account.
+  string email_address = 3;
+  // Protocol engine type.
+  AccountProtocol protocol = 4;
+  // Server hostname or IP address (IMAP/JMAP).
+  string server_host = 5;
+  // Server port number (1..=65535) (IMAP/JMAP).
+  uint32 server_port = 6;
+  // Whether TLS connection encryption is enabled.
+  bool use_tls = 7;
+  // IMAP connection security transport mode.
+  TlsMode imap_tls_mode = 8;
+  // SMTP connection security transport mode.
+  TlsMode smtp_tls_mode = 9;
+  // Keyring entry key used to retrieve OS vault credentials.
+  string keyring_secret_key = 10;
+  // Background sync polling interval in seconds (minimum 10s).
+  uint64 sync_interval_secs = 11;
+  // SMTP server hostname or IP address, used for outbound mail. Distinct
+  // from `server_host` because a mail provider's inbound (IMAP/JMAP) and
+  // outbound (SMTP) endpoints commonly differ.
+  string smtp_host = 12;
+  // SMTP server port number (1..=65535), used for outbound mail.
+  uint32 smtp_port = 13;
+}
+
+// AddAccountRequest carries the full account configuration plus the raw
+// password credential. `password` is written ONLY to the OS keyring vault
+// (under `config.keyring_secret_key`) by the daemon -- it is never persisted
+// to SQLite, never logged, and never echoed back in `AddAccountResponse`.
+message AddAccountRequest {
+  AccountConfig config = 1;
+  string password = 2;
+}
+
+// AddAccountResponse deliberately carries only the persisted account's id,
+// never the password nor the full config (callers already have both).
+message AddAccountResponse {
+  string id = 1;
+}
+
+// ListAccountsRequest currently carries no parameters.
+message ListAccountsRequest {}
+
+// ListAccountsResponse. `accounts` MUST NEVER contain password credentials
+// -- see `AccountConfig`'s doc comment.
+message ListAccountsResponse {
+  repeated AccountConfig accounts = 1;
+}
+
+// Mail exposes the READ path over the daemon's real, persistent message
+// store (the data that syncs in via `DatabaseEngine::save_email`).
+//
+// SECURITY: this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards `System` and `Accounts` -- every gRPC
+// service `nunciod` exposes MUST be authenticated, with no exceptions
+// carved out for "just one more" unauthenticated service. See
+// `nunciod::grpc::serve_on_listener`.
+service Mail {
+  // ListFolders returns every mailbox folder known to the store, with
+  // total/unread message counts.
+  rpc ListFolders(ListFoldersRequest) returns (ListFoldersResponse);
+  // ListMessages returns messages in a single folder, newest first, capped
+  // at `limit`.
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+  // GetMessage returns a single message by ID, including its (decrypted)
+  // body.
+  rpc GetMessage(GetMessageRequest) returns (GetMessageResponse);
+  // MarkRead updates a message's read/unread flag.
+  rpc MarkRead(MarkReadRequest) returns (MarkReadResponse);
+  // SearchMessages runs a full-text (FTS5) search over cached message
+  // subjects, senders, and bodies.
+  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+  // SendMessage composes and sends a real outbound email over SMTP, built
+  // from the configured account's SMTP endpoint
+  // (`AccountConfig.smtp_host`/`smtp_port`) and its keyring-stored
+  // password. Returns successfully ONLY when
+  // the SMTP transport genuinely accepted the message for delivery --
+  // never a fabricated success. A transport/authentication failure surfaces
+  // as a `Status::internal` (or `Status::invalid_argument` for a malformed
+  // request) error, never a fabricated `SendMessageResponse`.
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  // Sync triggers a real inbound mail synchronization: fetches folders and
+  // messages from the account's real mail backend and persists them via
+  // the store, exactly as `nunciod`'s internal sync command loop does,
+  // EXCEPT this awaits full completion before returning -- a successful
+  // response guarantees the synced messages are already visible to
+  // `ListMessages`/`GetMessage`. This is the authenticated, over-the-wire
+  // replacement for reaching into daemon internals to trigger a sync.
+  rpc Sync(SyncRequest) returns (SyncResponse);
+}
+
+// Mirrors `nuncio_core::model::Attachment`.
+message Attachment {
+  // Attachment filename.
+  string filename = 1;
+  // MIME content type (e.g. "application/pdf").
+  string mime_type = 2;
+  // Raw attachment content buffer.
+  bytes content = 3;
+}
+
+// Mirrors `nuncio_core::model::Email` field-for-field. Named `Message`
+// (rather than `Email`) to avoid colliding with common generated-code
+// identifiers in hand-written Rust using this module.
+message Message {
+  // Unique message identifier.
+  string id = 1;
+  // Account identifier owning the message.
+  string account_id = 2;
+  // Mailbox folder identifier (e.g. "inbox").
+  string folder_id = 3;
+  // Subject line.
+  string subject = 4;
+  // Sender address.
+  string sender = 5;
+  // Recipient address.
+  string recipient = 6;
+  // Unix timestamp of message arrival.
+  int64 received_at = 7;
+  // Read/unread flag status.
+  bool read = 8;
+  // Plaintext message body (already decrypted by the store).
+  optional string body_plain = 9;
+  // HTML message body (already decrypted by the store).
+  optional string body_html = 10;
+  // List of attached files.
+  repeated Attachment attachments = 11;
+}
+
+// Mirrors `nuncio_core::model::Folder`.
+message Folder {
+  // Folder identifier.
+  string id = 1;
+  // Folder display name.
+  string name = 2;
+  // Total message count.
+  uint64 total_messages = 3;
+  // Unread message count.
+  uint64 unread_messages = 4;
+}
+
+// ListFoldersRequest currently carries no parameters.
+message ListFoldersRequest {}
+
+// ListFoldersResponse.
+message ListFoldersResponse {
+  repeated Folder folders = 1;
+}
+
+// ListMessagesRequest. `limit` caps the number of messages returned
+// (newest first); a value of 0 means "use the server's default limit".
+message ListMessagesRequest {
+  // Mailbox folder identifier (e.g. "inbox").
+  string folder_id = 1;
+  // Maximum number of messages to return; 0 means "server default".
+  uint32 limit = 2;
+}
+
+// ListMessagesResponse.
+message ListMessagesResponse {
+  repeated Message messages = 1;
+}
+
+// GetMessageRequest.
+message GetMessageRequest {
+  // Unique message identifier.
+  string message_id = 1;
+}
+
+// GetMessageResponse.
+message GetMessageResponse {
+  Message message = 1;
+}
+
+// MarkReadRequest.
+message MarkReadRequest {
+  // Unique message identifier.
+  string message_id = 1;
+  // Desired read state.
+  bool read = 2;
+}
+
+// MarkReadResponse currently carries no parameters; a successful RPC
+// response (as opposed to a `Status` error) is confirmation enough.
+message MarkReadResponse {}
+
+// SearchMessagesRequest.
+message SearchMessagesRequest {
+  // Full-text search query string.
+  string query = 1;
+}
+
+// Mirrors `nuncio_store::search::SearchHit`.
+message MessageSearchHit {
+  // Matching message ID.
+  string id = 1;
+  // Matching subject/title.
+  string title = 2;
+  // Text snippet matching the search term.
+  string snippet = 3;
+}
+
+// SearchMessagesResponse.
+message SearchMessagesResponse {
+  repeated MessageSearchHit hits = 1;
+}
+
+// SendMessageRequest carries a composed outbound email. The sending
+// account's own address is used as the `From:` header -- it is resolved
+// server-side from the configured account, never supplied by the caller.
+message SendMessageRequest {
+  // Recipient email address.
+  string to = 1;
+  // Optional CC recipient email address.
+  optional string cc = 2;
+  // Message subject line.
+  string subject = 3;
+  // Plaintext message body.
+  string body_text = 4;
+  // Optional HTML message body.
+  optional string body_html = 5;
+  // Optional file attachments.
+  repeated Attachment attachments = 6;
+}
+
+// SendMessageResponse. A successful response means the SMTP transport
+// genuinely accepted the message for delivery -- never a fabricated
+// success (see `Mail.SendMessage`'s doc comment).
+message SendMessageResponse {
+  // Daemon-generated identifier for the sent message, for reference in
+  // logs/output. NOT a persisted message id -- outbound sends are not
+  // written back into the synced message store by this RPC.
+  string message_id = 1;
+}
+
+// SyncRequest. `account_id` mirrors `CoreCommand::SyncAccount`/`SyncAll`:
+// absent/empty means synchronize every configured account; set means
+// synchronize just that one account.
+message SyncRequest {
+  optional string account_id = 1;
+}
+
+// SyncResponse reports how many messages were synchronized.
+message SyncResponse {
+  uint64 synced_count = 1;
+}
+
+// Filters exposes the NSQL filter engine's rule CRUD, validation, and
+// dry-run preview operations over gRPC -- the authenticated replacement
+// for the existing hand-rolled `filter.*` JSON-RPC IPC methods
+// (`nunciod::main`'s `CustomRpcHandler`), which remain in place (both
+// transports coexist) until they are retired.
+//
+// This faithfully exposes the filter engine as it exists today, including
+// its known correctness gaps (e.g. `target_account`/`ON ACCOUNT` matching
+// against `folder_id` rather than the message's actual account field) --
+// fixing those is out of scope here.
+//
+// SECURITY: this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards `System`/`Accounts`/`Mail` -- every
+// gRPC service `nunciod` exposes MUST be authenticated, with no exceptions
+// carved out for "just one more" unauthenticated service. See
+// `nunciod::grpc::serve_on_listener`.
+service Filters {
+  // CreateRule parses and validates an NSQL rule definition, then persists
+  // it and reloads the daemon's live `FilterEngine` rule set (via its
+  // `ArcSwap`-backed hot-reload) so the new rule is active immediately.
+  // Rejects a syntactically or semantically invalid rule with
+  // `Status::invalid_argument` -- nothing is ever persisted on failure.
+  rpc CreateRule(CreateRuleRequest) returns (CreateRuleResponse);
+  // ListRules returns every persisted filter rule, priority ascending.
+  rpc ListRules(ListRulesRequest) returns (ListRulesResponse);
+  // DeleteRule removes a persisted filter rule by ID and reloads the
+  // daemon's live `FilterEngine` rule set so the removal takes effect
+  // immediately.
+  rpc DeleteRule(DeleteRuleRequest) returns (DeleteRuleResponse);
+  // ValidateRule parses and runs the 6-pass `NsqlValidator` audit against
+  // an NSQL rule definition WITHOUT persisting it. Unlike `CreateRule`,
+  // an invalid rule is NOT an RPC failure: it is the expected, honestly
+  // reported result carried in `ValidateRuleResponse.valid`/`error`.
+  rpc ValidateRule(ValidateRuleRequest) returns (ValidateRuleResponse);
+  // PreviewRule dry-run evaluates an ad hoc, NOT-yet-persisted NSQL rule
+  // definition against a stored message (by `message_id`) -- or, if none is
+  // given, a synthetic sample message -- using `FilterEngine::preview`'s
+  // existing dry-run evaluation path. Never persists the rule and never
+  // executes any of its actions.
+  rpc PreviewRule(PreviewRuleRequest) returns (PreviewRuleResponse);
+}
+
+// FilterRule mirrors `nuncio_filter::FilterRule`'s persisted/user-facing
+// fields. The parsed condition AST is intentionally NOT mirrored here --
+// `nsql_text` is the single source of truth, and re-parsing it via
+// `NsqlParser::parse_rule` deterministically reconstructs the identical AST,
+// so there is no independent state to carry over the wire. `actions` is the
+// NSQL-rendered form (`RuleAction::to_nsql`) of the rule's parsed action
+// list, included for display purposes.
+message FilterRule {
+  // Rule unique identifier.
+  string id = 1;
+  // Rule display name.
+  string name = 2;
+  // Target account pattern ("*" for all accounts, an exact address, or a
+  // wildcard like "%@kof22.com").
+  string target_account = 3;
+  // Rule evaluation order (0 = highest).
+  int32 priority = 4;
+  // Active flag.
+  bool enabled = 5;
+  // Full NSQL source code text.
+  string nsql_text = 6;
+  // Rendered NSQL action clauses (e.g. "MOVE TO 'Archive'"), derived from
+  // the parsed AST.
+  repeated string actions = 7;
+  // Creation timestamp (unix seconds).
+  int64 created_at = 8;
+  // Last update timestamp (unix seconds).
+  int64 updated_at = 9;
+}
+
+// CreateRuleRequest carries a new rule's display name, full NSQL source
+// text, and evaluation priority.
+message CreateRuleRequest {
+  // Display name for the rule.
+  string name = 1;
+  // Full NSQL source code text (may include an `ON ACCOUNT` clause and
+  // `ACTION` clause).
+  string nsql = 2;
+  // Evaluation order (0 = highest).
+  int32 priority = 3;
+}
+
+// CreateRuleResponse carries the persisted rule, including its
+// daemon-assigned `id` and timestamps.
+message CreateRuleResponse {
+  FilterRule rule = 1;
+}
+
+// ListRulesRequest currently carries no parameters.
+message ListRulesRequest {}
+
+// ListRulesResponse.
+message ListRulesResponse {
+  repeated FilterRule rules = 1;
+}
+
+// DeleteRuleRequest.
+message DeleteRuleRequest {
+  // Rule unique identifier.
+  string id = 1;
+}
+
+// DeleteRuleResponse currently carries no parameters; a successful RPC
+// response (as opposed to a `Status` error) is confirmation enough.
+message DeleteRuleResponse {}
+
+// ValidateRuleRequest carries only the raw NSQL source text -- validation
+// never persists anything, so no name/priority/id is needed.
+message ValidateRuleRequest {
+  string nsql = 1;
+}
+
+// ValidateRuleResponse. `valid == false` is an ordinary, successfully
+// returned result (never a `Status` error) carrying the honest parse or
+// `NsqlValidator` failure message in `error`.
+message ValidateRuleResponse {
+  // Whether `nsql` parsed AND passed every `NsqlValidator` pass.
+  bool valid = 1;
+  // Empty when `valid` is true; otherwise the parse or validation error
+  // message.
+  string error = 2;
+}
+
+// PreviewRuleRequest carries an ad hoc, NOT-yet-persisted NSQL rule
+// definition to dry-run evaluate. `message_id` optionally names a stored
+// message to evaluate against (looked up via the same store `Mail/
+// GetMessage` reads); when absent (or when `message_id` does not resolve to
+// a stored message), a fixed synthetic sample message is evaluated instead,
+// so this RPC can always return a result.
+message PreviewRuleRequest {
+  // Full NSQL source code text of the rule to preview.
+  string nsql = 1;
+  // Optional stored message id to evaluate the rule against.
+  optional string message_id = 2;
+}
+
+// PreviewRuleResponse mirrors `nuncio_filter::FilterPreviewResult`
+// field-for-field, except `actions_evaluated` is rendered as NSQL strings
+// (`RuleAction::to_nsql`) rather than a structured action AST.
+message PreviewRuleResponse {
+  // Evaluated message id (either the requested `message_id`, or the
+  // synthetic sample message's fixed id when none was given/resolvable).
+  string message_id = 1;
+  // Whether the previewed rule matched the evaluated message.
+  bool matched = 2;
+  // Present only when `matched` is true.
+  optional string matched_rule_id = 3;
+  // Present only when `matched` is true.
+  optional string matched_rule_name = 4;
+  // NSQL-rendered actions that would be executed on a real match.
+  repeated string actions_evaluated = 5;
+  // Evaluation duration in microseconds.
+  uint64 execution_time_us = 6;
+  // Human-readable step-by-step match traces.
+  repeated string condition_traces = 7;
+}
+
+// Export exposes the daemon's real mailbox export engine
+// (`nuncio_core::export`, via `DatabaseEngine::export_messages_to_file`)
+// over authenticated gRPC. The daemon and its caller run on the SAME host
+// (a local, single-machine deployment), so writing the export to a
+// filesystem path on that shared host -- rather than streaming potentially
+// very large export bytes back over the RPC itself -- is both simpler and
+// honest about where the data actually ends up.
+//
+// SECURITY: this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards `System`/`Accounts`/`Mail`/`Filters`
+// -- every gRPC service `nunciod` exposes MUST be authenticated, with no
+// exceptions carved out for "just one more" unauthenticated service. See
+// `nunciod::grpc::serve_on_listener`.
+service Export {
+  // ExportMailbox writes every message in `scope` to `output_path` in
+  // `format`, using the real `nuncio_core::export::ExportEngine`. Returns
+  // real message/byte counts read back from the file actually written --
+  // never fabricated. Also appends a WORM audit record for the export (see
+  // `Audit`).
+  rpc ExportMailbox(ExportRequest) returns (ExportResponse);
+}
+
+// Mirrors `nuncio_core::export::ExportFormat`.
+enum ExportFormat {
+  EXPORT_FORMAT_UNSPECIFIED = 0;
+  // RFC 4155 MBOX format (.mbox).
+  EXPORT_FORMAT_MBOX = 1;
+  // Zip archive of individual .eml MIME files (.zip).
+  EXPORT_FORMAT_EML_ZIP = 2;
+  // Structured JSON array (.json).
+  EXPORT_FORMAT_JSON = 3;
+  // JSON Lines, one message per line (.jsonl).
+  EXPORT_FORMAT_JSONL = 4;
+}
+
+// ExportRequest. `scope` selects which messages to export -- absent (no
+// oneof case set) means every message across every account and folder;
+// setting `account_id` or `folder_id` narrows the export to just that
+// account's or that folder's messages. These are the only scopes the store
+// can currently filter export by -- there is deliberately no broader query
+// scope here (e.g. an arbitrary NSQL filter) since the underlying store has
+// no such filtered read path to back one honestly.
+message ExportRequest {
+  oneof scope {
+    // Restrict the export to a single account's messages.
+    string account_id = 1;
+    // Restrict the export to a single folder's messages.
+    string folder_id = 2;
+  }
+  // Export output format.
+  ExportFormat format = 3;
+  // Absolute filesystem path to write the export to, on the SAME host the
+  // `nunciod` daemon runs on (see `Export`'s doc comment).
+  string output_path = 4;
+}
+
+// ExportResponse reports the REAL result of writing `output_path` -- never
+// a fabricated count.
+message ExportResponse {
+  // The path written to (echoes `ExportRequest.output_path`).
+  string output_path = 1;
+  // Number of messages actually written.
+  uint64 message_count = 2;
+  // Total bytes actually written to `output_path`.
+  uint64 bytes_written = 3;
+}
+
+// Audit exposes the daemon's real WORM (Write Once, Read Many) HMAC-chained
+// tamper-evident audit ledger (`nuncio_core::worm_audit`, via
+// `DatabaseEngine`'s `worm_audit_records` table) over authenticated gRPC.
+// This is a read/verify-only surface -- there is deliberately no RPC to
+// create or mutate records here, since the ledger is written internally by
+// the daemon as a side effect of other operations (e.g.
+// `Export.ExportMailbox`) and the underlying SQLite table itself rejects
+// `UPDATE`/`DELETE` at the schema level.
+//
+// SECURITY: this service MUST be mounted behind the SAME
+// `BearerAuthInterceptor` that guards every other service `nunciod`
+// exposes -- see `nunciod::grpc::serve_on_listener`.
+service Audit {
+  // ListRecords returns a page of the real, persisted WORM audit ledger,
+  // sequence ascending.
+  rpc ListRecords(ListRecordsRequest) returns (ListRecordsResponse);
+  // VerifyChain re-verifies the ENTIRE persisted WORM audit ledger's
+  // HMAC hash-chain integrity, using the ledger's real WORM HMAC key
+  // (provisioned once from the OS keyring vault at daemon startup). Never
+  // fabricates `valid: true`.
+  rpc VerifyChain(VerifyChainRequest) returns (VerifyChainResponse);
+}
+
+// AuditRecord mirrors `nuncio_core::WormAuditRecord` field-for-field.
+// `record_hmac` is this record's verification MAC (a derived signature
+// output), NOT secret key material -- the WORM HMAC signing key itself is
+// never exposed over this or any other RPC.
+message AuditRecord {
+  // Monotonically increasing sequence index.
+  uint64 sequence = 1;
+  // UTC timestamp in nanoseconds since Unix epoch.
+  int64 timestamp_ns = 2;
+  // Subsystem or actor that performed the audited action.
+  string actor = 3;
+  // Action identifier (e.g. "data.export").
+  string action = 4;
+  // SHA-256 hash of the audited payload.
+  string data_hash = 5;
+  // Previous record's HMAC signature ("GENESIS" for sequence 1).
+  string previous_block_hash = 6;
+  // HMAC-SHA256 signature sealing this record.
+  string record_hmac = 7;
+}
+
+// ListRecordsRequest. `limit` caps the number of records returned
+// (sequence ascending); a value of 0 means "use the server's default
+// limit".
+message ListRecordsRequest {
+  uint32 limit = 1;
+  uint32 offset = 2;
+}
+
+// ListRecordsResponse.
+message ListRecordsResponse {
+  repeated AuditRecord records = 1;
+}
+
+// VerifyChainRequest currently carries no parameters.
+message VerifyChainRequest {}
+
+// VerifyChainResponse reports the REAL result of re-verifying the entire
+// persisted WORM audit ledger's hash chain -- never a fabricated `valid`.
+message VerifyChainResponse {
+  // Whether every persisted record's HMAC AND inter-record chain linkage
+  // verified.
+  bool valid = 1;
+  // Total number of records checked.
+  uint64 record_count = 2;
+  // Present only when `valid` is false: the sequence number of the first
+  // record whose HMAC or chain linkage failed to verify.
+  optional uint64 first_broken_seq = 3;
+}

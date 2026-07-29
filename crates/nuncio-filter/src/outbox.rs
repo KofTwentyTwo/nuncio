@@ -62,7 +62,12 @@ impl OutboxManager {
 fn uuid_simple() -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_le_bytes());
+    hasher.update(
+        chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
     hex::encode(&hasher.finalize()[..8])
 }
 
@@ -82,7 +87,12 @@ mod tests {
 
     #[test]
     fn test_create_mutation() {
-        let mut_item = OutboxManager::create_mutation("rule-1", "msg-100", "MOVE", Some("Archive".to_string()));
+        let mut_item = OutboxManager::create_mutation(
+            "rule-1",
+            "msg-100",
+            "MOVE",
+            Some("Archive".to_string()),
+        );
         assert_eq!(mut_item.rule_id, "rule-1");
         assert_eq!(mut_item.message_id, "msg-100");
         assert_eq!(mut_item.mutation_type, "MOVE");

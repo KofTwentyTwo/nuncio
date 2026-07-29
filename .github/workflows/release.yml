@@ -1,15 +1,13 @@
 name: Nuncio Multi-Platform Release Pipeline (Dev, RC, Prod)
 
 on:
+  # Releases are cut ONLY from version tags (vMAJOR.MINOR.PATCH), per the release
+  # policy (no public release until V3). Branch-push and nightly-cron triggers were
+  # removed during the pre-alpha rebuild: they ran on every dev push and failed
+  # (they build the presentation GUI now archived under _reference/).
   push:
-    branches:
-      - main
-      - rc
-      - dev
     tags:
       - 'v*'
-  schedule:
-    - cron: '0 0 * * *' # Daily Nightly Build at 00:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -54,8 +52,6 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/nuncio-cli dist/nuncio-cli
-          cp target/${{ matrix.target }}/release/nuncio-tui dist/nuncio-tui
-          cp target/${{ matrix.target }}/release/nuncio-mcp dist/nuncio-mcp
           cp target/${{ matrix.target }}/release/nunciod dist/nunciod
           tar -czf ${{ matrix.artifact_name }} -C dist .
 
@@ -65,8 +61,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist
           Copy-Item target/${{ matrix.target }}/release/nuncio-cli.exe dist/nuncio-cli.exe
-          Copy-Item target/${{ matrix.target }}/release/nuncio-tui.exe dist/nuncio-tui.exe
-          Copy-Item target/${{ matrix.target }}/release/nuncio-mcp.exe dist/nuncio-mcp.exe
           Copy-Item target/${{ matrix.target }}/release/nunciod.exe dist/nunciod.exe
           Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact_name }}
 
@@ -124,17 +118,16 @@ jobs:
           prerelease: ${{ steps.prep.outputs.is_prerelease == 'true' }}
           files: dist-final/*
           body: |
-            ## Nuncio Sovereign Mail, Calendar & Contacts Suite
+            ## Nuncio Engine (nunciod + nuncio-cli)
             **Release Channel**: ${{ steps.prep.outputs.channel }}
 
-            ### 📦 Official Installer & Package Downloads
-            - **Windows Installer**: `Nuncio_x64.msi` (WiX Installer) / `Nuncio_x64-setup.exe` (NSIS)
-            - **macOS Disk Image**: `Nuncio_x64.dmg` (Intel) / `Nuncio_aarch64.dmg` (Apple Silicon)
-            - **Linux Packages**: `Nuncio_amd64.AppImage` / `Nuncio_amd64.deb`
-            - **CLI & Daemon Archives**: `nuncio-x86_64-unknown-linux-gnu.tar.gz`, `nuncio-aarch64-apple-darwin.tar.gz`, `nuncio-x86_64-apple-darwin.tar.gz`, `nuncio-x86_64-pc-windows-msvc.zip`
+            ### 📦 Daemon & CLI Archives
+            - `nuncio-x86_64-unknown-linux-gnu.tar.gz`
+            - `nuncio-aarch64-apple-darwin.tar.gz`
+            - `nuncio-x86_64-apple-darwin.tar.gz`
+            - `nuncio-x86_64-pc-windows-msvc.zip`
 
-            ### 🚀 Package Managers
-            - **Homebrew Tap**: `brew install koftwentytwo/tap/nuncio`
-            - **Cargo Source**: `cargo install --git https://github.com/KofTwentyTwo/nuncio.git nuncio-cli nuncio-tui nuncio-mcp nunciod`
+            ### 🚀 Cargo Source
+            - `cargo install --git https://github.com/KofTwentyTwo/nuncio.git nuncio-cli nunciod`
 
             Verify payload hashes against `SHA256SUMS.txt`.

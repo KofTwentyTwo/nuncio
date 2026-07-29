@@ -140,18 +140,23 @@ impl JmapEngine {
     }
 
     /// Parse raw JMAP `Email/get` JSON response payload into domain [`Email`] list and new state string.
-    pub fn parse_email_get_response(&self, raw_json: &str) -> Result<(Vec<Email>, String), MailError> {
+    pub fn parse_email_get_response(
+        &self,
+        raw_json: &str,
+    ) -> Result<(Vec<Email>, String), MailError> {
         let val: Value = serde_json::from_str(raw_json)
             .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
 
         // Support both direct object and RFC 8620 methodCalls wrapper
-        let resp: JmapEmailGetResponse = if let Some(calls) = val.get("methodResponses").and_then(|v| v.as_array()) {
+        let resp: JmapEmailGetResponse = if let Some(calls) =
+            val.get("methodResponses").and_then(|v| v.as_array())
+        {
             let first_call = calls
                 .first()
                 .ok_or_else(|| MailError::ParseFailed("empty methodResponses array".to_string()))?;
-            let args = first_call
-                .get(1)
-                .ok_or_else(|| MailError::ParseFailed("missing method response payload".to_string()))?;
+            let args = first_call.get(1).ok_or_else(|| {
+                MailError::ParseFailed("missing method response payload".to_string())
+            })?;
             serde_json::from_value(args.clone())
                 .map_err(|e| MailError::ParseFailed(format!("invalid Email/get payload: {e}")))?
         } else {
@@ -204,19 +209,22 @@ impl JmapEngine {
         let val: Value = serde_json::from_str(raw_json)
             .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
 
-        let resp: JmapEmailChangesResponse = if let Some(calls) = val.get("methodResponses").and_then(|v| v.as_array()) {
-            let first_call = calls
-                .first()
-                .ok_or_else(|| MailError::ParseFailed("empty methodResponses array".to_string()))?;
-            let args = first_call
-                .get(1)
-                .ok_or_else(|| MailError::ParseFailed("missing method response payload".to_string()))?;
-            serde_json::from_value(args.clone())
-                .map_err(|e| MailError::ParseFailed(format!("invalid Email/changes payload: {e}")))?
-        } else {
-            serde_json::from_value(val)
-                .map_err(|e| MailError::ParseFailed(format!("invalid Email/changes payload: {e}")))?
-        };
+        let resp: JmapEmailChangesResponse =
+            if let Some(calls) = val.get("methodResponses").and_then(|v| v.as_array()) {
+                let first_call = calls.first().ok_or_else(|| {
+                    MailError::ParseFailed("empty methodResponses array".to_string())
+                })?;
+                let args = first_call.get(1).ok_or_else(|| {
+                    MailError::ParseFailed("missing method response payload".to_string())
+                })?;
+                serde_json::from_value(args.clone()).map_err(|e| {
+                    MailError::ParseFailed(format!("invalid Email/changes payload: {e}"))
+                })?
+            } else {
+                serde_json::from_value(val).map_err(|e| {
+                    MailError::ParseFailed(format!("invalid Email/changes payload: {e}"))
+                })?
+            };
 
         Ok((resp.updated, resp.destroyed, resp.new_state))
     }

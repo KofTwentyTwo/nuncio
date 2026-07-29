@@ -38,7 +38,10 @@ impl CardDavClient {
     }
 
     pub async fn fetch_remote_vcards(&self) -> Result<Vec<Contact>, CardDavError> {
-        info!("Initiating CardDAV PROPFIND fetch from {}", self.config.carddav_url);
+        info!(
+            "Initiating CardDAV PROPFIND fetch from {}",
+            self.config.carddav_url
+        );
         // Returns mock or parsed remote vcards for CardDAV endpoint
         let sample_contact = Contact::new("Google CardDAV Sync Contact", "carddav.sync@nuncio.mx");
         Ok(vec![sample_contact])
