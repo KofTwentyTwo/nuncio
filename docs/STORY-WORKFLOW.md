@@ -21,9 +21,11 @@ implement; the PO reviews and merges. Do not merge your own work.
 A story is done only when **all** of these hold:
 1. **engine + proto (if the API surface changes) + CLI command + offline E2E test
    exist together** and prove the capability end to end.
-2. `cargo verify` is green — that is `cargo fmt --all -- --check`,
+2. The full local gate is green — that is `cargo fmt --all -- --check`,
    `cargo check-all` (clippy `--all-targets --workspace -D warnings`, **zero**
-   warnings), and `cargo test-all` (`cargo test --workspace`). **0 ignored tests.**
+   warnings), and `cargo test-all` (`cargo test --workspace`), run as three
+   separate commands (there is no combined `cargo verify` alias — Cargo aliases
+   can't chain subcommands). **0 ignored tests.**
 3. **No fabricated success.** A path that cannot do the real thing returns an
    honest `Unimplemented`/error — never canned data, never a fake "sent"/"ok".
    (Anti-pattern to never imitate: a client that logs "fetching…" and returns a
@@ -86,9 +88,10 @@ proto story is open. Non-proto stories (engine-only, CLI-only) can run in parall
 2. TDD where practical. Keep commits Conventional (`feat(scope): …`,
    `fix(scope): …`), imperative, <72-char subject, **no AI attribution**, no
    issue refs in code (a `Refs #NNN` in the commit message is fine).
-3. Before pushing, make `cargo verify` green. The pre-commit hook enforces it.
+3. Before pushing, make sure `cargo fmt --all -- --check`, `cargo check-all`, and
+   `cargo test-all` are all green. The pre-commit hook enforces this.
 4. Open a **PR to `dev`** (never to `main`). In the PR body: link the issue,
-   summarize what you built, **paste the gate output** (`cargo verify` result +
+   summarize what you built, **paste the gate output** (fmt/clippy/test results +
    test counts) as evidence, and list any decisions or follow-ups. If you found a
    real bug outside your scope, **file a new issue** — do not silently fix or
    ignore it.

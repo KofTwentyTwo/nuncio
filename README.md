@@ -52,9 +52,12 @@ repositories (roadmap Phase 5).
 cargo build --workspace          # build everything
 cargo check-all                  # clippy, all targets, warnings-as-errors (the gate)
 cargo test-all                   # run the whole test suite
-cargo verify                     # fmt --check + check-all + test-all
 cargo test -p nuncio-store       # test a single crate
 ```
+
+There is no `cargo verify` alias (Cargo aliases can't chain subcommands). Run the
+full local gate as three separate commands — `cargo fmt --all -- --check`,
+`cargo check-all`, `cargo test-all` — which is exactly what the pre-commit hook runs.
 
 Cargo aliases are defined in [`.cargo/config.toml`](.cargo/config.toml).
 

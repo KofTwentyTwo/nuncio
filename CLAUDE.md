@@ -60,7 +60,16 @@ Cargo aliases (defined in `.cargo/config.toml`):
 cargo check-all   # = clippy --all-targets --workspace -- -D warnings   (the lint gate)
 cargo test-all    # = test --workspace
 cargo cov         # = llvm-cov --workspace --ignore-filename-regex main.rs --summary-only  (informational; needs cargo-llvm-cov)
-cargo verify      # = fmt --all --check + check-all + test-all
+```
+
+There is no `cargo verify` alias — Cargo aliases are a single command's argv and
+cannot chain subcommands. Run the full gate as three separate commands (this is
+exactly what the pre-commit hook runs):
+
+```bash
+cargo fmt --all -- --check
+cargo check-all
+cargo test-all
 ```
 
 Common commands:
@@ -92,7 +101,9 @@ A shared RustRover setup lives in `.idea/` (the useful parts are tracked;
   - *Run nunciod (daemon)* — start the daemon.
   - *Run nuncio-cli (system status)* — drive it (start the daemon first).
   - *Cargo Build Release (daemon + CLI)* — `cargo build-release`.
-  - *Cargo Check All* · *Cargo Test All* · *Cargo Verify (fmt + clippy + tests)* — the gates.
+  - *Cargo Check All* · *Cargo Test All* — the gates (run `cargo fmt --all -- --check`
+    separately; there is no combined run configuration, since Cargo aliases and
+    RustRover run configurations can't chain subcommands).
   - *Cargo Coverage* — informational `llvm-cov` (needs `cargo-llvm-cov` installed).
 - Tip: set Clippy as the external linter (Settings → Rust → External Linters) so the
   editor mirrors the `-D warnings` gate.

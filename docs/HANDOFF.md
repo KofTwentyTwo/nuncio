@@ -6,7 +6,8 @@ machine (or a new LLM) picks up the work cold.
 
 ## TL;DR
 1. `git checkout dev` — the canonical branch (Phases 0–2 done + the roadmap). It is
-   green under the pinned toolchain (1.97.1); `cargo verify` passes.
+   green under the pinned toolchain (1.97.1); `cargo fmt --all -- --check`,
+   `cargo check-all`, and `cargo test-all` all pass.
 2. Read, in order: [`CLAUDE.md`](../CLAUDE.md), [`docs/ROADMAP.md`](ROADMAP.md),
    [`docs/STORY-WORKFLOW.md`](STORY-WORKFLOW.md),
    [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
@@ -61,7 +62,10 @@ commit/push, review-before-close, honest-error over green-lie.**
 1. Clone the repo; `git checkout dev`. The toolchain (1.97.1) installs
    automatically from `rust-toolchain.toml`. Native OS build (not WSL) — the
    daemon needs the OS keyring.
-2. `cargo verify` (fmt + clippy `-D warnings` all-targets + test-all) — confirm green.
+2. Confirm green: `cargo fmt --all -- --check`, then `cargo check-all` (clippy
+   `-D warnings` all-targets), then `cargo test-all`. (There is no combined
+   `cargo verify` alias — Cargo aliases can't chain subcommands — but this is
+   exactly what the pre-commit hook runs.)
 3. Run it: `cargo run -p nunciod` (daemon), then drive with
    `cargo run -p nuncio-cli -- system status`. See `docs/RUNNING.md` /
    `docs/DEVELOPING-IN-RUSTROVER.md`.
