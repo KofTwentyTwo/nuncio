@@ -439,6 +439,47 @@ fn map_calendar_event_to_proto(event: nuncio_core::model::CalendarEvent) -> Cale
     }
 }
 
+/// Combines an account's in-window events with its recurring masters into the final event
+/// list for a `ListEvents` query window, expanding each recurring master into its real
+/// occurrences via [`nuncio_cal::RecurrenceEngine::expand_occurrences`] rather than trusting
+/// the master row's own stored `start_time`/`end_time` to represent every future instance.
+///
+/// `recurring` events are never sourced from `all_in_window` for the final result -- only
+/// `e.rrule.is_none()` rows from `all_in_window` are kept verbatim -- so a recurring master
+/// that also happens to overlap the window in `all_in_window` is never emitted a second time
+/// alongside its expanded occurrences.
+///
+/// A recurring event whose `rrule` fails to parse degrades to the raw stored master (a genuine persisted row -- just unexpanded, not fabricated data) with a warning
+/// logged, rather than failing the whole query for one malformed rule among many.
+fn expand_events_for_window(
+    all_in_window: Vec<nuncio_core::model::CalendarEvent>,
+    recurring: Vec<nuncio_core::model::CalendarEvent>,
+    start_window: i64,
+    end_window: i64,
+) -> Vec<nuncio_core::model::CalendarEvent> {
+    let mut events: Vec<nuncio_core::model::CalendarEvent> = all_in_window
+        .into_iter()
+        .filter(|e| e.rrule.is_none())
+        .collect();
+
+    for event in recurring {
+        match nuncio_cal::RecurrenceEngine::expand_occurrences(&event, start_window, end_window) {
+            Ok(occurrences) => events.extend(occurrences),
+            Err(e) => {
+                tracing::warn!(
+                    "Calendar: failed to expand rrule for event '{}', falling back to raw \
+                     stored event: {}",
+                    event.id,
+                    e
+                );
+                events.push(event);
+            }
+        }
+    }
+
+    events
+}
+
 /// Test-only injection point for the daemon's calendar sync backend,
 /// mirroring [`MailEngineOverrides`]'s shape.
 ///
@@ -517,18 +558,25 @@ impl Calendar for CalendarGrpcService {
         if req.account_id.is_empty() {
             return Err(Status::invalid_argument("account_id is required"));
         }
-        // `DatabaseEngine::list_calendar_events` filters by account_id and
-        // time window only -- there is no per-calendar-collection filter in
-        // the store today, so `req.calendar_id` is not applied here. This
-        // never fabricates data; it genuinely returns every persisted event
-        // for the account in the requested window, same as `req.calendar_id`
-        // being absent from the query would.
 
-        let events = self
+        let all_in_window = self
             .db
             .list_calendar_events(&req.account_id, req.start_window, req.end_window)
             .await
-            .map_err(|e| Status::internal(format!("failed to list calendar events: {e}")))?
+            .map_err(|e| Status::internal(format!("failed to list calendar events: {e}")))?;
+
+        let recurring = self
+            .db
+            .list_recurring_calendar_events(&req.account_id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to list recurring events: {e}")))?;
+
+        let mut events =
+            expand_events_for_window(all_in_window, recurring, req.start_window, req.end_window);
+
+        events.retain(|e| req.calendar_id.is_empty() || e.calendar_id == req.calendar_id);
+
+        let events = events
             .into_iter()
             .map(map_calendar_event_to_proto)
             .collect();
@@ -3705,6 +3753,65 @@ mod tests {
         assert_eq!(response.events[0].id, "evt-in-window");
     }
 
+    /// `ListEvents` filters by `calendar_id` when it's non-empty: an event that overlaps the
+    /// window but belongs to a different calendar collection must not appear in the response.
+    #[tokio::test]
+    async fn list_events_excludes_events_from_a_different_calendar_id() {
+        use nuncio_proto::v1::calendar_client::CalendarClient;
+        use nuncio_proto::v1::ListEventsRequest;
+
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        db.save_calendar_event(&sample_calendar_event(
+            "evt-work-cal",
+            "acct-cal-1",
+            "cal-work",
+            1_700_000_000,
+            1_700_003_600,
+        ))
+        .await
+        .expect("save work-calendar event");
+        db.save_calendar_event(&sample_calendar_event(
+            "evt-personal-cal",
+            "acct-cal-1",
+            "cal-personal",
+            1_700_000_000,
+            1_700_003_600,
+        ))
+        .await
+        .expect("save personal-calendar event");
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = CalendarClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let response = client
+            .list_events(authed_bearer_request(ListEventsRequest {
+                account_id: "acct-cal-1".to_string(),
+                calendar_id: "cal-work".to_string(),
+                start_window: 1_699_999_000,
+                end_window: 1_700_004_000,
+            }))
+            .await
+            .expect("list_events succeeds")
+            .into_inner();
+
+        assert_eq!(response.events.len(), 1);
+        assert_eq!(response.events[0].id, "evt-work-cal");
+    }
+
     #[tokio::test]
     async fn list_events_rejects_empty_account_id() {
         use nuncio_proto::v1::calendar_client::CalendarClient;
@@ -3907,5 +4014,131 @@ mod tests {
                 .summary,
             "Summary for evt-sync-injected-1"
         );
+    }
+
+    // ---- expand_events_for_window (pure, no DB/gRPC) ----
+
+    fn recurring_event(
+        id: &str,
+        rrule: &str,
+        start: i64,
+        end: i64,
+    ) -> nuncio_core::model::CalendarEvent {
+        let mut event = sample_calendar_event(id, "acct-cal-1", "cal-work", start, end);
+        event.rrule = Some(rrule.to_string());
+        event
+    }
+
+    /// A weekly event's later occurrence (well past the stored master's own start/end) is
+    /// returned when the query window covers only that later occurrence -- proving the merge
+    /// helper materializes real occurrences rather than trusting the master row's own window
+    /// membership.
+    #[test]
+    fn expand_events_for_window_finds_later_occurrence_of_a_recurring_event() {
+        let master = recurring_event(
+            "evt-weekly",
+            "FREQ=WEEKLY;INTERVAL=1",
+            1_704_067_200, // 2024-01-01T00:00:00Z
+            1_704_070_800,
+        );
+
+        // Query a window 4 weeks later, which does not overlap the master's own
+        // start/end at all.
+        let start_window = 1_706_400_000; // 2024-01-28
+        let end_window = 1_706_500_000;
+
+        let result = expand_events_for_window(Vec::new(), vec![master], start_window, end_window);
+
+        assert_eq!(result.len(), 1);
+        assert!(result[0].start_time >= start_window && result[0].start_time <= end_window);
+        assert!(result[0].id.starts_with("evt-weekly_occ_"));
+    }
+
+    /// A non-recurring event passed through `all_in_window` is returned unchanged.
+    #[test]
+    fn expand_events_for_window_passes_non_recurring_events_through_unchanged() {
+        let event = sample_calendar_event(
+            "evt-single",
+            "acct-cal-1",
+            "cal-work",
+            1_700_000_000,
+            1_700_003_600,
+        );
+
+        let result = expand_events_for_window(
+            vec![event.clone()],
+            Vec::new(),
+            1_699_999_000,
+            1_700_004_000,
+        );
+
+        assert_eq!(result, vec![event]);
+    }
+
+    /// A recurring master whose own stored start/end also overlaps the query window must
+    /// never appear twice -- once as the raw row from `all_in_window` and again as an
+    /// expanded occurrence.
+    #[test]
+    fn expand_events_for_window_never_double_counts_a_recurring_master() {
+        let master = recurring_event(
+            "evt-weekly",
+            "FREQ=WEEKLY;INTERVAL=1",
+            1_704_067_200,
+            1_704_070_800,
+        );
+
+        // The master's own row also overlaps the window (as `list_calendar_events`
+        // would genuinely return it), simulating the exact double-count risk.
+        let result = expand_events_for_window(
+            vec![master.clone()],
+            vec![master],
+            1_704_067_200,
+            1_704_070_800,
+        );
+
+        assert_eq!(result.len(), 1);
+        assert!(result[0].id.starts_with("evt-weekly_occ_"));
+    }
+
+    /// A `COUNT`/`UNTIL`-bounded recurrence produces no events for a window entirely past
+    /// its bound.
+    #[test]
+    fn expand_events_for_window_honors_until_bound() {
+        let master = recurring_event(
+            "evt-bounded",
+            "FREQ=WEEKLY;INTERVAL=1;UNTIL=20240115T000000Z",
+            1_704_067_200,
+            1_704_070_800,
+        );
+
+        let result = expand_events_for_window(
+            Vec::new(),
+            vec![master],
+            1_709_251_200, // 2024-03-01, well past the UNTIL bound
+            1_709_337_600,
+        );
+
+        assert!(result.is_empty());
+    }
+
+    /// An event with an unparseable `rrule` degrades to the raw stored master rather than
+    /// vanishing or failing the whole merge.
+    #[test]
+    fn expand_events_for_window_degrades_unparseable_rrule_to_raw_master() {
+        let master = recurring_event(
+            "evt-bad-rrule",
+            "NOT_A_VALID_RRULE",
+            1_700_000_000,
+            1_700_003_600,
+        );
+
+        let result = expand_events_for_window(
+            Vec::new(),
+            vec![master.clone()],
+            1_699_999_000,
+            1_700_004_000,
+        );
+
+        assert_eq!(result, vec![master]);
     }
 }

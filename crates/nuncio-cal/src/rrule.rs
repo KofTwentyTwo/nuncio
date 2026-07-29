@@ -47,9 +47,15 @@ impl RecurrenceEngine {
 
         let duration = event.end_time - event.start_time;
 
+        // `RRuleSet`'s iterator yields occurrences in strictly increasing date order, so once
+        // an occurrence passes `window_end_dt` every later one will too -- `take_while` lets
+        // us stop walking the (possibly unbounded, no-UNTIL/COUNT) series there instead of
+        // scanning forever for a match that will never come once the series has moved past
+        // the window. `skip_while` similarly avoids materializing pre-window occurrences.
         let results = rrule_set
             .into_iter()
-            .filter(|dt| *dt >= window_start_dt && *dt <= window_end_dt)
+            .skip_while(|dt| *dt < window_start_dt)
+            .take_while(|dt| *dt <= window_end_dt)
             .take(Self::MAX_EXPANSION_COUNT as usize);
 
         let mut occurrences = Vec::new();
@@ -62,12 +68,11 @@ impl RecurrenceEngine {
             occurrences.push(instance);
         }
 
-        if occurrences.is_empty() {
-            // Return original if no occurrences fall strictly inside window
-            Ok(vec![event.clone()])
-        } else {
-            Ok(occurrences)
-        }
+        // No fallback to the raw master here: an empty result genuinely means no occurrence
+        // of this recurring event falls inside the requested window (e.g. the window is past
+        // an `UNTIL`/`COUNT` bound), and returning the master's own out-of-window timestamps
+        // instead would fabricate a result the caller never asked for.
+        Ok(occurrences)
     }
 }
 
@@ -108,6 +113,37 @@ mod tests {
 
         assert!(results.len() >= 3);
         assert!(results[0].id.contains("evt-weekly_occ_"));
+    }
+
+    #[test]
+    fn recurring_event_with_no_occurrences_in_window_returns_empty() {
+        let event = sample_recurring_event();
+        // Window is entirely before the series' own DTSTART -- no occurrence can fall
+        // inside it, so this must return no events at all, not the out-of-window master.
+        let results = RecurrenceEngine::expand_occurrences(&event, 1_600_000_000, 1_600_003_600)
+            .expect("expansion succeeds");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn until_bound_stops_occurrences_past_the_bound() {
+        let mut event = sample_recurring_event();
+        // Weekly series ends after its third occurrence (2024-01-15).
+        event.rrule = Some("FREQ=WEEKLY;INTERVAL=1;UNTIL=20240115T000000Z".to_string());
+
+        // Querying a window entirely after the UNTIL bound must produce zero occurrences.
+        let past_bound = RecurrenceEngine::expand_occurrences(&event, 1_707_350_400, 1_709_251_200)
+            .expect("expansion succeeds");
+        assert!(past_bound.is_empty());
+
+        // Querying a window spanning the bound only returns occurrences up to and
+        // including it, never past it.
+        let spanning_bound = RecurrenceEngine::expand_occurrences(&event, 1704067200, 1706745600)
+            .expect("expansion succeeds");
+        assert_eq!(spanning_bound.len(), 3);
+        for occurrence in &spanning_bound {
+            assert!(occurrence.start_time <= 1_705_276_800); // 2024-01-15T00:00:00Z
+        }
     }
 
     #[test]

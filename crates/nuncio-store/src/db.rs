@@ -995,6 +995,58 @@ impl DatabaseEngine {
             .collect())
     }
 
+    /// Query every persisted recurring calendar event (non-null, non-empty `rrule`) for
+    /// `account_id`, with **no** time-window filter -- a recurring master's own stored
+    /// `start_time`/`end_time` can validly sit long before (or after) any given query
+    /// window while its expanded occurrences still fall inside it, so callers that need
+    /// to materialize occurrences for a window must expand every one of the account's
+    /// recurring masters rather than pre-filtering by the master row's own timestamps.
+    #[allow(clippy::type_complexity)]
+    pub async fn list_recurring_calendar_events(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<nuncio_core::model::CalendarEvent>, DatabaseError> {
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, account_id, calendar_id, summary, start_time, end_time, rrule, location
+            FROM calendar_events
+            WHERE account_id = ? AND rrule IS NOT NULL AND rrule != ''
+            ORDER BY start_time ASC
+            "#,
+        )
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, account_id, calendar_id, summary, start_time, end_time, rrule, location)| {
+                    nuncio_core::model::CalendarEvent {
+                        id,
+                        account_id,
+                        calendar_id,
+                        summary,
+                        start_time,
+                        end_time,
+                        rrule,
+                        location,
+                    }
+                },
+            )
+            .collect())
+    }
+
     /// Retrieve a single calendar event by ID.
     #[allow(clippy::type_complexity)]
     pub async fn get_calendar_event(
@@ -1979,6 +2031,45 @@ mod tests {
             .expect("search events succeeds");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "evt-db-100");
+    }
+
+    /// `list_recurring_calendar_events` returns only rows with a non-empty `rrule`, for the
+    /// requested account only, and applies no time-window filter at all -- a master whose own
+    /// stored `start_time` is far outside any given query window must still come back, since
+    /// its expanded occurrences may fall inside that window.
+    #[tokio::test]
+    async fn list_recurring_calendar_events_filters_by_account_and_rrule_presence() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let mut recurring = sample_calendar_event("evt-recurring", "acct-1");
+        recurring.rrule = Some("FREQ=WEEKLY;INTERVAL=1".to_string());
+        recurring.start_time = 1_000; // far outside any window used below
+        recurring.end_time = 4_600;
+        engine.save_calendar_event(&recurring).await.unwrap();
+
+        let non_recurring = sample_calendar_event("evt-single", "acct-1");
+        engine.save_calendar_event(&non_recurring).await.unwrap();
+
+        let mut other_account_recurring = sample_calendar_event("evt-other-acct", "acct-2");
+        other_account_recurring.rrule = Some("FREQ=DAILY".to_string());
+        engine
+            .save_calendar_event(&other_account_recurring)
+            .await
+            .unwrap();
+
+        let recurring_for_acct1 = engine
+            .list_recurring_calendar_events("acct-1")
+            .await
+            .expect("list recurring calendar events succeeds");
+        assert_eq!(recurring_for_acct1.len(), 1);
+        assert_eq!(recurring_for_acct1[0].id, "evt-recurring");
+
+        let recurring_for_acct2 = engine
+            .list_recurring_calendar_events("acct-2")
+            .await
+            .expect("list recurring calendar events succeeds");
+        assert_eq!(recurring_for_acct2.len(), 1);
+        assert_eq!(recurring_for_acct2[0].id, "evt-other-acct");
     }
 
     /// Re-saving an event with the same ID (an update, not a fresh insert) replaces both the
