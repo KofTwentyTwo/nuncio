@@ -6,12 +6,14 @@
 //! This is the daemon's sole client-facing transport.
 
 use nuncio_cal::CalendarBackend;
+use nuncio_contacts::ContactsBackend;
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
 use nuncio_mail::{MailBackend, MessageSender};
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::audit_server::{Audit, AuditServer};
 use nuncio_proto::v1::calendar_server::{Calendar, CalendarServer};
+use nuncio_proto::v1::contacts_server::{Contacts, ContactsServer};
 use nuncio_proto::v1::event::Kind;
 use nuncio_proto::v1::export_server::{Export, ExportServer};
 use nuncio_proto::v1::filters_server::{Filters, FiltersServer};
@@ -21,19 +23,22 @@ use nuncio_proto::v1::{
     export_request, AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
     AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto,
     AuditRecord as AuditRecordProto, BatchFilterProgress, CalendarEvent as CalendarEventProto,
-    CalendarSyncRequest, CalendarSyncResponse, CreateRuleRequest, CreateRuleResponse,
-    DatabaseRecovered, DeleteRuleRequest, DeleteRuleResponse, Event, EventError,
-    ExportFormat as ExportFormatProto, ExportRequest, ExportResponse, FilterExecuted,
-    FilterRule as FilterRuleProto, Folder as FolderProto, GetEventRequest, GetEventResponse,
-    GetMessageRequest, GetMessageResponse, GetStatusRequest, GetStatusResponse,
-    ListAccountsRequest, ListAccountsResponse, ListEventsRequest, ListEventsResponse,
-    ListFoldersRequest, ListFoldersResponse, ListMessagesRequest, ListMessagesResponse,
-    ListRecordsRequest, ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest,
-    MarkReadResponse, Message as MessageProto, MessageFlagsChanged, MessageSearchHit,
-    PreviewRuleRequest, PreviewRuleResponse, SearchMessagesRequest, SearchMessagesResponse,
-    SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
-    SyncRequest, SyncResponse, SyncStarted, TlsMode as TlsModeProto, UpdateAvailable,
-    ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
+    CalendarSyncRequest, CalendarSyncResponse, Contact as ContactProto,
+    ContactEmail as ContactEmailProto, ContactPhone as ContactPhoneProto, ContactsSyncRequest,
+    ContactsSyncResponse, CreateContactRequest, CreateContactResponse, CreateRuleRequest,
+    CreateRuleResponse, DatabaseRecovered, DeleteRuleRequest, DeleteRuleResponse, Event,
+    EventError, ExportFormat as ExportFormatProto, ExportRequest, ExportResponse, FilterExecuted,
+    FilterRule as FilterRuleProto, Folder as FolderProto, GetContactRequest, GetContactResponse,
+    GetEventRequest, GetEventResponse, GetMessageRequest, GetMessageResponse, GetStatusRequest,
+    GetStatusResponse, ListAccountsRequest, ListAccountsResponse, ListContactsRequest,
+    ListContactsResponse, ListEventsRequest, ListEventsResponse, ListFoldersRequest,
+    ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, ListRecordsRequest,
+    ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest, MarkReadResponse,
+    Message as MessageProto, MessageFlagsChanged, MessageSearchHit, PreviewRuleRequest,
+    PreviewRuleResponse, SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest,
+    SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse,
+    SyncStarted, TlsMode as TlsModeProto, UpdateAvailable, ValidateRuleRequest,
+    ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -439,6 +444,45 @@ fn map_calendar_event_to_proto(event: nuncio_core::model::CalendarEvent) -> Cale
     }
 }
 
+/// Maps a `nuncio_contacts::Contact` onto its wire-format `nuncio.v1.Contact`
+/// representation. The internal bookkeeping timestamps
+/// (`created_at`/`updated_at`/`last_interacted_at`) are deliberately not
+/// carried over -- see the `Contact` message's doc comment in the `.proto`
+/// source.
+fn map_contact_to_proto(contact: nuncio_contacts::Contact) -> ContactProto {
+    ContactProto {
+        id: contact.id,
+        account_id: contact.account_id,
+        display_name: contact.display_name,
+        given_name: contact.given_name,
+        family_name: contact.family_name,
+        organization: contact.organization,
+        job_title: contact.job_title,
+        notes: contact.notes,
+        avatar_url: contact.avatar_url,
+        emails: contact
+            .emails
+            .into_iter()
+            .map(|e| ContactEmailProto {
+                email: e.email,
+                label: e.label,
+                is_primary: e.is_primary,
+            })
+            .collect(),
+        phones: contact
+            .phones
+            .into_iter()
+            .map(|p| ContactPhoneProto {
+                phone: p.phone,
+                label: p.label,
+                is_primary: p.is_primary,
+            })
+            .collect(),
+        is_favorite: contact.is_favorite,
+        interaction_count: contact.interaction_count,
+    }
+}
+
 /// Combines an account's in-window events with its recurring masters into the final event
 /// list for a `ListEvents` query window, expanding each recurring master into its real
 /// occurrences via [`nuncio_cal::RecurrenceEngine::expand_occurrences`] rather than trusting
@@ -601,6 +645,168 @@ impl Calendar for CalendarGrpcService {
 
         Ok(Response::new(GetEventResponse {
             event: Some(map_calendar_event_to_proto(event)),
+        }))
+    }
+}
+
+/// Test-only injection point for the daemon's real per-account CardDAV
+/// contacts backend, mirroring [`CalendarEngineOverrides`] exactly.
+///
+/// Production (every existing caller of [`serve`] / [`serve_on_listener`])
+/// never constructs a non-default instance: [`Default`] yields `None`,
+/// which routes `Contacts/Sync` to an honest "no CardDAV configuration"
+/// error, since `nuncio_core::AccountConfig` has no CardDAV collection
+/// URL/credential to build a real per-account `CardDavClient` from yet. Only
+/// a full-daemon E2E test supplies `Some(..)`, standing in a
+/// [`nuncio_contacts::MockContactsBackend`] for real network I/O.
+#[derive(Clone, Default)]
+pub struct ContactsEngineOverrides {
+    /// When `Some`, `Contacts/Sync` fetches from this backend instead of
+    /// returning an honest "no CardDAV configuration" error.
+    pub contacts_backend: Option<Arc<dyn ContactsBackend>>,
+}
+
+impl std::fmt::Debug for ContactsEngineOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContactsEngineOverrides")
+            .field("contacts_backend", &self.contacts_backend.is_some())
+            .finish()
+    }
+}
+
+/// `nuncio.v1.Contacts` gRPC service implementation backed by the daemon's
+/// live [`DatabaseEngine`] contact read/write methods.
+///
+/// `ListContacts`/`GetContact` always read genuinely persisted data.
+/// `CreateContact` persists a locally-authored contact directly to the
+/// store -- real local persistence, never a fabricated CardDAV write-back.
+/// `Sync` fetches from [`ContactsEngineOverrides::contacts_backend`] when
+/// injected; otherwise it returns an honest error, since there is no
+/// persisted per-account CardDAV configuration to build a real backend from
+/// yet (see `nunciod::contacts_sync`'s doc comment).
+struct ContactsGrpcService {
+    db: Arc<DatabaseEngine>,
+    overrides: ContactsEngineOverrides,
+}
+
+#[tonic::async_trait]
+impl Contacts for ContactsGrpcService {
+    async fn sync(
+        &self,
+        request: Request<ContactsSyncRequest>,
+    ) -> Result<Response<ContactsSyncResponse>, Status> {
+        let req = request.into_inner();
+
+        let synced = match &self.overrides.contacts_backend {
+            Some(backend) => {
+                crate::contacts_sync::sync_with_backend(&self.db, backend.as_ref(), &req.account_id)
+                    .await
+                    .map_err(|e| Status::internal(format!("contacts sync failed: {e}")))?
+            }
+            None => {
+                return Err(Status::internal(format!(
+                    "no CardDAV configuration exists for account '{}'; per-account CardDAV \
+                     configuration is not yet implemented",
+                    req.account_id
+                )));
+            }
+        };
+
+        Ok(Response::new(ContactsSyncResponse {
+            synced_count: synced as u64,
+        }))
+    }
+
+    async fn list_contacts(
+        &self,
+        request: Request<ListContactsRequest>,
+    ) -> Result<Response<ListContactsResponse>, Status> {
+        let req = request.into_inner();
+        if req.account_id.is_empty() {
+            return Err(Status::invalid_argument("account_id is required"));
+        }
+
+        let contacts = self
+            .db
+            .list_contacts(&req.account_id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to list contacts: {e}")))?
+            .into_iter()
+            .map(map_contact_to_proto)
+            .collect();
+
+        Ok(Response::new(ListContactsResponse { contacts }))
+    }
+
+    async fn get_contact(
+        &self,
+        request: Request<GetContactRequest>,
+    ) -> Result<Response<GetContactResponse>, Status> {
+        let req = request.into_inner();
+        if req.contact_id.is_empty() {
+            return Err(Status::invalid_argument("contact_id is required"));
+        }
+
+        let contact = self.db.get_contact(&req.contact_id).await.map_err(|e| {
+            Status::not_found(format!("contact '{}' not found: {e}", req.contact_id))
+        })?;
+
+        Ok(Response::new(GetContactResponse {
+            contact: Some(map_contact_to_proto(contact)),
+        }))
+    }
+
+    async fn create_contact(
+        &self,
+        request: Request<CreateContactRequest>,
+    ) -> Result<Response<CreateContactResponse>, Status> {
+        let req = request.into_inner();
+        if req.account_id.is_empty() {
+            return Err(Status::invalid_argument("account_id is required"));
+        }
+        if req.display_name.is_empty() {
+            return Err(Status::invalid_argument("display_name is required"));
+        }
+
+        let primary_email = req
+            .emails
+            .iter()
+            .find(|e| e.is_primary)
+            .or_else(|| req.emails.first())
+            .map(|e| e.email.clone())
+            .unwrap_or_default();
+
+        let mut contact = nuncio_contacts::Contact::new(req.display_name, primary_email);
+        contact.account_id = Some(req.account_id);
+        contact.organization = req.organization;
+        if !req.emails.is_empty() {
+            contact.emails = req
+                .emails
+                .into_iter()
+                .map(|e| nuncio_contacts::ContactEmail {
+                    email: e.email,
+                    label: e.label,
+                    is_primary: e.is_primary,
+                })
+                .collect();
+        }
+        contact.phones = req
+            .phones
+            .into_iter()
+            .map(|p| nuncio_contacts::ContactPhone {
+                phone: p.phone,
+                label: p.label,
+                is_primary: p.is_primary,
+            })
+            .collect();
+
+        self.db
+            .save_contact(&contact)
+            .await
+            .map_err(|e| Status::internal(format!("failed to save contact: {e}")))?;
+
+        Ok(Response::new(CreateContactResponse {
+            contact: Some(map_contact_to_proto(contact)),
         }))
     }
 }
@@ -1316,8 +1522,9 @@ pub async fn serve(
 }
 
 /// Serves the `nuncio.v1.System`, `nuncio.v1.Accounts`, `nuncio.v1.Mail`,
-/// `nuncio.v1.Filters`, `nuncio.v1.Export`, `nuncio.v1.Audit`, and
-/// `nuncio.v1.Calendar` gRPC services on an already-bound [`TcpListener`].
+/// `nuncio.v1.Filters`, `nuncio.v1.Export`, `nuncio.v1.Audit`,
+/// `nuncio.v1.Calendar`, and `nuncio.v1.Contacts` gRPC services on an
+/// already-bound [`TcpListener`].
 ///
 /// # Security
 ///
@@ -1350,15 +1557,18 @@ pub async fn serve_on_listener(
         token,
         MailEngineOverrides::default(),
         CalendarEngineOverrides::default(),
+        ContactsEngineOverrides::default(),
     )
     .await
 }
 
 /// Identical to [`serve_on_listener`], except the `nuncio.v1.Mail` service's
-/// inbound sync and outbound send engines, and the `nuncio.v1.Calendar`
-/// service's sync backend, can be overridden.
+/// inbound sync and outbound send engines, the `nuncio.v1.Calendar`
+/// service's sync backend, and the `nuncio.v1.Contacts` service's sync
+/// backend can be overridden.
 /// [`serve_on_listener`] is simply this function called with
-/// `MailEngineOverrides::default()` / `CalendarEngineOverrides::default()`
+/// `MailEngineOverrides::default()` / `CalendarEngineOverrides::default()` /
+/// `ContactsEngineOverrides::default()`
 /// (i.e. every field `None`, which is production's exact prior behavior);
 /// this function exists so a full-daemon offline E2E test can supply
 /// `Some(..)` without changing [`serve_on_listener`]'s signature for its many
@@ -1373,6 +1583,7 @@ pub async fn serve_on_listener_with_overrides(
     token: impl Into<Arc<str>>,
     overrides: MailEngineOverrides,
     calendar_overrides: CalendarEngineOverrides,
+    contacts_overrides: ContactsEngineOverrides,
 ) -> Result<(), GrpcServeError> {
     let token: Arc<str> = token.into();
 
@@ -1429,11 +1640,21 @@ pub async fn serve_on_listener_with_overrides(
     // every other service above -- see the hard invariant documented on
     // this function's doc comment.
     let calendar_service = CalendarGrpcService {
-        db,
+        db: db.clone(),
         overrides: calendar_overrides,
     };
-    let calendar_interceptor = BearerAuthInterceptor::new(token);
+    let calendar_interceptor = BearerAuthInterceptor::new(token.clone());
     let calendar_svc = CalendarServer::with_interceptor(calendar_service, calendar_interceptor);
+
+    // Contacts: mounted behind its own `BearerAuthInterceptor`, exactly like
+    // every other service above -- see the hard invariant documented on
+    // this function's doc comment.
+    let contacts_service = ContactsGrpcService {
+        db,
+        overrides: contacts_overrides,
+    };
+    let contacts_interceptor = BearerAuthInterceptor::new(token);
+    let contacts_svc = ContactsServer::with_interceptor(contacts_service, contacts_interceptor);
 
     Server::builder()
         .add_service(system_svc)
@@ -1443,6 +1664,7 @@ pub async fn serve_on_listener_with_overrides(
         .add_service(export_svc)
         .add_service(audit_svc)
         .add_service(calendar_svc)
+        .add_service(contacts_svc)
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await
         .map_err(GrpcServeError::Transport)
@@ -1533,15 +1755,18 @@ mod tests {
             token,
             overrides,
             CalendarEngineOverrides::default(),
+            ContactsEngineOverrides::default(),
         )
         .await
     }
 
     /// Spawns a test server on an ephemeral loopback port backed by the
-    /// given `db`/`filter_engine`/`secrets`/`overrides`/`calendar_overrides`:
-    /// the helper every test that injects a
-    /// [`CalendarEngineOverrides::calendar_backend`] uses to prove `Sync`
+    /// given `db`/`filter_engine`/`secrets`/`overrides`/`calendar_overrides`/
+    /// `contacts_overrides`: the helper every test that injects a
+    /// [`CalendarEngineOverrides::calendar_backend`] /
+    /// [`ContactsEngineOverrides::contacts_backend`] uses to prove `Sync`
     /// drives an injected test double over the real authenticated gRPC API.
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_test_server_with_all_overrides(
         event_bus: Arc<EventBus>,
         db: Arc<DatabaseEngine>,
@@ -1550,6 +1775,7 @@ mod tests {
         token: &str,
         overrides: MailEngineOverrides,
         calendar_overrides: CalendarEngineOverrides,
+        contacts_overrides: ContactsEngineOverrides,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1566,6 +1792,7 @@ mod tests {
                 token,
                 overrides,
                 calendar_overrides,
+                contacts_overrides,
             )
             .await;
         });
@@ -3967,6 +4194,7 @@ mod tests {
             "correct-token",
             MailEngineOverrides::default(),
             calendar_overrides,
+            ContactsEngineOverrides::default(),
         )
         .await;
 
@@ -4140,5 +4368,267 @@ mod tests {
         );
 
         assert_eq!(result, vec![master]);
+    }
+
+    fn sample_contact(id: &str, account_id: &str, display_name: &str) -> nuncio_contacts::Contact {
+        let mut contact =
+            nuncio_contacts::Contact::new(display_name, format!("{display_name}@nuncio.mx"));
+        contact.id = id.to_string();
+        contact.account_id = Some(account_id.to_string());
+        contact
+    }
+
+    /// Confirms `Contacts` is mounted behind its own `BearerAuthInterceptor`
+    /// exactly like every other service (no un-intercepted service).
+    #[tokio::test]
+    async fn contacts_rpcs_reject_missing_bearer_token() {
+        use nuncio_proto::v1::contacts_client::ContactsClient;
+        use nuncio_proto::v1::{ContactsSyncRequest, GetContactRequest, ListContactsRequest};
+
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = ContactsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .list_contacts(ListContactsRequest {
+                account_id: "acct-1".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .get_contact(GetContactRequest {
+                contact_id: "ct-1".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .sync(ContactsSyncRequest {
+                account_id: "acct-1".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn list_contacts_returns_only_genuinely_persisted_contacts() {
+        use nuncio_proto::v1::contacts_client::ContactsClient;
+        use nuncio_proto::v1::ListContactsRequest;
+
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        db.save_contact(&sample_contact("ct-list-1", "acct-contacts-list", "Alice"))
+            .await
+            .expect("save contact");
+        db.save_contact(&sample_contact("ct-list-2", "acct-contacts-list", "Bob"))
+            .await
+            .expect("save contact");
+        db.save_contact(&sample_contact("ct-list-other", "acct-other", "Carol"))
+            .await
+            .expect("save contact");
+
+        let secrets = Arc::new(SecretManager::mock());
+        let event_bus = Arc::new(EventBus::new());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = ContactsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let response = client
+            .list_contacts(authed_bearer_request(ListContactsRequest {
+                account_id: "acct-contacts-list".to_string(),
+            }))
+            .await
+            .expect("list_contacts succeeds")
+            .into_inner();
+
+        assert_eq!(response.contacts.len(), 2);
+        let ids: Vec<&str> = response.contacts.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"ct-list-1"));
+        assert!(ids.contains(&"ct-list-2"));
+        assert!(!ids.contains(&"ct-list-other"));
+    }
+
+    #[tokio::test]
+    async fn get_contact_reports_not_found_for_unknown_contact_id() {
+        use nuncio_proto::v1::contacts_client::ContactsClient;
+        use nuncio_proto::v1::GetContactRequest;
+
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = ContactsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .get_contact(authed_bearer_request(GetContactRequest {
+                contact_id: "does-not-exist".to_string(),
+            }))
+            .await
+            .expect_err("unknown contact id must be rejected");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    /// With no `ContactsEngineOverrides::contacts_backend` injected, `Sync`
+    /// returns an honest error -- there is no persisted per-account CardDAV
+    /// configuration to build a real backend from -- never a fabricated
+    /// `synced_count`.
+    #[tokio::test]
+    async fn contacts_sync_without_override_reports_honest_error() {
+        use nuncio_proto::v1::contacts_client::ContactsClient;
+        use nuncio_proto::v1::ContactsSyncRequest;
+
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = ContactsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .sync(authed_bearer_request(ContactsSyncRequest {
+                account_id: "acct-contacts-no-config".to_string(),
+            }))
+            .await
+            .expect_err("sync with no injected backend and no CardDAV config must fail");
+        assert_eq!(err.code(), Code::Internal);
+        assert!(err.message().contains("acct-contacts-no-config"));
+        assert!(err.message().contains("no CardDAV configuration"));
+    }
+
+    /// With a [`ContactsEngineOverrides::contacts_backend`] injected, `Sync`
+    /// genuinely fetches from it (via `contacts_sync::sync_with_backend`)
+    /// and awaits full completion before returning, so the synced contacts
+    /// are immediately visible to `ListContacts`/`GetContact` -- exactly the
+    /// mechanism a full-daemon offline E2E test uses.
+    #[tokio::test]
+    async fn contacts_sync_with_injected_backend_persists_and_is_immediately_visible() {
+        use nuncio_proto::v1::contacts_client::ContactsClient;
+        use nuncio_proto::v1::{ContactsSyncRequest, GetContactRequest, ListContactsRequest};
+
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let secrets = Arc::new(SecretManager::mock());
+
+        let mock_backend = nuncio_contacts::MockContactsBackend::new();
+        mock_backend.add_contact(sample_contact(
+            "ct-sync-injected-1",
+            "acct-contacts-injected",
+            "Injected Contact",
+        ));
+
+        let contacts_overrides = ContactsEngineOverrides {
+            contacts_backend: Some(Arc::new(mock_backend)),
+        };
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with_all_overrides(
+            Arc::new(EventBus::new()),
+            db,
+            filter_engine,
+            secrets,
+            "correct-token",
+            MailEngineOverrides::default(),
+            CalendarEngineOverrides::default(),
+            contacts_overrides,
+        )
+        .await;
+
+        let mut client = ContactsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let sync_response = client
+            .sync(authed_bearer_request(ContactsSyncRequest {
+                account_id: "acct-contacts-injected".to_string(),
+            }))
+            .await
+            .expect("sync succeeds")
+            .into_inner();
+        assert_eq!(sync_response.synced_count, 1);
+
+        let list_response = client
+            .list_contacts(authed_bearer_request(ListContactsRequest {
+                account_id: "acct-contacts-injected".to_string(),
+            }))
+            .await
+            .expect("list_contacts succeeds")
+            .into_inner();
+        assert_eq!(list_response.contacts.len(), 1);
+        assert_eq!(list_response.contacts[0].id, "ct-sync-injected-1");
+
+        let get_response = client
+            .get_contact(authed_bearer_request(GetContactRequest {
+                contact_id: "ct-sync-injected-1".to_string(),
+            }))
+            .await
+            .expect("get_contact succeeds")
+            .into_inner();
+        let contact = get_response.contact.expect("contact present in response");
+        assert_eq!(contact.display_name, "Injected Contact");
+    }
+
+    #[tokio::test]
+    async fn create_contact_persists_and_is_immediately_visible() {
+        use nuncio_proto::v1::contacts_client::ContactsClient;
+        use nuncio_proto::v1::{
+            ContactEmail as ContactEmailProto, CreateContactRequest, GetContactRequest,
+        };
+
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = ContactsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let create_response = client
+            .create_contact(authed_bearer_request(CreateContactRequest {
+                account_id: "acct-contacts-create".to_string(),
+                display_name: "New Contact".to_string(),
+                organization: Some("Kof22".to_string()),
+                emails: vec![ContactEmailProto {
+                    email: "new.contact@kof22.com".to_string(),
+                    label: "work".to_string(),
+                    is_primary: true,
+                }],
+                phones: vec![],
+            }))
+            .await
+            .expect("create_contact succeeds")
+            .into_inner();
+        let created = create_response
+            .contact
+            .expect("created contact present in response");
+        assert_eq!(created.display_name, "New Contact");
+        assert_eq!(created.account_id.as_deref(), Some("acct-contacts-create"));
+        assert_eq!(created.emails.len(), 1);
+
+        let get_response = client
+            .get_contact(authed_bearer_request(GetContactRequest {
+                contact_id: created.id.clone(),
+            }))
+            .await
+            .expect("get_contact succeeds")
+            .into_inner();
+        let fetched = get_response.contact.expect("contact present in response");
+        assert_eq!(fetched.display_name, "New Contact");
+        assert_eq!(fetched.organization.as_deref(), Some("Kof22"));
     }
 }
