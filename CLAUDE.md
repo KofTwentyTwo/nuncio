@@ -86,7 +86,7 @@ cargo run -p nuncio-cli -- system status         # drive it via the CLI (daemon 
 > **Gate status:** the workspace is green under the pinned toolchain
 > (`rust-toolchain.toml` = 1.97.1), so the local pre-commit hook runs the exact
 > `fmt`/`clippy --all-targets`/tests that CI does — "green locally" is CI-equivalent.
-> CI itself is paused until the GitHub Actions minutes reset (releases are tag-only).
+> CI runs `fmt`/`clippy --all-targets`/tests on every PR and they are required to merge to `main`/`rc`; releases are tag-only.
 > Coverage is informational, not a 100% gate.
 
 ## RustRover / IDE

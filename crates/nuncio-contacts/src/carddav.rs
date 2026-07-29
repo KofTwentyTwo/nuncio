@@ -1,35 +1,56 @@
-use crate::models::Contact;
-use reqwest::Client;
+//! CardDAV (RFC 6352) `REPORT` client and multistatus response parser.
+
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::info;
 
-#[derive(Error, Debug)]
+use crate::backend::ContactsBackend;
+use crate::models::Contact;
+use crate::parser::VCardParserAdapter;
+
+/// Errors returned by the CardDAV client engine.
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum CardDavError {
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("CardDAV sync error: {0}")]
-    SyncError(String),
+    /// Failed to parse an RFC 6350 vCard payload embedded in a CardDAV response.
+    #[error("failed to parse vCard payload: {0}")]
+    ParseFailed(String),
+
+    /// CardDAV network/transport-layer failure (connection, TLS, or an unexpected HTTP
+    /// status) distinct from a payload that connected fine but failed to parse.
+    #[error("CardDAV transport failure: {0}")]
+    TransportFailed(String),
 }
 
+/// Configuration for a specific CardDAV address book collection endpoint, mirroring
+/// `nuncio_cal::CalDavAccountConfig`.
+///
+/// `carddav_url` must already resolve to a specific address book collection (e.g.
+/// `https://carddav.example.com/dav/addressbooks/user/jmaes/contacts/`) -- PROPFIND-based
+/// `addressbook-home-set` auto-discovery is out of scope for this client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardDavAccountConfig {
+    /// Nuncio account identifier this address book collection belongs to.
     pub account_id: String,
+    /// Fully-qualified URL of the CardDAV address book collection to query.
     pub carddav_url: String,
+    /// Basic-auth username (or app-specific username, per provider).
     pub username: String,
+    /// Basic-auth secret (password or app-specific token) resolved from the OS keyring by the
+    /// caller -- never stored anywhere else in plaintext.
     pub auth_token: String,
 }
 
+/// CardDAV client protocol engine managing address book `REPORT` queries against a real server.
 pub struct CardDavClient {
-    #[allow(dead_code)]
-    client: Client,
     config: CardDavAccountConfig,
+    http: reqwest::Client,
 }
 
 impl CardDavClient {
+    /// Create a new `CardDavClient` bound to a specific CardDAV address book collection.
     pub fn new(config: CardDavAccountConfig) -> Self {
         Self {
-            client: Client::builder()
+            http: reqwest::Client::builder()
                 .user_agent("Nuncio-Contacts-CardDAV/1.0")
                 .build()
                 .unwrap_or_default(),
@@ -37,13 +58,153 @@ impl CardDavClient {
         }
     }
 
-    pub async fn fetch_remote_vcards(&self) -> Result<Vec<Contact>, CardDavError> {
-        info!(
-            "Initiating CardDAV PROPFIND fetch from {}",
-            self.config.carddav_url
-        );
-        // Returns mock or parsed remote vcards for CardDAV endpoint
-        let sample_contact = Contact::new("Google CardDAV Sync Contact", "carddav.sync@nuncio.mx");
-        Ok(vec![sample_contact])
+    /// Construct a standard CardDAV `<card:addressbook-query>` XML payload (RFC 6352 Section
+    /// 8.6) requesting the full `address-data` of every card in the collection.
+    pub fn build_report_query() -> String {
+        r#"<?xml version="1.0" encoding="utf-8" ?>
+<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+    <d:prop>
+        <d:getetag />
+        <card:address-data />
+    </d:prop>
+</card:addressbook-query>"#
+            .to_string()
+    }
+
+    /// Parse a CardDAV WebDAV XML `<multistatus>` response containing embedded vCard data.
+    pub fn parse_multistatus_response(
+        &self,
+        account_id: &str,
+        raw_xml: &str,
+    ) -> Result<Vec<Contact>, CardDavError> {
+        let mut contacts = Vec::new();
+
+        for block in raw_xml.split("<card:address-data>") {
+            if let Some((vcard_data, _)) = block.split_once("</card:address-data>") {
+                let clean_vcard = vcard_data.trim();
+                if !clean_vcard.is_empty() {
+                    let contact_id = format!("carddav-{account_id}-{}", contacts.len() + 1);
+                    let contact =
+                        VCardParserAdapter::parse_vcard(&contact_id, account_id, clean_vcard)?;
+                    contacts.push(contact);
+                }
+            }
+        }
+
+        Ok(contacts)
+    }
+
+    /// Issue a live CardDAV `REPORT` addressbook-query (RFC 6352 Section 8.6) against
+    /// `self.config.carddav_url` and parse the `multistatus` response into domain contacts.
+    ///
+    /// This performs a real network request -- no canned or fabricated data is ever
+    /// returned. A server or network failure surfaces as [`CardDavError::TransportFailed`]; a
+    /// malformed vCard inside a returned response surfaces as [`CardDavError::ParseFailed`].
+    pub async fn fetch_remote_vcards(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<Contact>, CardDavError> {
+        let body = Self::build_report_query();
+
+        // "REPORT" is a fixed, always-valid HTTP token; `from_bytes` cannot fail for it, but
+        // the error is still propagated rather than unwrapped so no code path here can panic.
+        let report_method = reqwest::Method::from_bytes(b"REPORT")
+            .map_err(|e| CardDavError::TransportFailed(format!("invalid HTTP method: {e}")))?;
+
+        let response = self
+            .http
+            .request(report_method, &self.config.carddav_url)
+            .header("Content-Type", "application/xml; charset=utf-8")
+            .header("Depth", "1")
+            .basic_auth(&self.config.username, Some(&self.config.auth_token))
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| CardDavError::TransportFailed(e.to_string()))?;
+
+        let status = response.status();
+        // RFC 6352 REPORT responses are conventionally 207 Multi-Status; some servers reply
+        // 200 OK for a single-collection result, so any 2xx/207 status is accepted.
+        if status.as_u16() != 207 && !status.is_success() {
+            return Err(CardDavError::TransportFailed(format!(
+                "CardDAV server returned unexpected status {status}"
+            )));
+        }
+
+        let raw_xml = response
+            .text()
+            .await
+            .map_err(|e| CardDavError::TransportFailed(e.to_string()))?;
+
+        self.parse_multistatus_response(account_id, &raw_xml)
+    }
+}
+
+#[async_trait]
+impl ContactsBackend for CardDavClient {
+    async fn fetch_contacts(&self, account_id: &str) -> Result<Vec<Contact>, CardDavError> {
+        self.fetch_remote_vcards(account_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> CardDavAccountConfig {
+        CardDavAccountConfig {
+            account_id: "acct-1".to_string(),
+            carddav_url: "https://carddav.example.com/addressbooks/contacts/".to_string(),
+            username: "jmaes".to_string(),
+            auth_token: "app-token-secret".to_string(),
+        }
+    }
+
+    #[test]
+    fn build_report_query_targets_addressbook_query() {
+        let query = CardDavClient::build_report_query();
+        assert!(query.contains("<card:addressbook-query"));
+        assert!(query.contains("<card:address-data"));
+    }
+
+    #[test]
+    fn parse_multistatus_response_extracts_contacts() {
+        let client = CardDavClient::new(test_config());
+        let xml_response = r#"<?xml version="1.0" encoding="utf-8"?>
+        <d:multistatus xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+            <d:response>
+                <d:href>/addressbooks/contacts/alice.vcf</d:href>
+                <d:propstat>
+                    <d:prop>
+                        <card:address-data>BEGIN:VCARD
+VERSION:4.0
+FN:Alice Dev
+EMAIL:alice@nuncio.mx
+END:VCARD</card:address-data>
+                    </d:prop>
+                </d:propstat>
+            </d:response>
+        </d:multistatus>"#;
+
+        let contacts = client
+            .parse_multistatus_response("acct-1", xml_response)
+            .expect("parse succeeds");
+
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].display_name, "Alice Dev");
+        assert_eq!(contacts[0].emails[0].email, "alice@nuncio.mx");
+        assert_eq!(contacts[0].account_id.as_deref(), Some("acct-1"));
+    }
+
+    #[test]
+    fn parse_multistatus_response_with_no_cards_yields_empty_not_fabricated() {
+        let client = CardDavClient::new(test_config());
+        let xml_response = r#"<?xml version="1.0" encoding="utf-8"?>
+        <d:multistatus xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav"></d:multistatus>"#;
+
+        let contacts = client
+            .parse_multistatus_response("acct-1", xml_response)
+            .expect("parse succeeds");
+        assert!(contacts.is_empty());
     }
 }

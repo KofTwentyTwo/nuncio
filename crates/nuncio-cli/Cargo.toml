@@ -15,7 +15,6 @@ nuncio-mail = { path = "../nuncio-mail" }
 nuncio-cal = { path = "../nuncio-cal" }
 nuncio-store = { path = "../nuncio-store" }
 nuncio-filter = { path = "../nuncio-filter" }
-nuncio-contacts = { path = "../nuncio-contacts" }
 nuncio-proto = { path = "../nuncio-proto" }
 
 tokio.workspace = true
