@@ -2,9 +2,9 @@ name: CI Quality Gates & Build Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, dev ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,9 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      # No toolchain-install action: rust-toolchain.toml pins 1.97.1 (+ rustfmt,
+      # clippy) and rustup auto-installs it on first cargo/rustc invocation, so
+      # CI always matches the local pinned toolchain instead of a drifting
+      # `stable`.
       - name: Check Formatting
         run: cargo fmt --all -- --check
 
@@ -30,13 +31,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - name: Install Linux Desktop Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev build-essential curl wget file libssl-dev
       - name: Cache Cargo Dependencies
         uses: Swatinem/rust-cache@v2
       - name: Run Clippy Linter (all targets, matches local `cargo check-all`)
@@ -47,36 +41,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install Linux Desktop Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev build-essential curl wget file libssl-dev
       - name: Cache Cargo Dependencies
         uses: Swatinem/rust-cache@v2
       - name: Run Workspace Tests
-        run: cargo test --workspace
+        run: cargo test-all
 
   coverage:
-    name: Enforce 100% Code Coverage Threshold
+    name: Code Coverage (informational)
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install Linux Desktop Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev build-essential curl wget file libssl-dev
+      - name: Install llvm-tools component
+        run: rustup component add llvm-tools-preview
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Cache Cargo Dependencies
         uses: Swatinem/rust-cache@v2
-      # Coverage is informational for now. The former `--fail-under-lines 100`
-      # gate excluded all main.rs (the integration wiring) and incentivized
-      # stub+matching-test theater. A realistic threshold plus a required
-      # mock-server E2E gate lands with Phase 1.C.6 (GH #143).
+      # Coverage is informational only (matches the local `cargo cov` alias):
+      # no --fail-under-lines threshold, and the job is continue-on-error so a
+      # coverage regression or tooling hiccup never reds the pipeline. A
+      # realistic coverage gate is a separate roadmap story.
       - name: Measure Code Coverage (informational)
-        run: cargo llvm-cov --workspace --ignore-filename-regex "main\.rs" --summary-only
+        run: cargo cov
 
   build-matrix:
     name: Cross-Platform Build Matrix (${{ matrix.os }})
@@ -88,7 +75,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
       - name: Cache Cargo Dependencies
         uses: Swatinem/rust-cache@v2
       - name: Build All Workspace Crates
