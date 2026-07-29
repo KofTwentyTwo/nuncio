@@ -32,12 +32,22 @@ use tonic::{Code, Request};
 /// Backs the mounted `nuncio.v1.Accounts` service with its own fresh
 /// ephemeral database + mock keyring, since this test file only exercises
 /// `System` and doesn't care about account/keyring state.
-async fn start_server(event_bus: Arc<EventBus>, token: String) -> std::net::SocketAddr {
+///
+/// Also returns the ephemeral database's backing `TempDir` guard: the
+/// spawned server task keeps using `db` long after this function returns,
+/// and on Linux dropping the guard here would unlink the directory out from
+/// under it, so any connection the pool opens afterward fails with "unable
+/// to open database file". Callers must hold the guard for as long as they
+/// keep talking to the server.
+async fn start_server(
+    event_bus: Arc<EventBus>,
+    token: String,
+) -> (std::net::SocketAddr, tempfile::TempDir) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral loopback port");
     let addr = listener.local_addr().expect("listener has local addr");
-    let (db, _dir) = DatabaseEngine::connect_ephemeral()
+    let (db, dir) = DatabaseEngine::connect_ephemeral()
         .await
         .expect("connect ephemeral test db");
     let secrets = Arc::new(SecretManager::mock());
@@ -53,7 +63,7 @@ async fn start_server(event_bus: Arc<EventBus>, token: String) -> std::net::Sock
         )
         .await;
     });
-    addr
+    (addr, dir)
 }
 
 #[tokio::test]
@@ -66,7 +76,7 @@ async fn rejects_calls_without_a_bearer_token() {
             .expect("token provisioned from mock vault"),
     );
 
-    let addr = start_server(event_bus, token).await;
+    let (addr, _dir) = start_server(event_bus, token).await;
     let mut client = SystemClient::connect(format!("http://{addr}"))
         .await
         .expect("client connects");
@@ -88,7 +98,7 @@ async fn rejects_calls_with_an_invalid_bearer_token() {
             .expect("token provisioned from mock vault"),
     );
 
-    let addr = start_server(event_bus, token).await;
+    let (addr, _dir) = start_server(event_bus, token).await;
     let mut client = SystemClient::connect(format!("http://{addr}"))
         .await
         .expect("client connects");
@@ -123,7 +133,7 @@ async fn accepts_correct_bearer_token_and_returns_real_engine_status() {
             .expect("token provisioned from mock vault"),
     );
 
-    let addr = start_server(event_bus.clone(), token.clone()).await;
+    let (addr, _dir) = start_server(event_bus.clone(), token.clone()).await;
     let mut client = SystemClient::connect(format!("http://{addr}"))
         .await
         .expect("client connects");

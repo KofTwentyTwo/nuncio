@@ -134,6 +134,10 @@ pub struct HeadlessRunner {
     db: DatabaseEngine,
     secrets: Arc<SecretManager>,
     grpc_addr: String,
+    // Kept only to hold the ephemeral database's backing directory open for
+    // the runner's lifetime: dropping it would unlink the directory out from
+    // under `db` while the pool may still need to open new connections.
+    _db_dir: tempfile::TempDir,
 }
 
 impl HeadlessRunner {
@@ -159,7 +163,7 @@ impl HeadlessRunner {
         secrets: Arc<SecretManager>,
         grpc_addr: String,
     ) -> Result<Self, RunnerError> {
-        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+        let (db, db_dir) = DatabaseEngine::connect_ephemeral()
             .await
             .map_err(|e| RunnerError::InitFailed(e.to_string()))?;
         let event_bus = EventBus::new();
@@ -167,6 +171,7 @@ impl HeadlessRunner {
             event_bus,
             db,
             secrets,
+            _db_dir: db_dir,
             grpc_addr,
         })
     }
