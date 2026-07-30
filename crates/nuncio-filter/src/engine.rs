@@ -97,8 +97,11 @@ impl CompiledFilter {
                     .unwrap_or("");
                 Self::eval_string_op(body, &leaf.operator, &leaf.value, regexes)
             }
-            FilterField::Folder | FilterField::Account => {
+            FilterField::Folder => {
                 Self::eval_string_op(&email.folder_id, &leaf.operator, &leaf.value, regexes)
+            }
+            FilterField::Account => {
+                Self::eval_string_op(&email.account_id, &leaf.operator, &leaf.value, regexes)
             }
             FilterField::HasAttachment => {
                 let has = !email.attachments.is_empty();
@@ -148,7 +151,11 @@ impl CompiledFilter {
                 }
             }
             FilterField::Header(_name) => {
-                // Header evaluation fallback
+                // Unreachable defensive branch: `NsqlValidator::pass1_field_types`
+                // rejects any rule with a `header[...]` condition before it can
+                // reach a `CompiledFilter`, since `Email` has no parsed-headers
+                // field to match against. Kept only so this match stays
+                // exhaustive over `FilterField`.
                 false
             }
         }
@@ -473,6 +480,30 @@ mod tests {
 
         let email = test_email("any-account", "Weekly Report", "inbox");
         assert_eq!(engine.evaluate(&email).len(), 1);
+    }
+
+    #[test]
+    fn test_account_condition_field_matches_account_id_not_folder_id() {
+        let nsql = "WHERE account = 'acct-a' ACTION MARK READ";
+        let rule = crate::parser::NsqlParser::parse_rule("Account Filter", 1, nsql).unwrap();
+        let engine = FilterEngine::new(vec![rule]).unwrap();
+
+        // Same folder_id, different account_id: a rule matching on the
+        // `account` condition field must key off email.account_id, never
+        // fall through to comparing folder_id.
+        let email_a = test_email("acct-a", "Anything", "shared-folder");
+        assert_eq!(
+            engine.evaluate(&email_a).len(),
+            1,
+            "rule on account = 'acct-a' must match a message with account_id 'acct-a'"
+        );
+
+        let email_b = test_email("acct-b", "Anything", "shared-folder");
+        assert!(
+            engine.evaluate(&email_b).is_empty(),
+            "rule on account = 'acct-a' must not match a message with account_id 'acct-b', \
+             even when it shares the same folder_id as an acct-a message"
+        );
     }
 
     #[test]

@@ -458,6 +458,34 @@ service Filters {
   // existing dry-run evaluation path. Never persists the rule and never
   // executes any of its actions.
   rpc PreviewRule(PreviewRuleRequest) returns (PreviewRuleResponse);
+  // UpdateRule applies partial overrides (name/nsql/priority) to an existing
+  // persisted rule, re-validates the resulting rule exactly as `CreateRule`
+  // does, and reloads the daemon's live `FilterEngine` rule set so the
+  // change takes effect immediately. Rejects an unknown `id` with
+  // `Status::not_found` and an invalid resulting rule with
+  // `Status::invalid_argument` -- nothing is persisted on either failure.
+  rpc UpdateRule(UpdateRuleRequest) returns (UpdateRuleResponse);
+  // ExportRules renders every persisted filter rule in the requested
+  // `format` ("sql" or "json") and returns the rendered text inline --
+  // small enough, unlike a mailbox export, to carry directly over the RPC
+  // rather than writing to a shared filesystem path.
+  rpc ExportRules(ExportRulesRequest) returns (ExportRulesResponse);
+  // ImportRules parses each non-empty, non-comment line of `content` as an
+  // independent NSQL rule definition and persists the ones that parse.
+  // Reports both the count of rules actually persisted and the parse error
+  // for every line that failed, rather than silently dropping failures.
+  rpc ImportRules(ImportRulesRequest) returns (ImportRulesResponse);
+  // GetExecutionLogs returns the most recent persisted filter execution
+  // log entries (hash-chain ledger), newest-eligible-first as stored,
+  // capped at `limit`.
+  rpc GetExecutionLogs(GetExecutionLogsRequest) returns (GetExecutionLogsResponse);
+  // Triage scans every stored message in bounded chunks, evaluating the
+  // daemon's live `FilterEngine` against each one and applying the same
+  // actions live sync would -- so the currently active rule set can be
+  // applied retroactively to mail that was synced before those rules
+  // existed. Streams cumulative progress as it works, ending with a final
+  // `done: true` message once the whole store has been scanned.
+  rpc Triage(TriageRequest) returns (stream TriageProgress);
 }
 
 // FilterRule mirrors `nuncio_filter::FilterRule`'s persisted/user-facing
@@ -575,6 +603,113 @@ message PreviewRuleResponse {
   uint64 execution_time_us = 6;
   // Human-readable step-by-step match traces.
   repeated string condition_traces = 7;
+}
+
+// UpdateRuleRequest carries a persisted rule's `id` plus optional
+// per-field overrides; an absent field leaves that field unchanged on the
+// existing rule.
+message UpdateRuleRequest {
+  // Rule unique identifier.
+  string id = 1;
+  // New display name, if changing.
+  optional string name = 2;
+  // New full NSQL source code text, if changing.
+  optional string nsql = 3;
+  // New evaluation order, if changing.
+  optional int32 priority = 4;
+}
+
+// UpdateRuleResponse carries the rule as persisted after applying the
+// requested overrides.
+message UpdateRuleResponse {
+  FilterRule rule = 1;
+}
+
+// ExportRulesRequest names the rendering format for `ExportRules`.
+message ExportRulesRequest {
+  // "sql" or "json".
+  string format = 1;
+}
+
+// ExportRulesResponse carries every persisted rule pre-rendered as a single
+// text blob in the requested format.
+message ExportRulesResponse {
+  string content = 1;
+}
+
+// ImportRulesRequest carries raw rule-definition text to parse and persist,
+// one NSQL rule definition per non-empty, non-comment (`--`-prefixed) line.
+message ImportRulesRequest {
+  string content = 1;
+}
+
+// ImportRulesResponse reports how many lines parsed and persisted
+// successfully, and the parse error for every line that did not.
+message ImportRulesResponse {
+  // Count of rule definitions successfully parsed and persisted.
+  int32 imported_count = 1;
+  // Parse error message for each line that failed, in encounter order.
+  repeated string errors = 2;
+}
+
+// GetExecutionLogsRequest caps the number of log entries returned.
+message GetExecutionLogsRequest {
+  uint32 limit = 1;
+}
+
+// GetExecutionLogsResponse.
+message GetExecutionLogsResponse {
+  repeated FilterExecutionLog logs = 1;
+}
+
+// FilterExecutionLog mirrors `nuncio_filter::FilterExecutionLog`
+// field-for-field -- the hash-chain ledger entry recorded each time a
+// persisted rule matches and acts on a message.
+message FilterExecutionLog {
+  // Log entry primary key.
+  int64 id = 1;
+  // Rule ID executed.
+  string rule_id = 2;
+  // Email message ID evaluated.
+  string message_id = 3;
+  // Action description string.
+  string action_taken = 4;
+  // Timestamp of execution (unix seconds).
+  int64 matched_at = 5;
+  // Hash of the preceding log record in the hash-chain ledger.
+  string prev_hash = 6;
+  // HMAC-SHA256 hash of this record.
+  string hash = 7;
+}
+
+// TriageRequest configures a retroactive rescan of the whole message store.
+message TriageRequest {
+  // Scope the scan to a single rule's actions. Currently NOT honored --
+  // `Triage` always evaluates a message against the full live rule set,
+  // matching what a real (non-retroactive) sync run would do. Reserved for
+  // forward compatibility; a client that sets this today gets a whole-store
+  // scan against all active rules, not an error.
+  optional string rule_id = 1;
+  // Number of messages fetched per keyset page. 0 selects the server
+  // default (100).
+  uint32 chunk_size = 2;
+}
+
+// TriageProgress reports the real, cumulative state of an in-progress (or
+// just-finished) `Triage` scan. Every field is the true running total as of
+// the chunk just processed -- never an estimate or a fabricated count.
+message TriageProgress {
+  // Total messages scanned so far.
+  uint64 scanned_count = 1;
+  // Total messages that had at least one action applied or enqueued.
+  uint64 matched_count = 2;
+  // Total individual actions applied or enqueued across all messages.
+  uint64 actions_applied_count = 3;
+  // ID of the last message scanned in the most recently processed chunk.
+  string last_message_id = 4;
+  // True only on the final message of the stream, once the whole store has
+  // been scanned.
+  bool done = 5;
 }
 
 // Export exposes the daemon's real mailbox export engine

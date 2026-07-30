@@ -67,6 +67,17 @@ impl DatabaseError {
             _ => false,
         }
     }
+
+    /// Returns true if this error means "no row matched the lookup" (e.g. a
+    /// `get_message`/`get_contact`/`get_calendar_event` call for an id that
+    /// was never saved), as opposed to a genuine I/O, corruption, or key
+    /// provisioning failure.
+    ///
+    /// Exposed so callers outside this crate can distinguish "not found" from
+    /// other failures without depending on `sqlx` directly.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, DatabaseError::Query(sqlx::Error::RowNotFound))
+    }
 }
 
 /// SQLite database storage engine managing WAL connection pools and migrations.

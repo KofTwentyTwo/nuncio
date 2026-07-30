@@ -23,16 +23,24 @@ machine (or a new LLM) picks up the work cold.
   it to the definition of done, and open a PR. Do not merge your own work; do not
   start a second story until yours is merged or handed back.
 
-## Current state of the code (2026-07-28)
+## Current state of the code (2026-07-30)
 - **Phases 0–2 complete.** The daemon boots gRPC-only on loopback
   `127.0.0.1:9420` behind a keyring bearer token, serving six services (System,
   Accounts, Mail, Filters, Export, Audit), each behind the auth interceptor. The
   `IMAP → store → read → SMTP send` spine works end-to-end over gRPC via the
   `nuncio-cli` reference client, tested offline. `nuncio.v1` is published with a
   contract-stability golden.
-- **Phase 3 in progress:** filter correctness (3.A) and the calendar **engine**
-  layer (3.B.1: real CalDAV transport, TZID fix, `CalendarBackend`, store CRUD)
-  are done and on `dev`. Everything else is the M1–M7 backlog.
+- **Phase 3 (feature completeness) is now COMPLETE — M1–M4 all merged to `dev`.**
+  Filter correctness (3.A), Calendar (M1: CalDAV + RRULE recurrence, API vertical),
+  Contacts (M2: real CardDAV engine + API vertical), JMAP (M3: real client wired
+  into Mail sync), and Filters made live (M4: engine wired into sync with a
+  fire-once guard, the `account`-field bug fixed, edit/export/import/logs and
+  `Filters.Triage` bulk rescan on the gRPC service) are all done.
+- **Next milestone: M5 — Mail lifecycle + incremental sync** (account
+  edit/delete/test-connection + persisted TLS mode, incremental IMAP sync with
+  progress + per-item FETCH timeout, explicit `SendMessage` account selection,
+  keyring rollback on failed `AddAccount`). Then M6 (security hardening), then
+  M7 (API freeze / client-readiness).
 - Full detail and the path to a client-ready API: `docs/ROADMAP.md`.
 
 ## Branches & preserved WIP
@@ -86,24 +94,26 @@ GitHub milestones **M1–M7** mirror `docs/ROADMAP.md`. Each milestone holds
 `story`-labelled issues with a full, self-contained spec. Order: M1 → M7 (M1–M5
 independent-ish feature work; M6 security; M7 the client-readiness gate).
 
-**M1 — Finish Calendar (CalDAV)** · milestone #23
-- #185 — Add Calendar API vertical (proto, daemon, CLI, E2E)  · **[PROTO]**
-- #186 — Wire RRULE recurrence expansion into calendar event queries
+**M1–M4 are DELIVERED — all stories merged to `dev`.** M5 is next.
 
-**M2 — Contacts (CardDAV)** · milestone #24
-- #187 — Build a real Contacts (CardDAV) engine, replacing the fabricated client
-- #188 — Add Contacts API vertical (proto, daemon, CLI, E2E)  · **[PROTO]**
+**M1 — Finish Calendar (CalDAV)** · milestone #23 · **DONE**
+- #185 — Add Calendar API vertical (proto, daemon, CLI, E2E)  · **[PROTO]** · merged
+- #186 — Wire RRULE recurrence expansion into calendar event queries · merged
 
-**M3 — JMAP** · milestone #25
-- #189 — Real JMAP client wired into the existing Mail sync path
+**M2 — Contacts (CardDAV)** · milestone #24 · **DONE**
+- #187 — Build a real Contacts (CardDAV) engine, replacing the fabricated client · merged
+- #188 — Add Contacts API vertical (proto, daemon, CLI, E2E)  · **[PROTO]** · merged
 
-**M4 — Filters made live** · milestone #26
-- #190 — Wire FilterEngine into live sync so matched rules actually fire  *(headline; #193 depends on its helper)*
-- #191 — Fix filter header-field and account-field evaluation bugs
-- #192 — Move filter edit/export/import/logs onto the Filters gRPC service  · **[PROTO]**
-- #193 — Re-expose bulk filter triage as a streaming Filters RPC  · **[PROTO]** *(depends on #190)*
+**M3 — JMAP** · milestone #25 · **DONE**
+- #189 — Real JMAP client wired into the existing Mail sync path · merged
 
-**M5 — Mail lifecycle + incremental sync** · milestone #27
+**M4 — Filters made live** · milestone #26 · **DONE**
+- #190 — Wire FilterEngine into live sync so matched rules actually fire  *(headline; #193 depends on its helper)* · merged
+- #191 — Fix filter header-field and account-field evaluation bugs · merged
+- #192 — Move filter edit/export/import/logs onto the Filters gRPC service  · **[PROTO]** · merged
+- #193 — Re-expose bulk filter triage as a streaming Filters RPC  · **[PROTO]** *(depends on #190)* · merged
+
+**M5 — Mail lifecycle + incremental sync** · milestone #27 ← **next**
 - #194 — Account lifecycle over gRPC (edit/delete/test) + persist TLS mode  · **[PROTO]** *(prior art: `wip/unreviewed-account-tls-sync`, reference-not-trust)*
 - #195 — Incremental IMAP sync with progress reporting and per-item FETCH timeout
 - #196 — SendMessage selects an explicit account instead of the first configured  · **[PROTO]**
@@ -135,3 +145,7 @@ independent-ish feature work; M6 security; M7 the client-readiness gate).
   those two issues if you consider that sensitive.
 - Decide the eventual fate of `wip/unreviewed-account-tls-sync` (review-and-adopt
   vs discard) once M5 lands a clean implementation.
+- Follow-ups filed during M1–M4 that are open but not blocking (not scheduled
+  into a milestone yet): #216 (calendar windowing/predicate refinement), #219
+  (contacts notes handling), #225 (`filter edit` silently re-enables a disabled
+  rule and resets `created_at`).

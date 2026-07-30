@@ -154,3 +154,66 @@ async fn accepts_correct_bearer_token_and_returns_real_engine_status() {
     assert_eq!(response.engine_status, "Syncing");
     assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
 }
+
+/// Confirms `Filters` newly added management RPCs are mounted behind the
+/// SAME `BearerAuthInterceptor` as every other service -- an unauthenticated
+/// call to `UpdateRule` must be rejected exactly like an unauthenticated
+/// call to `System/GetStatus` above, with no carve-out for "just one more"
+/// RPC.
+#[tokio::test]
+async fn rejects_calls_to_new_filters_rpcs_without_a_bearer_token() {
+    let event_bus = Arc::new(EventBus::new());
+    let secrets = SecretManager::mock();
+    let token = hex::encode(
+        secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .expect("token provisioned from mock vault"),
+    );
+
+    let (addr, _dir) = start_server(event_bus, token).await;
+    let mut client =
+        nuncio_proto::v1::filters_client::FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+    let err = client
+        .update_rule(nuncio_proto::v1::UpdateRuleRequest {
+            id: "rule-1".to_string(),
+            name: None,
+            nsql: None,
+            priority: None,
+        })
+        .await
+        .expect_err("call without any authorization header must be rejected");
+    assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+/// Confirms the streaming `Filters.Triage` RPC is mounted behind the SAME
+/// `BearerAuthInterceptor` as every other `Filters` RPC -- an unauthenticated
+/// call must be rejected before the stream is ever established, exactly
+/// like an unauthenticated unary call.
+#[tokio::test]
+async fn rejects_triage_calls_without_a_bearer_token() {
+    let event_bus = Arc::new(EventBus::new());
+    let secrets = SecretManager::mock();
+    let token = hex::encode(
+        secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .expect("token provisioned from mock vault"),
+    );
+
+    let (addr, _dir) = start_server(event_bus, token).await;
+    let mut client =
+        nuncio_proto::v1::filters_client::FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+    let err = client
+        .triage(nuncio_proto::v1::TriageRequest {
+            rule_id: None,
+            chunk_size: 0,
+        })
+        .await
+        .expect_err("call without any authorization header must be rejected");
+    assert_eq!(err.code(), Code::Unauthenticated);
+}

@@ -83,11 +83,14 @@ impl NsqlValidator {
                         "field 'has_attachment' requires a boolean value".to_string(),
                     )),
                 },
+                FilterField::Header(_) => Err(ValidationError::FieldTypeMismatch(
+                    "header field conditions are not yet supported: message headers are not indexed"
+                        .to_string(),
+                )),
                 FilterField::Subject
                 | FilterField::From
                 | FilterField::To
                 | FilterField::Body
-                | FilterField::Header(_)
                 | FilterField::Folder
                 | FilterField::Account => match &leaf.value {
                     FilterValue::String(_) | FilterValue::List(_) => Ok(()),
@@ -316,6 +319,18 @@ mod tests {
             "Invalid Size",
             1,
             "WHERE size = 'abc' ACTION MARK READ",
+        )
+        .unwrap();
+        let err = NsqlValidator::validate(&rule, &ValidationOptions::default()).unwrap_err();
+        assert!(matches!(err, ValidationError::FieldTypeMismatch(_)));
+    }
+
+    #[test]
+    fn test_pass1_rejects_unsupported_header_field_conditions() {
+        let rule = crate::parser::NsqlParser::parse_rule(
+            "Header Spam Score",
+            1,
+            "WHERE header['X-Spam-Score'] = '10' ACTION MARK READ",
         )
         .unwrap();
         let err = NsqlValidator::validate(&rule, &ValidationOptions::default()).unwrap_err();

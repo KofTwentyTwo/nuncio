@@ -517,6 +517,18 @@ pub enum FilterSubcommand {
         #[arg(short, long, default_value_t = 50, help = "Log limit")]
         limit: usize,
     },
+    /// Retroactively apply the current rule set to every stored message,
+    /// streaming cumulative progress as the scan runs.
+    Triage {
+        /// Restrict the scan's reporting to a single rule ID. Not yet
+        /// honored by the daemon (see `nuncio.v1.Filters.Triage`) -- the
+        /// scan always evaluates every active rule.
+        #[arg(short, long, help = "Rule identifier (not yet honored)")]
+        rule_id: Option<String>,
+        /// Messages fetched per streamed progress update.
+        #[arg(short, long, help = "Messages scanned per chunk")]
+        chunk_size: Option<u32>,
+    },
 }
 
 #[cfg(test)]

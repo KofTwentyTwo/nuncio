@@ -57,8 +57,25 @@ pub struct JmapEmailChangesResponse {
     pub destroyed: Vec<String>,
 }
 
-/// Raw JMAP email object representation.
+/// JMAP `Email/query` response payload wrapper (RFC 8620 Section 5.5), narrowed
+/// to just the matched id list -- `Email/get` needs explicit ids (or `None`
+/// for "all", which real servers reject for large mailboxes), so a query must
+/// always precede a get.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JmapEmailQueryResponse {
+    /// Matched email ids, in server-defined order.
+    #[serde(default)]
+    pub ids: Vec<String>,
+}
+
+/// Raw JMAP email object representation (RFC 8621 Section 4.1). Field names
+/// must stay `camelCase` on the wire -- `receivedAt`/`isUnread`/`bodySnippet`
+/// are the actual JMAP property names; without `rename_all` these silently
+/// fail to match and every parsed message gets a zero timestamp, `read:
+/// true`, and no snippet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JmapEmail {
     pub id: String,
     pub subject: Option<String>,
@@ -75,17 +92,68 @@ pub struct JmapAddress {
     pub email: String,
 }
 
-/// JMAP protocol engine implementing RFC 8620 / 8621.
+/// Raw JMAP `Mailbox` object representation (RFC 8621 Section 2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JmapMailbox {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub total_emails: u32,
+    #[serde(default)]
+    pub unread_emails: u32,
+}
+
+/// JMAP `Mailbox/get` response payload wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JmapMailboxGetResponse {
+    /// List of retrieved mailbox objects.
+    pub list: Vec<JmapMailbox>,
+}
+
+/// JMAP protocol engine implementing RFC 8620 / 8621. Mirrors [`crate::imap::ImapEngine`]'s
+/// shape: `new` builds an uncredentialed engine that keeps the deterministic, network-free
+/// fallback behaviour existing preview/dry-run callers and unit tests rely on; `with_credentials`
+/// is what production (`nunciod::sync::build_mail_backend`) always uses, and performs genuine
+/// HTTP session discovery and JSON-RPC calls against the real server.
 pub struct JmapEngine {
     account_id: String,
+    host: String,
+    username: Option<String>,
+    password: Option<String>,
+    http: reqwest::Client,
 }
 
 impl JmapEngine {
-    /// Create a new `JmapEngine` bound to an account ID.
+    /// Create a new, uncredentialed `JmapEngine` bound to an account ID. Never performs
+    /// network I/O -- callers that need a real server connection must use
+    /// [`JmapEngine::with_credentials`].
     pub fn new(account_id: &str) -> Self {
         Self {
             account_id: account_id.to_string(),
+            host: String::new(),
+            username: None,
+            password: None,
+            http: reqwest::Client::new(),
         }
+    }
+
+    /// Create a new `JmapEngine` with a server host and Basic-auth credentials. This is the
+    /// production path: `sync_folders`/`sync_messages` perform real HTTP session discovery and
+    /// JMAP JSON-RPC calls against `host`.
+    pub fn with_credentials(account_id: &str, host: &str, username: &str, password: &str) -> Self {
+        Self {
+            account_id: account_id.to_string(),
+            host: host.to_string(),
+            username: Some(username.to_string()),
+            password: Some(password.to_string()),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    fn has_credentials(&self) -> bool {
+        self.username.is_some() && self.password.is_some()
     }
 
     /// Construct standard JMAP Well-Known session discovery URL (RFC 8620 Section 2.1).
@@ -116,6 +184,25 @@ impl JmapEngine {
         })
     }
 
+    /// Build JSON-RPC request invocation for `Email/query`, filtered to a single mailbox.
+    /// `Email/get` requires an explicit id list (or `None` for "all", which real servers
+    /// reject for anything but tiny mailboxes), so a query must always precede a get.
+    pub fn build_email_query_request(account_id: &str, mailbox_id: &str) -> Value {
+        json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [
+                [
+                    "Email/query",
+                    {
+                        "accountId": account_id,
+                        "filter": { "inMailboxes": [mailbox_id] }
+                    },
+                    "c1"
+                ]
+            ]
+        })
+    }
+
     /// Build JSON-RPC request invocation for `Email/changes` (differential sync).
     pub fn build_email_changes_request(account_id: &str, since_state: &str) -> Value {
         json!({
@@ -133,10 +220,44 @@ impl JmapEngine {
         })
     }
 
+    /// Build JSON-RPC request invocation for `Mailbox/get` (all mailboxes).
+    pub fn build_mailbox_get_request(account_id: &str) -> Value {
+        json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [
+                [
+                    "Mailbox/get",
+                    {
+                        "accountId": account_id,
+                        "ids": null
+                    },
+                    "c1"
+                ]
+            ]
+        })
+    }
+
     /// Parse JMAP RFC 8620 session response JSON.
     pub fn parse_session(raw_json: &str) -> Result<JmapSession, MailError> {
         serde_json::from_str(raw_json)
             .map_err(|e| MailError::ParseFailed(format!("invalid JMAP session JSON: {e}")))
+    }
+
+    /// Extract the argument payload of the first method call from a JMAP JSON-RPC response,
+    /// supporting both the full `methodResponses` envelope and a bare response object (used by
+    /// tests that exercise a parser directly against a single method's payload).
+    fn extract_method_response_payload(val: &Value) -> Result<Value, MailError> {
+        if let Some(calls) = val.get("methodResponses").and_then(|v| v.as_array()) {
+            let first_call = calls
+                .first()
+                .ok_or_else(|| MailError::ParseFailed("empty methodResponses array".to_string()))?;
+            let args = first_call.get(1).ok_or_else(|| {
+                MailError::ParseFailed("missing method response payload".to_string())
+            })?;
+            Ok(args.clone())
+        } else {
+            Ok(val.clone())
+        }
     }
 
     /// Parse raw JMAP `Email/get` JSON response payload into domain [`Email`] list and new state string.
@@ -146,23 +267,9 @@ impl JmapEngine {
     ) -> Result<(Vec<Email>, String), MailError> {
         let val: Value = serde_json::from_str(raw_json)
             .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
-
-        // Support both direct object and RFC 8620 methodCalls wrapper
-        let resp: JmapEmailGetResponse = if let Some(calls) =
-            val.get("methodResponses").and_then(|v| v.as_array())
-        {
-            let first_call = calls
-                .first()
-                .ok_or_else(|| MailError::ParseFailed("empty methodResponses array".to_string()))?;
-            let args = first_call.get(1).ok_or_else(|| {
-                MailError::ParseFailed("missing method response payload".to_string())
-            })?;
-            serde_json::from_value(args.clone())
-                .map_err(|e| MailError::ParseFailed(format!("invalid Email/get payload: {e}")))?
-        } else {
-            serde_json::from_value(val)
-                .map_err(|e| MailError::ParseFailed(format!("invalid Email/get payload: {e}")))?
-        };
+        let payload = Self::extract_method_response_payload(&val)?;
+        let resp: JmapEmailGetResponse = serde_json::from_value(payload)
+            .map_err(|e| MailError::ParseFailed(format!("invalid Email/get payload: {e}")))?;
 
         let emails = resp
             .list
@@ -208,31 +315,117 @@ impl JmapEngine {
     ) -> Result<(Vec<String>, Vec<String>, String), MailError> {
         let val: Value = serde_json::from_str(raw_json)
             .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
-
-        let resp: JmapEmailChangesResponse =
-            if let Some(calls) = val.get("methodResponses").and_then(|v| v.as_array()) {
-                let first_call = calls.first().ok_or_else(|| {
-                    MailError::ParseFailed("empty methodResponses array".to_string())
-                })?;
-                let args = first_call.get(1).ok_or_else(|| {
-                    MailError::ParseFailed("missing method response payload".to_string())
-                })?;
-                serde_json::from_value(args.clone()).map_err(|e| {
-                    MailError::ParseFailed(format!("invalid Email/changes payload: {e}"))
-                })?
-            } else {
-                serde_json::from_value(val).map_err(|e| {
-                    MailError::ParseFailed(format!("invalid Email/changes payload: {e}"))
-                })?
-            };
+        let payload = Self::extract_method_response_payload(&val)?;
+        let resp: JmapEmailChangesResponse = serde_json::from_value(payload)
+            .map_err(|e| MailError::ParseFailed(format!("invalid Email/changes payload: {e}")))?;
 
         Ok((resp.updated, resp.destroyed, resp.new_state))
+    }
+
+    /// Parse raw JMAP `Email/query` JSON response payload into a matched id list.
+    pub fn parse_email_query_response(raw_json: &str) -> Result<Vec<String>, MailError> {
+        let val: Value = serde_json::from_str(raw_json)
+            .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
+        let payload = Self::extract_method_response_payload(&val)?;
+        let resp: JmapEmailQueryResponse = serde_json::from_value(payload)
+            .map_err(|e| MailError::ParseFailed(format!("invalid Email/query payload: {e}")))?;
+
+        Ok(resp.ids)
+    }
+
+    /// Parse raw JMAP `Mailbox/get` JSON response payload into a mailbox list.
+    pub fn parse_mailbox_get_response(raw_json: &str) -> Result<Vec<JmapMailbox>, MailError> {
+        let val: Value = serde_json::from_str(raw_json)
+            .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
+        let payload = Self::extract_method_response_payload(&val)?;
+        let resp: JmapMailboxGetResponse = serde_json::from_value(payload)
+            .map_err(|e| MailError::ParseFailed(format!("invalid Mailbox/get payload: {e}")))?;
+
+        Ok(resp.list)
+    }
+
+    /// Issue an authenticated JMAP session discovery `GET /.well-known/jmap` against `self.host`.
+    /// A network failure or unparseable response surfaces as a genuine [`MailError`] -- there is
+    /// no fallback to canned data once credentials are present.
+    async fn discover_session(&self) -> Result<JmapSession, MailError> {
+        let url = Self::build_session_url(&self.host);
+        let mut request = self.http.get(&url);
+        if let (Some(u), Some(p)) = (&self.username, &self.password) {
+            request = request.basic_auth(u, Some(p));
+        }
+
+        let response = request.send().await.map_err(|e| {
+            MailError::NetworkError(format!("JMAP session discovery at {url} failed: {e}"))
+        })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|e| {
+            MailError::NetworkError(format!("failed to read JMAP session response body: {e}"))
+        })?;
+        if !status.is_success() {
+            return Err(MailError::NetworkError(format!(
+                "JMAP session discovery at {url} returned status {status}"
+            )));
+        }
+
+        Self::parse_session(&body)
+    }
+
+    /// POST a JMAP JSON-RPC request body to `api_url`, returning the raw response text. A
+    /// non-2xx status or transport failure surfaces as [`MailError::NetworkError`].
+    async fn post_jmap(&self, api_url: &str, body: &Value) -> Result<String, MailError> {
+        let mut request = self.http.post(api_url).json(body);
+        if let (Some(u), Some(p)) = (&self.username, &self.password) {
+            request = request.basic_auth(u, Some(p));
+        }
+
+        let response = request.send().await.map_err(|e| {
+            MailError::NetworkError(format!("JMAP request to {api_url} failed: {e}"))
+        })?;
+        let status = response.status();
+        let text = response.text().await.map_err(|e| {
+            MailError::NetworkError(format!("failed to read JMAP response body: {e}"))
+        })?;
+        if !status.is_success() {
+            return Err(MailError::NetworkError(format!(
+                "JMAP server at {api_url} returned status {status}"
+            )));
+        }
+
+        Ok(text)
+    }
+
+    /// Resolve the JMAP `accountId` to use for API calls: the session's advertised primary mail
+    /// account if present, else the Nuncio account id as a last resort.
+    fn resolve_account_id(&self, session: &JmapSession) -> String {
+        session
+            .primary_accounts
+            .get("urn:ietf:params:jmap:mail")
+            .cloned()
+            .unwrap_or_else(|| self.account_id.clone())
     }
 }
 
 #[async_trait]
 impl MailBackend for JmapEngine {
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError> {
+        if self.has_credentials() {
+            let session = self.discover_session().await?;
+            let account_id = self.resolve_account_id(&session);
+            let request = Self::build_mailbox_get_request(&account_id);
+            let raw = self.post_jmap(&session.api_url, &request).await?;
+            let mailboxes = Self::parse_mailbox_get_response(&raw)?;
+
+            return Ok(mailboxes
+                .into_iter()
+                .map(|mb| Folder {
+                    id: mb.id,
+                    name: mb.name,
+                    total_messages: mb.total_emails as usize,
+                    unread_messages: mb.unread_emails as usize,
+                })
+                .collect());
+        }
+
         Ok(vec![
             Folder {
                 id: "inbox".to_string(),
@@ -257,9 +450,22 @@ impl MailBackend for JmapEngine {
 
     async fn sync_messages(
         &self,
-        _folder_id: &str,
+        folder_id: &str,
         _since_state: Option<&str>,
     ) -> Result<(Vec<Email>, String), MailError> {
+        if self.has_credentials() {
+            let session = self.discover_session().await?;
+            let account_id = self.resolve_account_id(&session);
+
+            let query_request = Self::build_email_query_request(&account_id, folder_id);
+            let query_raw = self.post_jmap(&session.api_url, &query_request).await?;
+            let ids = Self::parse_email_query_response(&query_raw)?;
+
+            let get_request = Self::build_email_get_request(&account_id, Some(ids));
+            let get_raw = self.post_jmap(&session.api_url, &get_request).await?;
+            return self.parse_email_get_response(&get_raw);
+        }
+
         let sample_jmap = json!({
             "state": "s-100",
             "list": [
@@ -315,6 +521,23 @@ mod tests {
     }
 
     #[test]
+    fn build_email_query_request_json_structure() {
+        let req = JmapEngine::build_email_query_request("acct-1", "mailbox-1");
+        assert_eq!(req["methodCalls"][0][0], "Email/query");
+        assert_eq!(
+            req["methodCalls"][0][1]["filter"]["inMailboxes"][0],
+            "mailbox-1"
+        );
+    }
+
+    #[test]
+    fn build_mailbox_get_request_json_structure() {
+        let req = JmapEngine::build_mailbox_get_request("acct-1");
+        assert_eq!(req["methodCalls"][0][0], "Mailbox/get");
+        assert_eq!(req["methodCalls"][0][1]["accountId"], "acct-1");
+    }
+
+    #[test]
     fn parse_session_valid_payload() {
         let raw = r#"{
             "username": "james",
@@ -349,5 +572,70 @@ mod tests {
         let engine = JmapEngine::new("acct-1");
         let res = engine.parse_email_get_response("{ invalid json }");
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn parse_email_query_response_extracts_ids() {
+        let raw = r#"{
+            "methodResponses": [
+                ["Email/query", {"ids": ["msg-1", "msg-2"]}, "c1"]
+            ]
+        }"#;
+        let ids = JmapEngine::parse_email_query_response(raw).expect("parse query");
+        assert_eq!(ids, vec!["msg-1".to_string(), "msg-2".to_string()]);
+    }
+
+    #[test]
+    fn parse_mailbox_get_response_extracts_mailboxes() {
+        let raw = r#"{
+            "methodResponses": [
+                ["Mailbox/get", {"list": [
+                    {"id": "mb-1", "name": "Inbox", "totalEmails": 5, "unreadEmails": 2}
+                ]}, "c1"]
+            ]
+        }"#;
+        let mailboxes = JmapEngine::parse_mailbox_get_response(raw).expect("parse mailboxes");
+        assert_eq!(mailboxes.len(), 1);
+        assert_eq!(mailboxes[0].id, "mb-1");
+        assert_eq!(mailboxes[0].total_emails, 5);
+        assert_eq!(mailboxes[0].unread_emails, 2);
+    }
+
+    /// Regression test for the camelCase wire-format bug: `JmapEmail` must deserialize
+    /// `receivedAt`/`isUnread`/`bodySnippet` (the real JMAP wire property names) rather than
+    /// silently defaulting them to `None` because it only matched the Rust field names.
+    #[test]
+    fn jmap_email_deserializes_camel_case_wire_fields() {
+        let raw = r#"{
+            "id": "msg-1",
+            "subject": "Test",
+            "from": [{"email": "a@nuncio.mx"}],
+            "to": [{"email": "b@nuncio.mx"}],
+            "receivedAt": 1700000000,
+            "isUnread": true,
+            "bodySnippet": "hello world"
+        }"#;
+        let email: JmapEmail = serde_json::from_str(raw).expect("parse camelCase JmapEmail");
+        assert_eq!(email.received_at, Some(1700000000));
+        assert_eq!(email.is_unread, Some(true));
+        assert_eq!(email.body_snippet, Some("hello world".to_string()));
+    }
+
+    #[tokio::test]
+    async fn uncredentialed_engine_keeps_static_fallback_behaviour() {
+        let engine = JmapEngine::new("acct-1");
+        assert!(!engine.has_credentials());
+
+        let folders = engine.sync_folders().await.expect("sync folders");
+        assert_eq!(folders.len(), 3);
+        assert_eq!(folders[0].id, "inbox");
+
+        let (emails, state) = engine
+            .sync_messages("inbox", None)
+            .await
+            .expect("sync messages");
+        assert_eq!(state, "s-100");
+        assert_eq!(emails.len(), 1);
+        assert_eq!(emails[0].id, "jmap-msg-1");
     }
 }
