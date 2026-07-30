@@ -447,6 +447,57 @@ struct AccountsGrpcService {
     connection_tester: Arc<dyn AccountConnectionTester>,
 }
 
+/// Rotate an account's stored credential to `new_password` and persist the
+/// updated `config`, with a rollback that never destroys a working
+/// credential.
+///
+/// The prior secret (if any) is snapshotted BEFORE the new one is written, so
+/// if `save_account` then fails the snapshot is RESTORED -- returning the
+/// vault to exactly its pre-call state. This differs deliberately from
+/// `add_account`'s rollback, which deletes: an add has no prior secret to
+/// preserve, but an update's key may already hold the working credential, and
+/// deleting it on a persist failure would leave the still-present account row
+/// referencing a missing secret (strictly worse than doing nothing). When
+/// there was no prior secret, restore falls back to deleting the just-written
+/// one, matching add's behavior for that case. A rollback failure is reported
+/// alongside the original persistence error (which stays primary), never in
+/// place of it.
+async fn rotate_credential_and_persist(
+    db: &DatabaseEngine,
+    secrets: &SecretManager,
+    config: &nuncio_core::AccountConfig,
+    new_password: &str,
+) -> Result<(), Status> {
+    // Snapshot the prior credential before overwriting it. `None` means the
+    // key held no secret (or was unreadable), in which case rollback deletes.
+    let previous = secrets.get_secret(&config.keyring_secret_key).ok();
+
+    secrets
+        .set_secret(&config.keyring_secret_key, new_password)
+        .map_err(|e| Status::internal(format!("failed to store credential in vault: {e}")))?;
+
+    if let Err(e) = db.save_account(config).await {
+        let mut message = format!("failed to persist account: {e}");
+        let rollback = match &previous {
+            Some(prior) => secrets.set_secret(&config.keyring_secret_key, prior),
+            None => secrets.delete_secret(&config.keyring_secret_key),
+        };
+        if let Err(rollback_err) = rollback {
+            tracing::warn!(
+                keyring_secret_key = %config.keyring_secret_key,
+                error = %rollback_err,
+                "failed to roll back keyring secret after update_account persistence failure"
+            );
+            message.push_str(&format!(
+                " (and failed to roll back the credential: {rollback_err})"
+            ));
+        }
+        return Err(Status::internal(message));
+    }
+
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl Accounts for AccountsGrpcService {
     async fn add_account(
@@ -548,38 +599,20 @@ impl Accounts for AccountsGrpcService {
         }
 
         match req.password {
-            // A password rotation applies the SAME keyring-then-persist
-            // rollback discipline as `add_account`: write the new credential
-            // first, and if the account row then fails to persist, delete the
-            // just-written secret so the vault never diverges from the
-            // persisted row. The original persistence error is always what the
-            // caller sees; a rollback failure is reported alongside it.
+            // A password rotation writes the new credential first, then
+            // persists. Unlike `add_account` (where no prior secret exists,
+            // so a failed persist rolls back by DELETING the orphan), an
+            // update's key may already hold the working credential, so a
+            // failed persist must RESTORE that prior value rather than delete
+            // it -- deleting would leave the still-present account row
+            // referencing a missing secret. See
+            // [`rotate_credential_and_persist`].
             Some(password) if !password.is_empty() => {
-                self.secrets
-                    .set_secret(&config.keyring_secret_key, &password)
-                    .map_err(|e| {
-                        Status::internal(format!("failed to store credential in vault: {e}"))
-                    })?;
-
-                if let Err(e) = self.db.save_account(&config).await {
-                    let mut message = format!("failed to persist account: {e}");
-                    if let Err(rollback_err) =
-                        self.secrets.delete_secret(&config.keyring_secret_key)
-                    {
-                        tracing::warn!(
-                            keyring_secret_key = %config.keyring_secret_key,
-                            error = %rollback_err,
-                            "failed to roll back keyring secret after update_account persistence failure"
-                        );
-                        message.push_str(&format!(
-                            " (and failed to roll back the credential: {rollback_err})"
-                        ));
-                    }
-                    return Err(Status::internal(message));
-                }
+                rotate_credential_and_persist(&self.db, &self.secrets, &config, &password).await?;
             }
             // No password change: the existing keyring credential is left
-            // untouched and only the persisted configuration is overwritten.
+            // entirely untouched and only the persisted configuration is
+            // overwritten.
             _ => {
                 self.db
                     .save_account(&config)
@@ -3076,6 +3109,96 @@ mod tests {
             !message.contains("failed to store credential in vault"),
             "error message must not be the unrelated set_secret failure message, got: {message}"
         );
+    }
+
+    /// Regression: a password rotation that fails to persist must RESTORE the
+    /// prior credential, never destroy it. Seeds an existing credential,
+    /// forces `save_account` to fail for real (closed pool), and asserts the
+    /// ORIGINAL secret is still retrievable afterward -- proving the update
+    /// rollback restores rather than deletes (which would orphan the still
+    /// present account row). Drives the exact rotation+rollback helper the
+    /// `update_account` RPC uses.
+    #[tokio::test]
+    async fn update_account_password_rotation_restores_prior_credential_on_persist_failure() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let secrets = SecretManager::mock();
+
+        let key = "nuncio/acct-rotate-1";
+        secrets
+            .set_secret(key, "original-working-password")
+            .expect("seed the prior credential");
+
+        let config = nuncio_core::AccountConfig {
+            id: "acct-rotate-1".to_string(),
+            name: "Rotate Account".to_string(),
+            email_address: "rotate@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: key.to_string(),
+            sync_interval_secs: 60,
+        };
+
+        // Force `save_account` to fail for real by closing the pool, exactly
+        // as `add_account`'s rollback test does.
+        db.close().await;
+
+        let err = rotate_credential_and_persist(&db, &secrets, &config, "new-rotated-password")
+            .await
+            .expect_err("save_account must fail once the pool is closed");
+        assert_eq!(err.code(), Code::Internal);
+        assert!(err.message().contains("failed to persist account"));
+
+        // The prior credential must be intact -- neither deleted nor left as
+        // the failed new value.
+        let restored = secrets.get_secret(key).expect("prior credential survives");
+        assert_eq!(restored, "original-working-password");
+    }
+
+    /// Companion: when the key held NO prior secret, a failed rotation falls
+    /// back to deleting the just-written one (matching `add_account`), leaving
+    /// no orphaned credential.
+    #[tokio::test]
+    async fn update_account_password_rotation_deletes_new_credential_when_none_existed() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let secrets = SecretManager::mock();
+
+        let key = "nuncio/acct-rotate-2";
+        let config = nuncio_core::AccountConfig {
+            id: "acct-rotate-2".to_string(),
+            name: "Rotate Account 2".to_string(),
+            email_address: "rotate2@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: key.to_string(),
+            sync_interval_secs: 60,
+        };
+
+        db.close().await;
+
+        let err = rotate_credential_and_persist(&db, &secrets, &config, "new-rotated-password")
+            .await
+            .expect_err("save_account must fail once the pool is closed");
+        assert_eq!(err.code(), Code::Internal);
+
+        // No prior secret existed, so the just-written one is rolled back by
+        // deletion -- nothing orphaned.
+        assert!(secrets.get_secret(key).is_err());
     }
 
     // ---- Mail ----
