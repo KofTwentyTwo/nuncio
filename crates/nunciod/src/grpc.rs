@@ -27,18 +27,21 @@ use nuncio_proto::v1::{
     ContactEmail as ContactEmailProto, ContactPhone as ContactPhoneProto, ContactsSyncRequest,
     ContactsSyncResponse, CreateContactRequest, CreateContactResponse, CreateRuleRequest,
     CreateRuleResponse, DatabaseRecovered, DeleteRuleRequest, DeleteRuleResponse, Event,
-    EventError, ExportFormat as ExportFormatProto, ExportRequest, ExportResponse, FilterExecuted,
-    FilterRule as FilterRuleProto, Folder as FolderProto, GetContactRequest, GetContactResponse,
-    GetEventRequest, GetEventResponse, GetMessageRequest, GetMessageResponse, GetStatusRequest,
-    GetStatusResponse, ListAccountsRequest, ListAccountsResponse, ListContactsRequest,
+    EventError, ExportFormat as ExportFormatProto, ExportRequest, ExportResponse,
+    ExportRulesRequest, ExportRulesResponse, FilterExecuted,
+    FilterExecutionLog as FilterExecutionLogProto, FilterRule as FilterRuleProto,
+    Folder as FolderProto, GetContactRequest, GetContactResponse, GetEventRequest,
+    GetEventResponse, GetExecutionLogsRequest, GetExecutionLogsResponse, GetMessageRequest,
+    GetMessageResponse, GetStatusRequest, GetStatusResponse, ImportRulesRequest,
+    ImportRulesResponse, ListAccountsRequest, ListAccountsResponse, ListContactsRequest,
     ListContactsResponse, ListEventsRequest, ListEventsResponse, ListFoldersRequest,
     ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, ListRecordsRequest,
     ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest, MarkReadResponse,
     Message as MessageProto, MessageFlagsChanged, MessageSearchHit, PreviewRuleRequest,
     PreviewRuleResponse, SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest,
     SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse,
-    SyncStarted, TlsMode as TlsModeProto, UpdateAvailable, ValidateRuleRequest,
-    ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
+    SyncStarted, TlsMode as TlsModeProto, UpdateAvailable, UpdateRuleRequest, UpdateRuleResponse,
+    ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -1108,6 +1111,22 @@ fn map_filter_rule_to_proto(rule: nuncio_filter::FilterRule) -> FilterRuleProto 
     }
 }
 
+/// Maps a `nuncio_filter::FilterExecutionLog` onto its wire-format
+/// `nuncio.v1.FilterExecutionLog` representation.
+fn map_filter_execution_log_to_proto(
+    log: nuncio_filter::FilterExecutionLog,
+) -> FilterExecutionLogProto {
+    FilterExecutionLogProto {
+        id: log.id,
+        rule_id: log.rule_id,
+        message_id: log.message_id,
+        action_taken: log.action_taken,
+        matched_at: log.matched_at,
+        prev_hash: log.prev_hash,
+        hash: log.hash,
+    }
+}
+
 /// Maps a `nuncio_filter::FilterPreviewResult` onto its wire-format
 /// `nuncio.v1.PreviewRuleResponse` representation.
 fn map_preview_result_to_proto(preview: nuncio_filter::FilterPreviewResult) -> PreviewRuleResponse {
@@ -1314,6 +1333,144 @@ impl Filters for FiltersGrpcService {
 
         let preview = preview_engine.preview(&email);
         Ok(Response::new(map_preview_result_to_proto(preview)))
+    }
+
+    /// Applies partial overrides to an already-persisted rule, re-validates
+    /// the resulting rule with the same checks `create_rule` runs, and
+    /// reloads the live `FilterEngine` -- mirroring the store-then-reload
+    /// order every other mutating `Filters` RPC uses. There is no
+    /// single-rule store getter, so the existing rule is located the same
+    /// way the (now-retired) CLI-local implementation did: list then find
+    /// by `id`.
+    async fn update_rule(
+        &self,
+        request: Request<UpdateRuleRequest>,
+    ) -> Result<Response<UpdateRuleResponse>, Status> {
+        let req = request.into_inner();
+
+        let existing = self
+            .db
+            .list_filter_rules()
+            .await
+            .map_err(|e| Status::internal(format!("failed to list filter rules: {e}")))?
+            .into_iter()
+            .find(|r| r.id == req.id)
+            .ok_or_else(|| Status::not_found(format!("filter rule '{}' not found", req.id)))?;
+
+        let name = req.name.unwrap_or(existing.name);
+        let nsql = req.nsql.unwrap_or(existing.nsql_text);
+        let priority = req.priority.unwrap_or(existing.priority);
+
+        let mut rule = NsqlParser::parse_rule(name, priority, &nsql)
+            .map_err(|e| Status::invalid_argument(format!("NSQL syntax error: {e}")))?;
+
+        NsqlValidator::validate(&rule, &ValidationOptions::default())
+            .map_err(|e| Status::invalid_argument(format!("NSQL validation error: {e}")))?;
+
+        rule.id = existing.id;
+
+        self.db
+            .save_filter_rule(&rule)
+            .await
+            .map_err(|e| Status::internal(format!("failed to persist filter rule: {e}")))?;
+
+        self.reload_engine_from_store().await;
+
+        Ok(Response::new(UpdateRuleResponse {
+            rule: Some(map_filter_rule_to_proto(rule)),
+        }))
+    }
+
+    /// Renders every persisted rule as either lossless NSQL source text
+    /// (`FilterRule::to_nsql`, one rule per line) or a JSON array, matching
+    /// the exact two renderings the (now-retired) CLI-local `filter export`
+    /// implementation produced.
+    async fn export_rules(
+        &self,
+        request: Request<ExportRulesRequest>,
+    ) -> Result<Response<ExportRulesResponse>, Status> {
+        let req = request.into_inner();
+
+        let rules = self
+            .db
+            .list_filter_rules()
+            .await
+            .map_err(|e| Status::internal(format!("failed to list filter rules: {e}")))?;
+
+        let content = if req.format == "json" {
+            serde_json::to_string_pretty(&rules)
+                .map_err(|e| Status::internal(format!("failed to render rules as JSON: {e}")))?
+        } else {
+            rules
+                .iter()
+                .map(|r| r.to_nsql())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        Ok(Response::new(ExportRulesResponse { content }))
+    }
+
+    /// Parses `content` one non-empty, non-comment (`--`-prefixed) line at a
+    /// time, persisting every rule that parses and collecting the parse
+    /// error for every line that does not -- unlike the (now-retired)
+    /// CLI-local implementation, a parse failure is never silently dropped.
+    /// The live `FilterEngine` is reloaded once at the end rather than once
+    /// per successfully imported line.
+    async fn import_rules(
+        &self,
+        request: Request<ImportRulesRequest>,
+    ) -> Result<Response<ImportRulesResponse>, Status> {
+        let req = request.into_inner();
+
+        let mut imported_count = 0i32;
+        let mut errors = Vec::new();
+
+        for line in req.content.lines() {
+            let line_trim = line.trim();
+            if line_trim.is_empty() || line_trim.starts_with("--") {
+                continue;
+            }
+
+            match NsqlParser::parse_rule(
+                format!("Imported Rule {}", imported_count + 1),
+                0,
+                line_trim,
+            ) {
+                Ok(rule) => match self.db.save_filter_rule(&rule).await {
+                    Ok(()) => imported_count += 1,
+                    Err(e) => errors.push(format!("failed to persist '{line_trim}': {e}")),
+                },
+                Err(e) => errors.push(format!("failed to parse '{line_trim}': {e}")),
+            }
+        }
+
+        self.reload_engine_from_store().await;
+
+        Ok(Response::new(ImportRulesResponse {
+            imported_count,
+            errors,
+        }))
+    }
+
+    /// Returns the persisted filter execution log ledger, capped at
+    /// `limit`, in the store's natural order.
+    async fn get_execution_logs(
+        &self,
+        request: Request<GetExecutionLogsRequest>,
+    ) -> Result<Response<GetExecutionLogsResponse>, Status> {
+        let req = request.into_inner();
+
+        let logs = self
+            .db
+            .list_filter_execution_logs(req.limit as usize)
+            .await
+            .map_err(|e| Status::internal(format!("failed to list execution logs: {e}")))?
+            .into_iter()
+            .map(map_filter_execution_log_to_proto)
+            .collect();
+
+        Ok(Response::new(GetExecutionLogsResponse { logs }))
     }
 }
 
@@ -3148,7 +3305,8 @@ mod tests {
 
     use nuncio_proto::v1::filters_client::FiltersClient;
     use nuncio_proto::v1::{
-        CreateRuleRequest, DeleteRuleRequest, ListRulesRequest, PreviewRuleRequest,
+        CreateRuleRequest, DeleteRuleRequest, ExportRulesRequest, GetExecutionLogsRequest,
+        ImportRulesRequest, ListRulesRequest, PreviewRuleRequest, UpdateRuleRequest,
         ValidateRuleRequest,
     };
 
@@ -3240,6 +3398,39 @@ mod tests {
                 nsql: SAMPLE_RULE_NSQL.to_string(),
                 message_id: None,
             })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .update_rule(UpdateRuleRequest {
+                id: "rule-1".to_string(),
+                name: None,
+                nsql: None,
+                priority: None,
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .export_rules(ExportRulesRequest {
+                format: "sql".to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .import_rules(ImportRulesRequest {
+                content: SAMPLE_RULE_NSQL.to_string(),
+            })
+            .await
+            .expect_err("missing bearer token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        let err = client
+            .get_execution_logs(GetExecutionLogsRequest { limit: 10 })
             .await
             .expect_err("missing bearer token must be rejected");
         assert_eq!(err.code(), Code::Unauthenticated);
@@ -3552,6 +3743,259 @@ mod tests {
             .await
             .expect_err("invalid NSQL must be rejected");
         assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    /// `UpdateRule` happy path: applies a partial override, preserves the
+    /// original `id`, persists, AND reloads the live `FilterEngine` -- the
+    /// same proof pattern `create_list_and_delete_rule_round_trip...` uses.
+    #[tokio::test]
+    async fn update_rule_applies_partial_overrides_and_reloads_the_live_engine() {
+        let (addr, _handle, _db, filter_engine, _dir) =
+            spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let created = client
+            .create_rule(authed_bearer_request(CreateRuleRequest {
+                name: "Original Name".to_string(),
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+                priority: 5,
+            }))
+            .await
+            .expect("create_rule succeeds")
+            .into_inner()
+            .rule
+            .expect("response carries the rule");
+        let rule_id = created.id.clone();
+
+        let updated = client
+            .update_rule(authed_bearer_request(UpdateRuleRequest {
+                id: rule_id.clone(),
+                name: Some("Renamed".to_string()),
+                nsql: None,
+                priority: Some(1),
+            }))
+            .await
+            .expect("update_rule succeeds")
+            .into_inner()
+            .rule
+            .expect("response carries the updated rule");
+
+        assert_eq!(updated.id, rule_id, "id must be preserved across an edit");
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.priority, 1);
+        assert_eq!(
+            updated.nsql_text, SAMPLE_RULE_NSQL,
+            "an omitted field must retain its previous value"
+        );
+
+        let list_response = client
+            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .await
+            .expect("list_rules succeeds")
+            .into_inner();
+        assert_eq!(list_response.rules.len(), 1);
+        assert_eq!(list_response.rules[0].name, "Renamed");
+
+        // The live `FilterEngine` was reloaded with the updated rule.
+        let matches = filter_engine.evaluate(&nuncio_core::model::Email {
+            id: "msg-1".to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "inbox".to_string(),
+            subject: "Urgent Meeting".to_string(),
+            sender: "a@b.com".to_string(),
+            recipient: "c@d.com".to_string(),
+            received_at: 0,
+            read: false,
+            body_plain: None,
+            body_html: None,
+            attachments: Vec::new(),
+        });
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0.id, rule_id);
+    }
+
+    #[tokio::test]
+    async fn update_rule_rejects_unknown_id() {
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .update_rule(authed_bearer_request(UpdateRuleRequest {
+                id: "no-such-rule".to_string(),
+                name: Some("Whatever".to_string()),
+                nsql: None,
+                priority: None,
+            }))
+            .await
+            .expect_err("unknown id must be rejected");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn update_rule_rejects_invalid_nsql_and_persists_nothing() {
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let created = client
+            .create_rule(authed_bearer_request(CreateRuleRequest {
+                name: "Original Name".to_string(),
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+                priority: 5,
+            }))
+            .await
+            .expect("create_rule succeeds")
+            .into_inner()
+            .rule
+            .expect("response carries the rule");
+
+        let err = client
+            .update_rule(authed_bearer_request(UpdateRuleRequest {
+                id: created.id,
+                name: None,
+                nsql: Some("THIS IS NOT VALID NSQL AT ALL {{{".to_string()),
+                priority: None,
+            }))
+            .await
+            .expect_err("invalid NSQL must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+
+        let list_response = client
+            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .await
+            .expect("list_rules succeeds")
+            .into_inner();
+        assert_eq!(
+            list_response.rules[0].nsql_text, SAMPLE_RULE_NSQL,
+            "a failed edit must never overwrite the persisted rule"
+        );
+    }
+
+    /// `ExportRules` renders every persisted rule as either lossless NSQL
+    /// text or a JSON array, reflecting the daemon's real, persistent
+    /// store -- not any ephemeral client-side state.
+    #[tokio::test]
+    async fn export_rules_renders_sql_and_json() {
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        client
+            .create_rule(authed_bearer_request(CreateRuleRequest {
+                name: "Export Me".to_string(),
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+                priority: 0,
+            }))
+            .await
+            .expect("create_rule succeeds");
+
+        let sql_export = client
+            .export_rules(authed_bearer_request(ExportRulesRequest {
+                format: "sql".to_string(),
+            }))
+            .await
+            .expect("export_rules succeeds")
+            .into_inner();
+        assert!(sql_export.content.contains("SELECT * FROM emails"));
+        assert!(sql_export.content.contains("Urgent"));
+
+        let json_export = client
+            .export_rules(authed_bearer_request(ExportRulesRequest {
+                format: "json".to_string(),
+            }))
+            .await
+            .expect("export_rules succeeds")
+            .into_inner();
+        assert!(json_export.content.contains("\"name\""));
+        assert!(json_export.content.contains("Export Me"));
+    }
+
+    /// `ImportRules` persists every line that parses AND reports the parse
+    /// error for every line that does not -- proving failures are surfaced
+    /// rather than silently dropped.
+    #[tokio::test]
+    async fn import_rules_reports_partial_failures_and_persists_valid_lines() {
+        let (addr, _handle, _db, filter_engine, _dir) =
+            spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let content = format!(
+            "-- a comment line, skipped\n\n{SAMPLE_RULE_NSQL}\nTHIS IS NOT VALID NSQL AT ALL {{{{{{\n"
+        );
+
+        let response = client
+            .import_rules(authed_bearer_request(ImportRulesRequest { content }))
+            .await
+            .expect("import_rules call itself succeeds")
+            .into_inner();
+
+        assert_eq!(response.imported_count, 1);
+        assert_eq!(response.errors.len(), 1);
+
+        let list_response = client
+            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .await
+            .expect("list_rules succeeds")
+            .into_inner();
+        assert_eq!(list_response.rules.len(), 1);
+        assert_eq!(list_response.rules[0].nsql_text, SAMPLE_RULE_NSQL);
+
+        // The live engine was reloaded to include the imported rule.
+        let matches = filter_engine.evaluate(&nuncio_core::model::Email {
+            id: "msg-1".to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "inbox".to_string(),
+            subject: "Urgent Meeting".to_string(),
+            sender: "a@b.com".to_string(),
+            recipient: "c@d.com".to_string(),
+            received_at: 0,
+            read: false,
+            body_plain: None,
+            body_html: None,
+            attachments: Vec::new(),
+        });
+        assert_eq!(matches.len(), 1);
+    }
+
+    /// `GetExecutionLogs` returns the persisted execution log ledger,
+    /// proving `filter logs` (via this RPC) now sees the SAME persistent
+    /// store that `filter create` (via `CreateRule`) writes into -- closing
+    /// the exact gap that motivated moving these operations onto `Filters`.
+    #[tokio::test]
+    async fn get_execution_logs_returns_the_persisted_ledger() {
+        let (addr, _handle, db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
+
+        db.save_filter_execution_log("rule-1", "msg-1", "MARK READ")
+            .await
+            .expect("seed an execution log entry");
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let response = client
+            .get_execution_logs(authed_bearer_request(GetExecutionLogsRequest { limit: 10 }))
+            .await
+            .expect("get_execution_logs succeeds")
+            .into_inner();
+
+        assert_eq!(response.logs.len(), 1);
+        assert_eq!(response.logs[0].rule_id, "rule-1");
+        assert_eq!(response.logs[0].message_id, "msg-1");
+        assert_eq!(response.logs[0].action_taken, "MARK READ");
     }
 
     // ---- Export ----

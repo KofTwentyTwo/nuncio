@@ -162,6 +162,20 @@ fn filter_rule_proto_to_json(rule: &nuncio_proto::v1::FilterRule) -> serde_json:
     })
 }
 
+fn filter_execution_log_proto_to_json(
+    log: &nuncio_proto::v1::FilterExecutionLog,
+) -> serde_json::Value {
+    json!({
+        "id": log.id,
+        "rule_id": log.rule_id,
+        "message_id": log.message_id,
+        "action_taken": log.action_taken,
+        "matched_at": log.matched_at,
+        "prev_hash": log.prev_hash,
+        "hash": log.hash,
+    })
+}
+
 /// Errors emitted by the CLI headless runner.
 #[derive(Error, Debug)]
 pub enum RunnerError {
@@ -474,132 +488,29 @@ impl HeadlessRunner {
                     self.handle_filter_test(sql, message_id.as_deref(), json_mode)
                         .await
                 }
-                // `filter edit`/`export`/`import`/`logs` are NOT part of the
-                // `Filters` gRPC surface this runner implements
-                // (`CreateRule`/`ListRules`/`DeleteRule`/
-                // `ValidateRule`/`PreviewRule`); they still read/write this
-                // runner's own ephemeral local `db` below, exactly as
-                // before. Because `List`/`Create`/`Delete` above now go
-                // through the daemon's real, persistent store instead, a
-                // rule created via `filter create` will NOT show up in
-                // `filter export`/`filter logs` (which only see this
-                // process's throwaway `db`) until these are migrated too --
-                // a known, intentional gap, not a regression
-                // introduced silently here.
                 FilterSubcommand::Edit {
                     id,
                     name,
                     sql,
                     priority,
                 } => {
-                    let existing = self
-                        .db
-                        .list_filter_rules()
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .find(|r| r.id == *id);
-                    if let Some(rule) = existing {
-                        let rule_name = name.clone().unwrap_or(rule.name);
-                        let rule_sql = sql.clone().unwrap_or(rule.nsql_text);
-                        let rule_priority = priority.unwrap_or(rule.priority);
-
-                        match nuncio_filter::NsqlParser::parse_rule(
-                            &rule_name,
-                            rule_priority,
-                            &rule_sql,
-                        ) {
-                            Ok(mut updated) => {
-                                updated.id = id.clone();
-                                if let Err(e) = self.db.save_filter_rule(&updated).await {
-                                    return if json_mode {
-                                        format_json_error(&e.to_string())
-                                    } else {
-                                        format!("Database Error: {e}")
-                                    };
-                                }
-                                if json_mode {
-                                    format_json(&json!(updated))
-                                } else {
-                                    format!("✓ Updated filter rule '{}'.", id)
-                                }
-                            }
-                            Err(e) => {
-                                if json_mode {
-                                    format_json_error(&e.to_string())
-                                } else {
-                                    format!("Syntax Error: {e}")
-                                }
-                            }
-                        }
-                    } else if json_mode {
-                        format_json_error(&format!("Rule '{}' not found", id))
-                    } else {
-                        format!("Rule '{}' not found.", id)
-                    }
+                    self.handle_filter_edit(
+                        id,
+                        name.as_deref(),
+                        sql.as_deref(),
+                        *priority,
+                        json_mode,
+                    )
+                    .await
                 }
                 FilterSubcommand::Export { format } => {
-                    let rules = self.db.list_filter_rules().await.unwrap_or_default();
-                    if format == "json" || json_mode {
-                        format_json(&json!(rules))
-                    } else {
-                        let sqls: Vec<String> = rules.iter().map(|r| r.to_nsql()).collect();
-                        sqls.join("\n")
-                    }
+                    self.handle_filter_export(format, json_mode).await
                 }
-                FilterSubcommand::Import { file } => match std::fs::read_to_string(file) {
-                    Ok(content) => {
-                        let mut imported = 0;
-                        for line in content.lines() {
-                            let line_trim = line.trim();
-                            if line_trim.is_empty() || line_trim.starts_with("--") {
-                                continue;
-                            }
-                            if let Ok(rule) = nuncio_filter::NsqlParser::parse_rule(
-                                format!("Imported Rule {}", imported + 1),
-                                0,
-                                line_trim,
-                            ) {
-                                if self.db.save_filter_rule(&rule).await.is_ok() {
-                                    imported += 1;
-                                }
-                            }
-                        }
-                        if json_mode {
-                            format_json(&json!({ "imported_count": imported }))
-                        } else {
-                            format!("✓ Successfully imported {} filter rules.", imported)
-                        }
-                    }
-                    Err(e) => {
-                        if json_mode {
-                            format_json_error(&e.to_string())
-                        } else {
-                            format!("Failed to read file: {e}")
-                        }
-                    }
-                },
+                FilterSubcommand::Import { file } => {
+                    self.handle_filter_import(file, json_mode).await
+                }
                 FilterSubcommand::Logs { limit } => {
-                    let logs = self
-                        .db
-                        .list_filter_execution_logs(*limit)
-                        .await
-                        .unwrap_or_default();
-                    if json_mode {
-                        format_json(&json!(logs))
-                    } else if logs.is_empty() {
-                        "No execution logs recorded.".to_string()
-                    } else {
-                        let mut out =
-                            String::from("ID   RULE_ID    MSG_ID     ACTION       TIMESTAMP\n");
-                        for l in logs {
-                            out.push_str(&format!(
-                                "{:<4} {:<10} {:<10} {:<12} {}\n",
-                                l.id, l.rule_id, l.message_id, l.action_taken, l.matched_at
-                            ));
-                        }
-                        out
-                    }
+                    self.handle_filter_logs(*limit, json_mode).await
                 }
             },
             Commands::Update { action } => match action {
@@ -1390,6 +1301,184 @@ impl HeadlessRunner {
             }
             Err(status) => Self::render_error(
                 &format!("nunciod daemon rejected preview_rule: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `filter edit`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Filters` API. Only the supplied overrides are
+    /// sent; the daemon applies them to the existing persisted rule,
+    /// re-validates, persists, and reloads its own live `FilterEngine`.
+    async fn handle_filter_edit(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        sql: Option<&str>,
+        priority: Option<i32>,
+        json_mode: bool,
+    ) -> String {
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .update_rule(nuncio_proto::v1::UpdateRuleRequest {
+                id: id.to_string(),
+                name: name.map(str::to_string),
+                nsql: sql.map(str::to_string),
+                priority,
+            })
+            .await
+        {
+            Ok(response) => match response.into_inner().rule {
+                Some(rule) => {
+                    if json_mode {
+                        format_json(&json!({ "rule": filter_rule_proto_to_json(&rule) }))
+                    } else {
+                        format!("✓ Updated filter rule '{}'.", rule.id)
+                    }
+                }
+                None => Self::render_error(
+                    "nunciod daemon accepted update_rule but returned no rule",
+                    json_mode,
+                ),
+            },
+            Err(status)
+                if status.code() == tonic::Code::InvalidArgument
+                    || status.code() == tonic::Code::NotFound =>
+            {
+                Self::render_error(status.message(), json_mode)
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected update_rule: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `filter export`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Filters` API, rendering every rule persisted in
+    /// the daemon's real, persistent store -- not this runner's own
+    /// ephemeral local `db`.
+    async fn handle_filter_export(&self, format: &str, json_mode: bool) -> String {
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .export_rules(nuncio_proto::v1::ExportRulesRequest {
+                format: format.to_string(),
+            })
+            .await
+        {
+            Ok(response) => {
+                let content = response.into_inner().content;
+                if json_mode {
+                    format_json(&json!({ "content": content }))
+                } else {
+                    content
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected export_rules: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `filter import`: reads the local file (the file lives on the CLI's
+    /// filesystem, which is why this stays a local read), then forwards the
+    /// raw content to the daemon for parsing -- so the same
+    /// `NsqlParser::parse_rule` and persistence path `filter create` uses is
+    /// exercised, and rules land in the daemon's real, persistent store.
+    async fn handle_filter_import(&self, file: &str, json_mode: bool) -> String {
+        let content = match std::fs::read_to_string(file) {
+            Ok(content) => content,
+            Err(e) => {
+                return if json_mode {
+                    format_json_error(&e.to_string())
+                } else {
+                    format!("Failed to read file: {e}")
+                };
+            }
+        };
+
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .import_rules(nuncio_proto::v1::ImportRulesRequest { content })
+            .await
+        {
+            Ok(response) => {
+                let response = response.into_inner();
+                if json_mode {
+                    format_json(&json!({
+                        "imported_count": response.imported_count,
+                        "errors": response.errors,
+                    }))
+                } else {
+                    let mut out = format!(
+                        "✓ Successfully imported {} filter rules.",
+                        response.imported_count
+                    );
+                    for err in &response.errors {
+                        out.push_str(&format!("\n  ✗ {err}"));
+                    }
+                    out
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected import_rules: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `filter logs`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.Filters` API, reading the daemon's real,
+    /// persistent filter execution log ledger.
+    async fn handle_filter_logs(&self, limit: usize, json_mode: bool) -> String {
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .get_execution_logs(nuncio_proto::v1::GetExecutionLogsRequest {
+                limit: limit as u32,
+            })
+            .await
+        {
+            Ok(response) => {
+                let logs = response.into_inner().logs;
+                if json_mode {
+                    let logs_json: Vec<serde_json::Value> = logs
+                        .iter()
+                        .map(filter_execution_log_proto_to_json)
+                        .collect();
+                    format_json(&json!({ "logs": logs_json }))
+                } else if logs.is_empty() {
+                    "No execution logs recorded.".to_string()
+                } else {
+                    let mut out =
+                        String::from("ID   RULE_ID    MSG_ID     ACTION       TIMESTAMP\n");
+                    for l in logs {
+                        out.push_str(&format!(
+                            "{:<4} {:<10} {:<10} {:<12} {}\n",
+                            l.id, l.rule_id, l.message_id, l.action_taken, l.matched_at
+                        ));
+                    }
+                    out
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected get_execution_logs: {status}"),
                 json_mode,
             ),
         }
@@ -3143,18 +3232,23 @@ mod tests {
         use nuncio_proto::v1::filters_server::{Filters as FiltersService, FiltersServer};
         use nuncio_proto::v1::{
             CreateRuleRequest, CreateRuleResponse, DeleteRuleRequest, DeleteRuleResponse,
-            FilterRule as FilterRuleProto, ListRulesRequest, ListRulesResponse, PreviewRuleRequest,
-            PreviewRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
+            ExportRulesRequest, ExportRulesResponse, FilterExecutionLog as FilterExecutionLogProto,
+            FilterRule as FilterRuleProto, GetExecutionLogsRequest, GetExecutionLogsResponse,
+            ImportRulesRequest, ImportRulesResponse, ListRulesRequest, ListRulesResponse,
+            PreviewRuleRequest, PreviewRuleResponse, UpdateRuleRequest, UpdateRuleResponse,
+            ValidateRuleRequest, ValidateRuleResponse,
         };
         use std::sync::Mutex;
 
         /// Minimal test-only stub of `nuncio.v1.Filters`: records the last
-        /// `DeleteRuleRequest` it received (so this test can assert on
-        /// exactly what the CLI sent over the wire) and otherwise returns
-        /// fixed responses.
+        /// `DeleteRuleRequest`/`UpdateRuleRequest`/`ImportRulesRequest` it
+        /// received (so this test can assert on exactly what the CLI sent
+        /// over the wire) and otherwise returns fixed responses.
         #[derive(Default)]
         struct StubFilters {
             last_delete: Arc<Mutex<Option<DeleteRuleRequest>>>,
+            last_update: Arc<Mutex<Option<UpdateRuleRequest>>>,
+            last_import: Arc<Mutex<Option<ImportRulesRequest>>>,
         }
 
         #[tonic::async_trait]
@@ -3244,10 +3338,81 @@ mod tests {
                     condition_traces: vec!["Rule 'Stub Rule': MATCH".to_string()],
                 }))
             }
+
+            async fn update_rule(
+                &self,
+                request: tonic::Request<UpdateRuleRequest>,
+            ) -> Result<tonic::Response<UpdateRuleResponse>, tonic::Status> {
+                let req = request.into_inner();
+                if req.id != "rule-stub-1" {
+                    return Err(tonic::Status::not_found("no such rule"));
+                }
+                *self.last_update.lock().unwrap_or_else(|e| e.into_inner()) = Some(req.clone());
+                Ok(tonic::Response::new(UpdateRuleResponse {
+                    rule: Some(FilterRuleProto {
+                        id: req.id,
+                        name: req.name.unwrap_or_else(|| "Stub Rule".to_string()),
+                        target_account: "*".to_string(),
+                        priority: req.priority.unwrap_or(5),
+                        enabled: true,
+                        nsql_text: req
+                            .nsql
+                            .unwrap_or_else(|| "WHERE subject CONTAINS 'Urgent'".to_string()),
+                        actions: vec!["MARK READ".to_string()],
+                        created_at: 1_700_000_000,
+                        updated_at: 1_700_000_001,
+                    }),
+                }))
+            }
+
+            async fn export_rules(
+                &self,
+                request: tonic::Request<ExportRulesRequest>,
+            ) -> Result<tonic::Response<ExportRulesResponse>, tonic::Status> {
+                let req = request.into_inner();
+                let content = if req.format == "json" {
+                    r#"[{"id":"rule-stub-1"}]"#.to_string()
+                } else {
+                    "SELECT * FROM emails WHERE subject CONTAINS 'Urgent' ACTION MARK READ"
+                        .to_string()
+                };
+                Ok(tonic::Response::new(ExportRulesResponse { content }))
+            }
+
+            async fn import_rules(
+                &self,
+                request: tonic::Request<ImportRulesRequest>,
+            ) -> Result<tonic::Response<ImportRulesResponse>, tonic::Status> {
+                let req = request.into_inner();
+                *self.last_import.lock().unwrap_or_else(|e| e.into_inner()) = Some(req.clone());
+                Ok(tonic::Response::new(ImportRulesResponse {
+                    imported_count: 1,
+                    errors: vec!["failed to parse 'garbage': stub parse error".to_string()],
+                }))
+            }
+
+            async fn get_execution_logs(
+                &self,
+                _request: tonic::Request<GetExecutionLogsRequest>,
+            ) -> Result<tonic::Response<GetExecutionLogsResponse>, tonic::Status> {
+                Ok(tonic::Response::new(GetExecutionLogsResponse {
+                    logs: vec![FilterExecutionLogProto {
+                        id: 1,
+                        rule_id: "rule-stub-1".to_string(),
+                        message_id: "msg-stub-1".to_string(),
+                        action_taken: "MARK READ".to_string(),
+                        matched_at: 1_700_000_002,
+                        prev_hash: "prev-hash".to_string(),
+                        hash: "hash".to_string(),
+                    }],
+                }))
+            }
         }
 
         let stub = StubFilters::default();
         let delete_probe = stub.last_delete.clone();
+        let update_probe = stub.last_update.clone();
+        let import_probe = stub.last_import.clone();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -3368,6 +3533,120 @@ mod tests {
             .await;
         assert!(test_out.contains(r#""matched":true"#));
         assert!(test_out.contains("msg-stub-1"));
+
+        // `filter edit`: proves the CLI forwards only the supplied
+        // overrides and renders the daemon's updated rule, and that a
+        // not-found `id` surfaces the daemon's honest `NotFound` error.
+        let edit_out = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Edit {
+                        id: "rule-stub-1".to_string(),
+                        name: Some("Renamed Rule".to_string()),
+                        sql: None,
+                        priority: Some(9),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(edit_out.contains("Renamed Rule"));
+        assert!(edit_out.contains(r#""priority":9"#));
+        let recorded_update = update_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received an update_rule request");
+        assert_eq!(recorded_update.id, "rule-stub-1");
+        assert_eq!(recorded_update.name.as_deref(), Some("Renamed Rule"));
+        assert_eq!(recorded_update.nsql, None);
+        assert_eq!(recorded_update.priority, Some(9));
+
+        let edit_not_found = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Edit {
+                        id: "no-such-rule".to_string(),
+                        name: None,
+                        sql: None,
+                        priority: None,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(edit_not_found.contains(r#""status":"error""#));
+
+        // `filter export`: proves the CLI forwards `format` and renders the
+        // daemon's rendered content as-is.
+        let export_sql = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Export {
+                        format: "sql".to_string(),
+                    },
+                },
+                false,
+            )
+            .await;
+        assert!(export_sql.contains("SELECT * FROM emails"));
+
+        let export_json = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Export {
+                        format: "json".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(export_json.contains("rule-stub-1"));
+
+        // `filter import`: proves the CLI reads the local file and forwards
+        // its raw content, and surfaces the daemon's per-line errors
+        // instead of silently dropping them.
+        let import_file = std::env::temp_dir().join(format!(
+            "nuncio-cli-filter-import-test-{}.sql",
+            std::process::id()
+        ));
+        std::fs::write(&import_file, "WHERE subject CONTAINS 'Urgent'\ngarbage\n")
+            .expect("write temp import file");
+        let import_out = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Import {
+                        file: import_file.to_string_lossy().to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        let _ = std::fs::remove_file(&import_file);
+        assert!(import_out.contains(r#""imported_count":1"#));
+        assert!(import_out.contains("stub parse error"));
+        let recorded_import = import_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received an import_rules request");
+        assert!(recorded_import
+            .content
+            .contains("WHERE subject CONTAINS 'Urgent'"));
+        assert!(recorded_import.content.contains("garbage"));
+
+        // `filter logs`: proves the CLI reads the daemon's real execution
+        // log ledger, not any local/ephemeral state.
+        let logs_out = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Logs { limit: 10 },
+                },
+                true,
+            )
+            .await;
+        assert!(logs_out.contains("msg-stub-1"));
+        assert!(logs_out.contains(r#""action_taken":"MARK READ""#));
     }
 
     #[tokio::test]
