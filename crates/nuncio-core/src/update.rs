@@ -40,6 +40,11 @@ pub enum UpdateError {
     #[error("checksum file error: {0}")]
     ChecksumFileError(String),
 
+    /// No checksum could be positively verified for the download, either because the release
+    /// has no `SHA256SUMS.txt` asset or because that asset could not be fetched.
+    #[error("checksum unavailable: {0}")]
+    ChecksumUnavailable(String),
+
     /// Archive unpacking failure (tar.gz or zip).
     #[error("archive extraction failed: {0}")]
     ArchiveError(String),
@@ -223,10 +228,41 @@ impl UpdateEngine {
     }
 
     /// Download release package bytes and verify SHA-256 checksum against `SHA256SUMS.txt`.
+    ///
+    /// This is the supply-chain trust boundary for the auto-updater: the only way to reach
+    /// `Ok` is an exact SHA-256 match against a successfully fetched `SHA256SUMS.txt`. Any
+    /// situation where the checksum cannot be positively verified — no checksum asset on the
+    /// release, a failed fetch of that asset, a missing filename entry, or a hash mismatch —
+    /// must fail closed rather than silently returning unverified bytes.
     pub async fn download_and_verify(
         &self,
         release_info: &ReleaseInfo,
     ) -> Result<Vec<u8>, UpdateError> {
+        // Refuse before spending bandwidth on the archive if there is no checksum asset to
+        // verify it against.
+        let checksum_url = release_info.checksum_url.as_ref().ok_or_else(|| {
+            UpdateError::ChecksumUnavailable(
+                "no SHA256SUMS.txt asset found for this release; refusing to apply an unverified update"
+                    .to_string(),
+            )
+        })?;
+
+        let sums_resp = self.client.get(checksum_url).send().await?;
+        if !sums_resp.status().is_success() {
+            return Err(UpdateError::ChecksumUnavailable(format!(
+                "failed to fetch SHA256SUMS.txt (HTTP status {}); refusing to apply an unverified update",
+                sums_resp.status()
+            )));
+        }
+        let sums_text = sums_resp.text().await?;
+        let expected_hash = parse_sha256sums(&sums_text, &release_info.archive_filename)
+            .ok_or_else(|| {
+                UpdateError::ChecksumFileError(format!(
+                    "Filename '{}' not found in SHA256SUMS.txt",
+                    release_info.archive_filename
+                ))
+            })?;
+
         // Download main binary package archive
         let archive_resp = self.client.get(&release_info.download_url).send().await?;
         if !archive_resp.status().is_success() {
@@ -237,29 +273,13 @@ impl UpdateEngine {
         }
         let archive_bytes = archive_resp.bytes().await?.to_vec();
 
-        // Verify SHA-256 checksum if SHA256SUMS.txt asset is available
-        if let Some(checksum_url) = &release_info.checksum_url {
-            let sums_resp = self.client.get(checksum_url).send().await?;
-            if sums_resp.status().is_success() {
-                let sums_text = sums_resp.text().await?;
-                if let Some(expected_hash) =
-                    parse_sha256sums(&sums_text, &release_info.archive_filename)
-                {
-                    let actual_hash = compute_sha256(&archive_bytes);
-                    if expected_hash.to_lowercase() != actual_hash.to_lowercase() {
-                        return Err(UpdateError::ChecksumMismatch {
-                            filename: release_info.archive_filename.clone(),
-                            expected: expected_hash,
-                            actual: actual_hash,
-                        });
-                    }
-                } else {
-                    return Err(UpdateError::ChecksumFileError(format!(
-                        "Filename '{}' not found in SHA256SUMS.txt",
-                        release_info.archive_filename
-                    )));
-                }
-            }
+        let actual_hash = compute_sha256(&archive_bytes);
+        if expected_hash.to_lowercase() != actual_hash.to_lowercase() {
+            return Err(UpdateError::ChecksumMismatch {
+                filename: release_info.archive_filename.clone(),
+                expected: expected_hash,
+                actual: actual_hash,
+            });
         }
 
         Ok(archive_bytes)
@@ -659,5 +679,130 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nuncio-x86_64-
         let info = result.release_info.expect("release info present");
         assert_eq!(info.release_notes, "Major security release");
         assert!(info.download_url.contains(&archive_filename));
+    }
+
+    fn release_info_for(
+        mock_server: &MockServer,
+        checksum_url: Option<String>,
+        archive_filename: &str,
+    ) -> ReleaseInfo {
+        ReleaseInfo {
+            version: "99.0.0".to_string(),
+            tag_name: "v99.0.0".to_string(),
+            release_notes: String::new(),
+            download_url: format!("{}/download/{archive_filename}", mock_server.uri()),
+            checksum_url,
+            archive_filename: archive_filename.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn download_and_verify_fails_closed_without_checksum_asset() {
+        let mock_server = MockServer::start().await;
+        let archive_filename = "nuncio-x86_64-unknown-linux-gnu.tar.gz";
+        let archive_bytes = b"archive payload".to_vec();
+
+        Mock::given(method("GET"))
+            .and(path(format!("/download/{archive_filename}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes))
+            .mount(&mock_server)
+            .await;
+
+        let updater = UpdateEngine::with_base_url(mock_server.uri()).unwrap();
+        let info = release_info_for(&mock_server, None, archive_filename);
+
+        let result = updater.download_and_verify(&info).await;
+        assert!(matches!(result, Err(UpdateError::ChecksumUnavailable(_))));
+    }
+
+    #[tokio::test]
+    async fn download_and_verify_fails_closed_on_sums_fetch_error() {
+        let mock_server = MockServer::start().await;
+        let archive_filename = "nuncio-x86_64-unknown-linux-gnu.tar.gz";
+        let archive_bytes = b"archive payload".to_vec();
+
+        Mock::given(method("GET"))
+            .and(path(format!("/download/{archive_filename}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download/SHA256SUMS.txt"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let updater = UpdateEngine::with_base_url(mock_server.uri()).unwrap();
+        let info = release_info_for(
+            &mock_server,
+            Some(format!("{}/download/SHA256SUMS.txt", mock_server.uri())),
+            archive_filename,
+        );
+
+        let result = updater.download_and_verify(&info).await;
+        assert!(matches!(result, Err(UpdateError::ChecksumUnavailable(_))));
+    }
+
+    #[tokio::test]
+    async fn download_and_verify_fails_closed_on_hash_mismatch() {
+        let mock_server = MockServer::start().await;
+        let archive_filename = "nuncio-x86_64-unknown-linux-gnu.tar.gz";
+        let archive_bytes = b"archive payload".to_vec();
+        let wrong_hash = compute_sha256(b"not the archive bytes");
+        let sums_text = format!("{wrong_hash}  {archive_filename}\n");
+
+        Mock::given(method("GET"))
+            .and(path(format!("/download/{archive_filename}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download/SHA256SUMS.txt"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sums_text))
+            .mount(&mock_server)
+            .await;
+
+        let updater = UpdateEngine::with_base_url(mock_server.uri()).unwrap();
+        let info = release_info_for(
+            &mock_server,
+            Some(format!("{}/download/SHA256SUMS.txt", mock_server.uri())),
+            archive_filename,
+        );
+
+        let result = updater.download_and_verify(&info).await;
+        assert!(matches!(result, Err(UpdateError::ChecksumMismatch { .. })));
+    }
+
+    #[tokio::test]
+    async fn download_and_verify_succeeds_on_matching_checksum() {
+        let mock_server = MockServer::start().await;
+        let archive_filename = "nuncio-x86_64-unknown-linux-gnu.tar.gz";
+        let archive_bytes = b"archive payload".to_vec();
+        let correct_hash = compute_sha256(&archive_bytes);
+        let sums_text = format!("{correct_hash}  {archive_filename}\n");
+
+        Mock::given(method("GET"))
+            .and(path(format!("/download/{archive_filename}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes.clone()))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download/SHA256SUMS.txt"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sums_text))
+            .mount(&mock_server)
+            .await;
+
+        let updater = UpdateEngine::with_base_url(mock_server.uri()).unwrap();
+        let info = release_info_for(
+            &mock_server,
+            Some(format!("{}/download/SHA256SUMS.txt", mock_server.uri())),
+            archive_filename,
+        );
+
+        let result = updater
+            .download_and_verify(&info)
+            .await
+            .expect("checksum matches, download succeeds");
+        assert_eq!(result, archive_bytes);
     }
 }
