@@ -44,9 +44,10 @@ These are non-negotiable and apply to every item below:
 ## Where we are today (2026-07-30)
 
 **Phases 0–2 are complete and on `dev`.** The daemon boots gRPC-only on loopback
-`127.0.0.1:9420` behind a keyring-minted bearer token, and serves **six services,
-each mounted behind the auth interceptor**: `System`, `Accounts`, `Mail`,
-`Filters`, `Export`, `Audit`. The IMAP→store→read→SMTP-send spine works
+`127.0.0.1:9420` behind a keyring-minted bearer token, and serves **eight
+services, each mounted behind the auth interceptor**: `System`, `Accounts`,
+`Mail`, `Filters`, `Calendar`, `Contacts`, `Export`, `Audit` (the `Calendar`
+and `Contacts` verticals landed in M1/M2). The IMAP→store→read→SMTP-send spine works
 end-to-end over gRPC, driven by the `nuncio-cli` reference client, tested
 offline. The legacy JSON-RPC IPC is removed. The `nuncio.v1` contract is
 published with a byte-deterministic `FileDescriptorSet` golden guarding it, plus
