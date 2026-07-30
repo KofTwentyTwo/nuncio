@@ -25,8 +25,9 @@ machine (or a new LLM) picks up the work cold.
 
 ## Current state of the code (2026-07-30)
 - **Phases 0–2 complete.** The daemon boots gRPC-only on loopback
-  `127.0.0.1:9420` behind a keyring bearer token, serving six services (System,
-  Accounts, Mail, Filters, Export, Audit), each behind the auth interceptor. The
+  `127.0.0.1:9420` behind a keyring bearer token, serving eight services (System,
+  Accounts, Mail, Filters, Calendar, Contacts, Export, Audit), each behind the
+  auth interceptor. The
   `IMAP → store → read → SMTP send` spine works end-to-end over gRPC via the
   `nuncio-cli` reference client, tested offline. `nuncio.v1` is published with a
   contract-stability golden.
