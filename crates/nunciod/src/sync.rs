@@ -18,7 +18,7 @@
 //! only places that resolve a real account's credentials and construct a
 //! real backend; they then delegate the actual fetch/persist/event-emission
 //! work to [`sync_with_backend`].
-use nuncio_core::{AccountConfig, AccountProtocol, CoreCommand, EventBus};
+use nuncio_core::{AccountConfig, AccountProtocol, CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, OutboxManager, RuleAction};
 use nuncio_mail::{ImapEngine, JmapEngine, MailBackend, MailError};
 use nuncio_store::db::DatabaseError;
@@ -235,13 +235,27 @@ async fn is_new_message(db: &nuncio_store::db::DatabaseEngine, message_id: &str)
 /// [`MockMailBackend`].
 async fn fetch_and_persist(
     db: &nuncio_store::db::DatabaseEngine,
+    event_bus: &EventBus,
     backend: &dyn MailBackend,
     filter_engine: &FilterEngine,
+    account_id: Option<&str>,
 ) -> Result<usize, SyncError> {
     let folders = backend.sync_folders().await?;
     let mut synced = 0usize;
     for folder in folders {
-        let (emails, _state) = backend.sync_messages(&folder.id, None).await?;
+        // Resume from the folder's stored checkpoint so the backend can fetch
+        // only what changed since the last sync. A checkpoint is keyed by
+        // (account, folder), so a run with no account context (a mock-driven
+        // `SyncAll` with `account_id == None`) has nowhere to key it and always
+        // performs a full fetch.
+        let last_state = match account_id {
+            Some(acct) => db.get_folder_sync_state(acct, &folder.id).await?,
+            None => None,
+        };
+        let (emails, new_state) = backend
+            .sync_messages(&folder.id, last_state.as_deref())
+            .await?;
+        let fetched = emails.len();
         for email in emails {
             let is_new = is_new_message(db, &email.id).await;
             db.save_email(&email).await?;
@@ -250,6 +264,19 @@ async fn fetch_and_persist(
             }
             synced += 1;
         }
+        // Persist the returned checkpoint only AFTER this folder's messages
+        // have landed, so the stored high-water mark can never advance past
+        // work that actually reached the store.
+        if let Some(acct) = account_id {
+            db.save_folder_sync_state(acct, &folder.id, &new_state)
+                .await?;
+        }
+        event_bus.publish_event(CoreEvent::SyncProgress {
+            account_id: account_id.map(str::to_string),
+            folder_id: folder.id.clone(),
+            fetched,
+            total: synced,
+        });
     }
     Ok(synced)
 }
@@ -282,7 +309,8 @@ pub async fn sync_with_backend(
         None => event_bus.process_command(CoreCommand::SyncAll),
     }
 
-    let result = fetch_and_persist(db, backend, filter_engine).await;
+    let result =
+        fetch_and_persist(db, event_bus, backend, filter_engine, account_id.as_deref()).await;
 
     if let Err(e) = &result {
         event_bus.process_command(CoreCommand::ReportError {
@@ -317,6 +345,7 @@ fn build_mail_backend(config: &AccountConfig, password: &str) -> Box<dyn MailBac
             &config.id,
             &config.server_host,
             config.server_port,
+            config.imap_tls_mode,
             &config.email_address,
             password,
         )),
@@ -393,7 +422,15 @@ pub async fn run_all_accounts_sync(
                 match secrets.get_secret(&config.keyring_secret_key) {
                     Ok(password) => {
                         let backend = build_mail_backend(&config, &password);
-                        match fetch_and_persist(db, backend.as_ref(), filter_engine).await {
+                        match fetch_and_persist(
+                            db,
+                            event_bus,
+                            backend.as_ref(),
+                            filter_engine,
+                            Some(&config.id),
+                        )
+                        .await
+                        {
                             Ok(count) => total_synced += count,
                             Err(e) => {
                                 event_bus.process_command(CoreCommand::ReportError {
@@ -618,6 +655,16 @@ mod tests {
                 account_id: Some("acct-mock-1".to_string())
             }
         );
+        // A per-folder progress event is published between start and complete.
+        assert_eq!(
+            events.recv().await.expect("progress event"),
+            CoreEvent::SyncProgress {
+                account_id: Some("acct-mock-1".to_string()),
+                folder_id: "inbox".to_string(),
+                fetched: 2,
+                total: 2,
+            }
+        );
         assert_eq!(
             events.recv().await.expect("complete event"),
             CoreEvent::SyncCompleted {
@@ -652,6 +699,16 @@ mod tests {
         assert_eq!(
             events.recv().await.expect("start event"),
             CoreEvent::SyncStarted { account_id: None }
+        );
+        // The folder is empty, but a progress event still marks it done.
+        assert_eq!(
+            events.recv().await.expect("progress event"),
+            CoreEvent::SyncProgress {
+                account_id: None,
+                folder_id: "inbox".to_string(),
+                fetched: 0,
+                total: 0,
+            }
         );
         assert_eq!(
             events.recv().await.expect("complete event"),
@@ -788,6 +845,15 @@ mod tests {
             events.recv().await.expect("start event"),
             CoreEvent::SyncStarted {
                 account_id: Some("acct-jmap-real-1".to_string())
+            }
+        );
+        assert_eq!(
+            events.recv().await.expect("progress event"),
+            CoreEvent::SyncProgress {
+                account_id: Some("acct-jmap-real-1".to_string()),
+                folder_id: "jmap-inbox".to_string(),
+                fetched: 1,
+                total: 1,
             }
         );
         assert_eq!(
@@ -1199,6 +1265,71 @@ mod tests {
             pending_after_second.len(),
             1,
             "no new outbox mutation should be enqueued on a repeat sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_with_backend_persists_and_threads_the_folder_checkpoint_across_syncs() {
+        // The regression this story exists to kill: the returned checkpoint
+        // must be persisted and fed back into the NEXT sync, so the second
+        // sync is genuinely incremental rather than a full re-fetch. Proven by
+        // capturing the exact `since_state` the backend received on each call.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+
+        let mock = MockMailBackend::new();
+        mock.set_returned_state("uidnext-4242");
+        mock.add_folder(Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 1,
+            unread_messages: 1,
+        });
+        mock.add_message(mock_email("m-inc-1", "inbox", "First"));
+
+        let filter_engine = empty_filter_engine();
+
+        // First sync: no checkpoint exists yet, so the backend is called with
+        // `None` and does a full fetch (one message).
+        let first = sync_with_backend(
+            &db,
+            &event_bus,
+            &mock,
+            &filter_engine,
+            Some("acct-inc-1".to_string()),
+        )
+        .await
+        .expect("first sync succeeds");
+        assert_eq!(first, 1);
+
+        // The returned checkpoint must now be persisted for (account, folder).
+        assert_eq!(
+            db.get_folder_sync_state("acct-inc-1", "inbox")
+                .await
+                .expect("read checkpoint"),
+            Some("uidnext-4242".to_string())
+        );
+
+        // Second sync: the daemon must feed the stored checkpoint back in. The
+        // mock returns nothing new for a non-None checkpoint -> narrower fetch.
+        let second = sync_with_backend(
+            &db,
+            &event_bus,
+            &mock,
+            &filter_engine,
+            Some("acct-inc-1".to_string()),
+        )
+        .await
+        .expect("second sync succeeds");
+        assert_eq!(second, 0, "an incremental second sync fetches nothing new");
+
+        // The proof of genuine incrementality: the backend saw `None` first,
+        // then the exact checkpoint the first sync returned.
+        assert_eq!(
+            mock.since_state_calls(),
+            vec![None, Some("uidnext-4242".to_string())],
         );
     }
 }

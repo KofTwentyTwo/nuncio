@@ -76,7 +76,7 @@
   /* milestone rail */
   .miles{position:relative;margin-top:8px}
   .miles::before{content:"";position:absolute;left:19px;top:12px;bottom:34px;width:2px;
-    background:linear-gradient(var(--done),var(--done) 57%,var(--prog) 57%,var(--prog) 71%,var(--line) 71%);border-radius:2px}
+    background:linear-gradient(var(--done),var(--done) 71%,var(--prog) 71%,var(--prog) 86%,var(--line) 86%);border-radius:2px}
   @media (max-width:640px){.miles::before{display:none}}
   .m{position:relative;padding-left:52px;margin-bottom:16px}
   @media (max-width:640px){.m{padding-left:0}}
@@ -135,14 +135,15 @@
 
   <h2>Where we are · 2026-07-30</h2>
   <div class="band">
-    <h3>Phases 0–2 complete, Phase 3 feature completeness done — M1–M4 all merged</h3>
+    <h3>Phases 0–2 complete, feature surface (Phase 3–M5) done — M1–M5 all merged</h3>
     <p>The daemon boots gRPC-only on loopback <span class="chip">127.0.0.1:9420</span> behind a keyring-minted
       bearer token. <code>IMAP → store → read → SMTP send</code> runs end-to-end over gRPC, driven by the
       <span class="chip">nuncio-cli</span> reference client, tested fully offline. The legacy JSON-RPC IPC is gone,
       and <span class="chip">nuncio.v1</span> is published with a byte-deterministic contract-stability golden.
-      Milestones M1–M4 are now complete on <span class="chip">dev</span>: Calendar, Contacts, JMAP, and live
-      Filters are all real, wired, and API-complete. <b style="color:var(--ink)">Next up: M5</b> (mail lifecycle
-      &amp; incremental sync).</p>
+      Milestones M1–M5 are now complete on <span class="chip">dev</span> (M1–M4 already promoted to
+      <span class="chip">main</span>): Calendar, Contacts, JMAP, live Filters, and mail lifecycle + incremental
+      sync are all real, wired, and API-complete. <b style="color:var(--ink)">Next up: M6</b> (security &amp;
+      release hardening).</p>
     <div class="chips">
       <span class="chip svc">System</span><span class="chip svc">Accounts</span><span class="chip svc">Mail</span>
       <span class="chip svc">Filters</span><span class="chip svc">Calendar</span><span class="chip svc">Contacts</span>
@@ -158,6 +159,7 @@
       <span class="donetag">M2 · Contacts (CardDAV)</span>
       <span class="donetag">M3 · JMAP</span>
       <span class="donetag">M4 · Filters made live</span>
+      <span class="donetag">M5 · Mail lifecycle + incremental sync</span>
     </div>
   </div>
 
@@ -226,27 +228,31 @@
       </div>
     </div>
 
-    <div class="m prog">
+    <div class="m done">
       <div class="node">M5</div>
       <div class="card">
         <div class="chead">
           <h3 class="ctitle"><span class="code">M5</span>Mail lifecycle + incremental sync</h3>
-          <span class="stat prog">Next</span>
+          <span class="stat done">Done</span>
         </div>
-        <p class="cbody">Round out real account management: edit / delete / test-connection with TLS modes
-          (implicit / STARTTLS / plain) actually wired; explicit send-account selection; and <b>incremental sync</b>
-          (honor <code>since_state</code> instead of re-fetching the whole mailbox every time) with progress and stall timeouts.</p>
+        <p class="cbody">Account lifecycle (edit / delete / test-connection) is real over gRPC, with TLS modes
+          (implicit / STARTTLS / plain) persisted and actually driving the IMAP/SMTP connection. Sync is now
+          genuinely incremental via a per-folder <code>{uidvalidity}:{uidnext}</code> checkpoint (a UIDVALIDITY
+          change forces a safe full re-fetch — no silent mail loss), with a per-item FETCH timeout and
+          <code>SyncProgress</code> events. <code>SendMessage</code> takes an explicit account id (honest
+          <code>AccountNotFound</code>, no silent wrong-account fallback), and a failed <code>AddAccount</code>
+          rolls back its orphaned keyring secret.</p>
         <div class="exit"><b>Exit:</b> full account lifecycle + incremental sync, offline-E2E-proven, no fabricated IMAP fallbacks.</div>
-        <div class="issues"><a class="iss">#170</a><a class="iss">#169</a><a class="iss">#182</a><a class="iss">#183</a><a class="iss">#184</a></div>
+        <div class="issues"><a class="iss">#170</a><a class="iss">#169</a><a class="iss">#182</a><a class="iss">#183</a><a class="iss">#184</a><span class="iss">done — #194–#197 merged</span></div>
       </div>
     </div>
 
-    <div class="m plan">
+    <div class="m prog">
       <div class="node">M6</div>
       <div class="card">
         <div class="chead">
           <h3 class="ctitle"><span class="code">M6</span>Security &amp; release hardening</h3>
-          <span class="stat plan">Planned</span>
+          <span class="stat prog">Next</span>
         </div>
         <p class="cbody">Fail-<i>closed</i> everywhere: fix the silent empty-ciphertext data-loss path; a
           signature-verifying updater that refuses to apply without checksums; zeroize key material; validate vault

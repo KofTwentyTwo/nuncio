@@ -53,8 +53,9 @@ offline. The legacy JSON-RPC IPC is removed. The `nuncio.v1` contract is
 published with a byte-deterministic `FileDescriptorSet` golden guarding it, plus
 external-codegen docs for Swift/C#/TypeScript.
 
-**Phase 3 — Feature completeness — is now COMPLETE**, via milestones M1–M4, all
-merged to `dev`:
+**The feature surface — Phase 3 through M5 — is now COMPLETE**, via milestones
+M1–M5, all merged to `dev` (M1–M4 are already promoted to `main`; M5 promotes
+next):
 
 - **3.A Filter correctness** — **done** (account scoping, `ON ACCOUNT`, non-ASCII
   offsets, `NOT IN`).
@@ -72,18 +73,30 @@ merged to `dev`:
   honestly rejected, filter edit/export/import/logs moved onto the `Filters`
   gRPC service, and a `Filters.Triage` server-streaming RPC does retroactive
   bulk rescan.
+- **Mail lifecycle & incremental sync** — **done** (M5). Account lifecycle
+  (`UpdateAccount`/`RemoveAccount`/`TestAccountConnection`) is real over gRPC,
+  with `imap_tls_mode`/`smtp_tls_mode` persisted and actually driving the real
+  IMAP (implicit/STARTTLS/plain) and SMTP connection. Sync is genuinely
+  incremental: a real per-folder `{uidvalidity}:{uidnext}` checkpoint narrows
+  the FETCH instead of re-fetching everything, a UIDVALIDITY change forces a
+  safe full re-fetch (no silent mail loss), a per-item FETCH timeout replaces
+  the indefinite hang, and a `SyncProgress` event is emitted. `SendMessage`
+  takes an explicit `account_id` (honest `AccountNotFound`, no silent
+  wrong-account fallback), and `AddAccount` rolls back an orphaned keyring
+  secret if persistence fails.
 
-**Next up: M5 — Mail lifecycle & incremental sync** (account edit/delete/test +
-persisted TLS mode, incremental IMAP sync with progress + per-item FETCH
-timeout, explicit `SendMessage` account selection, keyring rollback on failed
-`AddAccount`). Then M6 (security hardening), then M7 (API freeze / client
-readiness).
+**Next up: M6 — Security & release hardening** (fail-closed encryption,
+zeroized key material, WORM/ledger key-length validation, a rejection of
+non-loopback gRPC binds plus an auth-coverage canary, a fail-closed updater on
+missing `SHA256SUMS`, real CIDR/DNS SSRF checks for webhooks, inbound HTML
+email sanitization). Then M7 (API freeze / client-readiness).
 
-A handful of follow-ups were filed during M1–M4 and remain open, tracked as
-their own backlog items rather than blocking M1–M4's completion: calendar
-windowing/predicate refinement (#216), contacts notes handling (#219), and a
+A handful of follow-ups were filed during M1–M5 and remain open, tracked as
+their own backlog items rather than blocking completion: calendar
+windowing/predicate refinement (#216), contacts notes handling (#219), a
 `filter edit` bug where re-saving a rule silently re-enables it and resets
-`created_at` (#225).
+`created_at` (#225), and further mail sync/SMTP robustness polish identified
+during M5 (#233).
 
 **Explicitly deferred** (out of scope until the backend is client-ready and each
 is re-justified as a genuine engine capability): OpenPGP/S-MIME E2EE (#79),

@@ -186,6 +186,29 @@ pub struct WormChainReport {
     pub first_broken_seq: Option<u64>,
 }
 
+/// Serialize a [`nuncio_core::TlsMode`] to its stable on-disk `accounts`
+/// column form. Kept as a bare snake_case token (matching the column's
+/// `'implicit_tls'` default) rather than JSON, so a row inserted by the
+/// migration default and one written here are byte-identical.
+fn tls_mode_to_db(mode: nuncio_core::TlsMode) -> &'static str {
+    match mode {
+        nuncio_core::TlsMode::ImplicitTls => "implicit_tls",
+        nuncio_core::TlsMode::StartTls => "start_tls",
+        nuncio_core::TlsMode::Plain => "plain",
+    }
+}
+
+/// Parse a persisted `accounts` TLS-mode column back into
+/// [`nuncio_core::TlsMode`]. An unrecognized value falls back to the safe
+/// default (implicit TLS) rather than failing the whole account load.
+fn tls_mode_from_db(value: &str) -> nuncio_core::TlsMode {
+    match value {
+        "start_tls" => nuncio_core::TlsMode::StartTls,
+        "plain" => nuncio_core::TlsMode::Plain,
+        _ => nuncio_core::TlsMode::ImplicitTls,
+    }
+}
+
 impl DatabaseEngine {
     /// Maximum concurrent read/write pool size.
     pub const MAX_CONNECTIONS: u32 = 16;
@@ -439,7 +462,9 @@ impl DatabaseEngine {
                 keyring_secret_key TEXT NOT NULL,
                 sync_interval_secs INTEGER NOT NULL,
                 smtp_host TEXT,
-                smtp_port INTEGER
+                smtp_port INTEGER,
+                imap_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls',
+                smtp_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls'
             );
 
             CREATE TABLE IF NOT EXISTS filter_rules (
@@ -624,6 +649,19 @@ impl DatabaseEngine {
                 INSERT INTO contacts_fts(id, display_name, organization, emails_json)
                 VALUES (new.id, new.display_name, COALESCE(new.organization, ''), new.emails_json);
             END;
+
+            -- Per-folder inbound-sync checkpoint. `state` is an opaque,
+            -- protocol-defined resumption token (an IMAP UID boundary such as
+            -- UIDNEXT, a JMAP state string) that a backend hands back after a
+            -- sync and expects to receive on the next sync so it can fetch only
+            -- what changed since. Keyed by (account, folder) because the token
+            -- is meaningful only within a single mailbox on a single account.
+            CREATE TABLE IF NOT EXISTS folder_sync_state (
+                account_id TEXT NOT NULL,
+                folder_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                PRIMARY KEY (account_id, folder_id)
+            );
             "#,
         )
         .execute(&self.pool)
@@ -631,7 +669,49 @@ impl DatabaseEngine {
         .map_err(DatabaseError::Query)?;
 
         self.ensure_accounts_smtp_columns().await?;
+        self.ensure_accounts_tls_mode_columns().await?;
         self.backfill_message_fts().await?;
+
+        Ok(())
+    }
+
+    /// Additive, backfill-safe migration that adds the `imap_tls_mode` /
+    /// `smtp_tls_mode` columns to a pre-existing `accounts` table that
+    /// predates persisted per-protocol TLS transport modes.
+    ///
+    /// A fresh database already gets these columns from `CREATE TABLE IF NOT
+    /// EXISTS accounts` above, so on a fresh database this is a no-op. For a
+    /// pre-existing database file the columns are added with a
+    /// `'implicit_tls'` default, so every existing row keeps loading
+    /// successfully and retains the historical behavior (implicit TLS) it was
+    /// created under. SQLite has no `ADD COLUMN IF NOT EXISTS`, so column
+    /// presence is checked explicitly via `PRAGMA table_info` first, making
+    /// this safe to run on every daemon startup.
+    async fn ensure_accounts_tls_mode_columns(&self) -> Result<(), DatabaseError> {
+        let existing_columns: Vec<String> = sqlx::query("PRAGMA table_info(accounts)")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+
+        if !existing_columns.iter().any(|c| c == "imap_tls_mode") {
+            sqlx::query(
+                "ALTER TABLE accounts ADD COLUMN imap_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls'",
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+        }
+        if !existing_columns.iter().any(|c| c == "smtp_tls_mode") {
+            sqlx::query(
+                "ALTER TABLE accounts ADD COLUMN smtp_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls'",
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+        }
 
         Ok(())
     }
@@ -725,8 +805,8 @@ impl DatabaseEngine {
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO accounts
-            (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&config.id)
@@ -740,10 +820,33 @@ impl DatabaseEngine {
         .bind(config.sync_interval_secs as i64)
         .bind(&config.smtp_host)
         .bind(config.smtp_port as i64)
+        .bind(tls_mode_to_db(config.imap_tls_mode))
+        .bind(tls_mode_to_db(config.smtp_tls_mode))
         .execute(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
 
+        Ok(())
+    }
+
+    /// Fetch a single persisted [`nuncio_core::AccountConfig`] by id, or
+    /// `None` if no such account row exists.
+    pub async fn get_account(
+        &self,
+        id: &str,
+    ) -> Result<Option<nuncio_core::AccountConfig>, DatabaseError> {
+        Ok(self.list_accounts().await?.into_iter().find(|a| a.id == id))
+    }
+
+    /// Delete a persisted account configuration by id. Idempotent: deleting a
+    /// non-existent id is not an error (the post-condition -- "no account row
+    /// with this id" -- already holds).
+    pub async fn delete_account(&self, id: &str) -> Result<(), DatabaseError> {
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
         Ok(())
     }
 
@@ -762,9 +865,11 @@ impl DatabaseEngine {
             i64,
             Option<String>,
             Option<i64>,
+            String,
+            String,
         )> = sqlx::query_as(
             r#"
-            SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port
+            SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode
             FROM accounts
             "#,
         )
@@ -787,6 +892,8 @@ impl DatabaseEngine {
                     sync_interval_secs,
                     smtp_host,
                     smtp_port,
+                    imap_tls_mode,
+                    smtp_tls_mode,
                 )| {
                     let protocol = serde_json::from_str(&protocol_str)
                         .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
@@ -811,14 +918,59 @@ impl DatabaseEngine {
                         smtp_host: resolved_smtp_host,
                         smtp_port: resolved_smtp_port,
                         use_tls: use_tls != 0,
-                        imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-                        smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                        imap_tls_mode: tls_mode_from_db(&imap_tls_mode),
+                        smtp_tls_mode: tls_mode_from_db(&smtp_tls_mode),
                         keyring_secret_key,
                         sync_interval_secs: sync_interval_secs as u64,
                     }
                 },
             )
             .collect())
+    }
+
+    /// Fetch the persisted inbound-sync checkpoint for a folder, or `None` if
+    /// this account/folder pair has never completed a sync. A `None` result is
+    /// the signal to the backend that it must perform a full first-time fetch.
+    pub async fn get_folder_sync_state(
+        &self,
+        account_id: &str,
+        folder_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT state FROM folder_sync_state WHERE account_id = ? AND folder_id = ?",
+        )
+        .bind(account_id)
+        .bind(folder_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+        Ok(row.map(|(state,)| state))
+    }
+
+    /// Persist the inbound-sync checkpoint a backend returned for a folder,
+    /// overwriting any prior value (a checkpoint is a running high-water mark,
+    /// not history). Written only after a folder's messages have been fetched
+    /// and persisted, so the stored checkpoint can never advance past work that
+    /// actually landed in the store.
+    pub async fn save_folder_sync_state(
+        &self,
+        account_id: &str,
+        folder_id: &str,
+        state: &str,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO folder_sync_state (account_id, folder_id, state)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(account_id)
+        .bind(folder_id)
+        .bind(state)
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+        Ok(())
     }
 
     /// Save an [`nuncio_core::model::Email`] to SQLite (INSERT OR REPLACE).
@@ -2503,6 +2655,158 @@ mod tests {
         assert_eq!(accounts[0].email_address, "work@nuncio.mx");
         assert_eq!(accounts[0].smtp_host, "smtp.nuncio.mx");
         assert_eq!(accounts[0].smtp_port, 465);
+    }
+
+    /// Regression proof that the per-protocol TLS transport modes are
+    /// genuinely persisted and round-tripped -- previously they were
+    /// validated on add but silently discarded, with `list_accounts`
+    /// hardcoding both back to `ImplicitTls` regardless of what was saved.
+    /// Saves an account whose IMAP mode is `StartTls` and SMTP mode is
+    /// `Plain`, then re-reads it via BOTH `list_accounts` and `get_account`
+    /// and asserts each distinct mode survived rather than collapsing to the
+    /// default.
+    #[tokio::test]
+    async fn account_tls_modes_survive_save_and_reload() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let acct = nuncio_core::AccountConfig {
+            id: "acct-tls-1".to_string(),
+            name: "Mixed TLS Account".to_string(),
+            email_address: "mixed@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 143,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 25,
+            use_tls: false,
+            imap_tls_mode: nuncio_core::TlsMode::StartTls,
+            smtp_tls_mode: nuncio_core::TlsMode::Plain,
+            keyring_secret_key: "nuncio/acct-tls-1".to_string(),
+            sync_interval_secs: 60,
+        };
+
+        engine.save_account(&acct).await.expect("save succeeds");
+
+        let listed = engine.list_accounts().await.expect("list succeeds");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].imap_tls_mode, nuncio_core::TlsMode::StartTls);
+        assert_eq!(listed[0].smtp_tls_mode, nuncio_core::TlsMode::Plain);
+
+        let fetched = engine
+            .get_account("acct-tls-1")
+            .await
+            .expect("get succeeds")
+            .expect("account present");
+        assert_eq!(fetched.imap_tls_mode, nuncio_core::TlsMode::StartTls);
+        assert_eq!(fetched.smtp_tls_mode, nuncio_core::TlsMode::Plain);
+        assert_eq!(fetched, acct);
+    }
+
+    /// Proves `get_account` resolves a saved account by id and returns `None`
+    /// for an unknown id, and that `delete_account` genuinely removes the row
+    /// (and is idempotent for an already-absent id).
+    #[tokio::test]
+    async fn get_and_delete_account_round_trip() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let acct = nuncio_core::AccountConfig {
+            id: "acct-del-1".to_string(),
+            name: "Deletable".to_string(),
+            email_address: "del@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: "nuncio/acct-del-1".to_string(),
+            sync_interval_secs: 60,
+        };
+        engine.save_account(&acct).await.expect("save succeeds");
+
+        assert!(engine
+            .get_account("acct-del-1")
+            .await
+            .expect("get succeeds")
+            .is_some());
+        assert!(engine
+            .get_account("acct-missing")
+            .await
+            .expect("get succeeds")
+            .is_none());
+
+        engine
+            .delete_account("acct-del-1")
+            .await
+            .expect("delete succeeds");
+        assert!(engine
+            .get_account("acct-del-1")
+            .await
+            .expect("get succeeds")
+            .is_none());
+
+        // Idempotent: deleting an already-absent id is not an error.
+        engine
+            .delete_account("acct-del-1")
+            .await
+            .expect("second delete is a no-op");
+    }
+
+    #[tokio::test]
+    async fn folder_sync_state_round_trip_is_scoped_and_overwrites() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        // Absent before any sync completes.
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-1", "INBOX")
+                .await
+                .expect("get succeeds"),
+            None
+        );
+
+        engine
+            .save_folder_sync_state("acct-1", "INBOX", "105")
+            .await
+            .expect("save succeeds");
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-1", "INBOX")
+                .await
+                .expect("get succeeds"),
+            Some("105".to_string())
+        );
+
+        // A later checkpoint overwrites (high-water mark, not history).
+        engine
+            .save_folder_sync_state("acct-1", "INBOX", "220")
+            .await
+            .expect("save succeeds");
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-1", "INBOX")
+                .await
+                .expect("get succeeds"),
+            Some("220".to_string())
+        );
+
+        // Keyed by (account, folder): a different folder/account is unaffected.
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-1", "Sent")
+                .await
+                .expect("get succeeds"),
+            None
+        );
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-2", "INBOX")
+                .await
+                .expect("get succeeds"),
+            None
+        );
     }
 
     /// Proves the additive `smtp_host`/`smtp_port`

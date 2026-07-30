@@ -188,6 +188,54 @@ async fn rejects_calls_to_new_filters_rpcs_without_a_bearer_token() {
     assert_eq!(err.code(), Code::Unauthenticated);
 }
 
+/// Confirms the newly added `Accounts` lifecycle RPCs
+/// (`UpdateAccount`/`RemoveAccount`/`TestAccountConnection`) are each mounted
+/// behind the SAME `BearerAuthInterceptor` as every other service -- an
+/// unauthenticated call to any of them must be rejected exactly like an
+/// unauthenticated `System/GetStatus`, with no carve-out for "just one more"
+/// RPC.
+#[tokio::test]
+async fn rejects_calls_to_new_accounts_rpcs_without_a_bearer_token() {
+    let event_bus = Arc::new(EventBus::new());
+    let secrets = SecretManager::mock();
+    let token = hex::encode(
+        secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .expect("token provisioned from mock vault"),
+    );
+
+    let (addr, _dir) = start_server(event_bus, token).await;
+    let mut client =
+        nuncio_proto::v1::accounts_client::AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+    let update_err = client
+        .update_account(nuncio_proto::v1::UpdateAccountRequest {
+            config: None,
+            password: None,
+        })
+        .await
+        .expect_err("unauthenticated update_account must be rejected");
+    assert_eq!(update_err.code(), Code::Unauthenticated);
+
+    let remove_err = client
+        .remove_account(nuncio_proto::v1::RemoveAccountRequest {
+            id: "acct-1".to_string(),
+        })
+        .await
+        .expect_err("unauthenticated remove_account must be rejected");
+    assert_eq!(remove_err.code(), Code::Unauthenticated);
+
+    let test_err = client
+        .test_account_connection(nuncio_proto::v1::TestAccountConnectionRequest {
+            id: "acct-1".to_string(),
+        })
+        .await
+        .expect_err("unauthenticated test_account_connection must be rejected");
+    assert_eq!(test_err.code(), Code::Unauthenticated);
+}
+
 /// Confirms the streaming `Filters.Triage` RPC is mounted behind the SAME
 /// `BearerAuthInterceptor` as every other `Filters` RPC -- an unauthenticated
 /// call must be rejected before the stream is ever established, exactly

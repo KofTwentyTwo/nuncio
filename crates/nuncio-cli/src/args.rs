@@ -258,6 +258,12 @@ pub enum AccountSubcommand {
         /// Updated SMTP server port.
         #[arg(long, help = "Updated SMTP server port")]
         smtp_port: Option<u16>,
+        /// Updated IMAP transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, help = "Updated IMAP transport mode")]
+        imap_mode: Option<String>,
+        /// Updated SMTP transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, help = "Updated SMTP transport mode")]
+        smtp_mode: Option<String>,
     },
     /// Remove a configured account profile.
     Delete {
@@ -302,6 +308,10 @@ pub enum MailSubcommand {
         /// Message body text content.
         #[arg(short, long, help = "Message body text content")]
         body: String,
+        /// Identifier of the account to send from (defaults to the first
+        /// configured account when omitted).
+        #[arg(short, long, help = "Identifier of the account to send from")]
+        account: Option<String>,
     },
     /// Full-text search across all cached email messages.
     Search {
