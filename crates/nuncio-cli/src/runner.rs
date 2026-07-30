@@ -512,6 +512,13 @@ impl HeadlessRunner {
                 FilterSubcommand::Logs { limit } => {
                     self.handle_filter_logs(*limit, json_mode).await
                 }
+                FilterSubcommand::Triage {
+                    rule_id,
+                    chunk_size,
+                } => {
+                    self.handle_filter_triage(rule_id.clone(), *chunk_size, json_mode)
+                        .await
+                }
             },
             Commands::Update { action } => match action {
                 UpdateSubcommand::Check => match nuncio_core::UpdateEngine::new() {
@@ -1481,6 +1488,93 @@ impl HeadlessRunner {
                 &format!("nunciod daemon rejected get_execution_logs: {status}"),
                 json_mode,
             ),
+        }
+    }
+
+    /// Drains the server-streaming `Filters.Triage` RPC, printing (or
+    /// accumulating, in `--json` mode) each `TriageProgress` update as it
+    /// arrives so the caller can watch a retroactive rescan of the whole
+    /// message store progress in real time rather than blocking silently
+    /// until it finishes.
+    async fn handle_filter_triage(
+        &self,
+        rule_id: Option<String>,
+        chunk_size: Option<u32>,
+        json_mode: bool,
+    ) -> String {
+        let mut client = match self.connect_filters_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        let mut stream = match client
+            .triage(nuncio_proto::v1::TriageRequest {
+                rule_id,
+                chunk_size: chunk_size.unwrap_or(0),
+            })
+            .await
+        {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                return Self::render_error(
+                    &format!("nunciod daemon rejected triage: {status}"),
+                    json_mode,
+                )
+            }
+        };
+
+        let mut updates = Vec::new();
+        loop {
+            match stream.message().await {
+                Ok(Some(progress)) => {
+                    if !json_mode {
+                        println!(
+                            "scanned={} matched={} actions_applied={} last_message_id={} done={}",
+                            progress.scanned_count,
+                            progress.matched_count,
+                            progress.actions_applied_count,
+                            progress.last_message_id,
+                            progress.done
+                        );
+                    }
+                    let done = progress.done;
+                    updates.push(progress);
+                    if done {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(status) => {
+                    return Self::render_error(
+                        &format!("nunciod daemon triage stream failed: {status}"),
+                        json_mode,
+                    )
+                }
+            }
+        }
+
+        if json_mode {
+            let updates_json: Vec<serde_json::Value> = updates
+                .iter()
+                .map(|p| {
+                    json!({
+                        "scanned_count": p.scanned_count,
+                        "matched_count": p.matched_count,
+                        "actions_applied_count": p.actions_applied_count,
+                        "last_message_id": p.last_message_id,
+                        "done": p.done,
+                    })
+                })
+                .collect();
+            format_json(&json!({ "updates": updates_json }))
+        } else {
+            match updates.last() {
+                Some(last) => format!(
+                    "Triage complete: scanned={} matched={} actions_applied={}",
+                    last.scanned_count, last.matched_count, last.actions_applied_count
+                ),
+                None => "Triage produced no progress updates.".to_string(),
+            }
         }
     }
 
@@ -3235,8 +3329,8 @@ mod tests {
             ExportRulesRequest, ExportRulesResponse, FilterExecutionLog as FilterExecutionLogProto,
             FilterRule as FilterRuleProto, GetExecutionLogsRequest, GetExecutionLogsResponse,
             ImportRulesRequest, ImportRulesResponse, ListRulesRequest, ListRulesResponse,
-            PreviewRuleRequest, PreviewRuleResponse, UpdateRuleRequest, UpdateRuleResponse,
-            ValidateRuleRequest, ValidateRuleResponse,
+            PreviewRuleRequest, PreviewRuleResponse, TriageProgress, TriageRequest,
+            UpdateRuleRequest, UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
         };
         use std::sync::Mutex;
 
@@ -3406,6 +3500,37 @@ mod tests {
                         hash: "hash".to_string(),
                     }],
                 }))
+            }
+
+            type TriageStream = std::pin::Pin<
+                Box<
+                    dyn tokio_stream::Stream<Item = Result<TriageProgress, tonic::Status>>
+                        + Send
+                        + 'static,
+                >,
+            >;
+
+            async fn triage(
+                &self,
+                _request: tonic::Request<TriageRequest>,
+            ) -> Result<tonic::Response<Self::TriageStream>, tonic::Status> {
+                let updates = vec![
+                    Ok(TriageProgress {
+                        scanned_count: 2,
+                        matched_count: 1,
+                        actions_applied_count: 1,
+                        last_message_id: "msg-stub-2".to_string(),
+                        done: false,
+                    }),
+                    Ok(TriageProgress {
+                        scanned_count: 3,
+                        matched_count: 2,
+                        actions_applied_count: 2,
+                        last_message_id: "msg-stub-3".to_string(),
+                        done: true,
+                    }),
+                ];
+                Ok(tonic::Response::new(Box::pin(tokio_stream::iter(updates))))
             }
         }
 
@@ -3647,6 +3772,25 @@ mod tests {
             .await;
         assert!(logs_out.contains("msg-stub-1"));
         assert!(logs_out.contains(r#""action_taken":"MARK READ""#));
+
+        // `filter triage`: proves the CLI drains the server-streaming
+        // `Triage` RPC (its first real streaming-RPC consumer) and reports
+        // the final cumulative progress rather than only the first chunk.
+        let triage_out = runner
+            .execute_command(
+                &Commands::Filter {
+                    action: FilterSubcommand::Triage {
+                        rule_id: None,
+                        chunk_size: Some(2),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(triage_out.contains(r#""scanned_count":3"#));
+        assert!(triage_out.contains(r#""matched_count":2"#));
+        assert!(triage_out.contains(r#""actions_applied_count":2"#));
+        assert!(triage_out.contains(r#""done":true"#));
     }
 
     #[tokio::test]

@@ -479,6 +479,13 @@ service Filters {
   // log entries (hash-chain ledger), newest-eligible-first as stored,
   // capped at `limit`.
   rpc GetExecutionLogs(GetExecutionLogsRequest) returns (GetExecutionLogsResponse);
+  // Triage scans every stored message in bounded chunks, evaluating the
+  // daemon's live `FilterEngine` against each one and applying the same
+  // actions live sync would -- so the currently active rule set can be
+  // applied retroactively to mail that was synced before those rules
+  // existed. Streams cumulative progress as it works, ending with a final
+  // `done: true` message once the whole store has been scanned.
+  rpc Triage(TriageRequest) returns (stream TriageProgress);
 }
 
 // FilterRule mirrors `nuncio_filter::FilterRule`'s persisted/user-facing
@@ -673,6 +680,36 @@ message FilterExecutionLog {
   string prev_hash = 6;
   // HMAC-SHA256 hash of this record.
   string hash = 7;
+}
+
+// TriageRequest configures a retroactive rescan of the whole message store.
+message TriageRequest {
+  // Scope the scan to a single rule's actions. Currently NOT honored --
+  // `Triage` always evaluates a message against the full live rule set,
+  // matching what a real (non-retroactive) sync run would do. Reserved for
+  // forward compatibility; a client that sets this today gets a whole-store
+  // scan against all active rules, not an error.
+  optional string rule_id = 1;
+  // Number of messages fetched per keyset page. 0 selects the server
+  // default (100).
+  uint32 chunk_size = 2;
+}
+
+// TriageProgress reports the real, cumulative state of an in-progress (or
+// just-finished) `Triage` scan. Every field is the true running total as of
+// the chunk just processed -- never an estimate or a fabricated count.
+message TriageProgress {
+  // Total messages scanned so far.
+  uint64 scanned_count = 1;
+  // Total messages that had at least one action applied or enqueued.
+  uint64 matched_count = 2;
+  // Total individual actions applied or enqueued across all messages.
+  uint64 actions_applied_count = 3;
+  // ID of the last message scanned in the most recently processed chunk.
+  string last_message_id = 4;
+  // True only on the final message of the stream, once the whole store has
+  // been scanned.
+  bool done = 5;
 }
 
 // Export exposes the daemon's real mailbox export engine

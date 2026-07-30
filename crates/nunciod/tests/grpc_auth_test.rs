@@ -187,3 +187,33 @@ async fn rejects_calls_to_new_filters_rpcs_without_a_bearer_token() {
         .expect_err("call without any authorization header must be rejected");
     assert_eq!(err.code(), Code::Unauthenticated);
 }
+
+/// Confirms the streaming `Filters.Triage` RPC is mounted behind the SAME
+/// `BearerAuthInterceptor` as every other `Filters` RPC -- an unauthenticated
+/// call must be rejected before the stream is ever established, exactly
+/// like an unauthenticated unary call.
+#[tokio::test]
+async fn rejects_triage_calls_without_a_bearer_token() {
+    let event_bus = Arc::new(EventBus::new());
+    let secrets = SecretManager::mock();
+    let token = hex::encode(
+        secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .expect("token provisioned from mock vault"),
+    );
+
+    let (addr, _dir) = start_server(event_bus, token).await;
+    let mut client =
+        nuncio_proto::v1::filters_client::FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+    let err = client
+        .triage(nuncio_proto::v1::TriageRequest {
+            rule_id: None,
+            chunk_size: 0,
+        })
+        .await
+        .expect_err("call without any authorization header must be rejected");
+    assert_eq!(err.code(), Code::Unauthenticated);
+}
