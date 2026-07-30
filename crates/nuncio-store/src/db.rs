@@ -104,8 +104,8 @@ impl DatabaseError {
 pub struct DatabaseEngine {
     pool: SqlitePool,
     storage_key: Zeroizing<[u8; 32]>,
-    worm_key: Zeroizing<Vec<u8>>,
-    ledger_key: Zeroizing<Vec<u8>>,
+    worm_key: Zeroizing<[u8; 32]>,
+    ledger_key: Zeroizing<[u8; 32]>,
 }
 
 impl std::fmt::Debug for DatabaseEngine {
@@ -123,19 +123,34 @@ impl std::fmt::Debug for DatabaseEngine {
 #[allow(clippy::type_complexity)]
 fn resolve_engine_keys(
     secrets: &crate::vault::SecretManager,
-) -> Result<(Zeroizing<[u8; 32]>, Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>), DatabaseError> {
+) -> Result<
+    (
+        Zeroizing<[u8; 32]>,
+        Zeroizing<[u8; 32]>,
+        Zeroizing<[u8; 32]>,
+    ),
+    DatabaseError,
+> {
     let storage_key_bytes = secrets
         .get_or_create_key_bytes(crate::vault::STORAGE_KEY_ACCOUNT, 32)
         .map_err(|e| DatabaseError::KeyProvisioning(e.to_string()))?;
     let storage_key: [u8; 32] = storage_key_bytes.try_into().map_err(|_| {
         DatabaseError::KeyProvisioning("storage key material must be exactly 32 bytes".to_string())
     })?;
-    let worm_key = secrets
+    let worm_key_bytes = secrets
         .get_or_create_key_bytes(crate::vault::WORM_KEY_ACCOUNT, 32)
         .map_err(|e| DatabaseError::KeyProvisioning(e.to_string()))?;
-    let ledger_key = secrets
+    let worm_key: [u8; 32] = worm_key_bytes.try_into().map_err(|_| {
+        DatabaseError::KeyProvisioning(
+            "WORM audit key material must be exactly 32 bytes".to_string(),
+        )
+    })?;
+    let ledger_key_bytes = secrets
         .get_or_create_key_bytes(crate::vault::LEDGER_KEY_ACCOUNT, 32)
         .map_err(|e| DatabaseError::KeyProvisioning(e.to_string()))?;
+    let ledger_key: [u8; 32] = ledger_key_bytes.try_into().map_err(|_| {
+        DatabaseError::KeyProvisioning("ledger key material must be exactly 32 bytes".to_string())
+    })?;
     Ok((
         Zeroizing::new(storage_key),
         Zeroizing::new(worm_key),
@@ -1687,7 +1702,7 @@ impl DatabaseEngine {
             message_id,
             action_taken,
             matched_at,
-            &self.ledger_key,
+            &self.ledger_key[..],
         );
 
         let id = sqlx::query(
@@ -1779,7 +1794,7 @@ impl DatabaseEngine {
                 &message_id,
                 &action_taken,
                 matched_at,
-                &self.ledger_key,
+                &self.ledger_key[..],
             );
             if computed != hash {
                 return Ok(false);
@@ -1950,7 +1965,7 @@ impl DatabaseEngine {
         };
 
         let record = nuncio_core::WormAuditRecord::create_signed(
-            &self.worm_key,
+            &self.worm_key[..],
             next_seq,
             now_ns,
             actor,
@@ -2010,7 +2025,7 @@ impl DatabaseEngine {
     /// provisioned for this engine.
     pub async fn verify_worm_audit_chain(&self) -> Result<(), DatabaseError> {
         let records = self.list_worm_audit_records(100_000, 0).await?;
-        nuncio_core::verify_worm_chain(&records, &self.worm_key)
+        nuncio_core::verify_worm_chain(&records, &self.worm_key[..])
             .map_err(|e| DatabaseError::ChainIntegrityFailed(e.to_string()))
     }
 
@@ -2028,7 +2043,7 @@ impl DatabaseEngine {
     pub async fn verify_worm_audit_chain_report(&self) -> Result<WormChainReport, DatabaseError> {
         let records = self.list_worm_audit_records(100_000, 0).await?;
         let record_count = records.len();
-        match nuncio_core::verify_worm_chain(&records, &self.worm_key) {
+        match nuncio_core::verify_worm_chain(&records, &self.worm_key[..]) {
             Ok(()) => Ok(WormChainReport {
                 valid: true,
                 record_count,
@@ -2282,6 +2297,46 @@ mod tests {
 
         assert!(db_path.parent().expect("has parent").exists());
         assert!(engine.check_integrity().await.expect("integrity check"));
+    }
+
+    /// A hand-edited or corrupted vault entry for the WORM audit key must never be silently
+    /// accepted at the wrong length: a 16-byte HMAC key would still "work" mechanically but
+    /// would weaken the tamper-evidence the WORM log exists to provide. Construction must fail
+    /// closed instead.
+    #[tokio::test]
+    async fn connect_file_fails_closed_on_wrong_length_worm_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("bad_worm_key.db");
+        let secrets = crate::vault::SecretManager::mock();
+        secrets
+            .set_secret(crate::vault::WORM_KEY_ACCOUNT, &hex::encode([0u8; 16]))
+            .expect("seed undersized WORM key material");
+
+        let result = DatabaseEngine::connect_file(&db_path, &secrets).await;
+        assert!(
+            matches!(result, Err(DatabaseError::KeyProvisioning(_))),
+            "a WORM key of the wrong length must fail closed, never be silently accepted as an \
+             HMAC signing key: {result:?}"
+        );
+    }
+
+    /// Mirrors `connect_file_fails_closed_on_wrong_length_worm_key` for the filter execution
+    /// ledger's HMAC key.
+    #[tokio::test]
+    async fn connect_file_fails_closed_on_wrong_length_ledger_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("bad_ledger_key.db");
+        let secrets = crate::vault::SecretManager::mock();
+        secrets
+            .set_secret(crate::vault::LEDGER_KEY_ACCOUNT, &hex::encode([0u8; 16]))
+            .expect("seed undersized ledger key material");
+
+        let result = DatabaseEngine::connect_file(&db_path, &secrets).await;
+        assert!(
+            matches!(result, Err(DatabaseError::KeyProvisioning(_))),
+            "a ledger key of the wrong length must fail closed, never be silently accepted as an \
+             HMAC signing key: {result:?}"
+        );
     }
 
     #[tokio::test]
