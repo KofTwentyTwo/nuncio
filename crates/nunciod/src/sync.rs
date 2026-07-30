@@ -65,6 +65,19 @@ fn remote_action_tag(action: &RuleAction) -> Option<(&'static str, Option<String
 /// Evaluate `email` against `filter_engine` and route every matched rule's
 /// actions to their real, persisted effect.
 ///
+/// Filters fire EXACTLY ONCE per newly-arrived message: callers (see
+/// [`fetch_and_persist`]) must only invoke this for a message that was
+/// genuinely new to the store on this sync pass, never for one that already
+/// existed. Sync is not yet incremental -- every sync re-fetches and
+/// re-persists messages the backend still reports -- so calling this
+/// unconditionally on every persisted message would re-fire a rule's actions
+/// on every single re-sync of the same mailbox: a fresh
+/// `PendingRemoteMutation` and a fresh `FilterExecutionLog` entry per cycle
+/// for a message that arrived once, growing the outbox and the audit ledger
+/// without bound and (once a real mutation transport lands) duplicating the
+/// real remote operation. This function itself has no way to tell "new" from
+/// "already seen" -- that determination is the caller's responsibility.
+///
 /// `MarkRead`/`MarkUnread` apply immediately to the stored message via
 /// [`DatabaseEngine::set_message_read`]. Every other action enqueues a real
 /// [`nuncio_filter::PendingRemoteMutation`] through the existing outbox
@@ -119,11 +132,20 @@ pub async fn apply_filter_actions(
                         false
                     }
                 },
-                _ => {
+                RuleAction::MoveTo(_)
+                | RuleAction::CopyTo(_)
+                | RuleAction::Flag
+                | RuleAction::Unflag
+                | RuleAction::Delete
+                | RuleAction::ForwardTo(_)
+                | RuleAction::CallWebhook(_) => {
                     // Remote actions are handled below via the outbox; this
-                    // branch only tracks whether the immediate-action write
+                    // arm only tracks whether the immediate-action write
                     // itself succeeded (there is none for a remote action,
-                    // so it is unconditionally "not applicable" here).
+                    // so it is unconditionally "not applicable" here). Listed
+                    // explicitly rather than a wildcard so a future
+                    // immediate-style action can't silently fall through to
+                    // remote routing by accident.
                     true
                 }
             };
@@ -169,9 +191,39 @@ pub async fn apply_filter_actions(
     applied
 }
 
+/// Reports whether `message_id` is not yet present in the store.
+///
+/// Sync is not yet incremental (a re-sync re-fetches every message the
+/// backend still reports, not just genuinely new ones), so this is the guard
+/// that keeps filter actions firing exactly once per message: it must be
+/// checked BEFORE `save_email` persists (or re-persists) the message, since
+/// `save_email` is `INSERT OR REPLACE` and would otherwise erase the
+/// distinction between "arriving for the first time" and "seen again".
+///
+/// A lookup failure that is not "not found" (a genuine DB error) is logged
+/// and treated as "not new", the conservative choice: firing filters again on
+/// a message we can't positively identify as new risks duplicate remote
+/// mutations, which is worse than occasionally missing a fire on a message
+/// that was in fact new.
+async fn is_new_message(db: &nuncio_store::db::DatabaseEngine, message_id: &str) -> bool {
+    match db.get_message(message_id).await {
+        Ok(_) => false,
+        Err(e) if e.is_not_found() => true,
+        Err(e) => {
+            tracing::warn!(
+                "could not determine whether message '{message_id}' is new before sync \
+                 (treating as not-new to avoid duplicate filter firing): {e}"
+            );
+            false
+        }
+    }
+}
+
 /// Fetch every folder and every message in every folder from `backend`,
-/// persisting each message via [`DatabaseEngine::save_email`] and then
-/// evaluating it against `filter_engine` via [`apply_filter_actions`].
+/// persisting each message via [`DatabaseEngine::save_email`] and, for
+/// messages genuinely new to the store, evaluating it against
+/// `filter_engine` via [`apply_filter_actions`] (see [`is_new_message`] for
+/// why this must be gated rather than run on every persisted message).
 /// Returns the total number of messages processed (a message id "processed"
 /// more than once, e.g. by a backend that returns the same id from multiple
 /// folders, is counted once per occurrence -- `save_email` itself is
@@ -191,8 +243,11 @@ async fn fetch_and_persist(
     for folder in folders {
         let (emails, _state) = backend.sync_messages(&folder.id, None).await?;
         for email in emails {
+            let is_new = is_new_message(db, &email.id).await;
             db.save_email(&email).await?;
-            apply_filter_actions(db, filter_engine, &email).await;
+            if is_new {
+                apply_filter_actions(db, filter_engine, &email).await;
+            }
             synced += 1;
         }
     }
@@ -952,6 +1007,109 @@ mod tests {
         assert!(
             pending.is_empty(),
             "no rule matched, so no mutation should be enqueued"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_with_backend_does_not_refire_filters_on_a_repeat_sync_of_the_same_message() {
+        // Sync is not yet incremental: a real backend re-reports messages it
+        // already handed over on every sync pass. This proves a message's
+        // filter actions fire exactly once across repeated syncs rather than
+        // once per sync cycle -- the regression this guard exists for.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+
+        let mark_read_rule = nuncio_filter::NsqlParser::parse_rule(
+            "Urgent Auto-Read",
+            1,
+            "WHERE subject CONTAINS 'Urgent' ACTION MARK READ",
+        )
+        .expect("parse rule");
+        let move_rule = nuncio_filter::NsqlParser::parse_rule(
+            "Archive Rule",
+            2,
+            "WHERE subject CONTAINS 'Urgent' ACTION MOVE TO 'Archive'",
+        )
+        .expect("parse rule");
+        let filter_engine =
+            FilterEngine::new(vec![mark_read_rule, move_rule]).expect("compile rules");
+
+        let mock = MockMailBackend::new();
+        mock.add_folder(Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 1,
+            unread_messages: 1,
+        });
+        mock.add_message(mock_email("m-repeat", "inbox", "Urgent: server down"));
+
+        // First sync: the message is genuinely new, so both rules must fire.
+        let synced_first = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+            .await
+            .expect("first sync succeeds");
+        assert_eq!(synced_first, 1);
+
+        let stored_after_first = db
+            .get_message("m-repeat")
+            .await
+            .expect("message persisted after first sync");
+        assert!(stored_after_first.read);
+
+        let logs_after_first = db
+            .list_filter_execution_logs(10)
+            .await
+            .expect("list execution logs after first sync");
+        assert_eq!(logs_after_first.len(), 2, "both rules should fire once");
+
+        let pending_after_first = db
+            .list_pending_mutations(10)
+            .await
+            .expect("list pending mutations after first sync");
+        assert_eq!(pending_after_first.len(), 1);
+
+        // Manually flip the message back to unread, exactly as a user
+        // reading and then un-reading it would -- proves the second sync
+        // doesn't re-flip it back to read via a repeat MARK READ fire.
+        db.set_message_read("m-repeat", false)
+            .await
+            .expect("manually mark unread");
+
+        // Second sync: the mock backend reports the SAME message again
+        // (unchanged id), simulating a non-incremental re-sync.
+        let synced_second = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+            .await
+            .expect("second sync succeeds");
+        assert_eq!(synced_second, 1);
+
+        let stored_after_second = db
+            .get_message("m-repeat")
+            .await
+            .expect("message persisted after second sync");
+        assert!(
+            !stored_after_second.read,
+            "a re-sync of an already-seen message must not re-fire MARK READ"
+        );
+
+        let logs_after_second = db
+            .list_filter_execution_logs(10)
+            .await
+            .expect("list execution logs after second sync");
+        assert_eq!(
+            logs_after_second.len(),
+            2,
+            "no new execution log entries should be written on a repeat sync"
+        );
+
+        let pending_after_second = db
+            .list_pending_mutations(10)
+            .await
+            .expect("list pending mutations after second sync");
+        assert_eq!(
+            pending_after_second.len(),
+            1,
+            "no new outbox mutation should be enqueued on a repeat sync"
         );
     }
 }
