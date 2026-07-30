@@ -649,6 +649,19 @@ impl DatabaseEngine {
                 INSERT INTO contacts_fts(id, display_name, organization, emails_json)
                 VALUES (new.id, new.display_name, COALESCE(new.organization, ''), new.emails_json);
             END;
+
+            -- Per-folder inbound-sync checkpoint. `state` is an opaque,
+            -- protocol-defined resumption token (an IMAP UID boundary such as
+            -- UIDNEXT, a JMAP state string) that a backend hands back after a
+            -- sync and expects to receive on the next sync so it can fetch only
+            -- what changed since. Keyed by (account, folder) because the token
+            -- is meaningful only within a single mailbox on a single account.
+            CREATE TABLE IF NOT EXISTS folder_sync_state (
+                account_id TEXT NOT NULL,
+                folder_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                PRIMARY KEY (account_id, folder_id)
+            );
             "#,
         )
         .execute(&self.pool)
@@ -913,6 +926,51 @@ impl DatabaseEngine {
                 },
             )
             .collect())
+    }
+
+    /// Fetch the persisted inbound-sync checkpoint for a folder, or `None` if
+    /// this account/folder pair has never completed a sync. A `None` result is
+    /// the signal to the backend that it must perform a full first-time fetch.
+    pub async fn get_folder_sync_state(
+        &self,
+        account_id: &str,
+        folder_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT state FROM folder_sync_state WHERE account_id = ? AND folder_id = ?",
+        )
+        .bind(account_id)
+        .bind(folder_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+        Ok(row.map(|(state,)| state))
+    }
+
+    /// Persist the inbound-sync checkpoint a backend returned for a folder,
+    /// overwriting any prior value (a checkpoint is a running high-water mark,
+    /// not history). Written only after a folder's messages have been fetched
+    /// and persisted, so the stored checkpoint can never advance past work that
+    /// actually landed in the store.
+    pub async fn save_folder_sync_state(
+        &self,
+        account_id: &str,
+        folder_id: &str,
+        state: &str,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO folder_sync_state (account_id, folder_id, state)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(account_id)
+        .bind(folder_id)
+        .bind(state)
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+        Ok(())
     }
 
     /// Save an [`nuncio_core::model::Email`] to SQLite (INSERT OR REPLACE).
@@ -2694,6 +2752,61 @@ mod tests {
             .delete_account("acct-del-1")
             .await
             .expect("second delete is a no-op");
+    }
+
+    #[tokio::test]
+    async fn folder_sync_state_round_trip_is_scoped_and_overwrites() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        // Absent before any sync completes.
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-1", "INBOX")
+                .await
+                .expect("get succeeds"),
+            None
+        );
+
+        engine
+            .save_folder_sync_state("acct-1", "INBOX", "105")
+            .await
+            .expect("save succeeds");
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-1", "INBOX")
+                .await
+                .expect("get succeeds"),
+            Some("105".to_string())
+        );
+
+        // A later checkpoint overwrites (high-water mark, not history).
+        engine
+            .save_folder_sync_state("acct-1", "INBOX", "220")
+            .await
+            .expect("save succeeds");
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-1", "INBOX")
+                .await
+                .expect("get succeeds"),
+            Some("220".to_string())
+        );
+
+        // Keyed by (account, folder): a different folder/account is unaffected.
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-1", "Sent")
+                .await
+                .expect("get succeeds"),
+            None
+        );
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-2", "INBOX")
+                .await
+                .expect("get succeeds"),
+            None
+        );
     }
 
     /// Proves the additive `smtp_host`/`smtp_port`
