@@ -34,47 +34,93 @@ const FETCH_ITEM_TIMEOUT: Duration = Duration::from_secs(60);
 use crate::backend::MailBackend;
 use crate::parser::{MailError, MimeParserAdapter};
 
+/// Delimiter between the two components of a folder sync checkpoint. The
+/// checkpoint state string is `"{uidvalidity}{DELIM}{uidnext}"` (e.g.
+/// `"42:105"`): the mailbox's UIDVALIDITY at the time it was written, then the
+/// UID boundary to resume from. Both components are decimal `u32`.
+///
+/// UIDVALIDITY MUST be carried because IMAP UIDs are only meaningful within a
+/// stable UIDVALIDITY (RFC 3501 s2.3.1.1). If a mailbox is recreated and its
+/// UIDVALIDITY changes, UIDs restart from low numbers, so resuming from a UID
+/// boundary captured under the old UIDVALIDITY would issue `{old_uidnext}:*`
+/// against renumbered low UIDs -- which per `n:*` semantics returns only the
+/// single highest message and silently skips the rest. Comparing UIDVALIDITY
+/// first turns that into a safe full re-fetch instead.
+const CHECKPOINT_DELIM: char = ':';
+
 /// The `UID FETCH` sequence-set to issue for a folder sync, resolved from the
 /// stored checkpoint. Kept as a small typed value (rather than collapsing to a
-/// bare range string) so a corrupt checkpoint stays distinguishable from "no
-/// checkpoint" -- both fall back to a full fetch, but only the corrupt case is
-/// worth flagging, and tests can assert on the distinction.
+/// bare range string) so the distinct fall-back reasons stay observable: all
+/// of `Full`/`CorruptCheckpoint`/`UidValidityChanged` fetch `1:*`, but only the
+/// latter two are worth flagging, and tests can assert on which branch fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchRange {
     /// No prior checkpoint (first-ever sync of this folder): fetch everything.
     Full,
-    /// A checkpoint was stored but could not be parsed as a UID boundary.
-    /// Falls back to a full fetch, but the corruption is surfaced (logged)
-    /// rather than silently treated as "no checkpoint".
+    /// A checkpoint was stored but could not be parsed (malformed, or a legacy
+    /// bare-UID checkpoint predating UIDVALIDITY tracking). Falls back to a
+    /// full fetch, surfaced (logged) rather than silently ignored.
     CorruptCheckpoint,
-    /// A valid UID checkpoint: fetch only UIDs at or above it, i.e. messages
-    /// that arrived since the previous sync.
+    /// The stored checkpoint's UIDVALIDITY no longer matches the mailbox's
+    /// current UIDVALIDITY (the mailbox was renumbered) or the server did not
+    /// report a current UIDVALIDITY to compare against. Stored UIDs are no
+    /// longer meaningful, so this falls back to a safe full re-fetch.
+    UidValidityChanged {
+        /// UIDVALIDITY recorded in the stored checkpoint.
+        stored: u32,
+        /// UIDVALIDITY the server reports now, if any.
+        current: Option<u32>,
+    },
+    /// A valid checkpoint whose UIDVALIDITY still matches: fetch only UIDs at
+    /// or above the stored boundary, i.e. messages that arrived since.
     Incremental(u32),
 }
 
 impl FetchRange {
-    /// Render the IMAP `UID FETCH` sequence-set. `Full`/`CorruptCheckpoint`
-    /// fetch all UIDs (`1:*`); an incremental checkpoint `n` fetches `n:*`,
+    /// Render the IMAP `UID FETCH` sequence-set. Every non-incremental variant
+    /// fetches all UIDs (`1:*`); an incremental checkpoint `n` fetches `n:*`,
     /// which the server bounds to UIDs `>= n` -- a genuinely narrower fetch.
     fn sequence_set(self) -> String {
         match self {
-            FetchRange::Full | FetchRange::CorruptCheckpoint => "1:*".to_string(),
+            FetchRange::Full
+            | FetchRange::CorruptCheckpoint
+            | FetchRange::UidValidityChanged { .. } => "1:*".to_string(),
             FetchRange::Incremental(uid) => format!("{}:*", uid),
         }
     }
 }
 
-/// Resolve the fetch range from a stored `since_state` checkpoint. The
-/// checkpoint is the `UIDNEXT` captured at the end of the previous sync, held
-/// as its decimal string. `None` means no prior sync (full fetch); an
-/// unparseable or zero value is treated as a corrupt checkpoint (full fetch,
-/// flagged) rather than silently equivalent to "no checkpoint".
-fn resolve_fetch_range(since_state: Option<&str>) -> FetchRange {
-    match since_state {
-        None => FetchRange::Full,
-        Some(raw) => match raw.trim().parse::<u32>() {
-            Ok(uid) if uid >= 1 => FetchRange::Incremental(uid),
-            _ => FetchRange::CorruptCheckpoint,
+/// Resolve the fetch range from a stored `since_state` checkpoint and the
+/// mailbox's CURRENT UIDVALIDITY (as just reported by `SELECT`). `None` means
+/// no prior sync (full fetch). A checkpoint in the `"{uidvalidity}:{uidnext}"`
+/// format proceeds incrementally only when its UIDVALIDITY still matches the
+/// server's current one; a mismatch (mailbox renumbered) or a missing current
+/// UIDVALIDITY forces a safe full re-fetch. A malformed or legacy bare-number
+/// checkpoint is treated as corrupt (full fetch, flagged), never misread as a
+/// live UID boundary.
+fn resolve_fetch_range(since_state: Option<&str>, current_uid_validity: Option<u32>) -> FetchRange {
+    let Some(raw) = since_state else {
+        return FetchRange::Full;
+    };
+    let parsed = raw
+        .split_once(CHECKPOINT_DELIM)
+        .and_then(|(validity, uid)| {
+            Some((
+                validity.trim().parse::<u32>().ok()?,
+                uid.trim().parse::<u32>().ok()?,
+            ))
+        });
+    let Some((stored_validity, uid)) = parsed else {
+        return FetchRange::CorruptCheckpoint;
+    };
+    if uid < 1 {
+        return FetchRange::CorruptCheckpoint;
+    }
+    match current_uid_validity {
+        Some(current) if current == stored_validity => FetchRange::Incremental(uid),
+        current => FetchRange::UidValidityChanged {
+            stored: stored_validity,
+            current,
         },
     }
 }
@@ -506,12 +552,14 @@ impl ImapEngine {
     /// returning the fetched messages and the new sync checkpoint.
     ///
     /// `since_state` is the checkpoint returned by a previous sync of this
-    /// folder (the previous `UIDNEXT`); when present and valid the `UID FETCH`
-    /// is narrowed to `{checkpoint}:*` so only messages that arrived since are
-    /// fetched, rather than re-downloading full history every sync. The
+    /// folder, encoded as `"{uidvalidity}:{uidnext}"` (see [`CHECKPOINT_DELIM`]).
+    /// The `UID FETCH` is narrowed to `{uidnext}:*` only when the checkpoint's
+    /// UIDVALIDITY still matches the mailbox's current UIDVALIDITY; a mismatch
+    /// (the mailbox was renumbered) or a malformed/legacy checkpoint forces a
+    /// safe full re-fetch instead of silently skipping renumbered mail. The
     /// returned checkpoint is derived from real server state -- the mailbox's
-    /// `UIDNEXT` after selecting the folder, or (if the server omits it) one
-    /// past the highest UID actually seen -- never from a synthetic counter.
+    /// UIDVALIDITY plus its `UIDNEXT` (or one past the highest UID actually
+    /// seen) after selecting the folder -- never from a synthetic counter.
     pub async fn sync_folder_messages_with_session<S>(
         &self,
         folder_id: &str,
@@ -525,14 +573,23 @@ impl ImapEngine {
             MailError::ImapError(format!("failed to select folder '{}': {}", folder_id, e))
         })?;
         let server_uid_next = mailbox.uid_next;
+        let server_uid_validity = mailbox.uid_validity;
 
-        let range = resolve_fetch_range(since_state);
-        if range == FetchRange::CorruptCheckpoint {
-            tracing::warn!(
+        let range = resolve_fetch_range(since_state, server_uid_validity);
+        match range {
+            FetchRange::CorruptCheckpoint => tracing::warn!(
                 folder_id,
                 checkpoint = since_state.unwrap_or_default(),
                 "ignoring unparseable folder sync checkpoint; falling back to a full fetch"
-            );
+            ),
+            FetchRange::UidValidityChanged { stored, current } => tracing::warn!(
+                folder_id,
+                stored_uidvalidity = stored,
+                current_uidvalidity = current,
+                "mailbox UIDVALIDITY changed (renumbered); the stored UID checkpoint is no \
+                 longer valid, so re-fetching in full to avoid silently skipping messages"
+            ),
+            FetchRange::Full | FetchRange::Incremental(_) => {}
         }
 
         let query = build_fetch_command_query();
@@ -651,16 +708,24 @@ impl ImapEngine {
             emails.push(email);
         }
 
-        // Derive the next checkpoint from real server state: prefer the
-        // mailbox's authoritative UIDNEXT, else one past the highest UID
-        // actually seen. If the server reported neither (e.g. an empty
-        // incremental fetch), keep the prior checkpoint so the next sync stays
-        // incremental instead of regressing to a full re-fetch.
-        let new_checkpoint = server_uid_next
-            .or_else(|| (max_uid_seen > 0).then_some(max_uid_seen.saturating_add(1)))
-            .map(|uid| uid.to_string())
-            .or_else(|| since_state.map(|s| s.to_string()))
-            .unwrap_or_else(|| "1".to_string());
+        // Derive the next checkpoint from real server state as
+        // `"{uidvalidity}:{uidnext}"`. The UID boundary is the mailbox's
+        // authoritative UIDNEXT, else one past the highest UID actually seen.
+        // A checkpoint is only meaningful when both a UIDVALIDITY and a UID
+        // boundary are known; if either is missing (a server that omitted
+        // UIDVALIDITY, or an empty fetch that revealed no UIDNEXT/UID), keep
+        // the prior checkpoint rather than writing a validity-less one that the
+        // next sync could misread. As a last resort (no prior checkpoint
+        // either) emit an intentionally unparseable marker so the next sync
+        // safely falls back to a full fetch.
+        let boundary_uid = server_uid_next
+            .or_else(|| (max_uid_seen > 0).then_some(max_uid_seen.saturating_add(1)));
+        let new_checkpoint = match (server_uid_validity, boundary_uid) {
+            (Some(validity), Some(uid)) => format!("{}{}{}", validity, CHECKPOINT_DELIM, uid),
+            _ => since_state
+                .map(str::to_string)
+                .unwrap_or_else(|| "full-resync-required".to_string()),
+        };
 
         Ok((emails, new_checkpoint))
     }
@@ -904,34 +969,70 @@ mod tests {
     }
 
     #[test]
-    fn resolve_fetch_range_distinguishes_none_valid_and_corrupt_checkpoints() {
-        // First-ever sync: full history.
-        assert_eq!(resolve_fetch_range(None), FetchRange::Full);
-        assert_eq!(resolve_fetch_range(None).sequence_set(), "1:*");
+    fn resolve_fetch_range_distinguishes_none_valid_corrupt_and_renumbered_checkpoints() {
+        // First-ever sync: full history (current UIDVALIDITY irrelevant).
+        assert_eq!(resolve_fetch_range(None, Some(1)), FetchRange::Full);
+        assert_eq!(resolve_fetch_range(None, None).sequence_set(), "1:*");
 
-        // Valid UID checkpoint: narrowed fetch.
+        // Valid checkpoint whose UIDVALIDITY still matches: narrowed fetch.
         assert_eq!(
-            resolve_fetch_range(Some("105")),
+            resolve_fetch_range(Some("1:105"), Some(1)),
             FetchRange::Incremental(105)
         );
-        assert_eq!(resolve_fetch_range(Some("105")).sequence_set(), "105:*");
         assert_eq!(
-            resolve_fetch_range(Some(" 42 ")),
+            resolve_fetch_range(Some("1:105"), Some(1)).sequence_set(),
+            "105:*"
+        );
+        assert_eq!(
+            resolve_fetch_range(Some(" 7 : 42 "), Some(7)),
             FetchRange::Incremental(42)
         );
 
-        // Corrupt checkpoints fall back to full, but are a DISTINCT case from
-        // "no checkpoint" so the corruption is visible, not silently swallowed.
-        assert_eq!(resolve_fetch_range(Some("")), FetchRange::CorruptCheckpoint);
+        // UIDVALIDITY changed (mailbox renumbered) or the server reported none
+        // to compare against: MUST fall back to a full fetch, distinctly, so a
+        // renumber can never silently skip the low new UIDs.
         assert_eq!(
-            resolve_fetch_range(Some("0")),
+            resolve_fetch_range(Some("1:105"), Some(2)),
+            FetchRange::UidValidityChanged {
+                stored: 1,
+                current: Some(2)
+            }
+        );
+        assert_eq!(
+            resolve_fetch_range(Some("1:105"), Some(2)).sequence_set(),
+            "1:*"
+        );
+        assert_eq!(
+            resolve_fetch_range(Some("1:105"), None),
+            FetchRange::UidValidityChanged {
+                stored: 1,
+                current: None
+            }
+        );
+
+        // Malformed or legacy bare-number (pre-UIDVALIDITY) checkpoints are
+        // corrupt -> full fetch, never misread as a live UID boundary.
+        assert_eq!(
+            resolve_fetch_range(Some(""), Some(1)),
             FetchRange::CorruptCheckpoint
         );
         assert_eq!(
-            resolve_fetch_range(Some("not-a-uid")),
+            resolve_fetch_range(Some("105"), Some(1)),
+            FetchRange::CorruptCheckpoint,
+            "a legacy bare-number checkpoint must not be read as a UID boundary"
+        );
+        assert_eq!(
+            resolve_fetch_range(Some("1:0"), Some(1)),
             FetchRange::CorruptCheckpoint
         );
-        assert_eq!(resolve_fetch_range(Some("not-a-uid")).sequence_set(), "1:*");
+        assert_eq!(
+            resolve_fetch_range(Some("not:auid"), Some(1)),
+            FetchRange::CorruptCheckpoint
+        );
+        assert_eq!(
+            resolve_fetch_range(Some("not-a-uid"), Some(1)).sequence_set(),
+            "1:*"
+        );
     }
 
     /// Read a single CRLF-terminated line from a scripted-server stream,
@@ -1013,20 +1114,22 @@ mod tests {
 
         let engine = ImapEngine::new("acct-1", "example.test", 993);
 
-        // First sync: no checkpoint -> full history; returns the server UIDNEXT.
+        // First sync: no checkpoint -> full history; returns
+        // "{uidvalidity}:{uidnext}" from real server state.
         let (first, checkpoint) = engine
             .sync_folder_messages_with_session("INBOX", None, &mut session)
             .await
             .expect("first sync succeeds");
         assert!(first.is_empty());
-        assert_eq!(checkpoint, "105");
+        assert_eq!(checkpoint, "1:105");
 
-        // Second sync: feed back the checkpoint -> narrowed fetch.
+        // Second sync: feed back the checkpoint; UIDVALIDITY still matches
+        // (1), so the fetch is narrowed.
         let (_second, checkpoint2) = engine
             .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
             .await
             .expect("second sync succeeds");
-        assert_eq!(checkpoint2, "105");
+        assert_eq!(checkpoint2, "1:105");
 
         drop(session);
         let _ = server.await;
@@ -1046,6 +1149,99 @@ mod tests {
         assert!(
             !ranges[1].contains("1:*"),
             "second sync must NOT re-fetch full history, got: {}",
+            ranges[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_uidvalidity_change_forces_a_full_resync_instead_of_skipping_mail() {
+        // A mailbox renumber changes UIDVALIDITY and restarts UIDs from low
+        // numbers. Resuming from the old UID boundary (`105:*`) would return
+        // only the single highest message and silently drop the rest, so a
+        // UIDVALIDITY mismatch MUST force a full `1:*` re-fetch. The scripted
+        // server reports UIDVALIDITY 1 on the first SELECT and 2 on the second.
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let fetch_ranges = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server_ranges = fetch_ranges.clone();
+
+        let server = tokio::spawn(async move {
+            let mut io = server_io;
+            let mut select_count = 0u32;
+            while let Some(line) = read_scripted_line(&mut io).await {
+                let tag = line.split_whitespace().next().unwrap_or("").to_string();
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("UID FETCH") {
+                    if let Ok(mut g) = server_ranges.lock() {
+                        g.push(line.clone());
+                    }
+                    let _ = io
+                        .write_all(format!("{tag} OK FETCH completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("LOGIN") {
+                    let _ = io
+                        .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("SELECT") {
+                    select_count += 1;
+                    // First SELECT: UIDVALIDITY 1. Second: a DIFFERENT
+                    // UIDVALIDITY (2), i.e. the mailbox was renumbered.
+                    let uidvalidity = if select_count == 1 { 1 } else { 2 };
+                    let resp = format!(
+                        "* FLAGS (\\Seen)\r\n* 3 EXISTS\r\n* 0 RECENT\r\n\
+                         * OK [UIDVALIDITY {uidvalidity}] ok\r\n* OK [UIDNEXT 105] ok\r\n\
+                         {tag} OK [READ-WRITE] SELECT done\r\n"
+                    );
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("LOGOUT") {
+                    let _ = io
+                        .write_all(format!("* BYE\r\n{tag} OK LOGOUT\r\n").as_bytes())
+                        .await;
+                    break;
+                }
+            }
+        });
+
+        let client = async_imap::Client::new(client_io);
+        let mut session = client
+            .login("user", "pass")
+            .await
+            .map_err(|(e, _)| e)
+            .expect("scripted login succeeds");
+
+        let engine = ImapEngine::new("acct-1", "example.test", 993);
+
+        // First sync under UIDVALIDITY 1 stores "1:105".
+        let (_first, checkpoint) = engine
+            .sync_folder_messages_with_session("INBOX", None, &mut session)
+            .await
+            .expect("first sync succeeds");
+        assert_eq!(checkpoint, "1:105");
+
+        // Second sync: server now reports UIDVALIDITY 2. The stored checkpoint
+        // is stale, so the fetch MUST be a full `1:*`, and the checkpoint is
+        // rewritten under the new UIDVALIDITY.
+        let (_second, checkpoint2) = engine
+            .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
+            .await
+            .expect("second sync succeeds");
+        assert_eq!(
+            checkpoint2, "2:105",
+            "checkpoint must be rewritten under the new UIDVALIDITY"
+        );
+
+        drop(session);
+        let _ = server.await;
+
+        let ranges = fetch_ranges.lock().expect("lock captured ranges");
+        assert_eq!(ranges.len(), 2, "expected exactly two UID FETCH commands");
+        assert!(
+            ranges[0].contains("1:*"),
+            "first sync fetches full history, got: {}",
+            ranges[0]
+        );
+        assert!(
+            ranges[1].contains("1:*") && !ranges[1].contains("105:*"),
+            "a UIDVALIDITY change MUST force a full re-fetch (1:*), never 105:*, got: {}",
             ranges[1]
         );
     }
@@ -1072,7 +1268,7 @@ mod tests {
                         .await;
                 } else if upper.contains("SELECT") {
                     let resp = format!(
-                        "* 1 EXISTS\r\n* OK [UIDNEXT 42] ok\r\n\
+                        "* 1 EXISTS\r\n* OK [UIDVALIDITY 1] ok\r\n* OK [UIDNEXT 42] ok\r\n\
                          {tag} OK [READ-WRITE] SELECT done\r\n"
                     );
                     let _ = io.write_all(resp.as_bytes()).await;
