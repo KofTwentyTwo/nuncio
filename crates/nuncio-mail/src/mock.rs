@@ -14,12 +14,41 @@ pub struct MockMailBackend {
     messages: Arc<Mutex<Vec<Email>>>,
     sent_messages: Arc<Mutex<Vec<Email>>>,
     should_fail: Arc<Mutex<bool>>,
+    /// Every `since_state` argument this mock's `sync_messages` was called
+    /// with, in call order, so tests can prove a caller threads the returned
+    /// checkpoint back into the next sync (real incrementality).
+    since_state_calls: Arc<Mutex<Vec<Option<String>>>>,
+    /// The checkpoint token this mock returns from `sync_messages`.
+    returned_state: Arc<Mutex<String>>,
 }
 
 impl MockMailBackend {
     /// Create a new `MockMailBackend` with empty storage.
     pub fn new() -> Self {
-        Self::default()
+        let backend = Self::default();
+        if let Ok(mut state) = backend.returned_state.lock() {
+            *state = "mock-state-token-100".to_string();
+        }
+        backend
+    }
+
+    /// Override the checkpoint token this mock returns from `sync_messages`,
+    /// so a test can control the exact state a caller must persist and thread
+    /// back on the next sync.
+    pub fn set_returned_state(&self, state: &str) {
+        if let Ok(mut guard) = self.returned_state.lock() {
+            *guard = state.to_string();
+        }
+    }
+
+    /// Every `since_state` argument passed to `sync_messages`, in call order.
+    /// A caller that genuinely resumes from a checkpoint will show `None` on
+    /// the first call and the previously-returned state on the next.
+    pub fn since_state_calls(&self) -> Vec<Option<String>> {
+        self.since_state_calls
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     /// Configure the mock to simulate network failure errors.
@@ -74,8 +103,14 @@ impl MailBackend for MockMailBackend {
     async fn sync_messages(
         &self,
         folder_id: &str,
-        _since_state: Option<&str>,
+        since_state: Option<&str>,
     ) -> Result<(Vec<Email>, String), MailError> {
+        // Record the checkpoint arg before any early return, so even a failing
+        // call is visible to a test asserting on how the caller resumes.
+        if let Ok(mut calls) = self.since_state_calls.lock() {
+            calls.push(since_state.map(str::to_string));
+        }
+
         let should_fail = self
             .should_fail
             .lock()
@@ -85,6 +120,19 @@ impl MailBackend for MockMailBackend {
                 "simulated network failure".to_string(),
             ));
         }
+        let returned_state = self
+            .returned_state
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?
+            .clone();
+
+        // Simulate a since_state-aware backend: with a prior checkpoint there
+        // is nothing new to hand back, so the incremental fetch is genuinely
+        // narrower (empty) rather than a full re-report of every message.
+        if since_state.is_some() {
+            return Ok((Vec::new(), returned_state));
+        }
+
         let messages = self
             .messages
             .lock()
@@ -94,7 +142,7 @@ impl MailBackend for MockMailBackend {
             .filter(|m| m.folder_id == folder_id)
             .cloned()
             .collect();
-        Ok((matches, "mock-state-token-100".to_string()))
+        Ok((matches, returned_state))
     }
 
     async fn send_email(&self, email: &Email) -> Result<(), MailError> {

@@ -32,6 +32,14 @@ pub enum MailError {
     #[error("IMAP error: {0}")]
     ImapError(String),
 
+    /// A single FETCH response item exceeded its bounded read timeout without
+    /// the server responding. Distinct from a generic [`MailError::ImapError`]
+    /// so callers can tell an honest mid-stream stall (dead socket, server-side
+    /// hang) apart from a protocol/parse failure instead of the sync hanging
+    /// forever.
+    #[error("IMAP FETCH stalled: {0}")]
+    FetchStalled(String),
+
     /// Network or IO error.
     #[error("network I/O error: {0}")]
     NetworkError(String),
