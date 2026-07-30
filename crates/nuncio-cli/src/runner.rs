@@ -1911,8 +1911,11 @@ impl HeadlessRunner {
 
     /// `account test`: a real thin gRPC client of the daemon's
     /// `nuncio.v1.Accounts/TestAccountConnection` API. Reports the GENUINE
-    /// per-protocol dial/handshake/auth outcome the daemon measured -- never a
-    /// fabricated "connection test OK (24ms latency)".
+    /// per-protocol outcome the daemon measured -- never a fabricated
+    /// "connection test OK (24ms latency)". The two legs verify different
+    /// depths (see the RPC's proto doc): IMAP is a full login, SMTP is
+    /// transport reachability only (no AUTH), so the output labels them
+    /// distinctly and never implies SMTP authentication was verified.
     async fn handle_account_test(&self, id: &str, json_mode: bool) -> String {
         let mut client = match self.connect_accounts_client().await {
             Ok(client) => client,
@@ -1936,15 +1939,19 @@ impl HeadlessRunner {
                         "smtp_error": report.smtp_error,
                     }))
                 } else {
+                    // Label each leg by what it actually verifies: IMAP is a
+                    // full login, SMTP is transport reachability only (no
+                    // AUTH). The wording must never imply SMTP authentication
+                    // was checked when it was not.
                     let imap = match &report.imap_error {
-                        Some(e) => format!("IMAP: FAIL ({e})"),
-                        None if report.imap_ok => "IMAP: OK".to_string(),
-                        None => "IMAP: FAIL".to_string(),
+                        Some(e) => format!("IMAP (login): FAIL ({e})"),
+                        None if report.imap_ok => "IMAP (login): OK".to_string(),
+                        None => "IMAP (login): FAIL".to_string(),
                     };
                     let smtp = match &report.smtp_error {
-                        Some(e) => format!("SMTP: FAIL ({e})"),
-                        None if report.smtp_ok => "SMTP: OK".to_string(),
-                        None => "SMTP: FAIL".to_string(),
+                        Some(e) => format!("SMTP (reachability, no auth): FAIL ({e})"),
+                        None if report.smtp_ok => "SMTP (reachability, no auth): OK".to_string(),
+                        None => "SMTP (reachability, no auth): FAIL".to_string(),
                     };
                     format!("Connection test for '{id}'\n  {imap}\n  {smtp}")
                 }

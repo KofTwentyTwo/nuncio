@@ -156,10 +156,17 @@ service Accounts {
   rpc RemoveAccount(RemoveAccountRequest) returns (RemoveAccountResponse);
   // TestAccountConnection performs a real, bounded connection probe against
   // the account's configured IMAP and SMTP endpoints (honoring each one's
-  // TLS transport mode) using the account's keyring credential, and reports
-  // the GENUINE per-protocol outcome -- never a fabricated success. A probe
-  // that fails carries the real error detail; a transport-level probe is
-  // bounded by a timeout so the RPC cannot hang against an unreachable host.
+  // TLS transport mode) and reports the GENUINE per-protocol outcome -- never
+  // a fabricated success. The two legs verify DIFFERENT depths, and callers
+  // must not conflate them:
+  //   - IMAP verifies a full LOGIN: connect, negotiate TLS/STARTTLS, and
+  //     authenticate with the account's keyring credential.
+  //   - SMTP verifies only TRANSPORT REACHABILITY: connect and negotiate
+  //     TLS/STARTTLS. It does NOT perform an SMTP AUTH exchange, so `smtp_ok`
+  //     does not assert the credential is valid for outbound mail (SMTP has
+  //     no standard authentication probe that does not also submit a message).
+  // A probe that fails carries the real error detail; each leg is bounded by
+  // a timeout so the RPC cannot hang against an unreachable host.
   rpc TestAccountConnection(TestAccountConnectionRequest) returns (TestAccountConnectionResponse);
 }
 
@@ -270,15 +277,21 @@ message TestAccountConnectionRequest {
 // TestAccountConnectionResponse reports the REAL, independent outcome of
 // probing each protocol endpoint -- never a fabricated success. `imap_error`
 // / `smtp_error` are present only when the corresponding `*_ok` is false and
-// carry the genuine failure detail (dial/handshake/auth error text).
+// carry the genuine failure detail (dial/handshake/auth error text). The two
+// `*_ok` flags verify different depths -- see `TestAccountConnection`.
 message TestAccountConnectionResponse {
-  // Whether the IMAP endpoint probe genuinely succeeded.
+  // Whether the IMAP endpoint FULLY authenticated: connect, TLS/STARTTLS
+  // negotiation, AND login with the account's credential all succeeded.
   bool imap_ok = 1;
-  // Whether the SMTP endpoint probe genuinely succeeded.
+  // Whether the SMTP endpoint was REACHABLE: connect and TLS/STARTTLS
+  // negotiation succeeded. This is a transport-reachability check only -- it
+  // does NOT perform an SMTP AUTH exchange, so it does not assert the
+  // credential is valid for outbound mail.
   bool smtp_ok = 2;
-  // Present only when `imap_ok` is false: the real IMAP probe error.
+  // Present only when `imap_ok` is false: the real IMAP login/handshake error.
   optional string imap_error = 3;
-  // Present only when `smtp_ok` is false: the real SMTP probe error.
+  // Present only when `smtp_ok` is false: the real SMTP transport/handshake
+  // error.
   optional string smtp_error = 4;
 }
 
