@@ -41,41 +41,49 @@ These are non-negotiable and apply to every item below:
 
 ---
 
-## Where we are today (2026-07-28)
+## Where we are today (2026-07-30)
 
 **Phases 0–2 are complete and on `dev`.** The daemon boots gRPC-only on loopback
-`127.0.0.1:9420` behind a keyring-minted bearer token, and serves **six services,
-each mounted behind the auth interceptor**: `System`, `Accounts`, `Mail`,
-`Filters`, `Export`, `Audit`. The IMAP→store→read→SMTP-send spine works
+`127.0.0.1:9420` behind a keyring-minted bearer token, and serves **eight
+services, each mounted behind the auth interceptor**: `System`, `Accounts`,
+`Mail`, `Filters`, `Calendar`, `Contacts`, `Export`, `Audit` (the `Calendar`
+and `Contacts` verticals landed in M1/M2). The IMAP→store→read→SMTP-send spine works
 end-to-end over gRPC, driven by the `nuncio-cli` reference client, tested
 offline. The legacy JSON-RPC IPC is removed. The `nuncio.v1` contract is
 published with a byte-deterministic `FileDescriptorSet` golden guarding it, plus
 external-codegen docs for Swift/C#/TypeScript.
 
-- **Phase 0 — Honesty & foundation:** done. Fabricated docs archived; workspace
-  shrunk to engine crates + CLI (`_reference/` holds the old shells); real OS
-  keyring; fail-open auto-updater disabled; releases marked pre-alpha.
-- **Phase 1 — gRPC skeleton + the spine:** done. Authenticated loopback gRPC;
-  CLI as gRPC client; real `IMAP fetch → store → read → SMTP send` against mock
-  servers; store correctness fixes (FTS-vs-encryption, backfill, salvage schema,
-  transient-error ≠ corruption).
-- **Phase 2 — API completeness for the spine:** done. Full proto surface for the
-  spine; contract-stability test; codegen docs; IPC removed.
-
-**Phase 3 — Feature completeness — is in progress:**
+**Phase 3 — Feature completeness — is now COMPLETE**, via milestones M1–M4, all
+merged to `dev`:
 
 - **3.A Filter correctness** — **done** (account scoping, `ON ACCOUNT`, non-ASCII
   offsets, `NOT IN`).
-- **3.B Calendar** — engine layer **done** (real CalDAV `REPORT` transport,
-  `TZID` fix, `CalendarBackend` trait, `calendar_events` store CRUD); the API
-  vertical + recurrence wiring remain (see M1).
-- **3.C Contacts (CardDAV)** and **3.D JMAP** — not started.
+- **3.B Calendar** — **done** (M1). Real CalDAV `REPORT` transport, `TZID` fix,
+  `CalendarBackend` trait, `calendar_events` store CRUD, the `Calendar` gRPC
+  service + CLI commands, and RRULE recurrence wired into the event-query path.
+- **3.C Contacts (CardDAV)** — **done** (M2). A real, wiremock-tested CardDAV
+  client replaced the fabricated one; contacts persist through the daemon's
+  store and are exposed over a `Contacts` gRPC service + CLI.
+- **3.D JMAP** — **done** (M3). A real JMAP HTTP client is wired into the same
+  `MailBackend` fetch→store path as IMAP.
+- **Filters made live** — **done** (M4). `FilterEngine::evaluate` is wired into
+  the live sync path with a fire-once-per-new-message guard, the `account`
+  condition-field bug is fixed, unsupported `header[...]` conditions are
+  honestly rejected, filter edit/export/import/logs moved onto the `Filters`
+  gRPC service, and a `Filters.Triage` server-streaming RPC does retroactive
+  bulk rescan.
 
-Dogfooding against a real mailbox and a fabrication audit surfaced additional
-**real gaps** now folded into the milestones below: the filter match-and-act
-engine is not yet wired into the live sync path; sync is not incremental;
-account edit/delete/test-connection and TLS-mode selection are incomplete; and a
-set of correctness/security items (see M5/M6).
+**Next up: M5 — Mail lifecycle & incremental sync** (account edit/delete/test +
+persisted TLS mode, incremental IMAP sync with progress + per-item FETCH
+timeout, explicit `SendMessage` account selection, keyring rollback on failed
+`AddAccount`). Then M6 (security hardening), then M7 (API freeze / client
+readiness).
+
+A handful of follow-ups were filed during M1–M4 and remain open, tracked as
+their own backlog items rather than blocking M1–M4's completion: calendar
+windowing/predicate refinement (#216), contacts notes handling (#219), and a
+`filter edit` bug where re-saving a rule silently re-enables it and resets
+`created_at` (#225).
 
 **Explicitly deferred** (out of scope until the backend is client-ready and each
 is re-justified as a genuine engine capability): OpenPGP/S-MIME E2EE (#79),
