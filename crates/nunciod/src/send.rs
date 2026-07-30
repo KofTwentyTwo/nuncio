@@ -12,13 +12,13 @@
 //!
 //! # Account selection
 //!
-//! The `nuncio.v1.Mail` service (like every other RPC on it --
-//! `ListMessages`, `GetMessage`, `SearchMessages`, etc.) does not yet
-//! disambiguate between multiple configured accounts; it operates over a
-//! single, global store. Consistent with that existing scope, `SendMessage`
-//! sends from the first account returned by [`DatabaseEngine::list_accounts`].
-//! Supporting an explicit multi-account choice is future work, alongside
-//! the rest of the `Mail` service's single-account scope.
+//! `SendMessage` accepts an optional `account_id`. When the caller supplies
+//! one, that specific account is resolved and used as the sender -- a
+//! request naming an account that does not exist fails honestly rather than
+//! silently falling back to a different identity. When `account_id` is
+//! omitted, the account resolves to the first one returned by
+//! [`DatabaseEngine::list_accounts`], preserving behavior for callers that
+//! predate explicit selection.
 //!
 //! # Testability
 //!
@@ -61,6 +61,13 @@ pub enum SendError {
     /// No account is configured to send mail from.
     #[error("no account is configured to send mail from")]
     NoAccountConfigured,
+    /// The caller specified an `account_id` that does not match any
+    /// configured account. Distinct from [`SendError::NoAccountConfigured`]
+    /// (which means zero accounts exist at all): this means at least one
+    /// account exists, just not the one requested, so the request must fail
+    /// rather than silently sending from a different account.
+    #[error("no account configured with id {0:?}")]
+    AccountNotFound(String),
     /// Failed to read the account's credential from the secret vault.
     #[error("failed to read account credential from the secret vault: {0}")]
     Vault(#[from] VaultError),
@@ -90,6 +97,9 @@ pub struct ComposeRequest {
     pub body_html: Option<String>,
     /// File attachments.
     pub attachments: Vec<Attachment>,
+    /// Identifier of the account to send from. `None` preserves the prior
+    /// "first configured account" behavior.
+    pub account_id: Option<String>,
 }
 
 /// Send `message` through `sender`. Pure seam shared by production and
@@ -121,14 +131,24 @@ fn build_smtp_sender(
 }
 
 /// Resolves the account to send mail from. See the module-level "Account
-/// selection" doc above for why this is currently the first configured
-/// account rather than an explicit per-request choice.
-async fn resolve_sending_account(db: &DatabaseEngine) -> Result<AccountConfig, SendError> {
+/// selection" doc above: an explicit `account_id` must match a configured
+/// account or the request fails; `None` preserves the "first configured
+/// account" behavior.
+async fn resolve_sending_account(
+    db: &DatabaseEngine,
+    account_id: Option<&str>,
+) -> Result<AccountConfig, SendError> {
     let accounts = db.list_accounts().await?;
-    accounts
-        .into_iter()
-        .next()
-        .ok_or(SendError::NoAccountConfigured)
+    match account_id {
+        Some(id) => accounts
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| SendError::AccountNotFound(id.to_string())),
+        None => accounts
+            .into_iter()
+            .next()
+            .ok_or(SendError::NoAccountConfigured),
+    }
 }
 
 /// Generates a daemon-local identifier for a sent message, for reference in
@@ -154,7 +174,7 @@ pub async fn send_message_for_account(
     secrets: &SecretManager,
     request: ComposeRequest,
 ) -> Result<String, SendError> {
-    let config = resolve_sending_account(db).await?;
+    let config = resolve_sending_account(db, request.account_id.as_deref()).await?;
     let password = secrets.get_secret(&config.keyring_secret_key)?;
     let sender = build_smtp_sender(&config, &password)?;
 
@@ -186,7 +206,7 @@ pub async fn send_message_with_injected_sender(
     sender: &dyn MessageSender,
     request: ComposeRequest,
 ) -> Result<String, SendError> {
-    let config = resolve_sending_account(db).await?;
+    let config = resolve_sending_account(db, request.account_id.as_deref()).await?;
 
     let outbound = OutboundMessage {
         from: config.email_address,
@@ -286,6 +306,7 @@ mod tests {
                 body_text: Some("Body".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                account_id: None,
             },
         )
         .await
@@ -314,6 +335,7 @@ mod tests {
                 body_text: Some("Body".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                account_id: None,
             },
         )
         .await
@@ -352,6 +374,7 @@ mod tests {
                 body_text: Some("Body".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                account_id: None,
             },
         )
         .await
@@ -392,6 +415,7 @@ mod tests {
                 body_text: Some("Body via injected sender.".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                account_id: None,
             },
         )
         .await
@@ -423,11 +447,83 @@ mod tests {
                 body_text: Some("Body".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                account_id: None,
             },
         )
         .await
         .expect_err("no configured account must fail");
         assert!(matches!(err, SendError::NoAccountConfigured));
+        assert!(mock.sent_messages().is_empty());
+    }
+
+    /// Proves that with multiple configured accounts, an explicit
+    /// `account_id` selects that SPECIFIC account as the sender -- not
+    /// whichever account happens to be first -- by asserting the captured
+    /// outbound message's `From:` matches the requested account.
+    #[tokio::test]
+    async fn send_message_with_injected_sender_uses_the_explicitly_selected_account() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+
+        let first = sample_account("acct-first");
+        let second = sample_account("acct-second");
+        db.save_account(&first).await.expect("save first account");
+        db.save_account(&second).await.expect("save second account");
+
+        let mock = MockMessageSender::new();
+        send_message_with_injected_sender(
+            &db,
+            &mock,
+            ComposeRequest {
+                to: "bob@nuncio.mx".to_string(),
+                cc: None,
+                subject: "Hi".to_string(),
+                body_text: Some("Body".to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+                account_id: Some(second.id.clone()),
+            },
+        )
+        .await
+        .expect("send succeeds via explicitly selected account");
+
+        let sent = mock.sent_messages();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].from, second.email_address);
+        assert_ne!(sent[0].from, first.email_address);
+    }
+
+    /// An `account_id` naming an account that does not exist must fail with
+    /// the specific [`SendError::AccountNotFound`] variant -- never a silent
+    /// fallback to the first configured account, and never confusable with
+    /// [`SendError::NoAccountConfigured`] (which means zero accounts exist).
+    #[tokio::test]
+    async fn send_message_with_injected_sender_rejects_unknown_account_id() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+
+        let config = sample_account("acct-only");
+        db.save_account(&config).await.expect("save account");
+
+        let mock = MockMessageSender::new();
+        let err = send_message_with_injected_sender(
+            &db,
+            &mock,
+            ComposeRequest {
+                to: "bob@nuncio.mx".to_string(),
+                cc: None,
+                subject: "Hi".to_string(),
+                body_text: Some("Body".to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+                account_id: Some("acct-does-not-exist".to_string()),
+            },
+        )
+        .await
+        .expect_err("unknown account id must fail");
+        assert!(matches!(err, SendError::AccountNotFound(id) if id == "acct-does-not-exist"));
         assert!(mock.sent_messages().is_empty());
     }
 }

@@ -321,7 +321,11 @@ service Mail {
   // SendMessage composes and sends a real outbound email over SMTP, built
   // from the configured account's SMTP endpoint
   // (`AccountConfig.smtp_host`/`smtp_port`) and its keyring-stored
-  // password. Returns successfully ONLY when
+  // password. When `account_id` is set, that specific account is used as
+  // the sender, and a request naming an account that does not exist fails
+  // rather than silently falling back to a different account. When
+  // `account_id` is omitted, the first configured account is used. Returns
+  // successfully ONLY when
   // the SMTP transport genuinely accepted the message for delivery --
   // never a fabricated success. A transport/authentication failure surfaces
   // as a `Status::internal` (or `Status::invalid_argument` for a malformed
@@ -469,6 +473,10 @@ message SendMessageRequest {
   optional string body_html = 5;
   // Optional file attachments.
   repeated Attachment attachments = 6;
+  // Optional identifier of the account to send from. When omitted, the
+  // first configured account is used (preserving prior behavior); when
+  // set, the named account must exist or the request fails.
+  optional string account_id = 7;
 }
 
 // SendMessageResponse. A successful response means the SMTP transport

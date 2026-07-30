@@ -1355,6 +1355,7 @@ impl Mail for MailGrpcService {
                 .into_iter()
                 .map(map_attachment_from_proto)
                 .collect(),
+            account_id: req.account_id,
         };
 
         let message_id = if let Some(sender) = &self.overrides.message_sender {
@@ -3295,6 +3296,7 @@ mod tests {
                 body_text: "Body".to_string(),
                 body_html: None,
                 attachments: Vec::new(),
+                account_id: None,
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -3552,6 +3554,7 @@ mod tests {
             body_text: "Let's discuss the roadmap.".to_string(),
             body_html: None,
             attachments: Vec::new(),
+            account_id: None,
         }
     }
 
@@ -3839,6 +3842,7 @@ mod tests {
                 body_text: "Injected send body".to_string(),
                 body_html: None,
                 attachments: Vec::new(),
+                account_id: None,
             }))
             .await
             .expect("send_message succeeds")
