@@ -1,16 +1,28 @@
 //! Outbound HTTP Webhook Execution Engine with HMAC-SHA256 Signatures and SSRF Defense.
 
 use crate::ast::RuleAction;
-use crate::validator::{NsqlValidator, ValidationOptions};
+use crate::validator::{is_blocked_webhook_target, NsqlValidator, ValidationOptions};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde_json::json;
 use sha2::Sha256;
+use std::net::IpAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tokio::net::lookup_host;
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Returns the first address in `addrs` that is a blocked webhook target, if
+/// any. Split out from the DNS lookup so the egress policy can be exercised
+/// against synthetic address lists without touching the network.
+fn first_blocked_address(addrs: &[IpAddr]) -> Option<IpAddr> {
+    addrs
+        .iter()
+        .copied()
+        .find(|ip| is_blocked_webhook_target(*ip))
+}
 
 /// Errors emitted during HTTP webhook dispatch execution.
 #[derive(Error, Debug)]
@@ -60,6 +72,34 @@ impl WebhookDispatcher {
         let action = RuleAction::CallWebhook(url.to_string());
         NsqlValidator::pass6_action_security(&[action], opts)
             .map_err(|e| WebhookError::SecurityViolation(e.to_string()))?;
+
+        if opts.block_private_webhooks {
+            // Pass 6 only sees literal-IP hosts. Resolve the target here and
+            // reject it if a hostname points into a blocked range, closing the
+            // DNS-rebind class of SSRF bypass. This is not airtight: reqwest
+            // re-resolves and connects on its own after this check, so a narrow
+            // TOCTOU window remains where DNS could flip between our lookup and
+            // the actual connection. Fully closing it needs a pinned
+            // resolver/connector, which is out of scope here.
+            if let Ok(parsed) = reqwest::Url::parse(url) {
+                if let Some(host) = parsed.host_str() {
+                    // `host_str` brackets IPv6 literals (`[::1]`); strip them so
+                    // the pair passes to the resolver cleanly.
+                    let host = host.trim_start_matches('[').trim_end_matches(']');
+                    let port = parsed.port_or_known_default().unwrap_or(0);
+                    let resolved: Vec<IpAddr> = lookup_host((host, port))
+                        .await
+                        .map_err(|e| WebhookError::NetworkError(e.to_string()))?
+                        .map(|addr| addr.ip())
+                        .collect();
+                    if let Some(blocked) = first_blocked_address(&resolved) {
+                        return Err(WebhookError::SecurityViolation(format!(
+                            "webhook host '{host}' resolves to blocked address {blocked}"
+                        )));
+                    }
+                }
+            }
+        }
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -141,5 +181,28 @@ mod tests {
             result.unwrap_err(),
             WebhookError::SecurityViolation(_)
         ));
+    }
+
+    #[test]
+    fn test_first_blocked_address_flags_private_in_mixed_list() {
+        // Synthetic resolver output: a public address alongside a private one,
+        // as a rebinding host might return. The private one must be caught.
+        let addrs: Vec<IpAddr> = vec![
+            "93.184.216.34".parse().unwrap(),
+            "10.0.0.5".parse().unwrap(),
+        ];
+        assert_eq!(
+            first_blocked_address(&addrs),
+            Some("10.0.0.5".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_first_blocked_address_allows_all_public() {
+        let addrs: Vec<IpAddr> = vec![
+            "93.184.216.34".parse().unwrap(),
+            "172.32.0.1".parse().unwrap(),
+        ];
+        assert_eq!(first_blocked_address(&addrs), None);
     }
 }

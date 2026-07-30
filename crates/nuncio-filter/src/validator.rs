@@ -33,7 +33,10 @@ pub struct ValidationOptions {
     pub available_folders: Option<Vec<String>>,
     /// Optional domain whitelist for Pass 6 `FORWARD TO` actions.
     pub allowed_forward_domains: Option<Vec<String>>,
-    /// Flag enabling Pass 6 pre-flight DNS IP blacklisting for webhooks.
+    /// When set, reject webhook targets that point at private, loopback,
+    /// link-local, or metadata address ranges. The validator checks literal-IP
+    /// hosts; the dispatcher additionally checks addresses a hostname resolves
+    /// to before connecting.
     pub block_private_webhooks: bool,
 }
 
@@ -278,13 +281,25 @@ impl NsqlValidator {
                         )));
                     }
                     if opts.block_private_webhooks {
-                        let url_lower = url.to_lowercase();
-                        if url_lower.contains("127.0.0.1")
-                            || url_lower.contains("localhost")
-                            || url_lower.contains("169.254.169.254")
-                            || url_lower.contains("0.0.0.0")
-                        {
-                            return Err(ValidationError::ActionSecurityViolation(format!("CALL WEBHOOK URL '{url}' points to blocked private / metadata IP address")));
+                        // When the host is an IP literal, reject any that lands in a
+                        // blocked range. A substring match on the raw URL is not a
+                        // real defense: RFC 1918, alternate literal encodings, and
+                        // IPv6 all slip past it. Hostnames cannot be resolved here
+                        // (this pass is synchronous); the dispatcher performs the
+                        // DNS-resolution check before it connects.
+                        if let Ok(parsed) = reqwest::Url::parse(url) {
+                            if let Some(host) = parsed.host_str() {
+                                // `host_str` brackets IPv6 literals (`[::1]`); strip
+                                // them so the address parses.
+                                let host = host.trim_start_matches('[').trim_end_matches(']');
+                                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                                    if is_blocked_webhook_target(ip) {
+                                        return Err(ValidationError::ActionSecurityViolation(format!(
+                                            "CALL WEBHOOK URL '{url}' points to a blocked private / metadata address"
+                                        )));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -307,6 +322,51 @@ fn is_valid_email_format(email: &str) -> bool {
         && parts[1].contains('.')
         && !parts[1].starts_with('.')
         && !parts[1].ends_with('.')
+}
+
+/// Reports whether `ip` falls in a range that must never be a webhook target.
+///
+/// This is the core SSRF egress control. It blocks loopback, RFC 1918 / ULA
+/// private space, link-local (which subsumes the `169.254.169.254` cloud
+/// metadata endpoint), the unspecified address, broadcast, and multicast.
+/// It is shared by the synchronous validator (literal IPs in the URL) and the
+/// dispatcher (addresses a hostname resolves to) so both apply identical rules.
+pub(crate) fn is_blocked_webhook_target(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_blocked_ipv4(v4),
+        std::net::IpAddr::V6(v6) => {
+            // Unwrap IPv4-mapped addresses (`::ffff:a.b.c.d`) first: an embedded
+            // private or loopback IPv4 must be caught by the v4 rules and not
+            // slip through as an ordinary v6 address.
+            match v6.to_ipv4_mapped() {
+                Some(mapped) => is_blocked_ipv4(mapped),
+                None => is_blocked_ipv6(v6),
+            }
+        }
+    }
+}
+
+fn is_blocked_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    // `is_private` implements the exact RFC 1918 blocks (10/8, 172.16/12,
+    // 192.168/16), so boundaries such as 172.32.0.0 stay allowed. The leading
+    // `0` octet covers 0.0.0.0/8 (this-network, wider than `is_unspecified`).
+    ip.octets()[0] == 0
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+}
+
+fn is_blocked_ipv6(ip: std::net::Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+    // `is_unique_local` / `is_unicast_link_local` are not stable on the pinned
+    // toolchain, so match the prefixes by hand: fc00::/7 (unique-local) and
+    // fe80::/10 (link-local unicast).
+    let first = ip.segments()[0];
+    (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
 }
 
 #[cfg(test)]
@@ -371,5 +431,79 @@ mod tests {
         .unwrap();
         let err = NsqlValidator::validate(&rule, &ValidationOptions::default()).unwrap_err();
         assert!(matches!(err, ValidationError::ActionSecurityViolation(_)));
+    }
+
+    #[test]
+    fn test_pass6_rejects_literal_ip_bypasses() {
+        // Encodings the old case-insensitive substring blocklist let through.
+        let blocked_urls = [
+            "http://10.1.2.3/hook",
+            "http://172.16.0.1/hook",
+            "http://192.168.1.1/hook",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/hook",
+            "http://[fc00::1]/hook",
+            "http://[fe80::1]/hook",
+            "http://[::ffff:127.0.0.1]/hook",
+        ];
+        for url in blocked_urls {
+            let rule = crate::parser::NsqlParser::parse_rule(
+                "Webhook Bypass",
+                1,
+                &format!("WHERE subject CONTAINS 'x' ACTION CALL WEBHOOK '{url}'"),
+            )
+            .unwrap();
+            let err = NsqlValidator::validate(&rule, &ValidationOptions::default()).unwrap_err();
+            assert!(
+                matches!(err, ValidationError::ActionSecurityViolation(_)),
+                "expected {url} to be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pass6_allows_public_literal_ip() {
+        let rule = crate::parser::NsqlParser::parse_rule(
+            "Webhook Public",
+            1,
+            "WHERE subject CONTAINS 'x' ACTION CALL WEBHOOK 'http://93.184.216.34/hook'",
+        )
+        .unwrap();
+        assert!(NsqlValidator::validate(&rule, &ValidationOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn test_is_blocked_webhook_target_blocks_private_ranges() {
+        let blocked: [std::net::IpAddr; 12] = [
+            "127.0.0.1".parse().unwrap(),
+            "10.1.2.3".parse().unwrap(),
+            "172.16.0.1".parse().unwrap(),
+            "172.31.255.255".parse().unwrap(),
+            "192.168.1.1".parse().unwrap(),
+            "169.254.169.254".parse().unwrap(),
+            "169.254.0.1".parse().unwrap(),
+            "0.0.0.0".parse().unwrap(),
+            "::1".parse().unwrap(),
+            "fc00::1".parse().unwrap(),
+            "fe80::1".parse().unwrap(),
+            "::ffff:127.0.0.1".parse().unwrap(),
+        ];
+        for ip in blocked {
+            assert!(is_blocked_webhook_target(ip), "{ip} should be blocked");
+        }
+    }
+
+    #[test]
+    fn test_is_blocked_webhook_target_allows_public() {
+        // 172.32.0.1 sits just outside 172.16.0.0/12 and proves the range math
+        // is exact rather than a naive `172.` prefix check.
+        let allowed: [std::net::IpAddr; 3] = [
+            "172.32.0.1".parse().unwrap(),
+            "93.184.216.34".parse().unwrap(),
+            "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(),
+        ];
+        for ip in allowed {
+            assert!(!is_blocked_webhook_target(ip), "{ip} should be allowed");
+        }
     }
 }
