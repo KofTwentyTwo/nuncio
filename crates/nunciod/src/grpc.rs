@@ -511,10 +511,14 @@ impl Accounts for AccountsGrpcService {
         request: Request<AddAccountRequest>,
     ) -> Result<Response<AddAccountResponse>, Status> {
         let req = request.into_inner();
+        // Moved into a zeroizing wrapper immediately so the plaintext credential's
+        // backing memory is overwritten as soon as this function returns, rather
+        // than lingering as an ordinary `String` for the rest of the process.
+        let password = zeroize::Zeroizing::new(req.password);
         let proto_config = req
             .config
             .ok_or_else(|| Status::invalid_argument("config is required"))?;
-        if req.password.is_empty() {
+        if password.is_empty() {
             return Err(Status::invalid_argument("password is required"));
         }
 
@@ -538,7 +542,7 @@ impl Accounts for AccountsGrpcService {
         // The original persistence error is always what the caller sees --
         // a rollback failure is reported alongside it, never in place of it.
         self.secrets
-            .set_secret(&config.keyring_secret_key, &req.password)
+            .set_secret(&config.keyring_secret_key, &password)
             .map_err(|e| Status::internal(format!("failed to store credential in vault: {e}")))?;
 
         if let Err(e) = self.db.save_account(&config).await {

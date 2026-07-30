@@ -6,6 +6,7 @@ use std::path::Path;
 use std::str::FromStr;
 use tempfile::TempDir;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 /// Raw row shape for a pending remote mutation record fetched from SQLite.
 type PendingMutationRow = (String, String, String, String, String, String, i64, i64);
@@ -102,9 +103,9 @@ impl DatabaseError {
 #[derive(Clone)]
 pub struct DatabaseEngine {
     pool: SqlitePool,
-    storage_key: [u8; 32],
-    worm_key: Vec<u8>,
-    ledger_key: Vec<u8>,
+    storage_key: Zeroizing<[u8; 32]>,
+    worm_key: Zeroizing<Vec<u8>>,
+    ledger_key: Zeroizing<Vec<u8>>,
 }
 
 impl std::fmt::Debug for DatabaseEngine {
@@ -122,7 +123,7 @@ impl std::fmt::Debug for DatabaseEngine {
 #[allow(clippy::type_complexity)]
 fn resolve_engine_keys(
     secrets: &crate::vault::SecretManager,
-) -> Result<([u8; 32], Vec<u8>, Vec<u8>), DatabaseError> {
+) -> Result<(Zeroizing<[u8; 32]>, Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>), DatabaseError> {
     let storage_key_bytes = secrets
         .get_or_create_key_bytes(crate::vault::STORAGE_KEY_ACCOUNT, 32)
         .map_err(|e| DatabaseError::KeyProvisioning(e.to_string()))?;
@@ -135,7 +136,11 @@ fn resolve_engine_keys(
     let ledger_key = secrets
         .get_or_create_key_bytes(crate::vault::LEDGER_KEY_ACCOUNT, 32)
         .map_err(|e| DatabaseError::KeyProvisioning(e.to_string()))?;
-    Ok((storage_key, worm_key, ledger_key))
+    Ok((
+        Zeroizing::new(storage_key),
+        Zeroizing::new(worm_key),
+        Zeroizing::new(ledger_key),
+    ))
 }
 
 /// Reconstruct a [`nuncio_contacts::Contact`] from a `contacts` table row.
@@ -3267,5 +3272,51 @@ mod tests {
         assert!(!report.valid);
         assert_eq!(report.record_count, 1);
         assert_eq!(report.first_broken_seq, Some(1));
+    }
+
+    /// Proves the zeroize mechanism `Zeroizing`'s `Drop` relies on is real, not
+    /// decorative: explicitly invoking `Zeroize::zeroize` on key-shaped byte
+    /// buffers overwrites every byte with zero. This is checked directly
+    /// (without dropping the value) because inspecting freed heap memory would
+    /// require `unsafe`, which this workspace forbids.
+    #[test]
+    fn zeroize_mechanism_actually_wipes_key_bytes() {
+        use zeroize::Zeroize;
+
+        let mut fixed = Zeroizing::new([0xABu8; 32]);
+        assert!(fixed.iter().all(|&b| b != 0), "fixture must start non-zero");
+        fixed.zeroize();
+        assert!(
+            fixed.iter().all(|&b| b == 0),
+            "Zeroize::zeroize must overwrite every byte of a fixed-size key buffer"
+        );
+
+        let mut variable = Zeroizing::new(vec![0xCDu8; 32]);
+        assert!(
+            variable.iter().all(|&b| b != 0),
+            "fixture must start non-zero"
+        );
+        variable.zeroize();
+        assert!(
+            variable.iter().all(|&b| b == 0),
+            "Zeroize::zeroize must overwrite every byte of a heap-allocated key buffer"
+        );
+    }
+
+    /// `DatabaseEngine`'s manual `Debug` impl must never print the raw
+    /// storage/WORM/ledger key bytes it now holds in `Zeroizing` wrappers,
+    /// even after they were introduced.
+    #[tokio::test]
+    async fn debug_impl_never_prints_raw_key_bytes() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let debug_output = format!("{engine:?}");
+        assert!(
+            !debug_output.contains("storage_key")
+                && !debug_output.contains("worm_key")
+                && !debug_output.contains("ledger_key"),
+            "Debug output must never expose key field names/values: {debug_output}"
+        );
     }
 }
