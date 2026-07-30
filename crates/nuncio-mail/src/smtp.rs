@@ -9,6 +9,7 @@ use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::transport::smtp::Error as LettreSmtpError;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use nuncio_core::model::{Attachment, Email};
+use nuncio_core::TlsMode;
 
 use crate::backend::{MessageSender, OutboundMessage};
 use crate::parser::MailError;
@@ -42,10 +43,37 @@ pub struct SmtpTransportEngine {
 }
 
 impl SmtpTransportEngine {
-    /// Create a new [`SmtpTransportEngine`] with initialized transport client.
-    pub fn new(host: &str, port: u16, username: &str, password: &str) -> Result<Self, MailError> {
-        let transport = Self::build_transport(host, port, username, password)?;
+    /// Create a new [`SmtpTransportEngine`] with initialized transport client
+    /// for a specific transport security [`TlsMode`].
+    pub fn new(
+        host: &str,
+        port: u16,
+        tls_mode: TlsMode,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, MailError> {
+        let transport = Self::build_transport(host, port, tls_mode, username, password)?;
         Ok(Self { transport })
+    }
+
+    /// Probe the SMTP endpoint: open a real connection to the configured
+    /// relay (performing the implicit-TLS wrap or STARTTLS upgrade the
+    /// configured [`TlsMode`] selects) and confirm the server responds. Backs
+    /// the daemon's `TestAccountConnection` SMTP leg. Returns `Ok(())` only
+    /// when a connection genuinely succeeded -- a dial/handshake failure
+    /// surfaces as the real [`MailError`], never a fabricated success.
+    ///
+    /// This validates transport reachability and TLS negotiation; SMTP has no
+    /// standalone authentication probe (credentials are exercised at message
+    /// submission time), so this deliberately does not claim to verify auth.
+    pub async fn probe_connection(&self) -> Result<(), MailError> {
+        match self.transport.test_connection().await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(MailError::TransportFailed(
+                "SMTP server did not accept the connection probe".to_string(),
+            )),
+            Err(e) => Err(MailError::from(e)),
+        }
     }
 
     /// Create a new [`SmtpTransportEngine`] from an existing [`AsyncSmtpTransport`] client.
@@ -227,33 +255,53 @@ impl SmtpTransportEngine {
         Ok(())
     }
 
-    /// Build an [`AsyncSmtpTransport`] client instance.
-    /// Configures Implicit TLS (`Tls::Wrapper`) for port 465, and STARTTLS (`Tls::Required`) for port 587 or other ports.
+    /// Build an [`AsyncSmtpTransport`] client instance whose transport
+    /// security genuinely follows the configured [`TlsMode`]:
+    ///
+    /// - [`TlsMode::ImplicitTls`] wraps the socket in TLS immediately
+    ///   (`Tls::Wrapper`), as on the SMTPS port (465).
+    /// - [`TlsMode::StartTls`] connects in the clear and REQUIRES a STARTTLS
+    ///   upgrade before proceeding (`Tls::Required`), as on the submission
+    ///   port (587); a server without STARTTLS is rejected rather than
+    ///   silently falling back to plaintext.
+    /// - [`TlsMode::Plain`] performs no TLS at all (`Tls::None`), for a local
+    ///   test/dev relay -- the caller opted into cleartext explicitly.
+    ///
+    /// Implicit-TLS and STARTTLS relays are built via `relay(host)` (which
+    /// defaults to TLS wrapping) / `starttls_relay(host)` respectively;
+    /// plaintext is built via the non-encrypting `builder_dangerous(host)`.
     pub fn build_transport(
         host: &str,
         port: u16,
+        tls_mode: TlsMode,
         username: &str,
         password: &str,
     ) -> Result<AsyncSmtpTransport<Tokio1Executor>, MailError> {
         Self::validate_smtp_config(host, port, username)?;
 
         let creds = Credentials::new(username.to_string(), password.to_string());
-        let tls_params = TlsParameters::builder(host.to_string())
-            .build()
-            .map_err(|e| MailError::TransportFailed(format!("TLS parameters error: {}", e)))?;
 
-        let tls = if port == 465 {
-            Tls::Wrapper(tls_params)
-        } else {
-            Tls::Required(tls_params)
+        let builder = match tls_mode {
+            TlsMode::ImplicitTls | TlsMode::StartTls => {
+                let tls_params = TlsParameters::builder(host.to_string())
+                    .build()
+                    .map_err(|e| {
+                        MailError::TransportFailed(format!("TLS parameters error: {}", e))
+                    })?;
+                let tls = match tls_mode {
+                    TlsMode::StartTls => Tls::Required(tls_params),
+                    _ => Tls::Wrapper(tls_params),
+                };
+                AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+                    .map_err(|e| {
+                        MailError::TransportFailed(format!("relay configuration error: {}", e))
+                    })?
+                    .tls(tls)
+            }
+            TlsMode::Plain => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host),
         };
 
-        let transport = AsyncSmtpTransport::<Tokio1Executor>::relay(host)
-            .map_err(|e| MailError::TransportFailed(format!("relay configuration error: {}", e)))?
-            .port(port)
-            .credentials(creds)
-            .tls(tls)
-            .build();
+        let transport = builder.port(port).credentials(creds).build();
 
         Ok(transport)
     }
@@ -383,21 +431,59 @@ mod tests {
     }
 
     #[test]
-    fn build_transport_creates_starttls_client_for_port_587() {
-        let transport = SmtpTransportEngine::build_transport("smtp.nuncio.mx", 587, "user", "pass");
+    fn build_transport_creates_starttls_client() {
+        let transport = SmtpTransportEngine::build_transport(
+            "smtp.nuncio.mx",
+            587,
+            TlsMode::StartTls,
+            "user",
+            "pass",
+        );
         assert!(transport.is_ok());
     }
 
     #[test]
-    fn build_transport_creates_implicit_tls_client_for_port_465() {
-        let transport = SmtpTransportEngine::build_transport("smtp.nuncio.mx", 465, "user", "pass");
+    fn build_transport_creates_implicit_tls_client() {
+        let transport = SmtpTransportEngine::build_transport(
+            "smtp.nuncio.mx",
+            465,
+            TlsMode::ImplicitTls,
+            "user",
+            "pass",
+        );
+        assert!(transport.is_ok());
+    }
+
+    #[test]
+    fn build_transport_creates_plaintext_client() {
+        let transport = SmtpTransportEngine::build_transport(
+            "smtp.nuncio.mx",
+            25,
+            TlsMode::Plain,
+            "user",
+            "pass",
+        );
         assert!(transport.is_ok());
     }
 
     #[tokio::test]
+    async fn probe_connection_to_unreachable_server_fails() {
+        let engine = SmtpTransportEngine::new("127.0.0.1", 1, TlsMode::ImplicitTls, "user", "pass")
+            .expect("valid config");
+        let err = engine
+            .probe_connection()
+            .await
+            .expect_err("probe against port 1 must fail, never fabricate success");
+        assert!(matches!(
+            err,
+            MailError::TransportFailed(_) | MailError::SmtpFailed(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn send_email_to_unreachable_server_fails_with_transport_error() {
-        let engine =
-            SmtpTransportEngine::new("127.0.0.1", 1, "user", "pass").expect("valid config");
+        let engine = SmtpTransportEngine::new("127.0.0.1", 1, TlsMode::ImplicitTls, "user", "pass")
+            .expect("valid config");
         let email = sample_email();
         let err = engine
             .send_email(&email)
@@ -411,7 +497,8 @@ mod tests {
 
     #[test]
     fn engine_constructor_creates_instance() {
-        let engine = SmtpTransportEngine::new("smtp.nuncio.mx", 465, "user", "pass");
+        let engine =
+            SmtpTransportEngine::new("smtp.nuncio.mx", 465, TlsMode::ImplicitTls, "user", "pass");
         assert!(engine.is_ok());
     }
 
@@ -506,8 +593,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_to_unreachable_server_fails_with_transport_error() {
-        let engine =
-            SmtpTransportEngine::new("127.0.0.1", 1, "user", "pass").expect("valid config");
+        let engine = SmtpTransportEngine::new("127.0.0.1", 1, TlsMode::ImplicitTls, "user", "pass")
+            .expect("valid config");
         let message = sample_outbound_message();
         let err = engine
             .send_message(&message)
@@ -525,8 +612,8 @@ mod tests {
         // through to the real `send_message` path, not a separate/fabricated
         // stub -- exercised via the trait object
         // exactly like production code (`nunciod::send`) uses it.
-        let engine =
-            SmtpTransportEngine::new("127.0.0.1", 1, "user", "pass").expect("valid config");
+        let engine = SmtpTransportEngine::new("127.0.0.1", 1, TlsMode::ImplicitTls, "user", "pass")
+            .expect("valid config");
         let sender: &dyn MessageSender = &engine;
         let message = sample_outbound_message();
         let err = sender
