@@ -40,8 +40,9 @@ use nuncio_proto::v1::{
     Message as MessageProto, MessageFlagsChanged, MessageSearchHit, PreviewRuleRequest,
     PreviewRuleResponse, SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest,
     SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse,
-    SyncStarted, TlsMode as TlsModeProto, UpdateAvailable, UpdateRuleRequest, UpdateRuleResponse,
-    ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
+    SyncStarted, TlsMode as TlsModeProto, TriageProgress, TriageRequest, UpdateAvailable,
+    UpdateRuleRequest, UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
+    VerifyChainRequest, VerifyChainResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -53,7 +54,7 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tokio_stream::wrappers::{BroadcastStream, TcpListenerStream};
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream, TcpListenerStream};
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
@@ -1471,6 +1472,102 @@ impl Filters for FiltersGrpcService {
             .collect();
 
         Ok(Response::new(GetExecutionLogsResponse { logs }))
+    }
+
+    /// Server-streaming retroactive rescan of the whole message store.
+    /// Unlike `System::subscribe` (which wraps an already-live broadcast),
+    /// this RPC actively drives the scan: a spawned worker task walks
+    /// `db.get_message_chunk` in keyset pages, applies the shared
+    /// [`crate::sync::apply_filter_actions`] evaluate-and-route logic to
+    /// each message (the SAME side effects live sync produces), and pushes
+    /// cumulative progress onto an mpsc channel that this method wraps as
+    /// the returned stream.
+    ///
+    /// `rule_id` is accepted for forward compatibility but NOT currently
+    /// honored: `apply_filter_actions` always evaluates against the whole
+    /// live rule set, matching what a real sync pass would do, rather than
+    /// silently narrowing to one rule.
+    ///
+    /// A `get_message_chunk` failure sends a single `Err(Status::internal)`
+    /// on the stream and stops the scan -- never a fabricated `done: true`
+    /// on error. The receiver disconnecting (the caller dropped the call)
+    /// also stops the worker rather than continuing to scan for no one.
+    type TriageStream =
+        Pin<Box<dyn Stream<Item = Result<TriageProgress, Status>> + Send + 'static>>;
+
+    async fn triage(
+        &self,
+        request: Request<TriageRequest>,
+    ) -> Result<Response<Self::TriageStream>, Status> {
+        let req = request.into_inner();
+        let chunk_size = if req.chunk_size == 0 {
+            100
+        } else {
+            req.chunk_size as usize
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<TriageProgress, Status>>(16);
+        let db = self.db.clone();
+        let engine = self.filter_engine.clone();
+
+        tokio::spawn(async move {
+            let mut last_id = String::new();
+            let mut scanned: u64 = 0;
+            let mut matched: u64 = 0;
+            let mut applied: u64 = 0;
+
+            loop {
+                let batch = match db.get_message_chunk(&last_id, chunk_size).await {
+                    Ok(batch) => batch,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(Status::internal(format!(
+                                "failed to read message chunk during triage: {e}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                };
+                let is_last_page = batch.len() < chunk_size;
+
+                for email in &batch {
+                    let actions_for_email =
+                        crate::sync::apply_filter_actions(&db, &engine, email).await;
+                    scanned += 1;
+                    applied += actions_for_email as u64;
+                    if actions_for_email > 0 {
+                        matched += 1;
+                    }
+                }
+
+                if let Some(last) = batch.last() {
+                    last_id = last.id.clone();
+                }
+
+                let done = is_last_page;
+                if tx
+                    .send(Ok(TriageProgress {
+                        scanned_count: scanned,
+                        matched_count: matched,
+                        actions_applied_count: applied,
+                        last_message_id: last_id.clone(),
+                        done,
+                    }))
+                    .await
+                    .is_err()
+                {
+                    // Receiver dropped: the caller disconnected, so there is
+                    // no one left to report progress to.
+                    return;
+                }
+
+                if is_last_page {
+                    return;
+                }
+            }
+        });
+
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 }
 
