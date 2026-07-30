@@ -865,6 +865,7 @@ struct MailGrpcService {
     db: Arc<DatabaseEngine>,
     event_bus: Arc<EventBus>,
     secrets: Arc<SecretManager>,
+    filter_engine: Arc<FilterEngine>,
     overrides: MailEngineOverrides,
 }
 
@@ -1053,15 +1054,33 @@ impl Mail for MailGrpcService {
         let account_id = request.into_inner().account_id;
 
         let synced = if let Some(backend) = &self.overrides.mail_backend {
-            crate::sync::sync_with_backend(&self.db, &self.event_bus, backend.as_ref(), account_id)
-                .await
-                .map_err(|e| Status::internal(format!("sync failed: {e}")))?
+            crate::sync::sync_with_backend(
+                &self.db,
+                &self.event_bus,
+                backend.as_ref(),
+                &self.filter_engine,
+                account_id,
+            )
+            .await
+            .map_err(|e| Status::internal(format!("sync failed: {e}")))?
         } else if let Some(account_id) = account_id {
-            crate::sync::run_account_sync(&self.db, &self.secrets, &self.event_bus, &account_id)
-                .await
-                .map_err(|e| Status::internal(format!("sync failed: {e}")))?
+            crate::sync::run_account_sync(
+                &self.db,
+                &self.secrets,
+                &self.event_bus,
+                &self.filter_engine,
+                &account_id,
+            )
+            .await
+            .map_err(|e| Status::internal(format!("sync failed: {e}")))?
         } else {
-            crate::sync::run_all_accounts_sync(&self.db, &self.secrets, &self.event_bus).await
+            crate::sync::run_all_accounts_sync(
+                &self.db,
+                &self.secrets,
+                &self.event_bus,
+                &self.filter_engine,
+            )
+            .await
         };
 
         Ok(Response::new(SyncResponse {
@@ -1607,6 +1626,7 @@ pub async fn serve_on_listener_with_overrides(
         db: db.clone(),
         event_bus,
         secrets: secrets.clone(),
+        filter_engine: filter_engine.clone(),
         overrides,
     };
     let mail_interceptor = BearerAuthInterceptor::new(token.clone());
