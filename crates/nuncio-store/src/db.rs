@@ -36,6 +36,18 @@ pub enum DatabaseError {
     /// compiled-in default key.
     #[error("cryptographic key provisioning failed: {0}")]
     KeyProvisioning(String),
+    /// A body payload failed AEAD encryption before it could be persisted at rest.
+    /// This is a fail-closed error: it is returned instead of ever writing an
+    /// empty/placeholder ciphertext that would be indistinguishable from a
+    /// genuinely empty body on read-back.
+    #[error("payload encryption failed: {0}")]
+    Encryption(String),
+}
+
+impl From<crate::cipher::CipherError> for DatabaseError {
+    fn from(err: crate::cipher::CipherError) -> Self {
+        DatabaseError::Encryption(err.to_string())
+    }
 }
 
 impl DatabaseError {
@@ -984,14 +996,19 @@ impl DatabaseEngine {
     /// is not encrypted, so this intentionally trades some body confidentiality for working
     /// search.
     pub async fn save_email(&self, email: &nuncio_core::model::Email) -> Result<(), DatabaseError> {
+        // Encryption failures MUST surface before any SQL runs: a swallowed error here would
+        // otherwise leave a row with an empty/placeholder body column, indistinguishable from
+        // a genuinely empty body on read-back.
         let enc_plain = email
             .body_plain
             .as_ref()
-            .map(|p| crate::cipher::PayloadCipher::encrypt_text_at_rest(&self.storage_key, p));
+            .map(|p| crate::cipher::PayloadCipher::encrypt_text_at_rest(&self.storage_key, p))
+            .transpose()?;
         let enc_html = email
             .body_html
             .as_ref()
-            .map(|h| crate::cipher::PayloadCipher::encrypt_text_at_rest(&self.storage_key, h));
+            .map(|h| crate::cipher::PayloadCipher::encrypt_text_at_rest(&self.storage_key, h))
+            .transpose()?;
 
         let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
 

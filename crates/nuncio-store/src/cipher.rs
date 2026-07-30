@@ -64,12 +64,12 @@ impl PayloadCipher {
     /// AES-256-GCM key. The key MUST be sourced from a [`crate::vault::SecretManager`]-backed
     /// vault (never a compiled-in default) so that at-rest ciphertext cannot be decrypted
     /// without access to the OS keyring.
-    pub fn encrypt_text_at_rest(key: &[u8; 32], text: &str) -> String {
+    pub fn encrypt_text_at_rest(key: &[u8; 32], text: &str) -> Result<String, CipherError> {
         if text.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
-        let encrypted = Self::encrypt_bytes(key, text.as_bytes()).unwrap_or_default();
-        hex::encode(encrypted)
+        let encrypted = Self::encrypt_bytes(key, text.as_bytes())?;
+        Ok(hex::encode(encrypted))
     }
 
     /// Decrypt text payload from database column storage at rest using a caller-supplied
@@ -236,13 +236,17 @@ mod tests {
     fn text_at_rest_encryption_decryption_roundtrip() {
         let key = [7u8; 32];
         let text = "Sensitive Email Body Payload";
-        let encrypted = PayloadCipher::encrypt_text_at_rest(&key, text);
+        let encrypted =
+            PayloadCipher::encrypt_text_at_rest(&key, text).expect("encryption succeeds");
         assert_ne!(text, encrypted);
 
         let decrypted = PayloadCipher::decrypt_text_at_rest(&key, &encrypted);
         assert_eq!(text, decrypted);
 
-        assert_eq!(PayloadCipher::encrypt_text_at_rest(&key, ""), "");
+        assert_eq!(
+            PayloadCipher::encrypt_text_at_rest(&key, "").expect("empty text is not encrypted"),
+            ""
+        );
         assert_eq!(PayloadCipher::decrypt_text_at_rest(&key, ""), "");
     }
 
@@ -254,7 +258,8 @@ mod tests {
         let key_b = [2u8; 32];
         let text = "Confidential ledger payload";
 
-        let encrypted = PayloadCipher::encrypt_text_at_rest(&key_a, text);
+        let encrypted =
+            PayloadCipher::encrypt_text_at_rest(&key_a, text).expect("encryption succeeds");
         let decrypted_with_wrong_key = PayloadCipher::decrypt_text_at_rest(&key_b, &encrypted);
 
         assert_eq!(decrypted_with_wrong_key, "");
