@@ -322,8 +322,14 @@ impl HeadlessRunner {
                 MailSubcommand::Sync => self.handle_sync(json_mode).await,
                 MailSubcommand::List { folder } => self.handle_list_folder(folder, json_mode).await,
                 MailSubcommand::Read { id } => self.handle_read_message(id, json_mode).await,
-                MailSubcommand::Send { to, subject, body } => {
-                    self.handle_send_email(to, subject, body, json_mode).await
+                MailSubcommand::Send {
+                    to,
+                    subject,
+                    body,
+                    account,
+                } => {
+                    self.handle_send_email(to, subject, body, account.as_deref(), json_mode)
+                        .await
                 }
                 MailSubcommand::Search { query } => self.handle_search(query, json_mode).await,
                 MailSubcommand::Mark { id, read, unread } => {
@@ -695,6 +701,7 @@ impl HeadlessRunner {
         to: &str,
         subject: &str,
         body: &str,
+        account: Option<&str>,
         json_mode: bool,
     ) -> String {
         let mut client = match self.connect_mail_client().await {
@@ -710,6 +717,7 @@ impl HeadlessRunner {
                 body_text: body.to_string(),
                 body_html: None,
                 attachments: Vec::new(),
+                account_id: account.map(str::to_string),
             })
             .await
         {
@@ -3165,6 +3173,7 @@ mod tests {
                         to: "alice@nuncio.mx".to_string(),
                         subject: "Quarterly Roadmap".to_string(),
                         body: "Let's discuss the roadmap.".to_string(),
+                        account: None,
                     },
                 },
                 true,
@@ -3182,6 +3191,35 @@ mod tests {
         assert_eq!(recorded_send.to, "alice@nuncio.mx");
         assert_eq!(recorded_send.subject, "Quarterly Roadmap");
         assert_eq!(recorded_send.body_text, "Let's discuss the roadmap.");
+        assert_eq!(recorded_send.account_id, None);
+
+        // `mail send --account <id>` threads the explicit selector through
+        // to the daemon over the wire, proving the CLI flag is not merely
+        // parsed but actually reaches `SendMessageRequest.account_id`.
+        let mail_send_with_account = runner
+            .execute_command(
+                &Commands::Mail {
+                    action: MailSubcommand::Send {
+                        to: "alice@nuncio.mx".to_string(),
+                        subject: "Quarterly Roadmap".to_string(),
+                        body: "Let's discuss the roadmap.".to_string(),
+                        account: Some("acct-work".to_string()),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(mail_send_with_account.contains(r#""sent":true"#));
+
+        let recorded_send_with_account = send_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("stub daemon received a second send_message request");
+        assert_eq!(
+            recorded_send_with_account.account_id,
+            Some("acct-work".to_string())
+        );
     }
 
     /// Reference-client proof: boots a stub `nuncio.v1.Calendar` gRPC server

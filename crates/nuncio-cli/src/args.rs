@@ -308,6 +308,10 @@ pub enum MailSubcommand {
         /// Message body text content.
         #[arg(short, long, help = "Message body text content")]
         body: String,
+        /// Identifier of the account to send from (defaults to the first
+        /// configured account when omitted).
+        #[arg(short, long, help = "Identifier of the account to send from")]
+        account: Option<String>,
     },
     /// Full-text search across all cached email messages.
     Search {

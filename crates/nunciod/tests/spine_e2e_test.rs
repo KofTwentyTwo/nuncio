@@ -305,6 +305,7 @@ async fn full_mail_spine_round_trips_over_authenticated_grpc_with_mocked_protoco
             body_text: "Let's discuss the roadmap.".to_string(),
             body_html: None,
             attachments: Vec::new(),
+            account_id: None,
         })
         .await
         .expect("send_message succeeds")
