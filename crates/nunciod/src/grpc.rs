@@ -84,6 +84,12 @@ pub enum GrpcServeError {
     /// The tonic transport server failed while serving requests.
     #[error("gRPC transport server failed: {0}")]
     Transport(#[from] tonic::transport::Error),
+    /// The requested bind address is not a loopback address (or isn't a
+    /// valid socket address at all). The gRPC API carries a bearer token
+    /// but no transport encryption, so it must never be reachable from
+    /// anywhere but the local host.
+    #[error("refusing to bind gRPC listener on non-loopback address {0}: must be a loopback address (e.g. 127.0.0.1 or ::1)")]
+    NonLoopbackAddress(String),
 }
 
 /// Maps a `nuncio_core::CoreEvent` domain event onto its wire-format
@@ -2119,6 +2125,17 @@ pub async fn serve(
     secrets: Arc<SecretManager>,
     token: impl Into<Arc<str>>,
 ) -> Result<(), GrpcServeError> {
+    // Fail closed before ever touching the network: a misconfigured
+    // `NUNCIO_GRPC_ADDR` (or a future caller that forgets the loopback
+    // requirement) must not silently expose the unencrypted,
+    // bearer-token-only gRPC API beyond the local host.
+    let socket_addr = addr
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| GrpcServeError::NonLoopbackAddress(addr.to_string()))?;
+    if !socket_addr.ip().is_loopback() {
+        return Err(GrpcServeError::NonLoopbackAddress(addr.to_string()));
+    }
+
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|source| GrpcServeError::Bind {
@@ -2140,7 +2157,11 @@ pub async fn serve(
 /// `System` and `Accounts` below -- never `add_service(SomeServer::new(...))`
 /// unwrapped. This is a hard, non-negotiable invariant: an un-intercepted
 /// service mounted here would be reachable by any local process without
-/// authentication. If a future service is added, mount it the same way.
+/// authentication. If a future service is added, mount it the same way, and
+/// add it to the `tests::all_mounted_services_reject_unauthenticated_calls`
+/// canary test's list of dialed services -- that test's list of services
+/// must always match this function's `add_service` chain exactly, so a
+/// service added to one but not the other is an obvious review gap.
 ///
 /// Exposed separately from [`serve`] so tests can bind an ephemeral loopback
 /// port (`127.0.0.1:0`), read back the OS-assigned port via
@@ -2583,7 +2604,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serve_fails_closed_when_bind_address_is_invalid() {
+    async fn serve_fails_closed_when_bind_address_is_malformed() {
+        // A string that isn't a valid socket address at all can't be proven
+        // loopback, so it is rejected by the same address-validation check
+        // as a routable address -- never reaches `TcpListener::bind`.
         let event_bus = Arc::new(EventBus::new());
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
@@ -2599,8 +2623,92 @@ mod tests {
             "token",
         )
         .await
-        .expect_err("invalid bind address must fail");
-        assert!(matches!(err, GrpcServeError::Bind { .. }));
+        .expect_err("malformed bind address must fail");
+        assert!(matches!(err, GrpcServeError::NonLoopbackAddress(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_rejects_a_non_loopback_bind_address_without_binding() {
+        // A syntactically valid but routable address must be rejected by
+        // address validation before any socket is ever bound, so a
+        // misconfigured `NUNCIO_GRPC_ADDR` can't expose the API to the
+        // network even transiently.
+        let event_bus = Arc::new(EventBus::new());
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let err = serve(
+            "0.0.0.0:0",
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "token",
+        )
+        .await
+        .expect_err("non-loopback bind address must be rejected");
+        assert!(matches!(err, GrpcServeError::NonLoopbackAddress(_)));
+
+        let event_bus = Arc::new(EventBus::new());
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let err = serve(
+            "10.0.0.5:9420",
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "token",
+        )
+        .await
+        .expect_err("routable bind address must be rejected");
+        assert!(matches!(err, GrpcServeError::NonLoopbackAddress(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_accepts_ipv6_loopback_bind_address() {
+        // The loopback check must not be IPv4-only: `is_loopback()` covers
+        // `::1` too, so `serve` should pass address validation for it and
+        // move on to actually binding and serving. `serve` never returns on
+        // a successful bind (it runs the transport server until it errors),
+        // so a short timeout distinguishes "still serving" (validation and
+        // bind both succeeded) from a real, immediate failure. A bind-time
+        // failure is acceptable on an environment without IPv6 loopback, but
+        // it must surface as `Bind`, never `NonLoopbackAddress`.
+        let event_bus = Arc::new(EventBus::new());
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            serve(
+                "[::1]:0",
+                event_bus,
+                Arc::new(db),
+                filter_engine,
+                secrets,
+                "token",
+            ),
+        )
+        .await;
+        // `Err(_)` here is the timeout elapsing, i.e. `serve` is still
+        // running -- the success case. `Ok(Err(err))` is a real failure
+        // returned before the timeout, which must be a bind failure, not an
+        // address-validation rejection.
+        if let Ok(Err(err)) = result {
+            assert!(
+                matches!(err, GrpcServeError::Bind { .. }),
+                "IPv6 loopback must pass address validation even if the \
+                 environment can't actually bind it: got {err:?}"
+            );
+        }
     }
 
     fn authed_bearer_request<T>(payload: T) -> Request<T> {
@@ -5752,5 +5860,120 @@ mod tests {
         let fetched = get_response.contact.expect("contact present in response");
         assert_eq!(fetched.display_name, "New Contact");
         assert_eq!(fetched.organization.as_deref(), Some("Kof22"));
+    }
+
+    /// The single consolidated review checkpoint for the mounting invariant
+    /// documented on `serve_on_listener_with_overrides`: dials every one of
+    /// the services in that function's `add_service` chain with no
+    /// authorization metadata at all and asserts each rejects with
+    /// `Unauthenticated`. Whoever adds a ninth service must add it here too
+    /// -- if this test's list of dialed services ever stops matching that
+    /// `add_service` chain exactly, it has silently stopped doing its job.
+    #[tokio::test]
+    async fn all_mounted_services_reject_unauthenticated_calls() {
+        use nuncio_proto::v1::audit_client::AuditClient;
+        use nuncio_proto::v1::calendar_client::CalendarClient;
+        use nuncio_proto::v1::contacts_client::ContactsClient;
+        use nuncio_proto::v1::export_client::ExportClient;
+        use nuncio_proto::v1::filters_client::FiltersClient;
+        use nuncio_proto::v1::mail_client::MailClient;
+
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+        let url = format!("http://{addr}");
+
+        // System
+        let mut client = SystemClient::connect(url.clone())
+            .await
+            .expect("System client connects");
+        let err = client
+            .get_status(GetStatusRequest {})
+            .await
+            .expect_err("System must reject an unauthenticated call");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        // Accounts
+        let mut client = AccountsClient::connect(url.clone())
+            .await
+            .expect("Accounts client connects");
+        let err = client
+            .list_accounts(ListAccountsRequest {})
+            .await
+            .expect_err("Accounts must reject an unauthenticated call");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        // Mail
+        let mut client = MailClient::connect(url.clone())
+            .await
+            .expect("Mail client connects");
+        let err = client
+            .list_folders(ListFoldersRequest {})
+            .await
+            .expect_err("Mail must reject an unauthenticated call");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        // Filters
+        let mut client = FiltersClient::connect(url.clone())
+            .await
+            .expect("Filters client connects");
+        let err = client
+            .list_rules(ListRulesRequest {})
+            .await
+            .expect_err("Filters must reject an unauthenticated call");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        // Export
+        let mut client = ExportClient::connect(url.clone())
+            .await
+            .expect("Export client connects");
+        let err = client
+            .export_mailbox(ExportRequest {
+                scope: None,
+                format: ExportFormatProto::Json.into(),
+                output_path: "irrelevant.json".to_string(),
+            })
+            .await
+            .expect_err("Export must reject an unauthenticated call");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        // Audit
+        let mut client = AuditClient::connect(url.clone())
+            .await
+            .expect("Audit client connects");
+        let err = client
+            .list_records(ListRecordsRequest {
+                limit: 10,
+                offset: 0,
+            })
+            .await
+            .expect_err("Audit must reject an unauthenticated call");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        // Calendar
+        let mut client = CalendarClient::connect(url.clone())
+            .await
+            .expect("Calendar client connects");
+        let err = client
+            .list_events(ListEventsRequest {
+                account_id: "acct-1".to_string(),
+                calendar_id: "cal-1".to_string(),
+                start_window: 0,
+                end_window: i64::MAX,
+            })
+            .await
+            .expect_err("Calendar must reject an unauthenticated call");
+        assert_eq!(err.code(), Code::Unauthenticated);
+
+        // Contacts
+        let mut client = ContactsClient::connect(url)
+            .await
+            .expect("Contacts client connects");
+        let err = client
+            .list_contacts(ListContactsRequest {
+                account_id: "acct-1".to_string(),
+            })
+            .await
+            .expect_err("Contacts must reject an unauthenticated call");
+        assert_eq!(err.code(), Code::Unauthenticated);
     }
 }
