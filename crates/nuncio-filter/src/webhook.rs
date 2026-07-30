@@ -8,6 +8,7 @@ use serde_json::json;
 use sha2::Sha256;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -28,7 +29,7 @@ pub enum WebhookError {
 /// Outbound Webhook Dispatcher executing authenticated HTTP POST requests.
 pub struct WebhookDispatcher {
     client: Client,
-    secret_key: String,
+    secret_key: Zeroizing<String>,
 }
 
 impl WebhookDispatcher {
@@ -42,7 +43,7 @@ impl WebhookDispatcher {
 
         Self {
             client,
-            secret_key: secret_key.into(),
+            secret_key: Zeroizing::new(secret_key.into()),
         }
     }
 
