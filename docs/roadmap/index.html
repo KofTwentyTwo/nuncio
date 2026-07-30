@@ -76,7 +76,7 @@
   /* milestone rail */
   .miles{position:relative;margin-top:8px}
   .miles::before{content:"";position:absolute;left:19px;top:12px;bottom:34px;width:2px;
-    background:linear-gradient(var(--done),var(--prog) 16%,var(--line) 22%);border-radius:2px}
+    background:linear-gradient(var(--done),var(--done) 57%,var(--prog) 57%,var(--prog) 71%,var(--line) 71%);border-radius:2px}
   @media (max-width:640px){.miles::before{display:none}}
   .m{position:relative;padding-left:52px;margin-bottom:16px}
   @media (max-width:640px){.m{padding-left:0}}
@@ -133,24 +133,31 @@
 
   <hr class="rule">
 
-  <h2>Where we are · 2026-07-28</h2>
+  <h2>Where we are · 2026-07-30</h2>
   <div class="band">
-    <h3>Phases 0–2 complete — the spine works end to end</h3>
+    <h3>Phases 0–2 complete, Phase 3 feature completeness done — M1–M4 all merged</h3>
     <p>The daemon boots gRPC-only on loopback <span class="chip">127.0.0.1:9420</span> behind a keyring-minted
       bearer token. <code>IMAP → store → read → SMTP send</code> runs end-to-end over gRPC, driven by the
       <span class="chip">nuncio-cli</span> reference client, tested fully offline. The legacy JSON-RPC IPC is gone,
-      and <span class="chip">nuncio.v1</span> is published with a byte-deterministic contract-stability golden.</p>
+      and <span class="chip">nuncio.v1</span> is published with a byte-deterministic contract-stability golden.
+      Milestones M1–M4 are now complete on <span class="chip">dev</span>: Calendar, Contacts, JMAP, and live
+      Filters are all real, wired, and API-complete. <b style="color:var(--ink)">Next up: M5</b> (mail lifecycle
+      &amp; incremental sync).</p>
     <div class="chips">
       <span class="chip svc">System</span><span class="chip svc">Accounts</span><span class="chip svc">Mail</span>
-      <span class="chip svc">Filters</span><span class="chip svc">Export</span><span class="chip svc">Audit</span>
-      <span class="chip" style="color:var(--muted)">— 6 services, each behind the auth interceptor</span>
+      <span class="chip svc">Filters</span><span class="chip svc">Calendar</span><span class="chip svc">Contacts</span>
+      <span class="chip svc">Export</span><span class="chip svc">Audit</span>
+      <span class="chip" style="color:var(--muted)">— 8 services, each behind the auth interceptor</span>
     </div>
     <div class="donerow">
       <span class="donetag">Phase 0 · Honesty &amp; foundation</span>
       <span class="donetag">Phase 1 · gRPC skeleton + spine</span>
       <span class="donetag">Phase 2 · API completeness (spine)</span>
       <span class="donetag">3.A · Filter correctness</span>
-      <span class="donetag">3.B.1 · Calendar engine (CalDAV + TZID)</span>
+      <span class="donetag">M1 · Calendar (CalDAV + recurrence)</span>
+      <span class="donetag">M2 · Contacts (CardDAV)</span>
+      <span class="donetag">M3 · JMAP</span>
+      <span class="donetag">M4 · Filters made live</span>
     </div>
   </div>
 
@@ -159,72 +166,72 @@
   <h2>The path · seven milestones to the goal line</h2>
   <div class="miles">
 
-    <div class="m prog">
+    <div class="m done">
       <div class="node">M1</div>
       <div class="card">
         <div class="chead">
           <h3 class="ctitle"><span class="code">M1</span>Finish Calendar</h3>
-          <span class="stat prog">In progress</span>
+          <span class="stat done">Done</span>
         </div>
-        <p class="cbody">Publish the calendar engine over the API: a <code>Calendar</code> gRPC service
+        <p class="cbody">The calendar engine is published over the API: a <code>Calendar</code> gRPC service
           (Sync / ListEvents / GetEvent — honest surface only) behind the auth interceptor, daemon wiring, CLI
-          commands replacing the stub, and <b>recurrence (rrule) wired into the fetch/store path</b> (today it's dead code).</p>
+          commands replacing the stub, and <b>recurrence (rrule) wired into the fetch/store path</b>.</p>
         <div class="exit"><b>Exit:</b> a Calendar view over gRPC, offline-tested sync→list→get, recurring events materialize.</div>
-        <div class="issues"><a class="iss">#178</a><span class="iss">3.B.1 done → 3.B.2 next</span></div>
+        <div class="issues"><a class="iss">#178</a><span class="iss">done — #185, #186 merged</span></div>
       </div>
     </div>
 
-    <div class="m plan">
+    <div class="m done">
       <div class="node">M2</div>
       <div class="card">
         <div class="chead">
           <h3 class="ctitle"><span class="code">M2</span>Contacts · CardDAV</h3>
-          <span class="stat plan">Planned</span>
+          <span class="stat done">Done</span>
         </div>
-        <p class="cbody">Replace the fake CardDAV client (returns one hardcoded contact) with a real, wiremock-tested
-          client + vCard round-trip; persist through the daemon's store (the CLI currently writes a throwaway
-          in-memory DB); add a <code>Contacts</code> service, CLI, and offline E2E.</p>
+        <p class="cbody">The fake CardDAV client (returned one hardcoded contact) is replaced with a real, wiremock-tested
+          client + vCard round-trip; contacts persist through the daemon's store (the CLI previously wrote a throwaway
+          in-memory DB); a <code>Contacts</code> service, CLI, and offline E2E are in place.</p>
         <div class="exit"><b>Exit:</b> contacts sync and persist across restarts, driven over gRPC.</div>
-        <div class="issues"><a class="iss">#179</a></div>
+        <div class="issues"><a class="iss">#179</a><span class="iss">done — #187, #188 merged</span></div>
       </div>
     </div>
 
-    <div class="m plan">
+    <div class="m done">
       <div class="node">M3</div>
       <div class="card">
         <div class="chead">
           <h3 class="ctitle"><span class="code">M3</span>JMAP</h3>
-          <span class="stat plan">Planned</span>
+          <span class="stat done">Done</span>
         </div>
-        <p class="cbody">A real JMAP HTTP client (session, Email/query/get/set) with the camelCase wire fix, wired into
+        <p class="cbody">A real JMAP HTTP client (session, Email/query/get/set) with the camelCase wire fix is wired into
           the same <code>MailBackend</code> fetch→store path as IMAP; wiremock-tested.</p>
         <div class="exit"><b>Exit:</b> a JMAP account fetches → stores → lists offline, via the existing Mail service.</div>
-        <div class="issues"><a class="iss">#180</a></div>
+        <div class="issues"><a class="iss">#180</a><span class="iss">done — #189 merged</span></div>
       </div>
     </div>
 
-    <div class="m plan">
+    <div class="m done">
       <div class="node">M4</div>
       <div class="card">
         <div class="chead">
           <h3 class="ctitle"><span class="code">M4</span>Filters made live</h3>
-          <span class="stat plan">Planned</span>
+          <span class="stat done">Done</span>
         </div>
-        <p class="cbody">Today rules can be created, validated, and previewed as “MATCH” but <b>never fire</b>. Wire
-          <code>FilterEngine::evaluate</code> into the real sync path so matches trigger their action
-          (move/flag/delete/forward/webhook), fix the header + account-field bugs, and re-expose filter
-          edit/export/import/logs and bulk triage over the service.</p>
+        <p class="cbody">Rules could previously be created, validated, and previewed as “MATCH” but never fired.
+          <code>FilterEngine::evaluate</code> is now wired into the real sync path so matches trigger their action
+          (move/flag/delete/forward/webhook), the header + account-field bugs are fixed, and filter
+          edit/export/import/logs plus bulk triage are re-exposed over the service.</p>
         <div class="exit"><b>Exit:</b> an E2E proves a matching rule fires an action against synced mail — no fabricated preview.</div>
-        <div class="issues"><a class="iss">#175</a><a class="iss">#176</a><a class="iss">#181</a></div>
+        <div class="issues"><a class="iss">#175</a><a class="iss">#176</a><a class="iss">#181</a><span class="iss">done — #190–#193 merged</span></div>
       </div>
     </div>
 
-    <div class="m plan">
+    <div class="m prog">
       <div class="node">M5</div>
       <div class="card">
         <div class="chead">
           <h3 class="ctitle"><span class="code">M5</span>Mail lifecycle + incremental sync</h3>
-          <span class="stat plan">Planned</span>
+          <span class="stat prog">Next</span>
         </div>
         <p class="cbody">Round out real account management: edit / delete / test-connection with TLS modes
           (implicit / STARTTLS / plain) actually wired; explicit send-account selection; and <b>incremental sync</b>
