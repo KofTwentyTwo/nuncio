@@ -340,14 +340,33 @@ impl Accounts for AccountsGrpcService {
         // SQLite. If this fails, the account row below is deliberately
         // never saved, so a failed credential write can never leave behind
         // an account config with no retrievable password.
+        //
+        // If the credential write succeeds but the account row then fails to
+        // persist, the two steps are no longer in sync: without a rollback,
+        // the keyring would keep an orphaned secret that no account row
+        // references and that `ListAccounts` can never surface again. So on
+        // that failure we delete the just-written secret before returning,
+        // restoring the "no credential without a matching account" invariant.
+        // The original persistence error is always what the caller sees --
+        // a rollback failure is reported alongside it, never in place of it.
         self.secrets
             .set_secret(&config.keyring_secret_key, &req.password)
             .map_err(|e| Status::internal(format!("failed to store credential in vault: {e}")))?;
 
-        self.db
-            .save_account(&config)
-            .await
-            .map_err(|e| Status::internal(format!("failed to persist account: {e}")))?;
+        if let Err(e) = self.db.save_account(&config).await {
+            let mut message = format!("failed to persist account: {e}");
+            if let Err(rollback_err) = self.secrets.delete_secret(&config.keyring_secret_key) {
+                tracing::warn!(
+                    keyring_secret_key = %config.keyring_secret_key,
+                    error = %rollback_err,
+                    "failed to roll back orphaned keyring secret after add_account persistence failure"
+                );
+                message.push_str(&format!(
+                    " (and failed to roll back the credential: {rollback_err})"
+                ));
+            }
+            return Err(Status::internal(message));
+        }
 
         Ok(Response::new(AddAccountResponse { id: config.id }))
     }
@@ -2651,6 +2670,104 @@ mod tests {
         assert!(
             !response_debug.contains(PASSWORD),
             "password leaked into the ListAccounts response: {response_debug}"
+        );
+    }
+
+    /// Proves that when `set_secret` succeeds but the subsequent
+    /// `save_account` genuinely fails, `add_account` rolls back the
+    /// just-written credential instead of leaving it orphaned in the
+    /// keyring. The failure is forced deterministically by closing the
+    /// `DatabaseEngine`'s connection pool before the RPC is made, so
+    /// `save_account` fails for real (not a simulated/fabricated error).
+    #[tokio::test]
+    async fn add_account_rolls_back_keyring_secret_when_save_account_fails() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let secrets = Arc::new(SecretManager::mock());
+        let (addr, _handle) = spawn_test_server_with(
+            Arc::new(EventBus::new()),
+            db.clone(),
+            Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set")),
+            secrets.clone(),
+            "correct-token",
+        )
+        .await;
+
+        // Close the pool out from under the still-running server so the
+        // upcoming `save_account` call fails with a real "pool closed"
+        // error rather than anything contrived.
+        db.close().await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .add_account(authed_bearer_request(AddAccountRequest {
+                config: Some(sample_account_config_proto(
+                    "acct-rollback-1",
+                    "nuncio/acct-rollback-1",
+                )),
+                password: "will-be-orphaned-without-rollback".to_string(),
+            }))
+            .await
+            .expect_err("save_account must fail once the pool is closed");
+        assert_eq!(err.code(), Code::Internal);
+
+        // The rollback must have deleted the secret written just before the
+        // failed persistence attempt -- not left it behind, unreferenced by
+        // any account row.
+        let after_rollback = secrets.get_secret("nuncio/acct-rollback-1");
+        assert!(
+            after_rollback.is_err(),
+            "keyring secret should have been rolled back, but was still readable: {after_rollback:?}"
+        );
+    }
+
+    /// Proves the error surfaced to the caller after a rollback describes
+    /// the original persistence failure, never the rollback itself -- the
+    /// rollback is a failure-path side effect, not a replacement error.
+    #[tokio::test]
+    async fn add_account_rollback_preserves_the_original_persistence_error() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+        let secrets = Arc::new(SecretManager::mock());
+        let (addr, _handle) = spawn_test_server_with(
+            Arc::new(EventBus::new()),
+            db.clone(),
+            Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set")),
+            secrets.clone(),
+            "correct-token",
+        )
+        .await;
+
+        db.close().await;
+
+        let mut client = AccountsClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .add_account(authed_bearer_request(AddAccountRequest {
+                config: Some(sample_account_config_proto(
+                    "acct-rollback-2",
+                    "nuncio/acct-rollback-2",
+                )),
+                password: "irrelevant-password".to_string(),
+            }))
+            .await
+            .expect_err("save_account must fail once the pool is closed");
+
+        let message = err.message();
+        assert!(
+            message.contains("failed to persist account"),
+            "error message must describe the persistence failure, got: {message}"
+        );
+        assert!(
+            !message.contains("failed to store credential in vault"),
+            "error message must not be the unrelated set_secret failure message, got: {message}"
         );
     }
 
