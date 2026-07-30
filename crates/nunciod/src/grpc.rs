@@ -9,7 +9,7 @@ use nuncio_cal::CalendarBackend;
 use nuncio_contacts::ContactsBackend;
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
-use nuncio_mail::{MailBackend, MessageSender};
+use nuncio_mail::{ImapEngine, MailBackend, MessageSender, SmtpTransportEngine};
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::audit_server::{Audit, AuditServer};
 use nuncio_proto::v1::calendar_server::{Calendar, CalendarServer};
@@ -38,9 +38,11 @@ use nuncio_proto::v1::{
     ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, ListRecordsRequest,
     ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest, MarkReadResponse,
     Message as MessageProto, MessageFlagsChanged, MessageSearchHit, PreviewRuleRequest,
-    PreviewRuleResponse, SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest,
-    SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse,
-    SyncStarted, TlsMode as TlsModeProto, TriageProgress, TriageRequest, UpdateAvailable,
+    PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse, SearchMessagesRequest,
+    SearchMessagesResponse, SendMessageRequest, SendMessageResponse, ShuttingDown,
+    SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse, SyncStarted,
+    TestAccountConnectionRequest, TestAccountConnectionResponse, TlsMode as TlsModeProto,
+    TriageProgress, TriageRequest, UpdateAccountRequest, UpdateAccountResponse, UpdateAvailable,
     UpdateRuleRequest, UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
     VerifyChainRequest, VerifyChainResponse,
 };
@@ -304,6 +306,134 @@ fn map_account_config_from_proto(
     })
 }
 
+/// Outcome of probing a single protocol endpoint (IMAP or SMTP) during a
+/// `TestAccountConnection` RPC. `ok` reflects a GENUINE dial/handshake/auth
+/// outcome; `error` carries the real failure detail when `ok` is false.
+#[derive(Debug, Clone)]
+pub struct ProtocolProbe {
+    /// Whether the probe genuinely succeeded.
+    pub ok: bool,
+    /// Real failure detail, present only when `ok` is false.
+    pub error: Option<String>,
+}
+
+impl ProtocolProbe {
+    /// A successful probe.
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+
+    /// A failed probe carrying its real error text.
+    fn failed(error: String) -> Self {
+        Self {
+            ok: false,
+            error: Some(error),
+        }
+    }
+}
+
+/// The genuine per-protocol result of a `TestAccountConnection` probe.
+#[derive(Debug, Clone)]
+pub struct AccountConnectionReport {
+    /// Result of probing the account's IMAP endpoint.
+    pub imap: ProtocolProbe,
+    /// Result of probing the account's SMTP endpoint.
+    pub smtp: ProtocolProbe,
+}
+
+/// Injectable seam backing `TestAccountConnection`'s real per-protocol
+/// connection probing. Production uses [`RealAccountConnectionTester`], which
+/// performs a genuine bounded IMAP + SMTP dial/handshake using the account's
+/// configured endpoints, TLS modes, and keyring credential. A full-daemon
+/// offline test injects a stand-in so the RPC can be exercised end to end
+/// without touching any live server.
+#[tonic::async_trait]
+pub trait AccountConnectionTester: Send + Sync {
+    /// Probe both protocol endpoints for `config`, authenticating with
+    /// `password`, and report the genuine per-protocol outcome.
+    async fn probe(
+        &self,
+        config: &nuncio_core::AccountConfig,
+        password: &str,
+    ) -> AccountConnectionReport;
+}
+
+/// Production [`AccountConnectionTester`]: builds a real
+/// [`nuncio_mail::ImapEngine`] / [`nuncio_mail::SmtpTransportEngine`] from the
+/// account's configured endpoints, TLS transport modes, and keyring password,
+/// and performs a genuine, bounded connection probe against each. Every
+/// result is the real dial/handshake/auth outcome -- never fabricated.
+struct RealAccountConnectionTester;
+
+#[tonic::async_trait]
+impl AccountConnectionTester for RealAccountConnectionTester {
+    async fn probe(
+        &self,
+        config: &nuncio_core::AccountConfig,
+        password: &str,
+    ) -> AccountConnectionReport {
+        let imap = match config.protocol {
+            nuncio_core::AccountProtocol::ImapSmtp => {
+                let engine = ImapEngine::with_credentials(
+                    &config.id,
+                    &config.server_host,
+                    config.server_port,
+                    config.imap_tls_mode,
+                    &config.email_address,
+                    password,
+                );
+                match engine.probe_connection().await {
+                    Ok(()) => ProtocolProbe::ok(),
+                    Err(e) => ProtocolProbe::failed(e.to_string()),
+                }
+            }
+            nuncio_core::AccountProtocol::Jmap => ProtocolProbe::failed(
+                "IMAP connection probe is not applicable to a JMAP account".to_string(),
+            ),
+        };
+
+        let smtp = match SmtpTransportEngine::new(
+            &config.smtp_host,
+            config.smtp_port,
+            config.smtp_tls_mode,
+            &config.email_address,
+            password,
+        ) {
+            Ok(engine) => match engine.probe_connection().await {
+                Ok(()) => ProtocolProbe::ok(),
+                Err(e) => ProtocolProbe::failed(e.to_string()),
+            },
+            Err(e) => ProtocolProbe::failed(e.to_string()),
+        };
+
+        AccountConnectionReport { imap, smtp }
+    }
+}
+
+/// Overridable engine seam for the `nuncio.v1.Accounts` service, mirroring
+/// [`MailEngineOverrides`]'s shape. Production always uses the default (a real
+/// [`RealAccountConnectionTester`]); only a full-daemon offline E2E test
+/// injects a stand-in tester so `TestAccountConnection` can be driven over the
+/// real authenticated gRPC API without any live server.
+#[derive(Clone, Default)]
+pub struct AccountsEngineOverrides {
+    /// When `Some`, `TestAccountConnection` probes through this tester instead
+    /// of building real per-account IMAP/SMTP engines from keyring
+    /// credentials.
+    pub connection_tester: Option<Arc<dyn AccountConnectionTester>>,
+}
+
+impl std::fmt::Debug for AccountsEngineOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountsEngineOverrides")
+            .field("connection_tester", &self.connection_tester.is_some())
+            .finish()
+    }
+}
+
 /// `nuncio.v1.Accounts` gRPC service implementation backed by the daemon's
 /// live [`DatabaseEngine`] and [`SecretManager`] vault.
 ///
@@ -314,6 +444,58 @@ fn map_account_config_from_proto(
 struct AccountsGrpcService {
     db: Arc<DatabaseEngine>,
     secrets: Arc<SecretManager>,
+    connection_tester: Arc<dyn AccountConnectionTester>,
+}
+
+/// Rotate an account's stored credential to `new_password` and persist the
+/// updated `config`, with a rollback that never destroys a working
+/// credential.
+///
+/// The prior secret (if any) is snapshotted BEFORE the new one is written, so
+/// if `save_account` then fails the snapshot is RESTORED -- returning the
+/// vault to exactly its pre-call state. This differs deliberately from
+/// `add_account`'s rollback, which deletes: an add has no prior secret to
+/// preserve, but an update's key may already hold the working credential, and
+/// deleting it on a persist failure would leave the still-present account row
+/// referencing a missing secret (strictly worse than doing nothing). When
+/// there was no prior secret, restore falls back to deleting the just-written
+/// one, matching add's behavior for that case. A rollback failure is reported
+/// alongside the original persistence error (which stays primary), never in
+/// place of it.
+async fn rotate_credential_and_persist(
+    db: &DatabaseEngine,
+    secrets: &SecretManager,
+    config: &nuncio_core::AccountConfig,
+    new_password: &str,
+) -> Result<(), Status> {
+    // Snapshot the prior credential before overwriting it. `None` means the
+    // key held no secret (or was unreadable), in which case rollback deletes.
+    let previous = secrets.get_secret(&config.keyring_secret_key).ok();
+
+    secrets
+        .set_secret(&config.keyring_secret_key, new_password)
+        .map_err(|e| Status::internal(format!("failed to store credential in vault: {e}")))?;
+
+    if let Err(e) = db.save_account(config).await {
+        let mut message = format!("failed to persist account: {e}");
+        let rollback = match &previous {
+            Some(prior) => secrets.set_secret(&config.keyring_secret_key, prior),
+            None => secrets.delete_secret(&config.keyring_secret_key),
+        };
+        if let Err(rollback_err) = rollback {
+            tracing::warn!(
+                keyring_secret_key = %config.keyring_secret_key,
+                error = %rollback_err,
+                "failed to roll back keyring secret after update_account persistence failure"
+            );
+            message.push_str(&format!(
+                " (and failed to roll back the credential: {rollback_err})"
+            ));
+        }
+        return Err(Status::internal(message));
+    }
+
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -385,6 +567,128 @@ impl Accounts for AccountsGrpcService {
             .collect();
 
         Ok(Response::new(ListAccountsResponse { accounts }))
+    }
+
+    async fn update_account(
+        &self,
+        request: Request<UpdateAccountRequest>,
+    ) -> Result<Response<UpdateAccountResponse>, Status> {
+        let req = request.into_inner();
+        let proto_config = req
+            .config
+            .ok_or_else(|| Status::invalid_argument("config is required"))?;
+
+        let config = map_account_config_from_proto(proto_config)?;
+        config
+            .validate()
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        // Updating a non-existent account is a client error, not a silent
+        // create: reject it so a typo'd id never conjures a new account row.
+        if self
+            .db
+            .get_account(&config.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
+            .is_none()
+        {
+            return Err(Status::not_found(format!(
+                "account '{}' not found",
+                config.id
+            )));
+        }
+
+        match req.password {
+            // A password rotation writes the new credential first, then
+            // persists. Unlike `add_account` (where no prior secret exists,
+            // so a failed persist rolls back by DELETING the orphan), an
+            // update's key may already hold the working credential, so a
+            // failed persist must RESTORE that prior value rather than delete
+            // it -- deleting would leave the still-present account row
+            // referencing a missing secret. See
+            // [`rotate_credential_and_persist`].
+            Some(password) if !password.is_empty() => {
+                rotate_credential_and_persist(&self.db, &self.secrets, &config, &password).await?;
+            }
+            // No password change: the existing keyring credential is left
+            // entirely untouched and only the persisted configuration is
+            // overwritten.
+            _ => {
+                self.db
+                    .save_account(&config)
+                    .await
+                    .map_err(|e| Status::internal(format!("failed to persist account: {e}")))?;
+            }
+        }
+
+        Ok(Response::new(UpdateAccountResponse {}))
+    }
+
+    async fn remove_account(
+        &self,
+        request: Request<RemoveAccountRequest>,
+    ) -> Result<Response<RemoveAccountResponse>, Status> {
+        let req = request.into_inner();
+        if req.id.is_empty() {
+            return Err(Status::invalid_argument("id is required"));
+        }
+
+        let existing = self
+            .db
+            .get_account(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
+            .ok_or_else(|| Status::not_found(format!("account '{}' not found", req.id)))?;
+
+        self.db
+            .delete_account(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to remove account: {e}")))?;
+
+        // Best-effort credential cleanup: the account row is already gone, so
+        // a keyring deletion failure must not fail the RPC (which would
+        // wrongly imply the account still exists). Log it and move on -- an
+        // orphaned secret with no account row is inert.
+        if let Err(e) = self.secrets.delete_secret(&existing.keyring_secret_key) {
+            tracing::warn!(
+                keyring_secret_key = %existing.keyring_secret_key,
+                error = %e,
+                "failed to delete keyring credential after removing account"
+            );
+        }
+
+        Ok(Response::new(RemoveAccountResponse {}))
+    }
+
+    async fn test_account_connection(
+        &self,
+        request: Request<TestAccountConnectionRequest>,
+    ) -> Result<Response<TestAccountConnectionResponse>, Status> {
+        let req = request.into_inner();
+        if req.id.is_empty() {
+            return Err(Status::invalid_argument("id is required"));
+        }
+
+        let config = self
+            .db
+            .get_account(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
+            .ok_or_else(|| Status::not_found(format!("account '{}' not found", req.id)))?;
+
+        let password = self
+            .secrets
+            .get_secret(&config.keyring_secret_key)
+            .map_err(|e| Status::internal(format!("failed to read credential from vault: {e}")))?;
+
+        let report = self.connection_tester.probe(&config, &password).await;
+
+        Ok(Response::new(TestAccountConnectionResponse {
+            imap_ok: report.imap.ok,
+            smtp_ok: report.smtp.ok,
+            imap_error: report.imap.error,
+            smtp_error: report.smtp.error,
+        }))
     }
 }
 
@@ -1850,6 +2154,7 @@ pub async fn serve_on_listener(
         MailEngineOverrides::default(),
         CalendarEngineOverrides::default(),
         ContactsEngineOverrides::default(),
+        AccountsEngineOverrides::default(),
     )
     .await
 }
@@ -1876,6 +2181,7 @@ pub async fn serve_on_listener_with_overrides(
     overrides: MailEngineOverrides,
     calendar_overrides: CalendarEngineOverrides,
     contacts_overrides: ContactsEngineOverrides,
+    accounts_overrides: AccountsEngineOverrides,
 ) -> Result<(), GrpcServeError> {
     let token: Arc<str> = token.into();
 
@@ -1888,6 +2194,9 @@ pub async fn serve_on_listener_with_overrides(
     let accounts_service = AccountsGrpcService {
         db: db.clone(),
         secrets: secrets.clone(),
+        connection_tester: accounts_overrides
+            .connection_tester
+            .unwrap_or_else(|| Arc::new(RealAccountConnectionTester)),
     };
     let accounts_interceptor = BearerAuthInterceptor::new(token.clone());
     let accounts_svc = AccountsServer::with_interceptor(accounts_service, accounts_interceptor);
@@ -2070,6 +2379,36 @@ mod tests {
         calendar_overrides: CalendarEngineOverrides,
         contacts_overrides: ContactsEngineOverrides,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_test_server_with_every_override(
+            event_bus,
+            db,
+            filter_engine,
+            secrets,
+            token,
+            overrides,
+            calendar_overrides,
+            contacts_overrides,
+            AccountsEngineOverrides::default(),
+        )
+        .await
+    }
+
+    /// Widest test spawn helper: threads an [`AccountsEngineOverrides`] too,
+    /// so a test can inject a stand-in [`AccountConnectionTester`] and drive
+    /// `TestAccountConnection` over the real authenticated gRPC API without a
+    /// live server.
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_test_server_with_every_override(
+        event_bus: Arc<EventBus>,
+        db: Arc<DatabaseEngine>,
+        filter_engine: Arc<FilterEngine>,
+        secrets: Arc<SecretManager>,
+        token: &str,
+        overrides: MailEngineOverrides,
+        calendar_overrides: CalendarEngineOverrides,
+        contacts_overrides: ContactsEngineOverrides,
+        accounts_overrides: AccountsEngineOverrides,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral loopback port");
@@ -2086,6 +2425,7 @@ mod tests {
                 overrides,
                 calendar_overrides,
                 contacts_overrides,
+                accounts_overrides,
             )
             .await;
         });
@@ -2769,6 +3109,96 @@ mod tests {
             !message.contains("failed to store credential in vault"),
             "error message must not be the unrelated set_secret failure message, got: {message}"
         );
+    }
+
+    /// Regression: a password rotation that fails to persist must RESTORE the
+    /// prior credential, never destroy it. Seeds an existing credential,
+    /// forces `save_account` to fail for real (closed pool), and asserts the
+    /// ORIGINAL secret is still retrievable afterward -- proving the update
+    /// rollback restores rather than deletes (which would orphan the still
+    /// present account row). Drives the exact rotation+rollback helper the
+    /// `update_account` RPC uses.
+    #[tokio::test]
+    async fn update_account_password_rotation_restores_prior_credential_on_persist_failure() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let secrets = SecretManager::mock();
+
+        let key = "nuncio/acct-rotate-1";
+        secrets
+            .set_secret(key, "original-working-password")
+            .expect("seed the prior credential");
+
+        let config = nuncio_core::AccountConfig {
+            id: "acct-rotate-1".to_string(),
+            name: "Rotate Account".to_string(),
+            email_address: "rotate@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: key.to_string(),
+            sync_interval_secs: 60,
+        };
+
+        // Force `save_account` to fail for real by closing the pool, exactly
+        // as `add_account`'s rollback test does.
+        db.close().await;
+
+        let err = rotate_credential_and_persist(&db, &secrets, &config, "new-rotated-password")
+            .await
+            .expect_err("save_account must fail once the pool is closed");
+        assert_eq!(err.code(), Code::Internal);
+        assert!(err.message().contains("failed to persist account"));
+
+        // The prior credential must be intact -- neither deleted nor left as
+        // the failed new value.
+        let restored = secrets.get_secret(key).expect("prior credential survives");
+        assert_eq!(restored, "original-working-password");
+    }
+
+    /// Companion: when the key held NO prior secret, a failed rotation falls
+    /// back to deleting the just-written one (matching `add_account`), leaving
+    /// no orphaned credential.
+    #[tokio::test]
+    async fn update_account_password_rotation_deletes_new_credential_when_none_existed() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let secrets = SecretManager::mock();
+
+        let key = "nuncio/acct-rotate-2";
+        let config = nuncio_core::AccountConfig {
+            id: "acct-rotate-2".to_string(),
+            name: "Rotate Account 2".to_string(),
+            email_address: "rotate2@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::ImapSmtp,
+            server_host: "imap.nuncio.mx".to_string(),
+            server_port: 993,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: key.to_string(),
+            sync_interval_secs: 60,
+        };
+
+        db.close().await;
+
+        let err = rotate_credential_and_persist(&db, &secrets, &config, "new-rotated-password")
+            .await
+            .expect_err("save_account must fail once the pool is closed");
+        assert_eq!(err.code(), Code::Internal);
+
+        // No prior secret existed, so the just-written one is rolled back by
+        // deletion -- nothing orphaned.
+        assert!(secrets.get_secret(key).is_err());
     }
 
     // ---- Mail ----

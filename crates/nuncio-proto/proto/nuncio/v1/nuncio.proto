@@ -144,6 +144,30 @@ service Accounts {
   // ListAccounts returns every persisted account configuration. Password
   // credentials are NEVER included in this response.
   rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+  // UpdateAccount overwrites an existing account's persisted configuration.
+  // The password is optional: when omitted the existing keyring credential
+  // is left untouched; when present it REPLACES the stored credential in the
+  // OS keyring vault (never written to SQLite, never echoed back). A password
+  // rotation that cannot be persisted is rolled back so the vault never
+  // diverges from the persisted account row.
+  rpc UpdateAccount(UpdateAccountRequest) returns (UpdateAccountResponse);
+  // RemoveAccount deletes a persisted account configuration by id and its
+  // associated keyring credential.
+  rpc RemoveAccount(RemoveAccountRequest) returns (RemoveAccountResponse);
+  // TestAccountConnection performs a real, bounded connection probe against
+  // the account's configured IMAP and SMTP endpoints (honoring each one's
+  // TLS transport mode) and reports the GENUINE per-protocol outcome -- never
+  // a fabricated success. The two legs verify DIFFERENT depths, and callers
+  // must not conflate them:
+  //   - IMAP verifies a full LOGIN: connect, negotiate TLS/STARTTLS, and
+  //     authenticate with the account's keyring credential.
+  //   - SMTP verifies only TRANSPORT REACHABILITY: connect and negotiate
+  //     TLS/STARTTLS. It does NOT perform an SMTP AUTH exchange, so `smtp_ok`
+  //     does not assert the credential is valid for outbound mail (SMTP has
+  //     no standard authentication probe that does not also submit a message).
+  // A probe that fails carries the real error detail; each leg is bounded by
+  // a timeout so the RPC cannot hang against an unreachable host.
+  rpc TestAccountConnection(TestAccountConnectionRequest) returns (TestAccountConnectionResponse);
 }
 
 // Mirrors `nuncio_core::AccountProtocol`.
@@ -218,6 +242,57 @@ message ListAccountsRequest {}
 // -- see `AccountConfig`'s doc comment.
 message ListAccountsResponse {
   repeated AccountConfig accounts = 1;
+}
+
+// UpdateAccountRequest carries the full replacement account configuration
+// plus an OPTIONAL password. When `password` is absent the account's existing
+// keyring credential is preserved; when present it is written to the OS
+// keyring vault (under `config.keyring_secret_key`), exactly like
+// `AddAccountRequest` -- never persisted to SQLite, never logged, never
+// echoed back.
+message UpdateAccountRequest {
+  AccountConfig config = 1;
+  optional string password = 2;
+}
+
+// UpdateAccountResponse deliberately carries no fields: a successful RPC
+// response (as opposed to a `Status` error) is confirmation enough, and the
+// caller already holds the updated config it just sent.
+message UpdateAccountResponse {}
+
+// RemoveAccountRequest names the account configuration to delete by id.
+message RemoveAccountRequest {
+  string id = 1;
+}
+
+// RemoveAccountResponse currently carries no fields; a successful RPC
+// response is confirmation enough.
+message RemoveAccountResponse {}
+
+// TestAccountConnectionRequest names the persisted account to probe by id.
+message TestAccountConnectionRequest {
+  string id = 1;
+}
+
+// TestAccountConnectionResponse reports the REAL, independent outcome of
+// probing each protocol endpoint -- never a fabricated success. `imap_error`
+// / `smtp_error` are present only when the corresponding `*_ok` is false and
+// carry the genuine failure detail (dial/handshake/auth error text). The two
+// `*_ok` flags verify different depths -- see `TestAccountConnection`.
+message TestAccountConnectionResponse {
+  // Whether the IMAP endpoint FULLY authenticated: connect, TLS/STARTTLS
+  // negotiation, AND login with the account's credential all succeeded.
+  bool imap_ok = 1;
+  // Whether the SMTP endpoint was REACHABLE: connect and TLS/STARTTLS
+  // negotiation succeeded. This is a transport-reachability check only -- it
+  // does NOT perform an SMTP AUTH exchange, so it does not assert the
+  // credential is valid for outbound mail.
+  bool smtp_ok = 2;
+  // Present only when `imap_ok` is false: the real IMAP login/handshake error.
+  optional string imap_error = 3;
+  // Present only when `smtp_ok` is false: the real SMTP transport/handshake
+  // error.
+  optional string smtp_error = 4;
 }
 
 // Mail exposes the READ path over the daemon's real, persistent message

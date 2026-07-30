@@ -258,6 +258,12 @@ pub enum AccountSubcommand {
         /// Updated SMTP server port.
         #[arg(long, help = "Updated SMTP server port")]
         smtp_port: Option<u16>,
+        /// Updated IMAP transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, help = "Updated IMAP transport mode")]
+        imap_mode: Option<String>,
+        /// Updated SMTP transport mode (implicit_tls, start_tls, plain).
+        #[arg(long, help = "Updated SMTP transport mode")]
+        smtp_mode: Option<String>,
     },
     /// Remove a configured account profile.
     Delete {
