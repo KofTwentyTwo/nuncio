@@ -39,8 +39,8 @@ use nuncio_proto::v1::{
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
 use nunciod::grpc::{
-    serve_on_listener_with_overrides, CalendarEngineOverrides, ContactsEngineOverrides,
-    MailEngineOverrides,
+    serve_on_listener_with_overrides, AccountsEngineOverrides, CalendarEngineOverrides,
+    ContactsEngineOverrides, MailEngineOverrides,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -97,6 +97,7 @@ async fn boot_daemon(
             MailEngineOverrides::default(),
             CalendarEngineOverrides::default(),
             contacts_overrides,
+            AccountsEngineOverrides::default(),
         )
         .await;
     });

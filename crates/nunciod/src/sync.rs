@@ -317,6 +317,7 @@ fn build_mail_backend(config: &AccountConfig, password: &str) -> Box<dyn MailBac
             &config.id,
             &config.server_host,
             config.server_port,
+            config.imap_tls_mode,
             &config.email_address,
             password,
         )),

@@ -291,45 +291,32 @@ impl HeadlessRunner {
                     )
                     .await
                 }
-                AccountSubcommand::Show { id } => {
-                    let accounts = self.db.list_accounts().await.unwrap_or_default();
-                    let acct = accounts.into_iter().find(|a| a.id == *id);
-                    if json_mode {
-                        format_json(&json!({ "account": acct }))
-                    } else if let Some(a) = acct {
-                        format!("Account {}: Email: {}", a.id, a.email_address)
-                    } else {
-                        format!("Account '{}' not found", id)
-                    }
-                }
+                AccountSubcommand::Show { id } => self.handle_account_show(id, json_mode).await,
                 AccountSubcommand::Edit {
                     id,
                     email,
-                    imap_host: _,
-                    imap_port: _,
-                    smtp_host: _,
-                    smtp_port: _,
+                    imap_host,
+                    imap_port,
+                    smtp_host,
+                    smtp_port,
+                    imap_mode,
+                    smtp_mode,
                 } => {
-                    if json_mode {
-                        format_json(&json!({ "status": "updated", "id": id, "email": email }))
-                    } else {
-                        format!("Account '{}' updated successfully.", id)
-                    }
+                    self.handle_account_edit(
+                        id,
+                        email.as_deref(),
+                        imap_host.as_deref(),
+                        *imap_port,
+                        smtp_host.as_deref(),
+                        *smtp_port,
+                        imap_mode.as_deref(),
+                        smtp_mode.as_deref(),
+                        json_mode,
+                    )
+                    .await
                 }
-                AccountSubcommand::Delete { id } => {
-                    if json_mode {
-                        format_json(&json!({ "status": "deleted", "id": id }))
-                    } else {
-                        format!("Account '{}' removed.", id)
-                    }
-                }
-                AccountSubcommand::Test { id } => {
-                    if json_mode {
-                        format_json(&json!({ "status": "ok", "id": id, "latency_ms": 24 }))
-                    } else {
-                        format!("✓ Account '{}' connection test OK (24ms latency).", id)
-                    }
-                }
+                AccountSubcommand::Delete { id } => self.handle_account_delete(id, json_mode).await,
+                AccountSubcommand::Test { id } => self.handle_account_test(id, json_mode).await,
             },
             Commands::Mail { action } => match action {
                 MailSubcommand::Sync => self.handle_sync(json_mode).await,
@@ -1753,6 +1740,222 @@ impl HeadlessRunner {
         }
     }
 
+    /// Fetches every account from the daemon and returns the one matching
+    /// `id`, or an error string. There is deliberately no single-account
+    /// `GetAccount` RPC in the contract, so `account show`/`edit` filter the
+    /// `ListAccounts` result client-side -- always over the real daemon API,
+    /// never this runner's own ephemeral local `db`.
+    async fn fetch_account_by_id(
+        &self,
+        id: &str,
+    ) -> Result<nuncio_proto::v1::AccountConfig, String> {
+        let mut client = self.connect_accounts_client().await?;
+        let accounts = client
+            .list_accounts(nuncio_proto::v1::ListAccountsRequest {})
+            .await
+            .map_err(|status| format!("nunciod daemon rejected list_accounts: {status}"))?
+            .into_inner()
+            .accounts;
+        accounts
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| format!("account '{id}' not found"))
+    }
+
+    /// `account show`: a real thin gRPC client of the daemon's
+    /// `nuncio.v1.Accounts/ListAccounts` API, filtered client-side to a single
+    /// account. Reads ONLY the daemon's persistent store -- never this
+    /// runner's own ephemeral local `db`.
+    async fn handle_account_show(&self, id: &str, json_mode: bool) -> String {
+        let account = match self.fetch_account_by_id(id).await {
+            Ok(account) => account,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        if json_mode {
+            format_json(&json!({
+                "id": account.id,
+                "name": account.name,
+                "email_address": account.email_address,
+                "protocol": account.protocol().as_str_name(),
+                "server_host": account.server_host,
+                "server_port": account.server_port,
+                "smtp_host": account.smtp_host,
+                "smtp_port": account.smtp_port,
+                "use_tls": account.use_tls,
+                "imap_tls_mode": account.imap_tls_mode().as_str_name(),
+                "smtp_tls_mode": account.smtp_tls_mode().as_str_name(),
+                "keyring_secret_key": account.keyring_secret_key,
+                "sync_interval_secs": account.sync_interval_secs,
+            }))
+        } else {
+            format!(
+                "Account [{}] {} <{}>  IMAP {}:{} ({})  SMTP {}:{} ({})",
+                account.id,
+                account.name,
+                account.email_address,
+                account.server_host,
+                account.server_port,
+                account.imap_tls_mode().as_str_name(),
+                account.smtp_host,
+                account.smtp_port,
+                account.smtp_tls_mode().as_str_name(),
+            )
+        }
+    }
+
+    /// `account edit`: a real thin gRPC client of the daemon's
+    /// `nuncio.v1.Accounts/UpdateAccount` API. Fetches the existing account,
+    /// applies ONLY the flags actually supplied onto it, and persists the
+    /// merged config through the daemon. No password is sent, so the existing
+    /// keyring credential is preserved (see `UpdateAccountRequest`).
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_account_edit(
+        &self,
+        id: &str,
+        email: Option<&str>,
+        imap_host: Option<&str>,
+        imap_port: Option<u16>,
+        smtp_host: Option<&str>,
+        smtp_port: Option<u16>,
+        imap_mode: Option<&str>,
+        smtp_mode: Option<&str>,
+        json_mode: bool,
+    ) -> String {
+        let mut config = match self.fetch_account_by_id(id).await {
+            Ok(config) => config,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        if let Some(email) = email {
+            config.email_address = email.to_string();
+        }
+        if let Some(host) = imap_host {
+            config.server_host = host.to_string();
+        }
+        if let Some(port) = imap_port {
+            config.server_port = u32::from(port);
+        }
+        if let Some(host) = smtp_host {
+            config.smtp_host = host.to_string();
+        }
+        if let Some(port) = smtp_port {
+            config.smtp_port = u32::from(port);
+        }
+        if let Some(mode) = imap_mode {
+            match parse_tls_mode(mode) {
+                Ok(mode) => config.imap_tls_mode = map_tls_mode_to_proto(mode).into(),
+                Err(e) => return Self::render_error(&e, json_mode),
+            }
+        }
+        if let Some(mode) = smtp_mode {
+            match parse_tls_mode(mode) {
+                Ok(mode) => config.smtp_tls_mode = map_tls_mode_to_proto(mode).into(),
+                Err(e) => return Self::render_error(&e, json_mode),
+            }
+        }
+
+        let mut client = match self.connect_accounts_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .update_account(nuncio_proto::v1::UpdateAccountRequest {
+                config: Some(config),
+                password: None,
+            })
+            .await
+        {
+            Ok(_) => {
+                if json_mode {
+                    format_json(&json!({ "status": "updated", "id": id }))
+                } else {
+                    format!("Account '{id}' updated via nunciod daemon.")
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected update_account: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `account delete`: a real thin gRPC client of the daemon's
+    /// `nuncio.v1.Accounts/RemoveAccount` API -- genuinely removes the
+    /// persisted account and its keyring credential, never a fabricated
+    /// "removed." string.
+    async fn handle_account_delete(&self, id: &str, json_mode: bool) -> String {
+        let mut client = match self.connect_accounts_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .remove_account(nuncio_proto::v1::RemoveAccountRequest { id: id.to_string() })
+            .await
+        {
+            Ok(_) => {
+                if json_mode {
+                    format_json(&json!({ "status": "deleted", "id": id }))
+                } else {
+                    format!("Account '{id}' removed via nunciod daemon.")
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected remove_account: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
+    /// `account test`: a real thin gRPC client of the daemon's
+    /// `nuncio.v1.Accounts/TestAccountConnection` API. Reports the GENUINE
+    /// per-protocol dial/handshake/auth outcome the daemon measured -- never a
+    /// fabricated "connection test OK (24ms latency)".
+    async fn handle_account_test(&self, id: &str, json_mode: bool) -> String {
+        let mut client = match self.connect_accounts_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .test_account_connection(nuncio_proto::v1::TestAccountConnectionRequest {
+                id: id.to_string(),
+            })
+            .await
+        {
+            Ok(response) => {
+                let report = response.into_inner();
+                if json_mode {
+                    format_json(&json!({
+                        "id": id,
+                        "imap_ok": report.imap_ok,
+                        "smtp_ok": report.smtp_ok,
+                        "imap_error": report.imap_error,
+                        "smtp_error": report.smtp_error,
+                    }))
+                } else {
+                    let imap = match &report.imap_error {
+                        Some(e) => format!("IMAP: FAIL ({e})"),
+                        None if report.imap_ok => "IMAP: OK".to_string(),
+                        None => "IMAP: FAIL".to_string(),
+                    };
+                    let smtp = match &report.smtp_error {
+                        Some(e) => format!("SMTP: FAIL ({e})"),
+                        None if report.smtp_ok => "SMTP: OK".to_string(),
+                        None => "SMTP: FAIL".to_string(),
+                    };
+                    format!("Connection test for '{id}'\n  {imap}\n  {smtp}")
+                }
+            }
+            Err(status) => Self::render_error(
+                &format!("nunciod daemon rejected test_account_connection: {status}"),
+                json_mode,
+            ),
+        }
+    }
+
     /// Resolves the gRPC bearer token from the injected vault and dials the
     /// `nuncio.v1.Accounts` service at `self.grpc_addr`, shared by
     /// [`Self::handle_add_account`] and [`Self::handle_accounts_list`].
@@ -2246,60 +2449,6 @@ mod tests {
         assert!(bad_smtp_mode.starts_with("Error: invalid tls mode"));
     }
 
-    #[tokio::test]
-    async fn headless_runner_executes_all_pure_noun_verb_commands() {
-        let runner = HeadlessRunner::ephemeral()
-            .await
-            .expect("ephemeral runner initializes");
-
-        // Account Noun Commands: `Add`/`List` are exercised separately
-        // below via `ephemeral_with` + `SecretManager::mock()` against a
-        // live test gRPC server, for the exact same reason `system status`
-        // is: they are real gRPC clients of the `nunciod` daemon's
-        // `Accounts` API, so they must never run against this
-        // `ephemeral()`-constructed runner's production `SecretManager` or
-        // its (unreachable in CI) default gRPC address. `Show` still reads
-        // this runner's own ephemeral local `db`, so it is safe to
-        // exercise here.
-        let acct_show = runner
-            .execute_command(
-                &Commands::Account {
-                    action: AccountSubcommand::Show {
-                        id: "missing".to_string(),
-                    },
-                },
-                false,
-            )
-            .await;
-        assert!(acct_show.contains("Account 'missing' not found"));
-
-        // Mail Noun Commands: `Sync`/`List`/`Read`/`Search`/`Mark`/`Send`
-        // (and `Folder::List`) are all real gRPC clients of the `nunciod`
-        // daemon's `Mail` API -- exactly like `Account::Add`/`List` and
-        // `System::Status` above, they must never
-        // run against this `ephemeral()`-constructed runner's production
-        // `SecretManager` or its (unreachable in CI) default gRPC address.
-        // They are exercised separately below via `ephemeral_with` +
-        // `SecretManager::mock()` against a live stub `Mail` gRPC server
-        // (`mail_rpcs_round_trip_over_grpc_to_a_stub_daemon`).
-
-        // Cal Noun Commands: `List`/`Sync` are real gRPC clients of the
-        // `nunciod` daemon's `Calendar` API -- exactly like the Mail Noun
-        // Commands above, they must never run against this
-        // `ephemeral()`-constructed runner's production `SecretManager` or
-        // its (unreachable in CI) default gRPC address. They are exercised
-        // separately below via `ephemeral_with` + `SecretManager::mock()`
-        // against a live stub `Calendar` gRPC server
-        // (`calendar_rpcs_round_trip_over_grpc_to_a_stub_daemon`).
-
-        // System Noun Commands are exercised separately below via
-        // `ephemeral_with` + `SecretManager::mock()`: `system status` is a
-        // real gRPC client of the `nunciod` daemon, so it must never run
-        // against the production
-        // `SecretManager` this `ephemeral()`-constructed runner holds (that
-        // would touch the real OS keyring during a test run).
-    }
-
     /// Binds an ephemeral loopback TCP listener, reads back its OS-assigned
     /// address, then immediately drops the listener so the port is free
     /// again. Nothing is listening on the returned address, so connecting
@@ -2447,7 +2596,9 @@ mod tests {
         use nuncio_proto::v1::{
             AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
             AddAccountRequest, AddAccountResponse, ListAccountsRequest, ListAccountsResponse,
-            TlsMode as TlsModeProto,
+            RemoveAccountRequest, RemoveAccountResponse, TestAccountConnectionRequest,
+            TestAccountConnectionResponse, TlsMode as TlsModeProto, UpdateAccountRequest,
+            UpdateAccountResponse,
         };
         use std::sync::Mutex;
 
@@ -2477,6 +2628,32 @@ mod tests {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = Some(req);
                 Ok(tonic::Response::new(AddAccountResponse { id }))
+            }
+
+            async fn update_account(
+                &self,
+                _request: tonic::Request<UpdateAccountRequest>,
+            ) -> Result<tonic::Response<UpdateAccountResponse>, tonic::Status> {
+                Ok(tonic::Response::new(UpdateAccountResponse {}))
+            }
+
+            async fn remove_account(
+                &self,
+                _request: tonic::Request<RemoveAccountRequest>,
+            ) -> Result<tonic::Response<RemoveAccountResponse>, tonic::Status> {
+                Ok(tonic::Response::new(RemoveAccountResponse {}))
+            }
+
+            async fn test_account_connection(
+                &self,
+                _request: tonic::Request<TestAccountConnectionRequest>,
+            ) -> Result<tonic::Response<TestAccountConnectionResponse>, tonic::Status> {
+                Ok(tonic::Response::new(TestAccountConnectionResponse {
+                    imap_ok: true,
+                    smtp_ok: true,
+                    imap_error: None,
+                    smtp_error: None,
+                }))
             }
 
             async fn list_accounts(
@@ -2584,6 +2761,90 @@ mod tests {
         // Plain output must show each account's details, not just the count.
         assert!(list_out_text.contains("stub@nuncio.mx"));
         assert!(list_out_text.contains("imap.nuncio.mx"));
+
+        // `account show` reads the daemon's ListAccounts result (filtered
+        // client-side), not the runner's own ephemeral local db.
+        let show_out = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::Show {
+                        id: "acct-stub-1".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(show_out.contains("stub@nuncio.mx"));
+        assert!(show_out.contains("acct-stub-1"));
+
+        // `account edit` drives the real UpdateAccount RPC (stub accepts it).
+        let edit_out = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::Edit {
+                        id: "acct-stub-1".to_string(),
+                        email: None,
+                        imap_host: None,
+                        imap_port: None,
+                        smtp_host: None,
+                        smtp_port: None,
+                        imap_mode: Some("start_tls".to_string()),
+                        smtp_mode: None,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(edit_out.contains(r#""status":"updated""#));
+
+        // A garbage transport mode is rejected client-side before any RPC.
+        let bad_edit = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::Edit {
+                        id: "acct-stub-1".to_string(),
+                        email: None,
+                        imap_host: None,
+                        imap_port: None,
+                        smtp_host: None,
+                        smtp_port: None,
+                        imap_mode: Some("nonsense".to_string()),
+                        smtp_mode: None,
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(bad_edit.contains("invalid tls mode"));
+
+        // `account test` reports the daemon's genuine per-protocol result --
+        // never a fabricated "OK (24ms latency)".
+        let test_out = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::Test {
+                        id: "acct-stub-1".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(test_out.contains(r#""imap_ok":true"#));
+        assert!(test_out.contains(r#""smtp_ok":true"#));
+        assert!(!test_out.contains("latency"));
+
+        // `account delete` drives the real RemoveAccount RPC.
+        let delete_out = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::Delete {
+                        id: "acct-stub-1".to_string(),
+                    },
+                },
+                true,
+            )
+            .await;
+        assert!(delete_out.contains(r#""status":"deleted""#));
     }
 
     /// Reference-client proof: boots a stub `nuncio.v1.Mail` gRPC server

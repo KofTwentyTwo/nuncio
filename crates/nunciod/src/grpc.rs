@@ -9,7 +9,7 @@ use nuncio_cal::CalendarBackend;
 use nuncio_contacts::ContactsBackend;
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
-use nuncio_mail::{MailBackend, MessageSender};
+use nuncio_mail::{ImapEngine, MailBackend, MessageSender, SmtpTransportEngine};
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::audit_server::{Audit, AuditServer};
 use nuncio_proto::v1::calendar_server::{Calendar, CalendarServer};
@@ -38,9 +38,11 @@ use nuncio_proto::v1::{
     ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, ListRecordsRequest,
     ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest, MarkReadResponse,
     Message as MessageProto, MessageFlagsChanged, MessageSearchHit, PreviewRuleRequest,
-    PreviewRuleResponse, SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest,
-    SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse,
-    SyncStarted, TlsMode as TlsModeProto, TriageProgress, TriageRequest, UpdateAvailable,
+    PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse, SearchMessagesRequest,
+    SearchMessagesResponse, SendMessageRequest, SendMessageResponse, ShuttingDown,
+    SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse, SyncStarted,
+    TestAccountConnectionRequest, TestAccountConnectionResponse, TlsMode as TlsModeProto,
+    TriageProgress, TriageRequest, UpdateAccountRequest, UpdateAccountResponse, UpdateAvailable,
     UpdateRuleRequest, UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
     VerifyChainRequest, VerifyChainResponse,
 };
@@ -304,6 +306,134 @@ fn map_account_config_from_proto(
     })
 }
 
+/// Outcome of probing a single protocol endpoint (IMAP or SMTP) during a
+/// `TestAccountConnection` RPC. `ok` reflects a GENUINE dial/handshake/auth
+/// outcome; `error` carries the real failure detail when `ok` is false.
+#[derive(Debug, Clone)]
+pub struct ProtocolProbe {
+    /// Whether the probe genuinely succeeded.
+    pub ok: bool,
+    /// Real failure detail, present only when `ok` is false.
+    pub error: Option<String>,
+}
+
+impl ProtocolProbe {
+    /// A successful probe.
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+
+    /// A failed probe carrying its real error text.
+    fn failed(error: String) -> Self {
+        Self {
+            ok: false,
+            error: Some(error),
+        }
+    }
+}
+
+/// The genuine per-protocol result of a `TestAccountConnection` probe.
+#[derive(Debug, Clone)]
+pub struct AccountConnectionReport {
+    /// Result of probing the account's IMAP endpoint.
+    pub imap: ProtocolProbe,
+    /// Result of probing the account's SMTP endpoint.
+    pub smtp: ProtocolProbe,
+}
+
+/// Injectable seam backing `TestAccountConnection`'s real per-protocol
+/// connection probing. Production uses [`RealAccountConnectionTester`], which
+/// performs a genuine bounded IMAP + SMTP dial/handshake using the account's
+/// configured endpoints, TLS modes, and keyring credential. A full-daemon
+/// offline test injects a stand-in so the RPC can be exercised end to end
+/// without touching any live server.
+#[tonic::async_trait]
+pub trait AccountConnectionTester: Send + Sync {
+    /// Probe both protocol endpoints for `config`, authenticating with
+    /// `password`, and report the genuine per-protocol outcome.
+    async fn probe(
+        &self,
+        config: &nuncio_core::AccountConfig,
+        password: &str,
+    ) -> AccountConnectionReport;
+}
+
+/// Production [`AccountConnectionTester`]: builds a real
+/// [`nuncio_mail::ImapEngine`] / [`nuncio_mail::SmtpTransportEngine`] from the
+/// account's configured endpoints, TLS transport modes, and keyring password,
+/// and performs a genuine, bounded connection probe against each. Every
+/// result is the real dial/handshake/auth outcome -- never fabricated.
+struct RealAccountConnectionTester;
+
+#[tonic::async_trait]
+impl AccountConnectionTester for RealAccountConnectionTester {
+    async fn probe(
+        &self,
+        config: &nuncio_core::AccountConfig,
+        password: &str,
+    ) -> AccountConnectionReport {
+        let imap = match config.protocol {
+            nuncio_core::AccountProtocol::ImapSmtp => {
+                let engine = ImapEngine::with_credentials(
+                    &config.id,
+                    &config.server_host,
+                    config.server_port,
+                    config.imap_tls_mode,
+                    &config.email_address,
+                    password,
+                );
+                match engine.probe_connection().await {
+                    Ok(()) => ProtocolProbe::ok(),
+                    Err(e) => ProtocolProbe::failed(e.to_string()),
+                }
+            }
+            nuncio_core::AccountProtocol::Jmap => ProtocolProbe::failed(
+                "IMAP connection probe is not applicable to a JMAP account".to_string(),
+            ),
+        };
+
+        let smtp = match SmtpTransportEngine::new(
+            &config.smtp_host,
+            config.smtp_port,
+            config.smtp_tls_mode,
+            &config.email_address,
+            password,
+        ) {
+            Ok(engine) => match engine.probe_connection().await {
+                Ok(()) => ProtocolProbe::ok(),
+                Err(e) => ProtocolProbe::failed(e.to_string()),
+            },
+            Err(e) => ProtocolProbe::failed(e.to_string()),
+        };
+
+        AccountConnectionReport { imap, smtp }
+    }
+}
+
+/// Overridable engine seam for the `nuncio.v1.Accounts` service, mirroring
+/// [`MailEngineOverrides`]'s shape. Production always uses the default (a real
+/// [`RealAccountConnectionTester`]); only a full-daemon offline E2E test
+/// injects a stand-in tester so `TestAccountConnection` can be driven over the
+/// real authenticated gRPC API without any live server.
+#[derive(Clone, Default)]
+pub struct AccountsEngineOverrides {
+    /// When `Some`, `TestAccountConnection` probes through this tester instead
+    /// of building real per-account IMAP/SMTP engines from keyring
+    /// credentials.
+    pub connection_tester: Option<Arc<dyn AccountConnectionTester>>,
+}
+
+impl std::fmt::Debug for AccountsEngineOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountsEngineOverrides")
+            .field("connection_tester", &self.connection_tester.is_some())
+            .finish()
+    }
+}
+
 /// `nuncio.v1.Accounts` gRPC service implementation backed by the daemon's
 /// live [`DatabaseEngine`] and [`SecretManager`] vault.
 ///
@@ -314,6 +444,7 @@ fn map_account_config_from_proto(
 struct AccountsGrpcService {
     db: Arc<DatabaseEngine>,
     secrets: Arc<SecretManager>,
+    connection_tester: Arc<dyn AccountConnectionTester>,
 }
 
 #[tonic::async_trait]
@@ -385,6 +516,146 @@ impl Accounts for AccountsGrpcService {
             .collect();
 
         Ok(Response::new(ListAccountsResponse { accounts }))
+    }
+
+    async fn update_account(
+        &self,
+        request: Request<UpdateAccountRequest>,
+    ) -> Result<Response<UpdateAccountResponse>, Status> {
+        let req = request.into_inner();
+        let proto_config = req
+            .config
+            .ok_or_else(|| Status::invalid_argument("config is required"))?;
+
+        let config = map_account_config_from_proto(proto_config)?;
+        config
+            .validate()
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        // Updating a non-existent account is a client error, not a silent
+        // create: reject it so a typo'd id never conjures a new account row.
+        if self
+            .db
+            .get_account(&config.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
+            .is_none()
+        {
+            return Err(Status::not_found(format!(
+                "account '{}' not found",
+                config.id
+            )));
+        }
+
+        match req.password {
+            // A password rotation applies the SAME keyring-then-persist
+            // rollback discipline as `add_account`: write the new credential
+            // first, and if the account row then fails to persist, delete the
+            // just-written secret so the vault never diverges from the
+            // persisted row. The original persistence error is always what the
+            // caller sees; a rollback failure is reported alongside it.
+            Some(password) if !password.is_empty() => {
+                self.secrets
+                    .set_secret(&config.keyring_secret_key, &password)
+                    .map_err(|e| {
+                        Status::internal(format!("failed to store credential in vault: {e}"))
+                    })?;
+
+                if let Err(e) = self.db.save_account(&config).await {
+                    let mut message = format!("failed to persist account: {e}");
+                    if let Err(rollback_err) =
+                        self.secrets.delete_secret(&config.keyring_secret_key)
+                    {
+                        tracing::warn!(
+                            keyring_secret_key = %config.keyring_secret_key,
+                            error = %rollback_err,
+                            "failed to roll back keyring secret after update_account persistence failure"
+                        );
+                        message.push_str(&format!(
+                            " (and failed to roll back the credential: {rollback_err})"
+                        ));
+                    }
+                    return Err(Status::internal(message));
+                }
+            }
+            // No password change: the existing keyring credential is left
+            // untouched and only the persisted configuration is overwritten.
+            _ => {
+                self.db
+                    .save_account(&config)
+                    .await
+                    .map_err(|e| Status::internal(format!("failed to persist account: {e}")))?;
+            }
+        }
+
+        Ok(Response::new(UpdateAccountResponse {}))
+    }
+
+    async fn remove_account(
+        &self,
+        request: Request<RemoveAccountRequest>,
+    ) -> Result<Response<RemoveAccountResponse>, Status> {
+        let req = request.into_inner();
+        if req.id.is_empty() {
+            return Err(Status::invalid_argument("id is required"));
+        }
+
+        let existing = self
+            .db
+            .get_account(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
+            .ok_or_else(|| Status::not_found(format!("account '{}' not found", req.id)))?;
+
+        self.db
+            .delete_account(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to remove account: {e}")))?;
+
+        // Best-effort credential cleanup: the account row is already gone, so
+        // a keyring deletion failure must not fail the RPC (which would
+        // wrongly imply the account still exists). Log it and move on -- an
+        // orphaned secret with no account row is inert.
+        if let Err(e) = self.secrets.delete_secret(&existing.keyring_secret_key) {
+            tracing::warn!(
+                keyring_secret_key = %existing.keyring_secret_key,
+                error = %e,
+                "failed to delete keyring credential after removing account"
+            );
+        }
+
+        Ok(Response::new(RemoveAccountResponse {}))
+    }
+
+    async fn test_account_connection(
+        &self,
+        request: Request<TestAccountConnectionRequest>,
+    ) -> Result<Response<TestAccountConnectionResponse>, Status> {
+        let req = request.into_inner();
+        if req.id.is_empty() {
+            return Err(Status::invalid_argument("id is required"));
+        }
+
+        let config = self
+            .db
+            .get_account(&req.id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
+            .ok_or_else(|| Status::not_found(format!("account '{}' not found", req.id)))?;
+
+        let password = self
+            .secrets
+            .get_secret(&config.keyring_secret_key)
+            .map_err(|e| Status::internal(format!("failed to read credential from vault: {e}")))?;
+
+        let report = self.connection_tester.probe(&config, &password).await;
+
+        Ok(Response::new(TestAccountConnectionResponse {
+            imap_ok: report.imap.ok,
+            smtp_ok: report.smtp.ok,
+            imap_error: report.imap.error,
+            smtp_error: report.smtp.error,
+        }))
     }
 }
 
@@ -1850,6 +2121,7 @@ pub async fn serve_on_listener(
         MailEngineOverrides::default(),
         CalendarEngineOverrides::default(),
         ContactsEngineOverrides::default(),
+        AccountsEngineOverrides::default(),
     )
     .await
 }
@@ -1876,6 +2148,7 @@ pub async fn serve_on_listener_with_overrides(
     overrides: MailEngineOverrides,
     calendar_overrides: CalendarEngineOverrides,
     contacts_overrides: ContactsEngineOverrides,
+    accounts_overrides: AccountsEngineOverrides,
 ) -> Result<(), GrpcServeError> {
     let token: Arc<str> = token.into();
 
@@ -1888,6 +2161,9 @@ pub async fn serve_on_listener_with_overrides(
     let accounts_service = AccountsGrpcService {
         db: db.clone(),
         secrets: secrets.clone(),
+        connection_tester: accounts_overrides
+            .connection_tester
+            .unwrap_or_else(|| Arc::new(RealAccountConnectionTester)),
     };
     let accounts_interceptor = BearerAuthInterceptor::new(token.clone());
     let accounts_svc = AccountsServer::with_interceptor(accounts_service, accounts_interceptor);
@@ -2070,6 +2346,36 @@ mod tests {
         calendar_overrides: CalendarEngineOverrides,
         contacts_overrides: ContactsEngineOverrides,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_test_server_with_every_override(
+            event_bus,
+            db,
+            filter_engine,
+            secrets,
+            token,
+            overrides,
+            calendar_overrides,
+            contacts_overrides,
+            AccountsEngineOverrides::default(),
+        )
+        .await
+    }
+
+    /// Widest test spawn helper: threads an [`AccountsEngineOverrides`] too,
+    /// so a test can inject a stand-in [`AccountConnectionTester`] and drive
+    /// `TestAccountConnection` over the real authenticated gRPC API without a
+    /// live server.
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_test_server_with_every_override(
+        event_bus: Arc<EventBus>,
+        db: Arc<DatabaseEngine>,
+        filter_engine: Arc<FilterEngine>,
+        secrets: Arc<SecretManager>,
+        token: &str,
+        overrides: MailEngineOverrides,
+        calendar_overrides: CalendarEngineOverrides,
+        contacts_overrides: ContactsEngineOverrides,
+        accounts_overrides: AccountsEngineOverrides,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral loopback port");
@@ -2086,6 +2392,7 @@ mod tests {
                 overrides,
                 calendar_overrides,
                 contacts_overrides,
+                accounts_overrides,
             )
             .await;
         });

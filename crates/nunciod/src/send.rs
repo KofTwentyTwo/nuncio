@@ -113,6 +113,7 @@ fn build_smtp_sender(
     let engine = SmtpTransportEngine::new(
         &config.smtp_host,
         config.smtp_port,
+        config.smtp_tls_mode,
         &config.email_address,
         password,
     )?;
