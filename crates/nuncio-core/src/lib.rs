@@ -93,6 +93,19 @@ pub enum CoreEvent {
         /// Action description.
         action_taken: String,
     },
+    /// Progress notification emitted during an inbound mail sync, so a
+    /// long-running sync of a large mailbox is observably progressing rather
+    /// than indistinguishable from a hang. Emitted per folder as it completes.
+    SyncProgress {
+        /// Account being synced, if the sync is scoped to one.
+        account_id: Option<String>,
+        /// Folder whose messages were just fetched and persisted.
+        folder_id: String,
+        /// Messages fetched from this folder on this pass.
+        fetched: usize,
+        /// Cumulative messages fetched across the sync so far.
+        total: usize,
+    },
     /// Progress notification during bulk filter execution over a batch of emails.
     BatchFilterProgress {
         /// Messages processed so far in the batch.

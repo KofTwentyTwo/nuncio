@@ -87,15 +87,17 @@ pub enum GrpcServeError {
 }
 
 /// Maps a `nuncio_core::CoreEvent` domain event onto its wire-format
-/// `nuncio.v1.Event` representation, faithfully carrying every variant's
+/// `nuncio.v1.Event` representation, carrying every wire-visible variant's
 /// fields into the matching `oneof` case (see `proto/nuncio/v1/nuncio.proto`
-/// for the wire contract).
+/// for the wire contract). Returns `None` for events that are internal-only
+/// and have no case in the versioned contract, so they are dropped from the
+/// gRPC subscription stream rather than forced onto the wire.
 ///
 /// `usize` fields (`processed`, `total`, `matched`, `salvaged_rules_count`)
 /// are narrowed to `u64` for the wire; these are in-process counters that
 /// cannot realistically approach `u64::MAX`, and protobuf has no native
 /// `usize` type.
-fn map_core_event(event: CoreEvent) -> Event {
+fn map_core_event(event: CoreEvent) -> Option<Event> {
     let kind = match event {
         CoreEvent::SyncStarted { account_id } => Kind::SyncStarted(SyncStarted { account_id }),
         CoreEvent::SyncCompleted { account_id } => {
@@ -140,8 +142,12 @@ fn map_core_event(event: CoreEvent) -> Event {
         }),
         CoreEvent::Error { message } => Kind::Error(EventError { message }),
         CoreEvent::ShuttingDown => Kind::ShuttingDown(ShuttingDown {}),
+        // Internal sync-progress signal: intentionally not forwarded to gRPC
+        // subscribers, as it has no case in the versioned wire contract. It is
+        // observed in-process (e.g. by the daemon's own subscribers) only.
+        CoreEvent::SyncProgress { .. } => return None,
     };
-    Event { kind: Some(kind) }
+    Some(Event { kind: Some(kind) })
 }
 
 /// `nuncio.v1.System` gRPC service implementation backed by the daemon's live
@@ -191,7 +197,7 @@ impl System for SystemGrpcService {
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let receiver = self.event_bus.subscribe_events();
         let mapped = BroadcastStream::new(receiver).filter_map(|item| match item {
-            Ok(core_event) => Some(Ok(map_core_event(core_event))),
+            Ok(core_event) => map_core_event(core_event).map(Ok),
             Err(BroadcastStreamRecvError::Lagged(skipped)) => {
                 tracing::warn!(
                     "gRPC Subscribe stream lagged behind the daemon event bus; skipped {} \
