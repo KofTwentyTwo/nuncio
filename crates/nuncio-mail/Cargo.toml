@@ -26,8 +26,8 @@ rustls.workspace = true
 webpki-roots.workspace = true
 rustls-pki-types.workspace = true
 tokio-stream.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 wiremock.workspace = true
-reqwest.workspace = true
