@@ -30,17 +30,24 @@ machine (or a new LLM) picks up the work cold.
   `IMAP → store → read → SMTP send` spine works end-to-end over gRPC via the
   `nuncio-cli` reference client, tested offline. `nuncio.v1` is published with a
   contract-stability golden.
-- **Phase 3 (feature completeness) is now COMPLETE — M1–M4 all merged to `dev`.**
+- **The feature surface (Phase 3 through M5) is now COMPLETE — M1–M5 all merged
+  to `dev`** (M1–M4 already promoted to `main`; M5 promotes next).
   Filter correctness (3.A), Calendar (M1: CalDAV + RRULE recurrence, API vertical),
   Contacts (M2: real CardDAV engine + API vertical), JMAP (M3: real client wired
-  into Mail sync), and Filters made live (M4: engine wired into sync with a
+  into Mail sync), Filters made live (M4: engine wired into sync with a
   fire-once guard, the `account`-field bug fixed, edit/export/import/logs and
-  `Filters.Triage` bulk rescan on the gRPC service) are all done.
-- **Next milestone: M5 — Mail lifecycle + incremental sync** (account
-  edit/delete/test-connection + persisted TLS mode, incremental IMAP sync with
-  progress + per-item FETCH timeout, explicit `SendMessage` account selection,
-  keyring rollback on failed `AddAccount`). Then M6 (security hardening), then
-  M7 (API freeze / client-readiness).
+  `Filters.Triage` bulk rescan on the gRPC service), and Mail lifecycle +
+  incremental sync (M5: account edit/delete/test-connection with persisted
+  `imap_tls_mode`/`smtp_tls_mode` driving the real IMAP/SMTP connection, a real
+  per-folder `{uidvalidity}:{uidnext}` incremental-sync checkpoint with a safe
+  full re-fetch on UIDVALIDITY change and a per-item FETCH timeout, explicit
+  `SendMessage` account selection, and keyring rollback on failed `AddAccount`)
+  are all done.
+- **Next milestone: M6 — Security & release hardening** (fail-closed
+  encryption, zeroized key material, WORM/ledger key-length validation,
+  non-loopback gRPC bind rejection + an auth-coverage canary, a fail-closed
+  updater on missing `SHA256SUMS`, real CIDR/DNS SSRF checks for webhooks,
+  inbound HTML email sanitization). Then M7 (API freeze / client-readiness).
 - Full detail and the path to a client-ready API: `docs/ROADMAP.md`.
 
 ## Branches & preserved WIP
@@ -94,7 +101,7 @@ GitHub milestones **M1–M7** mirror `docs/ROADMAP.md`. Each milestone holds
 `story`-labelled issues with a full, self-contained spec. Order: M1 → M7 (M1–M5
 independent-ish feature work; M6 security; M7 the client-readiness gate).
 
-**M1–M4 are DELIVERED — all stories merged to `dev`.** M5 is next.
+**M1–M5 are DELIVERED — all stories merged to `dev`.** M6 is next.
 
 **M1 — Finish Calendar (CalDAV)** · milestone #23 · **DONE**
 - #185 — Add Calendar API vertical (proto, daemon, CLI, E2E)  · **[PROTO]** · merged
@@ -113,13 +120,13 @@ independent-ish feature work; M6 security; M7 the client-readiness gate).
 - #192 — Move filter edit/export/import/logs onto the Filters gRPC service  · **[PROTO]** · merged
 - #193 — Re-expose bulk filter triage as a streaming Filters RPC  · **[PROTO]** *(depends on #190)* · merged
 
-**M5 — Mail lifecycle + incremental sync** · milestone #27 ← **next**
-- #194 — Account lifecycle over gRPC (edit/delete/test) + persist TLS mode  · **[PROTO]** *(prior art: `wip/unreviewed-account-tls-sync`, reference-not-trust)*
-- #195 — Incremental IMAP sync with progress reporting and per-item FETCH timeout
-- #196 — SendMessage selects an explicit account instead of the first configured  · **[PROTO]**
-- #197 — Roll back orphaned keyring secret when AddAccount fails to persist
+**M5 — Mail lifecycle + incremental sync** · milestone #27 · **DONE**
+- #194 — Account lifecycle over gRPC (edit/delete/test) + persist TLS mode  · **[PROTO]** *(prior art: `wip/unreviewed-account-tls-sync`, reference-not-trust)* · merged
+- #195 — Incremental IMAP sync with progress reporting and per-item FETCH timeout · merged
+- #196 — SendMessage selects an explicit account instead of the first configured  · **[PROTO]** · merged
+- #197 — Roll back orphaned keyring secret when AddAccount fails to persist · merged
 
-**M6 — Security & release hardening** · milestone #28
+**M6 — Security & release hardening** · milestone #28 ← **next**
 - #198 — Fail closed on encryption failure in `PayloadCipher::encrypt_text_at_rest`
 - #199 — Zeroize long-lived engine key material on drop
 - #200 — Validate WORM/ledger key length from the vault, fail closed on mismatch
@@ -145,7 +152,7 @@ independent-ish feature work; M6 security; M7 the client-readiness gate).
   those two issues if you consider that sensitive.
 - Decide the eventual fate of `wip/unreviewed-account-tls-sync` (review-and-adopt
   vs discard) once M5 lands a clean implementation.
-- Follow-ups filed during M1–M4 that are open but not blocking (not scheduled
+- Follow-ups filed during M1–M5 that are open but not blocking (not scheduled
   into a milestone yet): #216 (calendar windowing/predicate refinement), #219
   (contacts notes handling), #225 (`filter edit` silently re-enables a disabled
-  rule and resets `created_at`).
+  rule and resets `created_at`), #233 (M5 sync/SMTP robustness polish).
