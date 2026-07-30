@@ -23,8 +23,61 @@ use tokio_stream::StreamExt;
 /// hang a connect -- and therefore a `TestAccountConnection` RPC -- forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Upper bound on how long a single `FETCH` response item may take to arrive
+/// once the `UID FETCH` command has been acknowledged. Fetching full bodies
+/// for a large mailbox in one command can be legitimately slow overall, so the
+/// bound is per item rather than for the whole stream; but a single item that
+/// never arrives (dead socket, server-side hang) must still surface as an
+/// honest timeout rather than hanging the sync indefinitely.
+const FETCH_ITEM_TIMEOUT: Duration = Duration::from_secs(60);
+
 use crate::backend::MailBackend;
 use crate::parser::{MailError, MimeParserAdapter};
+
+/// The `UID FETCH` sequence-set to issue for a folder sync, resolved from the
+/// stored checkpoint. Kept as a small typed value (rather than collapsing to a
+/// bare range string) so a corrupt checkpoint stays distinguishable from "no
+/// checkpoint" -- both fall back to a full fetch, but only the corrupt case is
+/// worth flagging, and tests can assert on the distinction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchRange {
+    /// No prior checkpoint (first-ever sync of this folder): fetch everything.
+    Full,
+    /// A checkpoint was stored but could not be parsed as a UID boundary.
+    /// Falls back to a full fetch, but the corruption is surfaced (logged)
+    /// rather than silently treated as "no checkpoint".
+    CorruptCheckpoint,
+    /// A valid UID checkpoint: fetch only UIDs at or above it, i.e. messages
+    /// that arrived since the previous sync.
+    Incremental(u32),
+}
+
+impl FetchRange {
+    /// Render the IMAP `UID FETCH` sequence-set. `Full`/`CorruptCheckpoint`
+    /// fetch all UIDs (`1:*`); an incremental checkpoint `n` fetches `n:*`,
+    /// which the server bounds to UIDs `>= n` -- a genuinely narrower fetch.
+    fn sequence_set(self) -> String {
+        match self {
+            FetchRange::Full | FetchRange::CorruptCheckpoint => "1:*".to_string(),
+            FetchRange::Incremental(uid) => format!("{}:*", uid),
+        }
+    }
+}
+
+/// Resolve the fetch range from a stored `since_state` checkpoint. The
+/// checkpoint is the `UIDNEXT` captured at the end of the previous sync, held
+/// as its decimal string. `None` means no prior sync (full fetch); an
+/// unparseable or zero value is treated as a corrupt checkpoint (full fetch,
+/// flagged) rather than silently equivalent to "no checkpoint".
+fn resolve_fetch_range(since_state: Option<&str>) -> FetchRange {
+    match since_state {
+        None => FetchRange::Full,
+        Some(raw) => match raw.trim().parse::<u32>() {
+            Ok(uid) if uid >= 1 => FetchRange::Incremental(uid),
+            _ => FetchRange::CorruptCheckpoint,
+        },
+    }
+}
 
 /// State of the dedicated IMAP IDLE socket listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,21 +502,42 @@ impl ImapEngine {
         &self.socket_manager
     }
 
-    /// Fetch and parse all messages in a folder over an active IMAP session.
+    /// Fetch and parse the messages in a folder over an active IMAP session,
+    /// returning the fetched messages and the new sync checkpoint.
+    ///
+    /// `since_state` is the checkpoint returned by a previous sync of this
+    /// folder (the previous `UIDNEXT`); when present and valid the `UID FETCH`
+    /// is narrowed to `{checkpoint}:*` so only messages that arrived since are
+    /// fetched, rather than re-downloading full history every sync. The
+    /// returned checkpoint is derived from real server state -- the mailbox's
+    /// `UIDNEXT` after selecting the folder, or (if the server omits it) one
+    /// past the highest UID actually seen -- never from a synthetic counter.
     pub async fn sync_folder_messages_with_session<S>(
         &self,
         folder_id: &str,
+        since_state: Option<&str>,
         session: &mut async_imap::Session<S>,
-    ) -> Result<Vec<Email>, MailError>
+    ) -> Result<(Vec<Email>, String), MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
-        session.select(folder_id).await.map_err(|e| {
+        let mailbox = session.select(folder_id).await.map_err(|e| {
             MailError::ImapError(format!("failed to select folder '{}': {}", folder_id, e))
         })?;
+        let server_uid_next = mailbox.uid_next;
+
+        let range = resolve_fetch_range(since_state);
+        if range == FetchRange::CorruptCheckpoint {
+            tracing::warn!(
+                folder_id,
+                checkpoint = since_state.unwrap_or_default(),
+                "ignoring unparseable folder sync checkpoint; falling back to a full fetch"
+            );
+        }
 
         let query = build_fetch_command_query();
-        let mut fetch_stream = session.uid_fetch("1:*", query).await.map_err(|e| {
+        let sequence_set = range.sequence_set();
+        let mut fetch_stream = session.uid_fetch(&sequence_set, query).await.map_err(|e| {
             MailError::ImapError(format!(
                 "UID FETCH failed for folder '{}': {}",
                 folder_id, e
@@ -471,11 +545,29 @@ impl ImapEngine {
         })?;
 
         let mut emails = Vec::new();
-        while let Some(fetch_res) = fetch_stream.next().await {
+        let mut max_uid_seen: u32 = 0;
+        loop {
+            // Bound EVERY individual item read: a slow-but-progressing large
+            // fetch is fine, but a single item that never arrives must surface
+            // as an honest `FetchStalled` instead of hanging the whole sync.
+            let next_item = tokio::time::timeout(FETCH_ITEM_TIMEOUT, fetch_stream.next())
+                .await
+                .map_err(|_| {
+                    MailError::FetchStalled(format!(
+                        "no FETCH response for folder '{}' within {}s ({} message(s) read so far)",
+                        folder_id,
+                        FETCH_ITEM_TIMEOUT.as_secs(),
+                        emails.len()
+                    ))
+                })?;
+            let Some(fetch_res) = next_item else {
+                break;
+            };
             let fetch_data = fetch_res
                 .map_err(|e| MailError::ImapError(format!("failed reading fetch item: {}", e)))?;
 
             let uid_num = fetch_data.uid.unwrap_or(0);
+            max_uid_seen = max_uid_seen.max(uid_num);
             let email_id = format!("imap-uid-{}", uid_num);
 
             let is_read = fetch_data
@@ -559,14 +651,36 @@ impl ImapEngine {
             emails.push(email);
         }
 
-        Ok(emails)
+        // Derive the next checkpoint from real server state: prefer the
+        // mailbox's authoritative UIDNEXT, else one past the highest UID
+        // actually seen. If the server reported neither (e.g. an empty
+        // incremental fetch), keep the prior checkpoint so the next sync stays
+        // incremental instead of regressing to a full re-fetch.
+        let new_checkpoint = server_uid_next
+            .or_else(|| (max_uid_seen > 0).then_some(max_uid_seen.saturating_add(1)))
+            .map(|uid| uid.to_string())
+            .or_else(|| since_state.map(|s| s.to_string()))
+            .unwrap_or_else(|| "1".to_string());
+
+        Ok((emails, new_checkpoint))
     }
 
-    /// Execute `UID FETCH 1:* (FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODY.PEEK[])` and parse returned messages into domain `Email` entities.
-    pub async fn sync_folder_messages(&self, folder_id: &str) -> Result<Vec<Email>, MailError> {
+    /// Fetch a folder's messages over a freshly authenticated session,
+    /// honoring `since_state` for an incremental fetch and returning the new
+    /// sync checkpoint alongside the messages. See
+    /// [`Self::sync_folder_messages_with_session`] for the checkpoint model.
+    pub async fn sync_folder_messages(
+        &self,
+        folder_id: &str,
+        since_state: Option<&str>,
+    ) -> Result<(Vec<Email>, String), MailError> {
         let (username, password) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
             _ => {
+                // Credential-less fixture path used by unit tests that never
+                // reach a real server. The checkpoint (one past the fixture's
+                // UID) is internally consistent with the fixture rather than
+                // derived from `emails.len()`.
                 let mock_emails = vec![Email {
                     id: "imap-uid-100".to_string(),
                     account_id: self.account_id.clone(),
@@ -580,7 +694,7 @@ impl ImapEngine {
                     body_html: None,
                     attachments: Vec::new(),
                 }];
-                return Ok(mock_emails);
+                return Ok((mock_emails, "101".to_string()));
             }
         };
 
@@ -588,11 +702,11 @@ impl ImapEngine {
             .socket_manager
             .connect_session(username, password)
             .await?;
-        let emails = self
-            .sync_folder_messages_with_session(folder_id, &mut session)
-            .await?;
+        let result = self
+            .sync_folder_messages_with_session(folder_id, since_state, &mut session)
+            .await;
         let _ = session.logout().await;
-        Ok(emails)
+        result
     }
 
     /// Listen for real-time IMAP IDLE notification events on an active IMAP session.
@@ -742,11 +856,9 @@ impl MailBackend for ImapEngine {
     async fn sync_messages(
         &self,
         folder_id: &str,
-        _since_state: Option<&str>,
+        since_state: Option<&str>,
     ) -> Result<(Vec<Email>, String), MailError> {
-        let emails = self.sync_folder_messages(folder_id).await?;
-        let modseq = format!("imap-modseq-{}", emails.len());
-        Ok((emails, modseq))
+        self.sync_folder_messages(folder_id, since_state).await
     }
 
     async fn send_email(&self, _email: &Email) -> Result<(), MailError> {
@@ -781,13 +893,219 @@ mod tests {
         assert_eq!(folders.len(), 2);
         assert_eq!(folders[0].id, "INBOX");
 
-        let (emails, modseq) = engine.sync_messages("INBOX", None).await?;
-        assert_eq!(modseq, "imap-modseq-1");
+        let (emails, checkpoint) = engine.sync_messages("INBOX", None).await?;
+        // Credential-less fixture: checkpoint is one past the fixture UID.
+        assert_eq!(checkpoint, "101");
         assert_eq!(emails.len(), 1);
         assert_eq!(emails[0].id, "imap-uid-100");
 
         engine.send_email(&emails[0]).await?;
         Ok(())
+    }
+
+    #[test]
+    fn resolve_fetch_range_distinguishes_none_valid_and_corrupt_checkpoints() {
+        // First-ever sync: full history.
+        assert_eq!(resolve_fetch_range(None), FetchRange::Full);
+        assert_eq!(resolve_fetch_range(None).sequence_set(), "1:*");
+
+        // Valid UID checkpoint: narrowed fetch.
+        assert_eq!(
+            resolve_fetch_range(Some("105")),
+            FetchRange::Incremental(105)
+        );
+        assert_eq!(resolve_fetch_range(Some("105")).sequence_set(), "105:*");
+        assert_eq!(
+            resolve_fetch_range(Some(" 42 ")),
+            FetchRange::Incremental(42)
+        );
+
+        // Corrupt checkpoints fall back to full, but are a DISTINCT case from
+        // "no checkpoint" so the corruption is visible, not silently swallowed.
+        assert_eq!(resolve_fetch_range(Some("")), FetchRange::CorruptCheckpoint);
+        assert_eq!(
+            resolve_fetch_range(Some("0")),
+            FetchRange::CorruptCheckpoint
+        );
+        assert_eq!(
+            resolve_fetch_range(Some("not-a-uid")),
+            FetchRange::CorruptCheckpoint
+        );
+        assert_eq!(resolve_fetch_range(Some("not-a-uid")).sequence_set(), "1:*");
+    }
+
+    /// Read a single CRLF-terminated line from a scripted-server stream,
+    /// returning `None` at EOF (client hung up). Used only by the in-memory
+    /// duplex tests below; the real fetch path never parses raw lines.
+    async fn read_scripted_line<R: AsyncRead + Unpin>(reader: &mut R) -> Option<String> {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match reader.read(&mut byte).await {
+                Ok(0) => {
+                    return if buf.is_empty() {
+                        None
+                    } else {
+                        Some(String::from_utf8_lossy(&buf).into_owned())
+                    }
+                }
+                Ok(_) => {
+                    if byte[0] == b'\n' {
+                        return Some(String::from_utf8_lossy(&buf).into_owned());
+                    }
+                    if byte[0] != b'\r' {
+                        buf.push(byte[0]);
+                    }
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn incremental_sync_narrows_the_fetch_range_on_the_second_pass() {
+        // Drives a real `async_imap::Session` over an in-memory duplex pair
+        // whose server side is a scripted IMAP responder. Proves the SECOND
+        // sync issues a GENUINELY narrower `UID FETCH` derived from the first
+        // sync's returned checkpoint -- not a full re-fetch.
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let fetch_ranges = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server_ranges = fetch_ranges.clone();
+
+        let server = tokio::spawn(async move {
+            let mut io = server_io;
+            while let Some(line) = read_scripted_line(&mut io).await {
+                let tag = line.split_whitespace().next().unwrap_or("").to_string();
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("UID FETCH") {
+                    if let Ok(mut g) = server_ranges.lock() {
+                        g.push(line.clone());
+                    }
+                    let _ = io
+                        .write_all(format!("{tag} OK FETCH completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("LOGIN") {
+                    let _ = io
+                        .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("SELECT") {
+                    let resp = format!(
+                        "* FLAGS (\\Seen)\r\n* 3 EXISTS\r\n* 0 RECENT\r\n\
+                         * OK [UIDVALIDITY 1] ok\r\n* OK [UIDNEXT 105] ok\r\n\
+                         {tag} OK [READ-WRITE] SELECT done\r\n"
+                    );
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("LOGOUT") {
+                    let _ = io
+                        .write_all(format!("* BYE\r\n{tag} OK LOGOUT\r\n").as_bytes())
+                        .await;
+                    break;
+                }
+            }
+        });
+
+        let client = async_imap::Client::new(client_io);
+        let mut session = client
+            .login("user", "pass")
+            .await
+            .map_err(|(e, _)| e)
+            .expect("scripted login succeeds");
+
+        let engine = ImapEngine::new("acct-1", "example.test", 993);
+
+        // First sync: no checkpoint -> full history; returns the server UIDNEXT.
+        let (first, checkpoint) = engine
+            .sync_folder_messages_with_session("INBOX", None, &mut session)
+            .await
+            .expect("first sync succeeds");
+        assert!(first.is_empty());
+        assert_eq!(checkpoint, "105");
+
+        // Second sync: feed back the checkpoint -> narrowed fetch.
+        let (_second, checkpoint2) = engine
+            .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
+            .await
+            .expect("second sync succeeds");
+        assert_eq!(checkpoint2, "105");
+
+        drop(session);
+        let _ = server.await;
+
+        let ranges = fetch_ranges.lock().expect("lock captured ranges");
+        assert_eq!(ranges.len(), 2, "expected exactly two UID FETCH commands");
+        assert!(
+            ranges[0].contains("1:*"),
+            "first sync must fetch full history, got: {}",
+            ranges[0]
+        );
+        assert!(
+            ranges[1].contains("105:*"),
+            "second sync must be narrowed to the checkpoint, got: {}",
+            ranges[1]
+        );
+        assert!(
+            !ranges[1].contains("1:*"),
+            "second sync must NOT re-fetch full history, got: {}",
+            ranges[1]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_never_responding_fetch_surfaces_fetchstalled_without_hanging() {
+        // The scripted server answers LOGIN and SELECT but then goes silent on
+        // the FETCH. With the tokio clock paused, the bounded per-item timeout
+        // fast-forwards, so the stall is turned into an honest `FetchStalled`
+        // error in negligible WALL-CLOCK time -- proving it never hangs.
+        let (client_io, server_io) = tokio::io::duplex(8192);
+
+        let server = tokio::spawn(async move {
+            let mut io = server_io;
+            while let Some(line) = read_scripted_line(&mut io).await {
+                let tag = line.split_whitespace().next().unwrap_or("").to_string();
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("UID FETCH") {
+                    // Deliberately never respond: a mid-stream server stall.
+                    std::future::pending::<()>().await;
+                } else if upper.contains("LOGIN") {
+                    let _ = io
+                        .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("SELECT") {
+                    let resp = format!(
+                        "* 1 EXISTS\r\n* OK [UIDNEXT 42] ok\r\n\
+                         {tag} OK [READ-WRITE] SELECT done\r\n"
+                    );
+                    let _ = io.write_all(resp.as_bytes()).await;
+                }
+            }
+        });
+
+        let client = async_imap::Client::new(client_io);
+        let mut session = client
+            .login("user", "pass")
+            .await
+            .map_err(|(e, _)| e)
+            .expect("scripted login succeeds");
+        let engine = ImapEngine::new("acct-1", "example.test", 993);
+
+        // Real wall clock, not the (paused) tokio clock: proves negligible
+        // elapsed time despite the 60s virtual timeout expiring.
+        let started = std::time::Instant::now();
+        let err = engine
+            .sync_folder_messages_with_session("INBOX", None, &mut session)
+            .await
+            .expect_err("a never-responding FETCH must surface an error");
+        assert!(
+            matches!(err, MailError::FetchStalled(_)),
+            "expected FetchStalled, got: {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "stalled fetch must not hang in wall-clock time, took {:?}",
+            started.elapsed()
+        );
+
+        server.abort();
     }
 
     #[tokio::test]
