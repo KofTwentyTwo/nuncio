@@ -40,3 +40,4 @@ fs4.workspace = true
 nuncio-cli = { path = "../nuncio-cli" }
 sqlx.workspace = true
 wiremock.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

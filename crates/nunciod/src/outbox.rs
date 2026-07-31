@@ -16,7 +16,9 @@
 //! exceeded, at which point it flips to `failed`. A permanent failure (the
 //! message no longer exists, a malformed payload, an unknown action) flips to
 //! `failed` immediately -- there is nothing a retry could fix. Success is
-//! never fabricated.
+//! never fabricated. A mutation whose execution exceeds
+//! [`PER_ITEM_EXECUTION_TIMEOUT`] is dispositioned the same way as any other
+//! transient failure -- it is RETRYABLE, never `completed`.
 //!
 //! # Testability
 //!
@@ -26,6 +28,7 @@
 //! without any live network. Production wires [`ProductionExecutionEnv`],
 //! which resolves real per-account engines from the store and the OS keyring.
 
+use crate::lifecycle::ShutdownSignal;
 use async_trait::async_trait;
 use nuncio_core::AccountConfig;
 use nuncio_filter::{
@@ -39,7 +42,17 @@ use nuncio_mail::{
 use nuncio_store::db::{DatabaseEngine, DatabaseError};
 use nuncio_store::vault::{SecretManager, VaultError, WEBHOOK_SIGNING_KEY_ACCOUNT};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
+
+/// Bound on how long a single outbox mutation may run before it is treated
+/// as a retryable timeout. A healthy IMAP/JMAP/SMTP round trip or webhook
+/// POST comfortably finishes well inside this window; a value this generous
+/// still keeps one hung remote op from stalling every OTHER pending
+/// mutation -- across every account -- behind it in the same drain pass, and
+/// from blocking graceful shutdown for longer than the shutdown grace
+/// period tolerates.
+const PER_ITEM_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Errors that can occur while resolving the resources needed to execute a
 /// single outbox mutation. These are surfaced from a [`RemoteExecutionEnv`]
@@ -119,11 +132,18 @@ pub struct ExecutionSummary {
 
 /// Drain up to `limit` pending mutations, executing each against `env` and
 /// persisting the honest outcome. Never marks a mutation `completed` unless the
-/// real operation succeeded. Returns a tally of the pass.
+/// real operation succeeded. Each item's execution is bounded by
+/// [`PER_ITEM_EXECUTION_TIMEOUT`] so one hung remote op cannot freeze delivery
+/// for every other item behind it; `shutdown` is raced against that same
+/// timeout so a hung item cannot delay graceful shutdown either -- on
+/// shutdown the drain pass stops immediately, leaving the in-flight item (and
+/// anything still queued behind it) untouched and `pending` for the next
+/// start. Returns a tally of the pass.
 pub async fn execute_pending_mutations(
     db: &DatabaseEngine,
     env: &dyn RemoteExecutionEnv,
     limit: usize,
+    shutdown: &mut ShutdownSignal,
 ) -> ExecutionSummary {
     let pending = match db.list_pending_mutations(limit).await {
         Ok(items) => items,
@@ -135,7 +155,23 @@ pub async fn execute_pending_mutations(
 
     let mut summary = ExecutionSummary::default();
     for item in pending {
-        let disposition = execute_one(db, env, &item).await;
+        let outcome = tokio::select! {
+            biased;
+            _ = shutdown.wait() => {
+                tracing::info!(
+                    mutation_id = %item.id,
+                    "outbox: drain pass interrupted by shutdown signal; item left pending"
+                );
+                break;
+            }
+            result = tokio::time::timeout(PER_ITEM_EXECUTION_TIMEOUT, execute_one(db, env, &item)) => result,
+        };
+        let disposition = match outcome {
+            Ok(disposition) => disposition,
+            Err(_elapsed) => Disposition::Retry(format!(
+                "mutation execution exceeded the {PER_ITEM_EXECUTION_TIMEOUT:?} timeout"
+            )),
+        };
         let next_retry = item.retry_count + 1;
         let (status, retry, tally): (&str, i32, fn(&mut ExecutionSummary)) = match disposition {
             Disposition::Completed => ("completed", item.retry_count, |s| s.completed += 1),
