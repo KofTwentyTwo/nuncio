@@ -48,6 +48,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{watch, Semaphore};
+use tracing::Instrument;
 
 /// Environment variable bounding how many account syncs may run at once.
 pub const CONCURRENCY_ENV_VAR: &str = "NUNCIO_SYNC_CONCURRENCY";
@@ -285,18 +286,30 @@ impl SyncDispatcher {
 
                 let inner = self.inner.clone();
                 let id = account_id.to_string();
-                tokio::spawn(async move {
-                    let outcome = inner.run_guarded(&id).await;
-                    // Remove the in-flight entry before publishing so a request
-                    // arriving after completion starts a fresh sync rather than
-                    // joining an already-finished one.
-                    inner
-                        .inflight
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .remove(&id);
-                    let _ = tx.send(Some(outcome));
-                });
+                // The actual sync runs in a detached task, which does NOT
+                // inherit the caller's span automatically. Capture the current
+                // span (the RPC's correlation span when a `Mail/Sync` triggered
+                // this) and instrument the task with it, so the sync's logs are
+                // correlatable to the request that kicked it off. A request
+                // that COALESCES onto an already-running sync joins the owner's
+                // task and is therefore correlated to the owner's request_id,
+                // not its own.
+                let span = tracing::Span::current();
+                tokio::spawn(
+                    async move {
+                        let outcome = inner.run_guarded(&id).await;
+                        // Remove the in-flight entry before publishing so a
+                        // request arriving after completion starts a fresh sync
+                        // rather than joining an already-finished one.
+                        inner
+                            .inflight
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .remove(&id);
+                        let _ = tx.send(Some(outcome));
+                    }
+                    .instrument(span),
+                );
                 rx
             }
         };
@@ -319,12 +332,19 @@ impl SyncDispatcher {
     /// production syncer additionally reports them on the event bus).
     pub async fn sync_all(&self, account_ids: Vec<String>) -> usize {
         let mut set = tokio::task::JoinSet::new();
+        // Propagate the caller's span (the RPC correlation span for an
+        // all-accounts `Mail/Sync`) into each per-account task so the fan-out
+        // stays correlated to the triggering request.
+        let span = tracing::Span::current();
         for account_id in account_ids {
             let dispatcher = self.clone();
-            set.spawn(async move {
-                let result = dispatcher.sync_account(&account_id).await;
-                (account_id, result)
-            });
+            set.spawn(
+                async move {
+                    let result = dispatcher.sync_account(&account_id).await;
+                    (account_id, result)
+                }
+                .instrument(span.clone()),
+            );
         }
 
         let mut total = 0usize;
