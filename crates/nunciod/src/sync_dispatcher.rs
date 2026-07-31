@@ -362,7 +362,7 @@ pub async fn sync_all_configured(
     let account_ids = match db.list_accounts().await {
         Ok(accounts) => accounts
             .into_iter()
-            .filter(|a| !a.protocol.is_dav())
+            .filter(|a| !a.is_dav())
             .map(|a| a.id)
             .collect::<Vec<_>>(),
         Err(e) => {
@@ -381,7 +381,7 @@ pub async fn sync_all_configured(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nuncio_core::{AccountConfig, AccountProtocol, CoreEvent, TlsMode};
+    use nuncio_core::{AccountConfig, CoreEvent, DavTransport, JmapTransport, Transport};
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::{sleep, Duration};
@@ -628,22 +628,19 @@ mod tests {
             id: id.to_string(),
             name: "Test".to_string(),
             email_address: format!("{id}@nuncio.mx"),
-            protocol: AccountProtocol::Jmap,
-            server_host: "jmap.nuncio.mx".to_string(),
-            server_port: 443,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
-            imap_tls_mode: TlsMode::ImplicitTls,
-            smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: Transport::Jmap(JmapTransport {
+                endpoint_host: "jmap.nuncio.mx".to_string(),
+            }),
         }
     }
 
     fn caldav_account(id: &str) -> AccountConfig {
         AccountConfig {
-            protocol: AccountProtocol::CalDav,
+            transport: Transport::Dav(DavTransport {
+                collection_url: "https://dav.nuncio.mx/cal/".to_string(),
+            }),
             ..jmap_account(id)
         }
     }

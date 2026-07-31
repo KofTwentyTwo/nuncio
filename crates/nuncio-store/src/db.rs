@@ -954,7 +954,52 @@ impl DatabaseEngine {
         &self,
         config: &nuncio_core::AccountConfig,
     ) -> Result<(), DatabaseError> {
-        let protocol_str = serde_json::to_string(&config.protocol).unwrap_or_default();
+        use nuncio_core::{TlsMode, Transport};
+
+        let protocol_str = serde_json::to_string(&config.protocol()).unwrap_or_default();
+        // Flatten the single active transport onto the physical columns. The
+        // `protocol` column doubles as the transport-kind discriminator that
+        // `list_accounts` reads back to reconstruct the exact variant. Columns
+        // that a given transport does not use are written empty/zero (and a
+        // default TLS mode for the NOT NULL `*_tls_mode` columns); they are
+        // ignored on load for that transport.
+        let (
+            server_host,
+            server_port,
+            imap_tls_mode,
+            smtp_host,
+            smtp_port,
+            smtp_tls_mode,
+            collection_url,
+        ) = match &config.transport {
+            Transport::ImapSmtp(t) => (
+                t.imap_host.clone(),
+                t.imap_port,
+                t.imap_tls_mode,
+                t.smtp_host.clone(),
+                t.smtp_port,
+                t.smtp_tls_mode,
+                String::new(),
+            ),
+            Transport::Jmap(t) => (
+                t.endpoint_host.clone(),
+                0u16,
+                TlsMode::ImplicitTls,
+                String::new(),
+                0u16,
+                TlsMode::ImplicitTls,
+                String::new(),
+            ),
+            Transport::Dav(t) => (
+                String::new(),
+                0u16,
+                TlsMode::ImplicitTls,
+                String::new(),
+                0u16,
+                TlsMode::ImplicitTls,
+                t.collection_url.clone(),
+            ),
+        };
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO accounts
@@ -966,8 +1011,8 @@ impl DatabaseEngine {
         .bind(&config.name)
         .bind(&config.email_address)
         .bind(protocol_str)
-        .bind(&config.server_host)
-        .bind(config.server_port as i64)
+        .bind(&server_host)
+        .bind(i64::from(server_port))
         // `use_tls` is a retained-but-unread on-disk column (see the
         // `CREATE TABLE`'s comment) -- written as a fixed placeholder since
         // no `AccountConfig` field backs it anymore, satisfying its
@@ -977,11 +1022,11 @@ impl DatabaseEngine {
         .bind(1i64)
         .bind(&config.keyring_secret_key)
         .bind(config.sync_interval_secs as i64)
-        .bind(&config.smtp_host)
-        .bind(config.smtp_port as i64)
-        .bind(tls_mode_to_db(config.imap_tls_mode))
-        .bind(tls_mode_to_db(config.smtp_tls_mode))
-        .bind(&config.collection_url)
+        .bind(&smtp_host)
+        .bind(i64::from(smtp_port))
+        .bind(tls_mode_to_db(imap_tls_mode))
+        .bind(tls_mode_to_db(smtp_tls_mode))
+        .bind(&collection_url)
         .execute(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
@@ -1057,31 +1102,50 @@ impl DatabaseEngine {
                 )| {
                     let protocol = serde_json::from_str(&protocol_str)
                         .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
-                    // Backfill-safe fallback: a row
-                    // written before `smtp_host`/`smtp_port` existed has
-                    // `NULL` in both columns (see
-                    // `Self::ensure_accounts_smtp_columns`). Rather than
-                    // surface an incomplete/invalid config, fall back to the
-                    // same host/port already used for IMAP/JMAP -- the best
-                    // available default for an account configured before
-                    // outbound mail had its own endpoint.
-                    let resolved_smtp_host = smtp_host.unwrap_or_else(|| server_host.clone());
-                    let resolved_smtp_port =
-                        smtp_port.map(|p| p as u16).unwrap_or(server_port as u16);
+                    // Reconstruct the exact transport variant from the
+                    // `protocol` discriminator column, reading only the columns
+                    // that variant uses (see `save_account`).
+                    let transport = match protocol {
+                        nuncio_core::AccountProtocol::ImapSmtp => {
+                            // Backfill-safe fallback: a row written before
+                            // `smtp_host`/`smtp_port` existed has `NULL` in both
+                            // columns (see `Self::ensure_accounts_smtp_columns`).
+                            // Rather than surface an incomplete/invalid config,
+                            // fall back to the same host/port already used for
+                            // IMAP -- the best available default for an account
+                            // configured before outbound mail had its own
+                            // endpoint.
+                            let resolved_smtp_host =
+                                smtp_host.unwrap_or_else(|| server_host.clone());
+                            let resolved_smtp_port =
+                                smtp_port.map(|p| p as u16).unwrap_or(server_port as u16);
+                            nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                                imap_host: server_host,
+                                imap_port: server_port as u16,
+                                imap_tls_mode: tls_mode_from_db(&imap_tls_mode),
+                                smtp_host: resolved_smtp_host,
+                                smtp_port: resolved_smtp_port,
+                                smtp_tls_mode: tls_mode_from_db(&smtp_tls_mode),
+                            })
+                        }
+                        nuncio_core::AccountProtocol::Jmap => {
+                            nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+                                endpoint_host: server_host,
+                            })
+                        }
+                        nuncio_core::AccountProtocol::CalDav => {
+                            nuncio_core::Transport::Dav(nuncio_core::DavTransport {
+                                collection_url: collection_url.unwrap_or_default(),
+                            })
+                        }
+                    };
                     nuncio_core::AccountConfig {
                         id,
                         name,
                         email_address,
-                        protocol,
-                        server_host,
-                        server_port: server_port as u16,
-                        smtp_host: resolved_smtp_host,
-                        smtp_port: resolved_smtp_port,
-                        imap_tls_mode: tls_mode_from_db(&imap_tls_mode),
-                        smtp_tls_mode: tls_mode_from_db(&smtp_tls_mode),
                         keyring_secret_key,
                         sync_interval_secs: sync_interval_secs as u64,
-                        collection_url: collection_url.unwrap_or_default(),
+                        transport,
                     }
                 },
             )
@@ -2767,16 +2831,16 @@ mod tests {
                 id: "acct-contended-1".to_string(),
                 name: "Contended Account".to_string(),
                 email_address: "contended@nuncio.mx".to_string(),
-                protocol: nuncio_core::AccountProtocol::ImapSmtp,
-                server_host: "imap.nuncio.mx".to_string(),
-                server_port: 993,
-                smtp_host: "smtp.nuncio.mx".to_string(),
-                smtp_port: 465,
-                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-contended-1".to_string(),
                 sync_interval_secs: 60,
-                collection_url: String::new(),
+                transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                    imap_host: "imap.nuncio.mx".to_string(),
+                    imap_port: 993,
+                    imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                    smtp_host: "smtp.nuncio.mx".to_string(),
+                    smtp_port: 465,
+                    smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                }),
             };
             engine.save_account(&acct).await.unwrap();
             engine.close().await;
@@ -3346,16 +3410,16 @@ mod tests {
             id: "acct-test-1".to_string(),
             name: "Work Account".to_string(),
             email_address: "work@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-test-1".to_string(),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            }),
         };
 
         engine
@@ -3369,8 +3433,9 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "acct-test-1");
         assert_eq!(accounts[0].email_address, "work@nuncio.mx");
-        assert_eq!(accounts[0].smtp_host, "smtp.nuncio.mx");
-        assert_eq!(accounts[0].smtp_port, 465);
+        let t = accounts[0].imap_smtp().expect("imap-smtp transport");
+        assert_eq!(t.smtp_host, "smtp.nuncio.mx");
+        assert_eq!(t.smtp_port, 465);
     }
 
     /// Regression proof that the per-protocol TLS transport modes are
@@ -3389,32 +3454,34 @@ mod tests {
             id: "acct-tls-1".to_string(),
             name: "Mixed TLS Account".to_string(),
             email_address: "mixed@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 143,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 25,
-            imap_tls_mode: nuncio_core::TlsMode::StartTls,
-            smtp_tls_mode: nuncio_core::TlsMode::Plain,
             keyring_secret_key: "nuncio/acct-tls-1".to_string(),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 143,
+                imap_tls_mode: nuncio_core::TlsMode::StartTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 25,
+                smtp_tls_mode: nuncio_core::TlsMode::Plain,
+            }),
         };
 
         engine.save_account(&acct).await.expect("save succeeds");
 
         let listed = engine.list_accounts().await.expect("list succeeds");
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].imap_tls_mode, nuncio_core::TlsMode::StartTls);
-        assert_eq!(listed[0].smtp_tls_mode, nuncio_core::TlsMode::Plain);
+        let lt = listed[0].imap_smtp().expect("imap-smtp transport");
+        assert_eq!(lt.imap_tls_mode, nuncio_core::TlsMode::StartTls);
+        assert_eq!(lt.smtp_tls_mode, nuncio_core::TlsMode::Plain);
 
         let fetched = engine
             .get_account("acct-tls-1")
             .await
             .expect("get succeeds")
             .expect("account present");
-        assert_eq!(fetched.imap_tls_mode, nuncio_core::TlsMode::StartTls);
-        assert_eq!(fetched.smtp_tls_mode, nuncio_core::TlsMode::Plain);
+        let ft = fetched.imap_smtp().expect("imap-smtp transport");
+        assert_eq!(ft.imap_tls_mode, nuncio_core::TlsMode::StartTls);
+        assert_eq!(ft.smtp_tls_mode, nuncio_core::TlsMode::Plain);
         assert_eq!(fetched, acct);
     }
 
@@ -3429,16 +3496,11 @@ mod tests {
             id: "acct-caldav-store-1".to_string(),
             name: "Work Calendar".to_string(),
             email_address: "cal@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::CalDav,
-            server_host: String::new(),
-            server_port: 0,
-            smtp_host: String::new(),
-            smtp_port: 0,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-caldav-store-1".to_string(),
             sync_interval_secs: 300,
-            collection_url: "https://dav.example.com/calendars/user/work/".to_string(),
+            transport: nuncio_core::Transport::Dav(nuncio_core::DavTransport {
+                collection_url: "https://dav.example.com/calendars/user/work/".to_string(),
+            }),
         };
         engine.save_account(&caldav).await.expect("save succeeds");
 
@@ -3448,11 +3510,75 @@ mod tests {
             .expect("get succeeds")
             .expect("account present");
         assert_eq!(fetched, caldav);
-        assert_eq!(fetched.protocol, nuncio_core::AccountProtocol::CalDav);
+        assert_eq!(fetched.protocol(), nuncio_core::AccountProtocol::CalDav);
         assert_eq!(
-            fetched.collection_url,
-            "https://dav.example.com/calendars/user/work/"
+            fetched.dav_collection_url(),
+            Some("https://dav.example.com/calendars/user/work/")
         );
+    }
+
+    /// Regression proof that accounts of DIFFERENT transports coexist on disk
+    /// and each loads back as its exact original transport variant -- the flat
+    /// physical columns must not blur one transport into another on reload.
+    #[tokio::test]
+    async fn distinct_transport_accounts_round_trip_to_their_own_variant() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let imap = nuncio_core::AccountConfig {
+            id: "acct-mix-imap".to_string(),
+            name: "IMAP Account".to_string(),
+            email_address: "imap@nuncio.mx".to_string(),
+            keyring_secret_key: "nuncio/acct-mix-imap".to_string(),
+            sync_interval_secs: 60,
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 143,
+                imap_tls_mode: nuncio_core::TlsMode::StartTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 587,
+                smtp_tls_mode: nuncio_core::TlsMode::StartTls,
+            }),
+        };
+        let jmap = nuncio_core::AccountConfig {
+            id: "acct-mix-jmap".to_string(),
+            name: "JMAP Account".to_string(),
+            email_address: "jmap@nuncio.mx".to_string(),
+            keyring_secret_key: "nuncio/acct-mix-jmap".to_string(),
+            sync_interval_secs: 120,
+            transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+                endpoint_host: "jmap.nuncio.mx".to_string(),
+            }),
+        };
+        let dav = nuncio_core::AccountConfig {
+            id: "acct-mix-dav".to_string(),
+            name: "DAV Account".to_string(),
+            email_address: "dav@nuncio.mx".to_string(),
+            keyring_secret_key: "nuncio/acct-mix-dav".to_string(),
+            sync_interval_secs: 300,
+            transport: nuncio_core::Transport::Dav(nuncio_core::DavTransport {
+                collection_url: "https://dav.example.com/cal/".to_string(),
+            }),
+        };
+
+        for acct in [&imap, &jmap, &dav] {
+            engine.save_account(acct).await.expect("save succeeds");
+        }
+
+        let reload = |id: &str| {
+            let engine = &engine;
+            let id = id.to_string();
+            async move {
+                engine
+                    .get_account(&id)
+                    .await
+                    .expect("get succeeds")
+                    .expect("account present")
+            }
+        };
+
+        assert_eq!(reload("acct-mix-imap").await, imap);
+        assert_eq!(reload("acct-mix-jmap").await, jmap);
+        assert_eq!(reload("acct-mix-dav").await, dav);
     }
 
     /// Proves `get_account` resolves a saved account by id and returns `None`
@@ -3466,16 +3592,16 @@ mod tests {
             id: "acct-del-1".to_string(),
             name: "Deletable".to_string(),
             email_address: "del@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-del-1".to_string(),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            }),
         };
         engine.save_account(&acct).await.expect("save succeeds");
 
@@ -3640,8 +3766,9 @@ mod tests {
         assert_eq!(acct.id, "acct-pre-migration");
         // Falls back to the IMAP/JMAP endpoint since smtp_host/smtp_port
         // were NULL for this pre-existing row.
-        assert_eq!(acct.smtp_host, "imap.nuncio.mx");
-        assert_eq!(acct.smtp_port, 993);
+        let acct_t = acct.imap_smtp().expect("imap-smtp transport");
+        assert_eq!(acct_t.smtp_host, "imap.nuncio.mx");
+        assert_eq!(acct_t.smtp_port, 993);
 
         // Step 3: re-running migrate() (e.g. a second daemon startup against
         // the same file) must be a no-op, not an error.
@@ -3657,16 +3784,16 @@ mod tests {
             id: "acct-post-migration".to_string(),
             name: "Post Migration Account".to_string(),
             email_address: "post@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 587,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::StartTls,
             keyring_secret_key: "nuncio/acct-post-migration".to_string(),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 587,
+                smtp_tls_mode: nuncio_core::TlsMode::StartTls,
+            }),
         };
         engine
             .save_account(&new_acct)
@@ -3677,8 +3804,9 @@ mod tests {
             .iter()
             .find(|a| a.id == "acct-post-migration")
             .expect("newly saved account present");
-        assert_eq!(post.smtp_host, "smtp.nuncio.mx");
-        assert_eq!(post.smtp_port, 587);
+        let post_t = post.imap_smtp().expect("imap-smtp transport");
+        assert_eq!(post_t.smtp_host, "smtp.nuncio.mx");
+        assert_eq!(post_t.smtp_port, 587);
 
         engine.close().await;
     }

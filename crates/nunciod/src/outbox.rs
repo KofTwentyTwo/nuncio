@@ -470,10 +470,13 @@ impl RemoteExecutionEnv for ProductionExecutionEnv {
     ) -> Result<Box<dyn MessageSender>, OutboxExecuteError> {
         let config = self.account(account_id).await?;
         let password = self.secrets.get_secret(&config.keyring_secret_key)?;
+        let transport = config
+            .imap_smtp()
+            .ok_or_else(|| OutboxExecuteError::NotAMailAccount(account_id.to_string()))?;
         let engine = SmtpTransportEngine::new(
-            &config.smtp_host,
-            config.smtp_port,
-            config.smtp_tls_mode,
+            &transport.smtp_host,
+            transport.smtp_port,
+            transport.smtp_tls_mode,
             &config.email_address,
             &password,
         )?;

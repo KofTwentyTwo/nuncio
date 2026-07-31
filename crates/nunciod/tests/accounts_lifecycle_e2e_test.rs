@@ -29,7 +29,7 @@
 use nuncio_core::EventBus;
 use nuncio_filter::FilterEngine;
 use nuncio_proto::v1::{
-    AccountConfig, AccountProtocol, AddAccountRequest, ListAccountsRequest, RemoveAccountRequest,
+    AccountConfig, AddAccountRequest, ListAccountsRequest, RemoveAccountRequest,
     TestAccountConnectionRequest, TlsMode, UpdateAccountRequest,
 };
 use nuncio_store::db::DatabaseEngine;
@@ -41,6 +41,15 @@ use nunciod::grpc::{
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
+
+/// Extract the IMAP/SMTP transport sub-message from a wire `AccountConfig`,
+/// panicking if the account is not an IMAP/SMTP account (test-only helper).
+fn imap_smtp_transport(config: &AccountConfig) -> &nuncio_proto::v1::ImapSmtpTransport {
+    match &config.transport {
+        Some(nuncio_proto::v1::account_config::Transport::ImapSmtp(t)) => t,
+        _ => panic!("expected an IMAP/SMTP account"),
+    }
+}
 
 const ACCOUNT_ID: &str = "acct-lifecycle-e2e-1";
 const ACCOUNT_EMAIL: &str = "lifecycle-e2e@nuncio.mx";
@@ -79,16 +88,18 @@ fn sample_account_config() -> AccountConfig {
         id: ACCOUNT_ID.to_string(),
         name: "Lifecycle E2E Account".to_string(),
         email_address: ACCOUNT_EMAIL.to_string(),
-        protocol: AccountProtocol::ImapSmtp.into(),
-        server_host: "imap.nuncio.mx".to_string(),
-        server_port: 143,
-        imap_tls_mode: TlsMode::StartTls.into(),
-        smtp_tls_mode: TlsMode::Plain.into(),
         keyring_secret_key: KEYRING_KEY.to_string(),
         sync_interval: Some(nuncio_proto::time::duration_from_secs(60)),
-        smtp_host: "127.0.0.1".to_string(),
-        smtp_port: 25,
-        collection_url: String::new(),
+        transport: Some(nuncio_proto::v1::account_config::Transport::ImapSmtp(
+            nuncio_proto::v1::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 143,
+                imap_tls_mode: TlsMode::StartTls.into(),
+                smtp_host: "127.0.0.1".to_string(),
+                smtp_port: 25,
+                smtp_tls_mode: TlsMode::Plain.into(),
+            },
+        )),
     }
 }
 
@@ -179,13 +190,18 @@ async fn account_lifecycle_round_trips_over_authenticated_grpc_offline() {
         .into_inner()
         .accounts;
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].imap_tls_mode(), TlsMode::StartTls);
-    assert_eq!(listed[0].smtp_tls_mode(), TlsMode::Plain);
+    let listed_t = imap_smtp_transport(&listed[0]);
+    assert_eq!(listed_t.imap_tls_mode(), TlsMode::StartTls);
+    assert_eq!(listed_t.smtp_tls_mode(), TlsMode::Plain);
 
     // ---- (c) UpdateAccount genuinely mutates the persisted config ----
     let mut updated = sample_account_config();
     updated.name = "Renamed Lifecycle Account".to_string();
-    updated.imap_tls_mode = TlsMode::ImplicitTls.into();
+    if let Some(nuncio_proto::v1::account_config::Transport::ImapSmtp(t)) =
+        updated.transport.as_mut()
+    {
+        t.imap_tls_mode = TlsMode::ImplicitTls.into();
+    }
     accounts_client
         .update_account(UpdateAccountRequest {
             config: Some(updated),
@@ -202,9 +218,10 @@ async fn account_lifecycle_round_trips_over_authenticated_grpc_offline() {
         .accounts;
     assert_eq!(relisted.len(), 1);
     assert_eq!(relisted[0].name, "Renamed Lifecycle Account");
-    assert_eq!(relisted[0].imap_tls_mode(), TlsMode::ImplicitTls);
+    let relisted_t = imap_smtp_transport(&relisted[0]);
+    assert_eq!(relisted_t.imap_tls_mode(), TlsMode::ImplicitTls);
     // Untouched fields survive the update.
-    assert_eq!(relisted[0].smtp_tls_mode(), TlsMode::Plain);
+    assert_eq!(relisted_t.smtp_tls_mode(), TlsMode::Plain);
 
     // ---- (d) TestAccountConnection reports the GENUINE per-protocol result ----
     let report = accounts_client

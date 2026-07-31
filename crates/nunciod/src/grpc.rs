@@ -14,6 +14,7 @@ use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
 use nuncio_mail::{ImapEngine, MailBackend, MessageSender, SmtpTransportEngine};
 use nuncio_proto::errors;
+use nuncio_proto::v1::account_config::Transport as TransportProto;
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::audit_server::{Audit, AuditServer};
 use nuncio_proto::v1::calendar_server::{Calendar, CalendarServer};
@@ -25,25 +26,25 @@ use nuncio_proto::v1::mail_server::{Mail, MailServer};
 use nuncio_proto::v1::system_server::{System, SystemServer};
 use nuncio_proto::v1::ErrorReason;
 use nuncio_proto::v1::{
-    export_request, AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
-    AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto,
-    AuditRecord as AuditRecordProto, BatchFilterProgress, CalendarEvent as CalendarEventProto,
-    CalendarSyncRequest, CalendarSyncResponse, Contact as ContactProto,
-    ContactEmail as ContactEmailProto, ContactPhone as ContactPhoneProto, ContactsSyncRequest,
-    ContactsSyncResponse, CreateContactRequest, CreateContactResponse, CreateRuleRequest,
-    CreateRuleResponse, DatabaseRecovered, DeleteRuleRequest, DeleteRuleResponse, Event,
-    EventError, ExportFormat as ExportFormatProto, ExportRequest, ExportResponse,
-    ExportRulesRequest, ExportRulesResponse, FilterExecuted,
+    export_request, AccountConfig as AccountConfigProto, AddAccountRequest, AddAccountResponse,
+    Attachment as AttachmentProto, AuditRecord as AuditRecordProto, BatchFilterProgress,
+    CalendarEvent as CalendarEventProto, CalendarSyncRequest, CalendarSyncResponse,
+    Contact as ContactProto, ContactEmail as ContactEmailProto, ContactPhone as ContactPhoneProto,
+    ContactsSyncRequest, ContactsSyncResponse, CreateContactRequest, CreateContactResponse,
+    CreateRuleRequest, CreateRuleResponse, DatabaseRecovered, DavTransport as DavTransportProto,
+    DeleteRuleRequest, DeleteRuleResponse, Event, EventError, ExportFormat as ExportFormatProto,
+    ExportRequest, ExportResponse, ExportRulesRequest, ExportRulesResponse, FilterExecuted,
     FilterExecutionLog as FilterExecutionLogProto, FilterRule as FilterRuleProto,
     Folder as FolderProto, GetContactRequest, GetContactResponse, GetEventRequest,
     GetEventResponse, GetExecutionLogsRequest, GetExecutionLogsResponse, GetMessageRequest,
-    GetMessageResponse, GetStatusRequest, GetStatusResponse, ImportRulesRequest,
-    ImportRulesResponse, ListAccountsRequest, ListAccountsResponse, ListContactsRequest,
-    ListContactsResponse, ListEventsRequest, ListEventsResponse, ListFoldersRequest,
-    ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, ListRecordsRequest,
-    ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest, MarkReadResponse,
-    Message as MessageProto, MessageFlagsChanged, MessageSearchHit, PreviewRuleRequest,
-    PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse,
+    GetMessageResponse, GetStatusRequest, GetStatusResponse,
+    ImapSmtpTransport as ImapSmtpTransportProto, ImportRulesRequest, ImportRulesResponse,
+    JmapTransport as JmapTransportProto, ListAccountsRequest, ListAccountsResponse,
+    ListContactsRequest, ListContactsResponse, ListEventsRequest, ListEventsResponse,
+    ListFoldersRequest, ListFoldersResponse, ListMessagesRequest, ListMessagesResponse,
+    ListRecordsRequest, ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest,
+    MarkReadResponse, Message as MessageProto, MessageFlagsChanged, MessageSearchHit,
+    PreviewRuleRequest, PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse,
     RuleExportFormat as RuleExportFormatProto, SearchMessagesRequest, SearchMessagesResponse,
     SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
     SyncRequest, SyncResponse, SyncStarted, TestAccountConnectionRequest,
@@ -275,33 +276,6 @@ impl System for SystemGrpcService {
     }
 }
 
-/// Maps a `nuncio_core::AccountProtocol` onto its wire-format
-/// `nuncio.v1.AccountProtocol` enum value.
-fn map_account_protocol_to_proto(protocol: nuncio_core::AccountProtocol) -> AccountProtocolProto {
-    match protocol {
-        nuncio_core::AccountProtocol::Jmap => AccountProtocolProto::Jmap,
-        nuncio_core::AccountProtocol::ImapSmtp => AccountProtocolProto::ImapSmtp,
-        nuncio_core::AccountProtocol::CalDav => AccountProtocolProto::Caldav,
-    }
-}
-
-/// Maps a wire-format `nuncio.v1.AccountProtocol` enum value back onto
-/// `nuncio_core::AccountProtocol`. `Unspecified` is treated as an invalid
-/// request rather than silently defaulting to a protocol the caller never
-/// asked for.
-fn map_account_protocol_from_proto(
-    protocol: AccountProtocolProto,
-) -> Result<nuncio_core::AccountProtocol, Status> {
-    match protocol {
-        AccountProtocolProto::Jmap => Ok(nuncio_core::AccountProtocol::Jmap),
-        AccountProtocolProto::ImapSmtp => Ok(nuncio_core::AccountProtocol::ImapSmtp),
-        AccountProtocolProto::Caldav => Ok(nuncio_core::AccountProtocol::CalDav),
-        AccountProtocolProto::Unspecified => {
-            Err(Status::invalid_argument("account protocol is required"))
-        }
-    }
-}
-
 /// Maps a `nuncio_core::TlsMode` onto its wire-format `nuncio.v1.TlsMode`
 /// enum value.
 fn map_tls_mode_to_proto(mode: nuncio_core::TlsMode) -> TlsModeProto {
@@ -330,56 +304,93 @@ fn map_tls_mode_from_proto(mode: TlsModeProto) -> Result<nuncio_core::TlsMode, S
 /// in the OS keyring, keyed by `keyring_secret_key`), so there is nothing to
 /// scrub here -- there is simply no field to carry it.
 fn map_account_config_to_proto(config: nuncio_core::AccountConfig) -> AccountConfigProto {
+    let transport = match config.transport {
+        nuncio_core::Transport::ImapSmtp(t) => TransportProto::ImapSmtp(ImapSmtpTransportProto {
+            imap_host: t.imap_host,
+            imap_port: u32::from(t.imap_port),
+            imap_tls_mode: map_tls_mode_to_proto(t.imap_tls_mode).into(),
+            smtp_host: t.smtp_host,
+            smtp_port: u32::from(t.smtp_port),
+            smtp_tls_mode: map_tls_mode_to_proto(t.smtp_tls_mode).into(),
+        }),
+        nuncio_core::Transport::Jmap(t) => TransportProto::Jmap(JmapTransportProto {
+            endpoint_host: t.endpoint_host,
+        }),
+        nuncio_core::Transport::Dav(t) => TransportProto::Dav(DavTransportProto {
+            collection_url: t.collection_url,
+        }),
+    };
     AccountConfigProto {
         id: config.id,
         name: config.name,
         email_address: config.email_address,
-        protocol: map_account_protocol_to_proto(config.protocol).into(),
-        server_host: config.server_host,
-        server_port: u32::from(config.server_port),
-        imap_tls_mode: map_tls_mode_to_proto(config.imap_tls_mode).into(),
-        smtp_tls_mode: map_tls_mode_to_proto(config.smtp_tls_mode).into(),
         keyring_secret_key: config.keyring_secret_key,
         sync_interval: Some(nuncio_proto::time::duration_from_secs(
             config.sync_interval_secs,
         )),
-        smtp_host: config.smtp_host,
-        smtp_port: u32::from(config.smtp_port),
-        collection_url: config.collection_url,
+        transport: Some(transport),
     }
 }
 
 /// Maps a wire-format `nuncio.v1.AccountConfig` request payload back onto
-/// `nuncio_core::AccountConfig`. Rejects a `server_port` outside `1..=65535`
-/// with `Status::invalid_argument` rather than silently truncating it.
+/// `nuncio_core::AccountConfig`. An unset `transport` oneof is a typed
+/// `VALIDATION_FAILED` error rather than a panic or a silent default; a port
+/// outside `1..=65535` is likewise rejected rather than silently truncated.
 fn map_account_config_from_proto(
     config: AccountConfigProto,
 ) -> Result<nuncio_core::AccountConfig, Status> {
-    let protocol = map_account_protocol_from_proto(config.protocol())?;
-    let imap_tls_mode = map_tls_mode_from_proto(config.imap_tls_mode())?;
-    let smtp_tls_mode = map_tls_mode_from_proto(config.smtp_tls_mode())?;
-    let server_port = u16::try_from(config.server_port)
-        .map_err(|_| Status::invalid_argument("server_port must be in range 1..=65535"))?;
-    let smtp_port = u16::try_from(config.smtp_port)
-        .map_err(|_| Status::invalid_argument("smtp_port must be in range 1..=65535"))?;
-    let sync_interval = config
-        .sync_interval
-        .ok_or_else(|| Status::invalid_argument("sync_interval is required"))?;
+    let sync_interval = config.sync_interval.ok_or_else(|| {
+        errors::status(ErrorReason::ValidationFailed, "sync_interval is required")
+    })?;
+
+    let transport = match config.transport {
+        Some(TransportProto::ImapSmtp(t)) => {
+            let imap_port = u16::try_from(t.imap_port).map_err(|_| {
+                errors::status(
+                    ErrorReason::ValidationFailed,
+                    "imap_port must be in range 1..=65535",
+                )
+            })?;
+            let smtp_port = u16::try_from(t.smtp_port).map_err(|_| {
+                errors::status(
+                    ErrorReason::ValidationFailed,
+                    "smtp_port must be in range 1..=65535",
+                )
+            })?;
+            // Resolve the TLS-mode enums (which borrow `t`) before moving the
+            // owned host strings out of `t`.
+            let imap_tls_mode = map_tls_mode_from_proto(t.imap_tls_mode())?;
+            let smtp_tls_mode = map_tls_mode_from_proto(t.smtp_tls_mode())?;
+            nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: t.imap_host,
+                imap_port,
+                imap_tls_mode,
+                smtp_host: t.smtp_host,
+                smtp_port,
+                smtp_tls_mode,
+            })
+        }
+        Some(TransportProto::Jmap(t)) => nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+            endpoint_host: t.endpoint_host,
+        }),
+        Some(TransportProto::Dav(t)) => nuncio_core::Transport::Dav(nuncio_core::DavTransport {
+            collection_url: t.collection_url,
+        }),
+        None => {
+            return Err(errors::status(
+                ErrorReason::ValidationFailed,
+                "account transport is required (one of imap_smtp, jmap, dav must be set)",
+            ))
+        }
+    };
 
     Ok(nuncio_core::AccountConfig {
         id: config.id,
         name: config.name,
         email_address: config.email_address,
-        protocol,
-        server_host: config.server_host,
-        server_port,
-        smtp_host: config.smtp_host,
-        smtp_port,
-        imap_tls_mode,
-        smtp_tls_mode,
         keyring_secret_key: config.keyring_secret_key,
         sync_interval_secs: nuncio_proto::time::duration_to_secs(&sync_interval),
-        collection_url: config.collection_url,
+        transport,
     })
 }
 
@@ -452,44 +463,50 @@ impl AccountConnectionTester for RealAccountConnectionTester {
         config: &nuncio_core::AccountConfig,
         password: &str,
     ) -> AccountConnectionReport {
-        let imap = match config.protocol {
-            nuncio_core::AccountProtocol::ImapSmtp => {
-                let engine = ImapEngine::with_credentials(
-                    &config.id,
-                    &config.server_host,
-                    config.server_port,
-                    config.imap_tls_mode,
-                    &config.email_address,
-                    password,
-                );
-                match engine.probe_connection().await {
-                    Ok(()) => ProtocolProbe::ok(),
-                    Err(e) => ProtocolProbe::failed(e.to_string()),
+        // Only an IMAP/SMTP account has mail endpoints to probe. A JMAP or DAV
+        // account has no IMAP/SMTP legs, so report that honestly rather than
+        // dialing fields that do not exist for it.
+        let transport = match &config.transport {
+            nuncio_core::Transport::ImapSmtp(t) => t,
+            nuncio_core::Transport::Jmap(_) => {
+                return AccountConnectionReport {
+                    imap: ProtocolProbe::failed(
+                        "IMAP connection probe is not applicable to a JMAP account".to_string(),
+                    ),
+                    smtp: ProtocolProbe::failed(
+                        "SMTP connection probe is not applicable to a JMAP account".to_string(),
+                    ),
                 }
             }
-            nuncio_core::AccountProtocol::Jmap => ProtocolProbe::failed(
-                "IMAP connection probe is not applicable to a JMAP account".to_string(),
-            ),
-            nuncio_core::AccountProtocol::CalDav => ProtocolProbe::failed(
-                "IMAP connection probe is not applicable to a CalDAV account".to_string(),
-            ),
+            nuncio_core::Transport::Dav(_) => {
+                return AccountConnectionReport {
+                    imap: ProtocolProbe::failed(
+                        "IMAP connection probe is not applicable to a CalDAV account".to_string(),
+                    ),
+                    smtp: ProtocolProbe::failed(
+                        "SMTP connection probe is not applicable to a CalDAV account".to_string(),
+                    ),
+                }
+            }
         };
 
-        // A CalDAV account has no SMTP endpoint to probe; report that honestly
-        // rather than dialing the (empty) mail endpoint fields.
-        if config.protocol == nuncio_core::AccountProtocol::CalDav {
-            return AccountConnectionReport {
-                imap,
-                smtp: ProtocolProbe::failed(
-                    "SMTP connection probe is not applicable to a CalDAV account".to_string(),
-                ),
-            };
-        }
+        let engine = ImapEngine::with_credentials(
+            &config.id,
+            &transport.imap_host,
+            transport.imap_port,
+            transport.imap_tls_mode,
+            &config.email_address,
+            password,
+        );
+        let imap = match engine.probe_connection().await {
+            Ok(()) => ProtocolProbe::ok(),
+            Err(e) => ProtocolProbe::failed(e.to_string()),
+        };
 
         let smtp = match SmtpTransportEngine::new(
-            &config.smtp_host,
-            config.smtp_port,
-            config.smtp_tls_mode,
+            &transport.smtp_host,
+            transport.smtp_port,
+            transport.smtp_tls_mode,
             &config.email_address,
             password,
         ) {
@@ -1037,7 +1054,7 @@ impl CalendarGrpcService {
             .await
             .map_err(|e| Status::internal(format!("failed to list accounts: {e}")))?
             .into_iter()
-            .filter(|a| a.protocol == nuncio_core::AccountProtocol::CalDav)
+            .filter(|a| a.is_dav())
             .filter(|a| req.account_id.is_empty() || a.id == req.account_id)
             .collect();
 
@@ -3493,17 +3510,36 @@ mod tests {
             id: id.to_string(),
             name: "Restart Test Account".to_string(),
             email_address: format!("{id}@nuncio.mx"),
-            protocol: AccountProtocolProto::ImapSmtp.into(),
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            imap_tls_mode: TlsModeProto::ImplicitTls.into(),
-            smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
             keyring_secret_key: keyring_secret_key.to_string(),
             sync_interval: Some(nuncio_proto::time::duration_from_secs(60)),
-            collection_url: String::new(),
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
+            transport: Some(TransportProto::ImapSmtp(ImapSmtpTransportProto {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: TlsModeProto::ImplicitTls.into(),
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
+            })),
         }
+    }
+
+    #[test]
+    fn account_config_from_proto_rejects_unset_transport_as_validation_failed() {
+        let config = AccountConfigProto {
+            id: "acct-no-transport".to_string(),
+            name: "No Transport".to_string(),
+            email_address: "no-transport@nuncio.mx".to_string(),
+            keyring_secret_key: "nuncio/acct-no-transport".to_string(),
+            sync_interval: Some(nuncio_proto::time::duration_from_secs(60)),
+            transport: None,
+        };
+        let err = map_account_config_from_proto(config)
+            .expect_err("an account with no transport must be rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            nuncio_proto::errors::error_reason(&err),
+            Some(ErrorReason::ValidationFailed),
+        );
     }
 
     #[tokio::test]
@@ -3885,16 +3921,16 @@ mod tests {
             id: "acct-rotate-1".to_string(),
             name: "Rotate Account".to_string(),
             email_address: "rotate@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: key.to_string(),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            }),
         };
 
         // Force `save_account` to fail for real by closing the pool, exactly
@@ -3928,16 +3964,16 @@ mod tests {
             id: "acct-rotate-2".to_string(),
             name: "Rotate Account 2".to_string(),
             email_address: "rotate2@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: key.to_string(),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            }),
         };
 
         db.close().await;
@@ -4542,16 +4578,16 @@ mod tests {
             id: "acct-send-1".to_string(),
             name: "Send Test Account".to_string(),
             email_address: "sender@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "127.0.0.1".to_string(),
-            smtp_port: 1,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-send-1".to_string(),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_host: "127.0.0.1".to_string(),
+                smtp_port: 1,
+                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            }),
         };
         db.save_account(&config).await.expect("save account");
         secrets
@@ -4710,16 +4746,16 @@ mod tests {
             id: "acct-injected-send-1".to_string(),
             name: "Injected Send Test Account".to_string(),
             email_address: "sender@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-injected-send-1".to_string(),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            }),
         };
         // Deliberately never stores a keyring credential -- this path must
         // never need one.
@@ -4826,16 +4862,16 @@ mod tests {
             id: "acct-injected-send-fail-1".to_string(),
             name: "Injected Send Failure Test Account".to_string(),
             email_address: "sender@nuncio.mx".to_string(),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
-            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-injected-send-fail-1".to_string(),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            }),
         };
         db.save_account(&config).await.expect("save account");
 

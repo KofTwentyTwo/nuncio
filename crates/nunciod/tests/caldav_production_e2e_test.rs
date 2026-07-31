@@ -20,8 +20,7 @@
 use nuncio_core::EventBus;
 use nuncio_filter::FilterEngine;
 use nuncio_proto::v1::{
-    AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
-    AddAccountRequest, CalendarSyncRequest, ListEventsRequest, TlsMode as TlsModeProto,
+    AccountConfig as AccountConfigProto, AddAccountRequest, CalendarSyncRequest, ListEventsRequest,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
@@ -158,16 +157,13 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
                 id: ACCOUNT_ID.to_string(),
                 name: "Work Calendar".to_string(),
                 email_address: ACCOUNT_EMAIL.to_string(),
-                protocol: AccountProtocolProto::Caldav.into(),
-                server_host: String::new(),
-                server_port: 0,
-                imap_tls_mode: TlsModeProto::ImplicitTls.into(),
-                smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
                 keyring_secret_key: KEYRING_KEY.to_string(),
                 sync_interval: Some(nuncio_proto::time::duration_from_secs(300)),
-                smtp_host: String::new(),
-                smtp_port: 0,
-                collection_url: collection_url.clone(),
+                transport: Some(nuncio_proto::v1::account_config::Transport::Dav(
+                    nuncio_proto::v1::DavTransport {
+                        collection_url: collection_url.clone(),
+                    },
+                )),
             }),
             password: CALDAV_PASSWORD.to_string(),
         })

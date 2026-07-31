@@ -152,16 +152,16 @@ mod tests {
                 id: "acct-orch-1".to_string(),
                 name: "Orch Account".to_string(),
                 email_address: "orch@nuncio.mx".to_string(),
-                protocol: nuncio_core::AccountProtocol::ImapSmtp,
-                server_host: "imap.nuncio.mx".to_string(),
-                server_port: 993,
-                smtp_host: "smtp.nuncio.mx".to_string(),
-                smtp_port: 465,
-                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-orch-1".to_string(),
                 sync_interval_secs: 60,
-                collection_url: String::new(),
+                transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                    imap_host: "imap.nuncio.mx".to_string(),
+                    imap_port: 993,
+                    imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                    smtp_host: "smtp.nuncio.mx".to_string(),
+                    smtp_port: 465,
+                    smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                }),
             };
             engine.save_account(&acct).await.unwrap();
             engine.close().await;

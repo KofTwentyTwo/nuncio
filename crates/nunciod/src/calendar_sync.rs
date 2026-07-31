@@ -74,7 +74,7 @@ pub async fn sync_caldav_account(
 ) -> Result<usize, CalendarSyncError> {
     let client = CalDavClient::new(CalDavAccountConfig {
         account_id: account.id.clone(),
-        caldav_url: account.collection_url.clone(),
+        caldav_url: account.dav_collection_url().unwrap_or_default().to_string(),
         username: account.email_address.clone(),
         auth_token: password.to_string(),
     });

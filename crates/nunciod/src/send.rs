@@ -68,6 +68,11 @@ pub enum SendError {
     /// rather than silently sending from a different account.
     #[error("no account configured with id {0:?}")]
     AccountNotFound(String),
+    /// The resolved account does not have an SMTP outbound endpoint (only an
+    /// IMAP/SMTP account can send outbound mail over SMTP; a JMAP or DAV
+    /// account cannot).
+    #[error("account {0:?} has no SMTP transport and cannot send outbound mail")]
+    NotAnSmtpAccount(String),
     /// Failed to read the account's credential from the secret vault.
     #[error("failed to read account credential from the secret vault: {0}")]
     Vault(#[from] VaultError),
@@ -120,10 +125,13 @@ fn build_smtp_sender(
     config: &AccountConfig,
     password: &str,
 ) -> Result<SmtpTransportEngine, SendError> {
+    let transport = config
+        .imap_smtp()
+        .ok_or_else(|| SendError::NotAnSmtpAccount(config.id.clone()))?;
     let engine = SmtpTransportEngine::new(
-        &config.smtp_host,
-        config.smtp_port,
-        config.smtp_tls_mode,
+        &transport.smtp_host,
+        transport.smtp_port,
+        transport.smtp_tls_mode,
         &config.email_address,
         password,
     )?;
@@ -233,16 +241,16 @@ mod tests {
             id: id.to_string(),
             name: "Send Test Account".to_string(),
             email_address: format!("{id}@nuncio.mx"),
-            protocol: nuncio_core::AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "127.0.0.1".to_string(),
-            smtp_port: 1,
-            imap_tls_mode: TlsMode::ImplicitTls,
-            smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: TlsMode::ImplicitTls,
+                smtp_host: "127.0.0.1".to_string(),
+                smtp_port: 1,
+                smtp_tls_mode: TlsMode::ImplicitTls,
+            }),
         }
     }
 
