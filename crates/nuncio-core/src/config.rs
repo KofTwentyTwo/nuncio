@@ -11,6 +11,21 @@ pub enum AccountProtocol {
     Jmap,
     /// Legacy IMAP4rev1 + SMTP protocol engines.
     ImapSmtp,
+    /// CalDAV (RFC 4791) calendar-collection protocol engine. A CalDAV
+    /// account is a standalone account entry addressed by its
+    /// `collection_url` and its own keyring credential; it does not use the
+    /// IMAP/JMAP/SMTP mail endpoints.
+    CalDav,
+}
+
+impl AccountProtocol {
+    /// Whether this protocol speaks WebDAV against a collection URL (as
+    /// opposed to a mail protocol addressed by host/port). Such accounts
+    /// require [`AccountConfig::collection_url`] and do not require the
+    /// IMAP/SMTP mail endpoint fields.
+    pub fn is_dav(self) -> bool {
+        matches!(self, AccountProtocol::CalDav)
+    }
 }
 
 /// Security and transport encryption mode for mail protocol streams (IMAP & SMTP).
@@ -43,6 +58,9 @@ pub enum ConfigError {
     /// The synchronization interval is too short (minimum 10 seconds).
     #[error("sync interval must be at least 10 seconds")]
     SyncIntervalTooShort,
+    /// A DAV-protocol account's collection URL is not a valid http(s) URL.
+    #[error("collection_url must be a valid http(s) URL")]
+    InvalidCollectionUrl,
 }
 
 /// Complete configuration schema for a mail & calendar account.
@@ -76,6 +94,12 @@ pub struct AccountConfig {
     pub keyring_secret_key: String,
     /// Background sync polling interval in seconds (minimum 10s).
     pub sync_interval_secs: u64,
+    /// Fully-qualified collection URL for DAV-protocol accounts (CalDAV
+    /// today, CardDAV later). Set for accounts whose protocol speaks WebDAV;
+    /// empty for mail accounts. This is a full URL (scheme + host + path),
+    /// not a bare host, because a DAV client dispatches requests directly at
+    /// the collection URL.
+    pub collection_url: String,
 }
 
 impl AccountConfig {
@@ -103,19 +127,34 @@ impl AccountConfig {
         {
             return Err(ConfigError::InvalidEmailFormat);
         }
-        if self.server_host.trim().is_empty() {
-            return Err(ConfigError::EmptyField {
-                field: "server_host",
-            });
-        }
-        if self.server_port == 0 {
-            return Err(ConfigError::InvalidPort);
-        }
-        if self.smtp_host.trim().is_empty() {
-            return Err(ConfigError::EmptyField { field: "smtp_host" });
-        }
-        if self.smtp_port == 0 {
-            return Err(ConfigError::InvalidPort);
+        if self.protocol.is_dav() {
+            // A DAV-protocol account is addressed by its collection URL, not
+            // by mail host/port endpoints, so it validates the URL instead of
+            // the IMAP/SMTP fields (which are left empty for such accounts).
+            let url = self.collection_url.trim();
+            if url.is_empty() {
+                return Err(ConfigError::EmptyField {
+                    field: "collection_url",
+                });
+            }
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err(ConfigError::InvalidCollectionUrl);
+            }
+        } else {
+            if self.server_host.trim().is_empty() {
+                return Err(ConfigError::EmptyField {
+                    field: "server_host",
+                });
+            }
+            if self.server_port == 0 {
+                return Err(ConfigError::InvalidPort);
+            }
+            if self.smtp_host.trim().is_empty() {
+                return Err(ConfigError::EmptyField { field: "smtp_host" });
+            }
+            if self.smtp_port == 0 {
+                return Err(ConfigError::InvalidPort);
+            }
         }
         if self.keyring_secret_key.trim().is_empty() {
             return Err(ConfigError::EmptyField {
@@ -149,7 +188,62 @@ mod tests {
             smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-123".to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         }
+    }
+
+    fn valid_caldav_account() -> AccountConfig {
+        AccountConfig {
+            id: "acct-cal-1".to_string(),
+            name: "Work Calendar".to_string(),
+            email_address: "user@nuncio.mx".to_string(),
+            protocol: AccountProtocol::CalDav,
+            server_host: String::new(),
+            server_port: 0,
+            smtp_host: String::new(),
+            smtp_port: 0,
+            use_tls: true,
+            imap_tls_mode: TlsMode::ImplicitTls,
+            smtp_tls_mode: TlsMode::ImplicitTls,
+            keyring_secret_key: "nuncio/acct-cal-1".to_string(),
+            sync_interval_secs: 300,
+            collection_url: "https://caldav.example.com/calendars/user/work/".to_string(),
+        }
+    }
+
+    #[test]
+    fn valid_caldav_account_passes_without_mail_endpoints() {
+        let config = valid_caldav_account();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn caldav_account_requires_collection_url() {
+        let mut config = valid_caldav_account();
+        config.collection_url = "  ".to_string();
+        assert_eq!(
+            config.validate().unwrap_err(),
+            ConfigError::EmptyField {
+                field: "collection_url"
+            }
+        );
+    }
+
+    #[test]
+    fn caldav_account_rejects_non_http_collection_url() {
+        let mut config = valid_caldav_account();
+        config.collection_url = "ftp://caldav.example.com/work/".to_string();
+        assert_eq!(
+            config.validate().unwrap_err(),
+            ConfigError::InvalidCollectionUrl
+        );
+    }
+
+    #[test]
+    fn account_protocol_is_dav_only_for_dav_protocols() {
+        assert!(AccountProtocol::CalDav.is_dav());
+        assert!(!AccountProtocol::Jmap.is_dav());
+        assert!(!AccountProtocol::ImapSmtp.is_dav());
     }
 
     #[test]
@@ -275,6 +369,11 @@ mod tests {
         assert_eq!(imap_json, "\"imap-smtp\"");
         let parsed_imap: AccountProtocol = serde_json::from_str(&imap_json).unwrap();
         assert_eq!(parsed_imap, AccountProtocol::ImapSmtp);
+
+        let caldav_json = serde_json::to_string(&AccountProtocol::CalDav).unwrap();
+        assert_eq!(caldav_json, "\"cal-dav\"");
+        let parsed_caldav: AccountProtocol = serde_json::from_str(&caldav_json).unwrap();
+        assert_eq!(parsed_caldav, AccountProtocol::CalDav);
     }
 
     #[test]

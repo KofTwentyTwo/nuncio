@@ -59,6 +59,10 @@ pub enum OutboxExecuteError {
     /// A database error occurred while resolving the account/message.
     #[error("database error: {0}")]
     Store(#[from] DatabaseError),
+    /// The resolved account is not a mail account (e.g. a CalDAV account), so
+    /// it has no mail backend to execute an outbound mutation against.
+    #[error("account '{0}' is not a mail account")]
+    NotAMailAccount(String),
 }
 
 /// Injectable seam for the resources a mutation needs: the per-account mail
@@ -423,7 +427,8 @@ impl RemoteExecutionEnv for ProductionExecutionEnv {
     ) -> Result<Box<dyn MailBackend>, OutboxExecuteError> {
         let config = self.account(account_id).await?;
         let password = self.secrets.get_secret(&config.keyring_secret_key)?;
-        Ok(crate::sync::build_mail_backend(&config, &password))
+        crate::sync::build_mail_backend(&config, &password)
+            .map_err(|_| OutboxExecuteError::NotAMailAccount(account_id.to_string()))
     }
 
     async fn message_sender(

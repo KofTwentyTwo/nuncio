@@ -39,6 +39,20 @@ fn map_tls_mode_to_proto(mode: nuncio_core::TlsMode) -> nuncio_proto::v1::TlsMod
     }
 }
 
+/// Parse an `account add --protocol` string into its wire-format
+/// `nuncio.v1.AccountProtocol` value. Accepts both the kebab-case
+/// serialization (`imap-smtp`) and common aliases.
+fn parse_account_protocol(protocol: &str) -> Result<nuncio_proto::v1::AccountProtocol, String> {
+    match protocol.to_ascii_lowercase().as_str() {
+        "imap-smtp" | "imap_smtp" | "imap" => Ok(nuncio_proto::v1::AccountProtocol::ImapSmtp),
+        "jmap" => Ok(nuncio_proto::v1::AccountProtocol::Jmap),
+        "caldav" | "cal-dav" | "cal_dav" => Ok(nuncio_proto::v1::AccountProtocol::Caldav),
+        other => Err(format!(
+            "invalid protocol '{other}' (expected imap-smtp, jmap, or caldav)"
+        )),
+    }
+}
+
 /// Renders a `nuncio.v1.Message` (as returned by the daemon's `Mail` gRPC
 /// service) into the JSON shape used by `mail list`/`mail read`'s
 /// `--json` output.
@@ -270,6 +284,8 @@ impl HeadlessRunner {
                 AccountSubcommand::List => self.handle_accounts_list(json_mode).await,
                 AccountSubcommand::Add {
                     email,
+                    protocol,
+                    collection_url,
                     imap_host,
                     imap_port,
                     smtp_host,
@@ -280,6 +296,8 @@ impl HeadlessRunner {
                 } => {
                     self.handle_add_account(
                         email,
+                        protocol,
+                        collection_url.as_deref(),
                         imap_host,
                         *imap_port,
                         smtp_host,
@@ -1603,6 +1621,8 @@ impl HeadlessRunner {
     async fn handle_add_account(
         &self,
         email: &str,
+        protocol: &str,
+        collection_url: Option<&str>,
         imap_host: &str,
         imap_port: u16,
         smtp_host: &str,
@@ -1621,23 +1641,43 @@ impl HeadlessRunner {
             Err(e) => return Self::render_error(&e, json_mode),
         };
 
+        let account_protocol = match parse_account_protocol(protocol) {
+            Ok(p) => p,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+        let is_caldav = account_protocol == nuncio_proto::v1::AccountProtocol::Caldav;
+        if is_caldav && collection_url.map(str::trim).unwrap_or_default().is_empty() {
+            return Self::render_error("a caldav account requires --collection-url", json_mode);
+        }
+
         let keyring_key = format!("nuncio/{}", email);
         let account_id = format!("acct-{}", email.replace('@', "-at-").replace('.', "-"));
 
+        // A CalDAV account is addressed by its collection URL, not by mail
+        // host/port endpoints, so those are left empty for it.
         let proto_config = nuncio_proto::v1::AccountConfig {
             id: account_id.clone(),
             name: email.to_string(),
             email_address: email.to_string(),
-            protocol: nuncio_proto::v1::AccountProtocol::ImapSmtp.into(),
-            server_host: imap_host.to_string(),
-            server_port: u32::from(imap_port),
+            protocol: account_protocol.into(),
+            server_host: if is_caldav {
+                String::new()
+            } else {
+                imap_host.to_string()
+            },
+            server_port: if is_caldav { 0 } else { u32::from(imap_port) },
             use_tls: true,
             imap_tls_mode: map_tls_mode_to_proto(imap_tls_mode).into(),
             smtp_tls_mode: map_tls_mode_to_proto(smtp_tls_mode).into(),
             keyring_secret_key: keyring_key.clone(),
             sync_interval_secs: 300,
-            smtp_host: smtp_host.to_string(),
-            smtp_port: u32::from(smtp_port),
+            smtp_host: if is_caldav {
+                String::new()
+            } else {
+                smtp_host.to_string()
+            },
+            smtp_port: if is_caldav { 0 } else { u32::from(smtp_port) },
+            collection_url: collection_url.unwrap_or_default().to_string(),
         };
 
         let mut client = match self.connect_accounts_client().await {
@@ -1654,7 +1694,23 @@ impl HeadlessRunner {
         {
             Ok(response) => {
                 let account_id = response.into_inner().id;
-                if json_mode {
+                if is_caldav {
+                    let collection = collection_url.unwrap_or_default();
+                    if json_mode {
+                        format_json(&json!({
+                            "configured": true,
+                            "account_id": account_id,
+                            "email": email,
+                            "protocol": "caldav",
+                            "collection_url": collection,
+                            "keyring_key": keyring_key
+                        }))
+                    } else {
+                        format!(
+                            "CalDAV account '{email}' (ID: {account_id}) added via nunciod daemon with collection URL {collection}"
+                        )
+                    }
+                } else if json_mode {
                     format_json(&json!({
                         "configured": true,
                         "account_id": account_id,
@@ -1716,6 +1772,7 @@ impl HeadlessRunner {
                                 "smtp_tls_mode": a.smtp_tls_mode().as_str_name(),
                                 "keyring_secret_key": a.keyring_secret_key,
                                 "sync_interval_secs": a.sync_interval_secs,
+                                "collection_url": a.collection_url,
                             })
                         })
                         .collect();
@@ -1726,17 +1783,24 @@ impl HeadlessRunner {
                         accounts.len()
                     );
                     for a in &accounts {
-                        out.push_str(&format!(
-                            "\n  [{}] {} <{}>  IMAP {}:{}  SMTP {}:{}  TLS={}",
-                            a.id,
-                            a.name,
-                            a.email_address,
-                            a.server_host,
-                            a.server_port,
-                            a.smtp_host,
-                            a.smtp_port,
-                            a.use_tls,
-                        ));
+                        if a.protocol() == nuncio_proto::v1::AccountProtocol::Caldav {
+                            out.push_str(&format!(
+                                "\n  [{}] {} <{}>  CalDAV {}",
+                                a.id, a.name, a.email_address, a.collection_url,
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                "\n  [{}] {} <{}>  IMAP {}:{}  SMTP {}:{}  TLS={}",
+                                a.id,
+                                a.name,
+                                a.email_address,
+                                a.server_host,
+                                a.server_port,
+                                a.smtp_host,
+                                a.smtp_port,
+                                a.use_tls,
+                            ));
+                        }
                     }
                     out
                 }
@@ -2413,6 +2477,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_account_protocol_accepts_known_names_and_rejects_garbage() {
+        assert_eq!(
+            parse_account_protocol("imap-smtp").expect("valid"),
+            nuncio_proto::v1::AccountProtocol::ImapSmtp
+        );
+        assert_eq!(
+            parse_account_protocol("jmap").expect("valid"),
+            nuncio_proto::v1::AccountProtocol::Jmap
+        );
+        assert_eq!(
+            parse_account_protocol("caldav").expect("valid"),
+            nuncio_proto::v1::AccountProtocol::Caldav
+        );
+        assert_eq!(
+            parse_account_protocol("CalDAV").expect("case-insensitive"),
+            nuncio_proto::v1::AccountProtocol::Caldav
+        );
+        let err = parse_account_protocol("smoke-signals").expect_err("garbage rejected");
+        assert!(err.contains("invalid protocol"));
+    }
+
+    /// `account add --protocol caldav` with no `--collection-url` must be
+    /// rejected BEFORE dialing the daemon -- proven by pointing at an address
+    /// nothing is listening on and confirming the failure is the validation
+    /// error, not a connection error.
+    #[tokio::test]
+    async fn account_add_caldav_requires_collection_url_before_dialing() {
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), "127.0.0.1:1".into())
+                .await
+                .expect("runner init");
+
+        let out = runner
+            .execute_command(
+                &Commands::Account {
+                    action: AccountSubcommand::Add {
+                        email: "cal@nuncio.mx".to_string(),
+                        protocol: "caldav".to_string(),
+                        collection_url: None,
+                        imap_host: "unused".to_string(),
+                        imap_port: 993,
+                        smtp_host: "unused".to_string(),
+                        smtp_port: 465,
+                        imap_mode: "implicit_tls".to_string(),
+                        smtp_mode: "implicit_tls".to_string(),
+                        password: crate::args::PasswordArg("pw".to_string()),
+                    },
+                },
+                false,
+            )
+            .await;
+        assert!(out.contains("requires --collection-url"));
+        assert!(!out.contains("unreachable"));
+    }
+
     /// `account add` must reject an invalid `--imap-mode`/`--smtp-mode`
     /// string BEFORE ever dialing the daemon -- proven here by pointing at
     /// an address nothing is listening on and confirming the failure is the
@@ -2429,6 +2549,8 @@ mod tests {
                 &Commands::Account {
                     action: AccountSubcommand::Add {
                         email: "x@y.com".to_string(),
+                        protocol: "imap-smtp".to_string(),
+                        collection_url: None,
                         imap_host: "imap.y.com".to_string(),
                         imap_port: 993,
                         smtp_host: "smtp.y.com".to_string(),
@@ -2449,6 +2571,8 @@ mod tests {
                 &Commands::Account {
                     action: AccountSubcommand::Add {
                         email: "x@y.com".to_string(),
+                        protocol: "imap-smtp".to_string(),
+                        collection_url: None,
                         imap_host: "imap.y.com".to_string(),
                         imap_port: 993,
                         smtp_host: "smtp.y.com".to_string(),
@@ -2690,6 +2814,7 @@ mod tests {
                         sync_interval_secs: 300,
                         smtp_host: "smtp.nuncio.mx".to_string(),
                         smtp_port: 465,
+                        collection_url: String::new(),
                     }],
                 }))
             }
@@ -2719,6 +2844,8 @@ mod tests {
                 &Commands::Account {
                     action: AccountSubcommand::Add {
                         email: "james.maes@kof22.com".to_string(),
+                        protocol: "imap-smtp".to_string(),
+                        collection_url: None,
                         imap_host: "mail.kof22.com".to_string(),
                         imap_port: 993,
                         smtp_host: "mail.kof22.com".to_string(),

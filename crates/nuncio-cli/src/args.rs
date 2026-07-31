@@ -202,11 +202,19 @@ pub enum UpdateSubcommand {
 pub enum AccountSubcommand {
     /// List all configured mail and calendar accounts.
     List,
-    /// Add and configure a new mail account securely.
+    /// Add and configure a new mail or CalDAV account securely.
     Add {
         /// Email address or account username.
         #[arg(short, long, help = "Email address or account username")]
         email: String,
+        /// Account protocol: imap-smtp (default), jmap, or caldav. A caldav
+        /// account requires --collection-url and ignores the IMAP/SMTP flags.
+        #[arg(long, default_value = "imap-smtp", help = "Account protocol")]
+        protocol: String,
+        /// Fully-qualified CalDAV calendar-collection URL (required for a
+        /// caldav account; ignored for mail accounts).
+        #[arg(long, help = "CalDAV calendar-collection URL (caldav only)")]
+        collection_url: Option<String>,
         /// IMAP server hostname.
         #[arg(long, default_value = "mail.kof22.com", help = "IMAP server hostname")]
         imap_host: String,
@@ -569,6 +577,8 @@ mod tests {
             Commands::Account {
                 action: AccountSubcommand::Add {
                     email: "james.maes@kof22.com".to_string(),
+                    protocol: "imap-smtp".to_string(),
+                    collection_url: None,
                     imap_host: "mail.kof22.com".to_string(),
                     imap_port: 993,
                     smtp_host: "mail.kof22.com".to_string(),

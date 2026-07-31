@@ -175,6 +175,10 @@ enum AccountProtocol {
   ACCOUNT_PROTOCOL_UNSPECIFIED = 0;
   ACCOUNT_PROTOCOL_JMAP = 1;
   ACCOUNT_PROTOCOL_IMAP_SMTP = 2;
+  // CalDAV (RFC 4791) calendar-collection account. A CalDAV account is its
+  // own first-class account entry: it carries `collection_url` and its own
+  // keyring credential, and does not require the IMAP/SMTP mail endpoints.
+  ACCOUNT_PROTOCOL_CALDAV = 3;
 }
 
 // Mirrors `nuncio_core::TlsMode`.
@@ -218,6 +222,12 @@ message AccountConfig {
   string smtp_host = 12;
   // SMTP server port number (1..=65535), used for outbound mail.
   uint32 smtp_port = 13;
+  // Fully-qualified collection URL for DAV-protocol accounts (e.g. a CalDAV
+  // calendar collection or, later, a CardDAV address-book collection). Set
+  // for accounts whose protocol speaks WebDAV; empty for mail accounts. This
+  // is a full URL (scheme + host + path), not a bare host, because a DAV
+  // client dispatches requests directly at the collection URL.
+  string collection_url = 14;
 }
 
 // AddAccountRequest carries the full account configuration plus the raw

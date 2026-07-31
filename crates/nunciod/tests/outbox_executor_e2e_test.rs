@@ -97,6 +97,7 @@ fn sample_account() -> nuncio_core::AccountConfig {
         smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
         keyring_secret_key: format!("nuncio/{ACCOUNT_ID}"),
         sync_interval_secs: 60,
+        collection_url: String::new(),
     }
 }
 
