@@ -663,7 +663,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected sync: {status}"),
+                &format!(
+                    "nunciod daemon rejected sync: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -701,7 +704,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected list_messages: {status}"),
+                &format!(
+                    "nunciod daemon rejected list_messages: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -757,7 +763,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected send_message: {status}"),
+                &format!(
+                    "nunciod daemon rejected send_message: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -800,7 +809,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected search_messages: {status}"),
+                &format!(
+                    "nunciod daemon rejected search_messages: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -838,7 +850,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected list_folders: {status}"),
+                &format!(
+                    "nunciod daemon rejected list_folders: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -877,7 +892,10 @@ impl HeadlessRunner {
                 Self::render_error(&format!("message '{}' not found", id), json_mode)
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected get_message: {status}"),
+                &format!(
+                    "nunciod daemon rejected get_message: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -930,7 +948,10 @@ impl HeadlessRunner {
                 Self::render_error(&format!("message '{}' not found", id), json_mode)
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected mark_read: {status}"),
+                &format!(
+                    "nunciod daemon rejected mark_read: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -997,7 +1018,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected export_mailbox: {status}"),
+                &format!(
+                    "nunciod daemon rejected export_mailbox: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1055,7 +1079,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected list_records: {status}"),
+                &format!(
+                    "nunciod daemon rejected list_records: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1096,7 +1123,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected verify_chain: {status}"),
+                &format!(
+                    "nunciod daemon rejected verify_chain: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1155,7 +1185,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected list_rules: {status}"),
+                &format!(
+                    "nunciod daemon rejected list_rules: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1204,7 +1237,10 @@ impl HeadlessRunner {
                 Self::render_error(status.message(), json_mode)
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected create_rule: {status}"),
+                &format!(
+                    "nunciod daemon rejected create_rule: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1232,7 +1268,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected delete_rule: {status}"),
+                &format!(
+                    "nunciod daemon rejected delete_rule: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1267,7 +1306,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected validate_rule: {status}"),
+                &format!(
+                    "nunciod daemon rejected validate_rule: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1320,7 +1362,10 @@ impl HeadlessRunner {
                 Self::render_error(status.message(), json_mode)
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected preview_rule: {status}"),
+                &format!(
+                    "nunciod daemon rejected preview_rule: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1372,7 +1417,10 @@ impl HeadlessRunner {
                 Self::render_error(status.message(), json_mode)
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected update_rule: {status}"),
+                &format!(
+                    "nunciod daemon rejected update_rule: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1403,7 +1451,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected export_rules: {status}"),
+                &format!(
+                    "nunciod daemon rejected export_rules: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1454,7 +1505,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected import_rules: {status}"),
+                &format!(
+                    "nunciod daemon rejected import_rules: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1498,7 +1552,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected get_execution_logs: {status}"),
+                &format!(
+                    "nunciod daemon rejected get_execution_logs: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1530,7 +1587,10 @@ impl HeadlessRunner {
             Ok(response) => response.into_inner(),
             Err(status) => {
                 return Self::render_error(
-                    &format!("nunciod daemon rejected triage: {status}"),
+                    &format!(
+                        "nunciod daemon rejected triage: {}",
+                        Self::clean_status_message(&status)
+                    ),
                     json_mode,
                 )
             }
@@ -1559,7 +1619,10 @@ impl HeadlessRunner {
                 Ok(None) => break,
                 Err(status) => {
                     return Self::render_error(
-                        &format!("nunciod daemon triage stream failed: {status}"),
+                        &format!(
+                            "nunciod daemon triage stream failed: {}",
+                            Self::clean_status_message(&status)
+                        ),
                         json_mode,
                     )
                 }
@@ -1731,7 +1794,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected add_account: {status}"),
+                &format!(
+                    "nunciod daemon rejected add_account: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1806,7 +1872,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected list_accounts: {status}"),
+                &format!(
+                    "nunciod daemon rejected list_accounts: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1825,7 +1894,12 @@ impl HeadlessRunner {
         let accounts = client
             .list_accounts(nuncio_proto::v1::ListAccountsRequest {})
             .await
-            .map_err(|status| format!("nunciod daemon rejected list_accounts: {status}"))?
+            .map_err(|status| {
+                format!(
+                    "nunciod daemon rejected list_accounts: {}",
+                    Self::clean_status_message(&status)
+                )
+            })?
             .into_inner()
             .accounts;
         accounts
@@ -1947,7 +2021,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected update_account: {status}"),
+                &format!(
+                    "nunciod daemon rejected update_account: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -1975,7 +2052,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected remove_account: {status}"),
+                &format!(
+                    "nunciod daemon rejected remove_account: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -2029,7 +2109,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected test_account_connection: {status}"),
+                &format!(
+                    "nunciod daemon rejected test_account_connection: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -2127,7 +2210,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected list_events: {status}"),
+                &format!(
+                    "nunciod daemon rejected list_events: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -2172,7 +2258,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected calendar sync: {status}"),
+                &format!(
+                    "nunciod daemon rejected calendar sync: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -2225,7 +2314,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected list_contacts: {status}"),
+                &format!(
+                    "nunciod daemon rejected list_contacts: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -2271,7 +2363,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected list_contacts: {status}"),
+                &format!(
+                    "nunciod daemon rejected list_contacts: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -2329,7 +2424,10 @@ impl HeadlessRunner {
                 ),
             },
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected create_contact: {status}"),
+                &format!(
+                    "nunciod daemon rejected create_contact: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -2363,7 +2461,10 @@ impl HeadlessRunner {
                 }
             }
             Err(status) => Self::render_error(
-                &format!("nunciod daemon rejected contacts sync: {status}"),
+                &format!(
+                    "nunciod daemon rejected contacts sync: {}",
+                    Self::clean_status_message(&status)
+                ),
                 json_mode,
             ),
         }
@@ -2376,6 +2477,22 @@ impl HeadlessRunner {
             format_json_error(message)
         } else {
             format!("Error: {message}")
+        }
+    }
+
+    /// Extracts the clean, user-facing text from a `tonic::Status` returned
+    /// by a daemon RPC. Uses the server-provided message when present;
+    /// falls back to a short "<code> error" form when the message is empty.
+    /// Callers MUST use this (never the `Display`/`Debug` of `tonic::Status`
+    /// directly) for user-facing output, since `Display`/`Debug` on
+    /// `tonic::Status` dumps raw gRPC internals (`status: ..., metadata:
+    /// MetadataMap { ... }`) that are meaningless to a CLI user.
+    fn clean_status_message(status: &tonic::Status) -> String {
+        let message = status.message();
+        if message.is_empty() {
+            format!("{:?} error", status.code())
+        } else {
+            message.to_string()
         }
     }
 
@@ -2431,7 +2548,12 @@ impl HeadlessRunner {
         let response = client
             .get_status(nuncio_proto::v1::GetStatusRequest {})
             .await
-            .map_err(|e| format!("nunciod daemon rejected status request: {e}"))?
+            .map_err(|status| {
+                format!(
+                    "nunciod daemon rejected status request: {}",
+                    Self::clean_status_message(&status)
+                )
+            })?
             .into_inner();
 
         Ok((response.engine_status, response.version))
@@ -3347,6 +3469,109 @@ mod tests {
             recorded_send_with_account.account_id,
             Some("acct-work".to_string())
         );
+    }
+
+    /// Proves that a generic (non-`NotFound`/`InvalidArgument`) RPC failure
+    /// is rendered as the server-provided `status.message()` text, never
+    /// the raw `Display`/`Debug` dump of `tonic::Status` (which leaks
+    /// internal gRPC framing like `metadata: MetadataMap { ... }` into
+    /// CLI output).
+    #[tokio::test]
+    async fn mail_rpc_error_renders_clean_message_not_raw_status_dump() {
+        use nuncio_proto::v1::mail_server::{Mail as MailService, MailServer};
+        use nuncio_proto::v1::{
+            GetMessageRequest, GetMessageResponse, ListFoldersRequest, ListFoldersResponse,
+            ListMessagesRequest, ListMessagesResponse, MarkReadRequest, MarkReadResponse,
+            SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest, SendMessageResponse,
+            SyncRequest, SyncResponse,
+        };
+
+        /// Minimal test-only stub of `nuncio.v1.Mail` whose `ListFolders`
+        /// always fails with an internal error, so this test can assert
+        /// on exactly how the CLI renders a generic RPC failure.
+        struct StubMailAlwaysErrors;
+
+        #[tonic::async_trait]
+        impl MailService for StubMailAlwaysErrors {
+            async fn list_folders(
+                &self,
+                _request: tonic::Request<ListFoldersRequest>,
+            ) -> Result<tonic::Response<ListFoldersResponse>, tonic::Status> {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn list_messages(
+                &self,
+                _request: tonic::Request<ListMessagesRequest>,
+            ) -> Result<tonic::Response<ListMessagesResponse>, tonic::Status> {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn get_message(
+                &self,
+                _request: tonic::Request<GetMessageRequest>,
+            ) -> Result<tonic::Response<GetMessageResponse>, tonic::Status> {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn mark_read(
+                &self,
+                _request: tonic::Request<MarkReadRequest>,
+            ) -> Result<tonic::Response<MarkReadResponse>, tonic::Status> {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn search_messages(
+                &self,
+                _request: tonic::Request<SearchMessagesRequest>,
+            ) -> Result<tonic::Response<SearchMessagesResponse>, tonic::Status> {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn send_message(
+                &self,
+                _request: tonic::Request<SendMessageRequest>,
+            ) -> Result<tonic::Response<SendMessageResponse>, tonic::Status> {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn sync(
+                &self,
+                _request: tonic::Request<SyncRequest>,
+            ) -> Result<tonic::Response<SyncResponse>, tonic::Status> {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(MailServer::new(StubMailAlwaysErrors))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+                .await
+                .expect("ephemeral runner initializes");
+
+        let out = runner
+            .execute_command(
+                &Commands::Folder {
+                    action: FolderSubcommand::List,
+                },
+                false,
+            )
+            .await;
+
+        assert!(out.contains("mailbox index is corrupt"));
+        assert!(!out.contains("metadata:"));
+        assert!(!out.contains("MetadataMap"));
+        assert!(!out.contains("status:"));
     }
 
     /// Reference-client proof: boots a stub `nuncio.v1.Calendar` gRPC server
