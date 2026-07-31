@@ -728,13 +728,22 @@ impl DatabaseEngine {
     ///
     /// A fresh database already gets both columns from `CREATE TABLE IF NOT
     /// EXISTS messages` above, so on a fresh database the `PRAGMA table_info`
-    /// check finds them present and only the index is created. For a
-    /// pre-existing database file the columns are added with an empty-string
-    /// default; every legacy row is then backfilled to `remote_id = id` (the
-    /// old primary key, which was globally unique) so the new UNIQUE index can
-    /// be built without collisions. SQLite has no `ADD COLUMN IF NOT EXISTS`,
-    /// so column presence is checked explicitly first, making this safe to run
-    /// on every daemon startup.
+    /// check finds them present and the backfill matches no rows -- only the
+    /// index is created. For a pre-existing database file the columns are added
+    /// with an empty-string default and every legacy row is backfilled to
+    /// `remote_id = id` (the old primary key, which was globally unique) so the
+    /// UNIQUE index can be built without collisions. SQLite has no `ADD COLUMN
+    /// IF NOT EXISTS`, so column presence is checked explicitly first, making
+    /// this safe to run on every daemon startup.
+    ///
+    /// The whole step runs in a single transaction, and the backfill is
+    /// unconditional (idempotent `WHERE remote_id = ''`) rather than gated on
+    /// having just added the column. Both properties make a partial run
+    /// self-healing: a crash mid-migration rolls back atomically, and even a
+    /// committed intermediate state (column present but a legacy row still
+    /// carrying the empty default) is completed by the next startup's backfill
+    /// before the index is built -- so the daemon can never wedge on an index
+    /// collision it could have avoided.
     async fn ensure_messages_identity_columns(&self) -> Result<(), DatabaseError> {
         let existing_columns: Vec<String> = sqlx::query("PRAGMA table_info(messages)")
             .fetch_all(&self.pool)
@@ -744,32 +753,40 @@ impl DatabaseEngine {
             .map(|row| row.get::<String, _>("name"))
             .collect();
 
+        let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
+
         if !existing_columns.iter().any(|c| c == "remote_id") {
             sqlx::query("ALTER TABLE messages ADD COLUMN remote_id TEXT NOT NULL DEFAULT ''")
-                .execute(&self.pool)
-                .await
-                .map_err(DatabaseError::Query)?;
-            // Seed legacy rows with a unique, non-empty remote id (the old
-            // primary key) so the UNIQUE identity index below is satisfiable.
-            sqlx::query("UPDATE messages SET remote_id = id WHERE remote_id = ''")
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(DatabaseError::Query)?;
         }
         if !existing_columns.iter().any(|c| c == "uid_validity") {
             sqlx::query("ALTER TABLE messages ADD COLUMN uid_validity TEXT NOT NULL DEFAULT ''")
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(DatabaseError::Query)?;
         }
+
+        // Seed any legacy row still carrying the empty-string default with a
+        // unique, non-empty remote id (the old primary key) so the UNIQUE
+        // identity index is satisfiable. Unconditional so a partial prior run
+        // is always completed before the index is (re)built; a no-op on a fresh
+        // or already-migrated database.
+        sqlx::query("UPDATE messages SET remote_id = id WHERE remote_id = ''")
+            .execute(&mut *tx)
+            .await
+            .map_err(DatabaseError::Query)?;
 
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_identity \
              ON messages (account_id, folder_id, uid_validity, remote_id)",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(DatabaseError::Query)?;
+
+        tx.commit().await.map_err(DatabaseError::Query)?;
 
         Ok(())
     }
@@ -3634,6 +3651,65 @@ mod tests {
         assert_eq!(fetched.remote_id, "5");
         assert_eq!(fetched.uid_validity, "42");
         assert_eq!(fetched.folder_id, "INBOX");
+    }
+
+    /// A crash between `ADD COLUMN remote_id` and its backfill can commit an
+    /// intermediate state -- the column present but a legacy row still carrying
+    /// the empty-string default -- with the UNIQUE index not yet built. The
+    /// migration must complete that backfill on the next open and build the
+    /// index without a collision, rather than wedging the daemon.
+    #[tokio::test]
+    async fn messages_identity_migration_completes_from_a_partial_run() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        // Reproduce the partial state: drop the identity index, then insert two
+        // rows in the same folder that both still hold the empty default. With
+        // the index gone this is permitted, and the two would collide on
+        // (account, folder, uid_validity='', remote_id='') if it were rebuilt now.
+        sqlx::query("DROP INDEX IF EXISTS idx_messages_identity")
+            .execute(engine.pool())
+            .await
+            .unwrap();
+        for id in ["legacy-a", "legacy-b"] {
+            sqlx::query(
+                "INSERT INTO messages \
+                 (id, account_id, folder_id, remote_id, uid_validity, subject, sender, recipient, received_at, read_flag) \
+                 VALUES (?, 'acct-1', 'INBOX', '', '', 'subj', 'a@nuncio.mx', 'b@nuncio.mx', 0, 0)",
+            )
+            .bind(id)
+            .execute(engine.pool())
+            .await
+            .unwrap();
+        }
+
+        // Re-running the migration must finish the backfill and build the index.
+        engine
+            .ensure_messages_identity_columns()
+            .await
+            .expect("a partial migration must complete on the next open");
+
+        // Both legacy rows survive with a unique, non-empty backfilled remote id.
+        assert_eq!(
+            engine.get_message("legacy-a").await.unwrap().remote_id,
+            "legacy-a"
+        );
+        assert_eq!(
+            engine.get_message("legacy-b").await.unwrap().remote_id,
+            "legacy-b"
+        );
+
+        // The unique identity index is now present, and re-running is idempotent.
+        let index: Option<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_identity'",
+        )
+        .fetch_optional(engine.pool())
+        .await
+        .unwrap();
+        assert!(index.is_some(), "the unique identity index must be built");
+        engine
+            .ensure_messages_identity_columns()
+            .await
+            .expect("re-running an already-complete migration is a no-op");
     }
 
     fn export_test_email(id: &str, account_id: &str, folder_id: &str) -> nuncio_core::model::Email {
