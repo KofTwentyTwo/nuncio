@@ -133,6 +133,92 @@ impl<'a> SearchEngine<'a> {
         Ok((hits, next))
     }
 
+    /// Perform a full-text trigram search over contact display names, organizations, and
+    /// email addresses.
+    pub async fn search_contacts(&self, query: &str) -> Result<Vec<SearchHit>, DatabaseError> {
+        let clean_query = Self::sanitize_fts5_query(query);
+        if clean_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            r#"
+            SELECT id, display_name, snippet(contacts_fts, 3, '<b>', '</b>', '...', 10) as snippet
+            FROM contacts_fts
+            WHERE contacts_fts MATCH ?
+            ORDER BY rank
+            LIMIT 50
+            "#,
+        )
+        .bind(&clean_query)
+        .fetch_all(self.db.pool())
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, title, snippet)| SearchHit { id, title, snippet })
+            .collect())
+    }
+
+    /// Keyset-paginated full-text search over contact display names,
+    /// organizations, and email addresses, ordered by relevance (`rank ASC, id
+    /// ASC`). Mirrors [`Self::search_messages_page`]'s rank-materializing
+    /// subquery so the same keyset-pagination guarantee (every hit returned
+    /// exactly once, across pages) applies to contact search.
+    pub async fn search_contacts_page(
+        &self,
+        query: &str,
+        after: Option<(f64, String)>,
+        page_size: usize,
+    ) -> Result<(Vec<SearchHit>, Option<(f64, String)>), DatabaseError> {
+        let clean_query = Self::sanitize_fts5_query(query);
+        if clean_query.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let fetch = page_size.saturating_add(1);
+
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "SELECT id, title, snippet, rk FROM ( \
+             SELECT id, display_name AS title, \
+             snippet(contacts_fts, 3, '<b>', '</b>', '...', 10) AS snippet, rank AS rk \
+             FROM contacts_fts WHERE contacts_fts MATCH ",
+        );
+        builder.push_bind(clean_query);
+        builder.push(") ");
+        if let Some((rank, id)) = &after {
+            builder.push("WHERE (rk > ");
+            builder.push_bind(*rank);
+            builder.push(" OR (rk = ");
+            builder.push_bind(*rank);
+            builder.push(" AND id > ");
+            builder.push_bind(id.clone());
+            builder.push("))");
+        }
+        builder.push(" ORDER BY rk ASC, id ASC LIMIT ");
+        builder.push_bind(fetch as i64);
+
+        let rows = builder
+            .build_query_as::<(String, String, String, f64)>()
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        let has_more = rows.len() > page_size;
+        let mut last_key: Option<(f64, String)> = None;
+        let hits: Vec<SearchHit> = rows
+            .into_iter()
+            .take(page_size)
+            .map(|(id, title, snippet, rk)| {
+                last_key = Some((rk, id.clone()));
+                SearchHit { id, title, snippet }
+            })
+            .collect();
+
+        let next = if has_more { last_key } else { None };
+        Ok((hits, next))
+    }
+
     /// Perform a full-text trigram search over calendar event summaries and locations.
     pub async fn search_events(&self, query: &str) -> Result<Vec<SearchHit>, DatabaseError> {
         let clean_query = Self::sanitize_fts5_query(query);
@@ -357,6 +443,156 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "evt-1");
         assert_eq!(hits[0].title, "Architecture Summit");
+    }
+
+    async fn insert_contact(
+        db: &DatabaseEngine,
+        id: &str,
+        display_name: &str,
+        organization: &str,
+        emails_json: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO contacts \
+             (id, display_name, organization, emails_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+        )
+        .bind(id)
+        .bind(display_name)
+        .bind(organization)
+        .bind(emails_json)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    /// Proves `contacts_fts` is actually populated by the `contacts_ai`/`contacts_au` triggers
+    /// (not merely created and left unused): several contacts are inserted, a matching term
+    /// ranks the true matches and excludes the non-matching contact.
+    #[tokio::test]
+    async fn fts5_contact_search_ranks_matches_and_excludes_others() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let search = SearchEngine::new(&db);
+
+        assert!(search.search_contacts("").await.unwrap().is_empty());
+
+        insert_contact(&db, "ct-1", "Alice Architect", "Acme Corp", "[]").await;
+        insert_contact(&db, "ct-2", "Bob Baker", "Baker Studio", "[]").await;
+        insert_contact(&db, "ct-3", "Carol Architect", "Acme Corp", "[]").await;
+
+        let hits = search.search_contacts("Architect").await.unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(hits.len(), 2);
+        assert!(ids.contains(&"ct-1"));
+        assert!(ids.contains(&"ct-3"));
+        assert!(!ids.contains(&"ct-2"));
+
+        let bob_hits = search.search_contacts("Bob").await.unwrap();
+        assert_eq!(bob_hits.len(), 1);
+        assert_eq!(bob_hits[0].id, "ct-2");
+        assert_eq!(bob_hits[0].title, "Bob Baker");
+    }
+
+    /// Updating and deleting a contact keeps `contacts_fts` in sync via the `contacts_au`/
+    /// `contacts_ad` triggers: a renamed contact stops matching its old name and starts
+    /// matching its new one, and a deleted contact stops matching entirely.
+    #[tokio::test]
+    async fn fts5_contact_search_reflects_update_and_delete() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let search = SearchEngine::new(&db);
+
+        insert_contact(&db, "ct-upd-1", "Dana Original", "Original Org", "[]").await;
+        assert_eq!(search.search_contacts("Original").await.unwrap().len(), 1);
+
+        sqlx::query(
+            "UPDATE contacts SET display_name = 'Dana Renamed', organization = 'New Org' \
+             WHERE id = 'ct-upd-1'",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        assert!(search.search_contacts("Original").await.unwrap().is_empty());
+        let hits = search.search_contacts("Renamed").await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "ct-upd-1");
+
+        sqlx::query("DELETE FROM contacts WHERE id = 'ct-upd-1'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert!(search.search_contacts("Renamed").await.unwrap().is_empty());
+    }
+
+    /// A search term matching an indexed email address (stored as JSON) is found, and a
+    /// sanitized/edge-case query (FTS5 operator characters) does not error -- it just yields
+    /// no matches when nothing survives sanitization to match.
+    #[tokio::test]
+    async fn fts5_contact_search_matches_email_and_survives_edge_query() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let search = SearchEngine::new(&db);
+
+        insert_contact(
+            &db,
+            "ct-email-1",
+            "Erin Example",
+            "",
+            r#"[{"email":"erin.example@nuncio.mx","label":"work"}]"#,
+        )
+        .await;
+
+        let hits = search.search_contacts("erin.example").await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "ct-email-1");
+
+        let edge_hits = search.search_contacts("\"weird*: query\"").await.unwrap();
+        assert!(edge_hits.is_empty());
+    }
+
+    /// Keyset pagination over contact search must return every matching hit exactly once,
+    /// mirroring the message-search pagination guarantee.
+    #[tokio::test]
+    async fn search_contacts_page_returns_every_hit_once_no_gaps() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        for i in 0..5 {
+            insert_contact(
+                &db,
+                &format!("ct-page-{i}"),
+                "Planning Committee Member",
+                "Acme Corp",
+                "[]",
+            )
+            .await;
+        }
+
+        let search = SearchEngine::new(&db);
+        let mut seen = Vec::new();
+        let mut after: Option<(f64, String)> = None;
+        let mut pages = 0;
+        loop {
+            let (hits, next) = search
+                .search_contacts_page("Planning", after.clone(), 2)
+                .await
+                .unwrap();
+            pages += 1;
+            assert!(hits.len() <= 2, "page must not exceed page_size");
+            seen.extend(hits.iter().map(|h| h.id.clone()));
+            match next {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+            assert!(pages < 100, "pagination must terminate");
+        }
+
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            5,
+            "every matching contact returned exactly once"
+        );
+        assert!(pages >= 3, "5 hits at page_size 2 must span multiple pages");
     }
 
     #[test]
