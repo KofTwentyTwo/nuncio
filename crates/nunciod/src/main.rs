@@ -46,6 +46,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| nunciod::default_db_path());
 
+    // Exclusive single-instance lock on the database path, acquired BEFORE
+    // the store is opened. Held for the entire process lifetime (dropped at
+    // the end of `main`, releasing it on any clean exit) so a second
+    // `nunciod` pointed at the same database fails fast instead of the two
+    // instances corrupting SQLite state between them.
+    let _instance_lock =
+        nunciod::lock::InstanceLock::acquire(&db_path).map_err(|e| format!("{e}"))?;
+
     let orchestrator = nunciod::SelfHealingSyncOrchestrator::new(&db_path, event_bus.clone());
     let (db, _summary) = orchestrator.initialize_and_recover().await?;
 
