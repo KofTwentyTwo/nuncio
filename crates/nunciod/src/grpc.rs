@@ -5,7 +5,9 @@
 //!
 //! This is the daemon's sole client-facing transport.
 
+use crate::lifecycle::ShutdownSignal;
 use crate::pagination::{self, CursorField};
+use crate::sync_dispatcher::{sync_all_configured, ProductionAccountSyncer, SyncDispatcher};
 use nuncio_cal::CalendarBackend;
 use nuncio_contacts::ContactsBackend;
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
@@ -1414,11 +1416,11 @@ impl Contacts for ContactsGrpcService {
 ///
 /// Production (`nunciod::main`, and every existing caller of [`serve`] /
 /// [`serve_on_listener`]) never constructs a non-default instance:
-/// [`Default`] yields every field `None`, which routes `Mail/Sync` and
-/// `Mail/SendMessage` through the exact same real production entry points
-/// (`nunciod::sync::run_all_accounts_sync` / `run_account_sync`,
-/// `nunciod::send::send_message_for_account`) as before this override
-/// existed. Production code depends only on the `nuncio_mail::{MailBackend,
+/// [`Default`] yields every field `None`, which routes `Mail/Sync` through
+/// the shared `nunciod::sync_dispatcher::SyncDispatcher` (single account or
+/// `sync_all_configured` fan-out) and `Mail/SendMessage` through
+/// `nunciod::send::send_message_for_account`, exactly as production does.
+/// Production code depends only on the `nuncio_mail::{MailBackend,
 /// MessageSender}` trait objects here -- never on `nuncio_mail`'s mock
 /// types -- so this seam never makes production depend on a test double.
 ///
@@ -1464,6 +1466,11 @@ struct MailGrpcService {
     secrets: Arc<SecretManager>,
     filter_engine: Arc<FilterEngine>,
     overrides: MailEngineOverrides,
+    /// Single bounded-concurrency dispatcher every production `Sync` funnels
+    /// through, so a client `Sync` and the daemon's scheduled syncs share one
+    /// concurrency cap, one in-flight coalescing map, and one per-account
+    /// timeout. The injected test backend path deliberately bypasses it.
+    sync_dispatcher: Arc<SyncDispatcher>,
 }
 
 #[tonic::async_trait]
@@ -1683,12 +1690,20 @@ impl Mail for MailGrpcService {
     /// scopes the sync to one account, `None` syncs every configured
     /// account.
     ///
+    /// Production syncs funnel through the shared [`SyncDispatcher`]: a
+    /// single-account request goes through its bounded/coalesced/timed
+    /// per-account path, and an all-accounts request fans every configured
+    /// mail account out through that same path via
+    /// [`sync_all_configured`], so one slow account can no longer
+    /// head-of-line-block the others.
+    ///
     /// When [`MailEngineOverrides::mail_backend`] is injected, fetches from
-    /// it via [`crate::sync::sync_with_backend`] instead of resolving a
-    /// real per-account engine from keyring credentials -- this is what
-    /// lets a full-daemon E2E test drive a real inbound sync entirely over
-    /// this authenticated gRPC API with no live network, exactly as a real
-    /// client would trigger it (no un-intercepted back door).
+    /// it via [`crate::sync::sync_with_backend`] instead -- this is what lets
+    /// a full-daemon E2E test drive a real inbound sync entirely over this
+    /// authenticated gRPC API with no live network, exactly as a real client
+    /// would trigger it (no un-intercepted back door). The injected backend
+    /// is a single in-memory double, so it deliberately bypasses the
+    /// dispatcher's per-account bounding.
     async fn sync(&self, request: Request<SyncRequest>) -> Result<Response<SyncResponse>, Status> {
         let account_id = request.into_inner().account_id;
 
@@ -1703,23 +1718,12 @@ impl Mail for MailGrpcService {
             .await
             .map_err(|e| Status::internal(format!("sync failed: {e}")))?
         } else if let Some(account_id) = account_id {
-            crate::sync::run_account_sync(
-                &self.db,
-                &self.secrets,
-                &self.event_bus,
-                &self.filter_engine,
-                &account_id,
-            )
-            .await
-            .map_err(|e| Status::internal(format!("sync failed: {e}")))?
+            self.sync_dispatcher
+                .sync_account(&account_id)
+                .await
+                .map_err(|e| Status::internal(format!("sync failed: {e}")))?
         } else {
-            crate::sync::run_all_accounts_sync(
-                &self.db,
-                &self.secrets,
-                &self.event_bus,
-                &self.filter_engine,
-            )
-            .await
+            sync_all_configured(&self.sync_dispatcher, &self.db, &self.event_bus).await
         };
 
         Ok(Response::new(SyncResponse {
@@ -2460,6 +2464,29 @@ impl tonic::service::Interceptor for BearerAuthInterceptor {
     }
 }
 
+/// Builds the production [`SyncDispatcher`] for serve entry points that are
+/// not handed one by their caller (every path except production's
+/// [`serve_with_shutdown`], which threads through the daemon-wide dispatcher
+/// so the RPC and the scheduled syncs share one instance). Wraps a
+/// [`ProductionAccountSyncer`] with concurrency/timeout bounds from the
+/// environment; `shutdown` is the signal the dispatcher races in-flight syncs
+/// against -- non-graceful entry points pass [`ShutdownSignal::never`].
+fn default_sync_dispatcher(
+    db: Arc<DatabaseEngine>,
+    secrets: Arc<SecretManager>,
+    event_bus: Arc<EventBus>,
+    filter_engine: Arc<FilterEngine>,
+    shutdown: ShutdownSignal,
+) -> Arc<SyncDispatcher> {
+    let syncer = Arc::new(ProductionAccountSyncer::new(
+        db,
+        secrets,
+        event_bus,
+        filter_engine,
+    ));
+    Arc::new(SyncDispatcher::from_env(syncer, shutdown))
+}
+
 /// Binds a loopback TCP listener at `addr` and serves the `nuncio.v1.System`,
 /// `nuncio.v1.Accounts`, `nuncio.v1.Mail`, `nuncio.v1.Filters`,
 /// `nuncio.v1.Export`, `nuncio.v1.Audit`, and `nuncio.v1.Calendar` gRPC
@@ -2548,6 +2575,7 @@ pub async fn serve_on_listener(
 /// as `shutdown` resolves, instead of running until the transport errors.
 ///
 /// `addr` MUST be a loopback address; see [`serve`].
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_with_shutdown(
     addr: &str,
     event_bus: Arc<EventBus>,
@@ -2555,6 +2583,7 @@ pub async fn serve_with_shutdown(
     filter_engine: Arc<FilterEngine>,
     secrets: Arc<SecretManager>,
     token: impl Into<Arc<str>>,
+    sync_dispatcher: Arc<SyncDispatcher>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), GrpcServeError> {
     let socket_addr = addr
@@ -2570,13 +2599,22 @@ pub async fn serve_with_shutdown(
             addr: addr.to_string(),
             source,
         })?;
-    serve_on_listener_with_shutdown(
+    // Production threads its own daemon-wide dispatcher (built over the shared
+    // shutdown signal) all the way to the Mail service, rather than letting a
+    // serve wrapper mint a fresh one, so the client `Sync` RPC and the
+    // scheduled syncs share a single concurrency cap and in-flight map.
+    serve_on_listener_with_overrides_and_shutdown(
         listener,
         event_bus,
         db,
         filter_engine,
         secrets,
         token,
+        MailEngineOverrides::default(),
+        CalendarEngineOverrides::default(),
+        ContactsEngineOverrides::default(),
+        AccountsEngineOverrides::default(),
+        sync_dispatcher,
         shutdown,
     )
     .await
@@ -2594,6 +2632,17 @@ pub async fn serve_on_listener_with_shutdown(
     token: impl Into<Arc<str>>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), GrpcServeError> {
+    // This entry point receives an opaque shutdown future rather than a
+    // `ShutdownSignal`, so it mints a fresh production dispatcher over a
+    // never-firing signal; production instead uses `serve_with_shutdown`,
+    // which threads the real shared dispatcher through.
+    let sync_dispatcher = default_sync_dispatcher(
+        db.clone(),
+        secrets.clone(),
+        event_bus.clone(),
+        filter_engine.clone(),
+        ShutdownSignal::never(),
+    );
     serve_on_listener_with_overrides_and_shutdown(
         listener,
         event_bus,
@@ -2605,6 +2654,7 @@ pub async fn serve_on_listener_with_shutdown(
         CalendarEngineOverrides::default(),
         ContactsEngineOverrides::default(),
         AccountsEngineOverrides::default(),
+        sync_dispatcher,
         shutdown,
     )
     .await
@@ -2636,7 +2686,16 @@ pub async fn serve_on_listener_with_overrides(
 ) -> Result<(), GrpcServeError> {
     // Delegates to the shutdown-aware variant with a shutdown future that
     // never resolves, preserving this function's exact prior behavior (run
-    // until the transport itself errors) for every existing caller.
+    // until the transport itself errors) for every existing caller. The
+    // dispatcher is minted here over a never-firing signal; only production's
+    // `serve_with_shutdown` threads a real shared dispatcher through.
+    let sync_dispatcher = default_sync_dispatcher(
+        db.clone(),
+        secrets.clone(),
+        event_bus.clone(),
+        filter_engine.clone(),
+        ShutdownSignal::never(),
+    );
     serve_on_listener_with_overrides_and_shutdown(
         listener,
         event_bus,
@@ -2648,6 +2707,7 @@ pub async fn serve_on_listener_with_overrides(
         calendar_overrides,
         contacts_overrides,
         accounts_overrides,
+        sync_dispatcher,
         std::future::pending(),
     )
     .await
@@ -2671,6 +2731,7 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
     calendar_overrides: CalendarEngineOverrides,
     contacts_overrides: ContactsEngineOverrides,
     accounts_overrides: AccountsEngineOverrides,
+    sync_dispatcher: Arc<SyncDispatcher>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), GrpcServeError> {
     let token: Arc<str> = token.into();
@@ -2708,6 +2769,7 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
         secrets: secrets.clone(),
         filter_engine: filter_engine.clone(),
         overrides,
+        sync_dispatcher,
     };
     let mail_interceptor = BearerAuthInterceptor::new(token.clone());
     let mail_svc = InterceptedService::new(

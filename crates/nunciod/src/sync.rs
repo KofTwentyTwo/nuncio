@@ -14,10 +14,12 @@
 //! [`sync_with_backend`] takes `&dyn MailBackend` rather than a concrete
 //! engine, so it is exercised directly in tests with [`MockMailBackend`] --
 //! no real network or OS keyring access ever happens inside it. Production
-//! entry points ([`run_account_sync`], [`run_all_accounts_sync`]) are the
-//! only places that resolve a real account's credentials and construct a
-//! real backend; they then delegate the actual fetch/persist/event-emission
-//! work to [`sync_with_backend`].
+//! entry point [`run_account_sync`] is the only place that resolves a real
+//! account's credentials and constructs a real backend; it then delegates the
+//! actual fetch/persist/event-emission work to [`sync_with_backend`]. An
+//! all-accounts sync fans these per-account runs out through
+//! [`crate::sync_dispatcher::sync_all_configured`], so concurrency and the
+//! per-account timeout are bounded in one place rather than serialized here.
 use nuncio_core::{AccountConfig, AccountProtocol, CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, OutboxManager, RuleAction};
 use nuncio_mail::{ImapEngine, JmapEngine, MailBackend, MailError};
@@ -406,87 +408,6 @@ pub async fn run_account_sync(
             Err(e)
         }
     }
-}
-
-/// Production entry point for `CoreCommand::SyncAll`: syncs every persisted
-/// account in turn, wrapping the whole batch in a single
-/// `SyncStarted{None}`/`SyncCompleted{None}` pair (rather than one pair per
-/// account). A single account failing to sync (missing credential, backend
-/// error, etc.) publishes a `CoreEvent::Error` and does not stop the
-/// remaining accounts from being attempted. Returns the total number of
-/// messages synced across all accounts.
-pub async fn run_all_accounts_sync(
-    db: &nuncio_store::db::DatabaseEngine,
-    secrets: &SecretManager,
-    event_bus: &EventBus,
-    filter_engine: &FilterEngine,
-) -> usize {
-    event_bus.process_command(CoreCommand::SyncAll);
-
-    let mut total_synced = 0usize;
-    match db.list_accounts().await {
-        Ok(accounts) => {
-            for config in accounts {
-                // DAV-protocol accounts (e.g. CalDAV) are not mail accounts;
-                // they sync through their own domain service, so skip them
-                // here rather than attempting to build a mail backend.
-                if config.protocol.is_dav() {
-                    continue;
-                }
-                match secrets.get_secret(&config.keyring_secret_key) {
-                    Ok(password) => {
-                        let backend = match build_mail_backend(&config, &password) {
-                            Ok(backend) => backend,
-                            Err(e) => {
-                                event_bus.process_command(CoreCommand::ReportError {
-                                    message: format!(
-                                        "sync skipped for account '{}': {e}",
-                                        config.id
-                                    ),
-                                });
-                                continue;
-                            }
-                        };
-                        match fetch_and_persist(
-                            db,
-                            event_bus,
-                            backend.as_ref(),
-                            filter_engine,
-                            Some(&config.id),
-                        )
-                        .await
-                        {
-                            Ok(count) => total_synced += count,
-                            Err(e) => {
-                                event_bus.process_command(CoreCommand::ReportError {
-                                    message: format!(
-                                        "sync failed for account '{}': {e}",
-                                        config.id
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        event_bus.process_command(CoreCommand::ReportError {
-                            message: format!(
-                                "cannot read credential for account '{}': {e}",
-                                config.id
-                            ),
-                        });
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            event_bus.process_command(CoreCommand::ReportError {
-                message: format!("failed to list accounts for sync: {e}"),
-            });
-        }
-    }
-
-    event_bus.complete_sync(None);
-    total_synced
 }
 
 #[cfg(test)]
@@ -954,93 +875,6 @@ mod tests {
             other => panic!("expected CoreEvent::Error, got {other:?}"),
         }
         assert_eq!(event_bus.current_state().status, EngineStatus::Idle);
-    }
-
-    #[tokio::test]
-    async fn run_all_accounts_sync_with_no_accounts_returns_zero_and_emits_events() {
-        let (db, _dir) = DatabaseEngine::connect_ephemeral()
-            .await
-            .expect("ephemeral db");
-        let event_bus = EventBus::new();
-        let mut events = event_bus.subscribe_events();
-        let secrets = SecretManager::mock();
-
-        let filter_engine = empty_filter_engine();
-        let total = run_all_accounts_sync(&db, &secrets, &event_bus, &filter_engine).await;
-        assert_eq!(total, 0);
-
-        assert_eq!(
-            events.recv().await.expect("start event"),
-            CoreEvent::SyncStarted { account_id: None }
-        );
-        assert_eq!(
-            events.recv().await.expect("complete event"),
-            CoreEvent::SyncCompleted { account_id: None }
-        );
-    }
-
-    #[tokio::test]
-    async fn run_all_accounts_sync_persists_across_multiple_accounts() {
-        let mock_server_a = MockServer::start().await;
-        let mock_server_b = MockServer::start().await;
-        mount_single_message_jmap_stubs(&mock_server_a, "acct-all-a").await;
-        mount_single_message_jmap_stubs(&mock_server_b, "acct-all-b").await;
-
-        let (db, _dir) = DatabaseEngine::connect_ephemeral()
-            .await
-            .expect("ephemeral db");
-        let event_bus = EventBus::new();
-        let secrets = SecretManager::mock();
-
-        let config_a = sample_jmap_account_at("acct-all-a", &mock_server_a.uri());
-        let config_b = sample_jmap_account_at("acct-all-b", &mock_server_b.uri());
-        db.save_account(&config_a).await.expect("save account a");
-        db.save_account(&config_b).await.expect("save account b");
-        secrets
-            .set_secret(&config_a.keyring_secret_key, "token-a")
-            .expect("store credential a");
-        secrets
-            .set_secret(&config_b.keyring_secret_key, "token-b")
-            .expect("store credential b");
-
-        let filter_engine = empty_filter_engine();
-        let total = run_all_accounts_sync(&db, &secrets, &event_bus, &filter_engine).await;
-        // 2 accounts * 1 folder * 1 message each = 2 processed messages.
-        assert_eq!(total, 2);
-        assert_eq!(event_bus.current_state().status, EngineStatus::Idle);
-    }
-
-    #[tokio::test]
-    async fn run_all_accounts_sync_reports_error_for_account_missing_credential() {
-        let (db, _dir) = DatabaseEngine::connect_ephemeral()
-            .await
-            .expect("ephemeral db");
-        let event_bus = EventBus::new();
-        let mut events = event_bus.subscribe_events();
-        let secrets = SecretManager::mock();
-
-        let config = sample_jmap_account("acct-all-nocred");
-        db.save_account(&config).await.expect("save account");
-        // No credential stored in the vault for this account.
-
-        let filter_engine = empty_filter_engine();
-        let total = run_all_accounts_sync(&db, &secrets, &event_bus, &filter_engine).await;
-        assert_eq!(total, 0);
-
-        assert_eq!(
-            events.recv().await.expect("start event"),
-            CoreEvent::SyncStarted { account_id: None }
-        );
-        match events.recv().await.expect("error event") {
-            CoreEvent::Error { message } => {
-                assert!(message.contains("acct-all-nocred"));
-            }
-            other => panic!("expected CoreEvent::Error, got {other:?}"),
-        }
-        assert_eq!(
-            events.recv().await.expect("complete event"),
-            CoreEvent::SyncCompleted { account_id: None }
-        );
     }
 
     #[tokio::test]
