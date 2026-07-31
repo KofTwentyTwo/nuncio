@@ -801,9 +801,12 @@ impl ImapEngine {
     ///
     /// `MOVE` uses `UID MOVE` (RFC 6851) when the server advertises the `MOVE`
     /// capability, else falls back to the equivalent `UID COPY` + `UID STORE
-    /// +FLAGS (\Deleted)` + `EXPUNGE`. `DELETE` is `UID STORE +FLAGS
-    /// (\Deleted)` + `EXPUNGE`. Each command's tagged result is checked, so
-    /// only a genuine server success returns `Ok(())`.
+    /// +FLAGS (\Deleted)` + UID-scoped `UID EXPUNGE`. `DELETE` is `UID STORE
+    /// +FLAGS (\Deleted)` + `UID EXPUNGE`. The expunge is always scoped to the
+    /// target UID via RFC 4315 (never a mailbox-wide `EXPUNGE`, which would
+    /// destroy other `\Deleted` messages) and requires `UIDPLUS`, failing
+    /// closed otherwise. Each command's tagged result is checked, so only a
+    /// genuine server success returns `Ok(())`.
     pub async fn apply_mutation_with_session<S>(
         &self,
         spec: &RemoteMutationSpec,
@@ -863,7 +866,7 @@ impl ImapEngine {
             RemoteMutationKind::Delete => {
                 self.uid_store_flags(session, &uid_set, "+FLAGS", "\\Deleted")
                     .await?;
-                self.expunge_all(session).await
+                self.uid_expunge_scoped(session, &uid_set).await
             }
         }
     }
@@ -893,28 +896,56 @@ impl ImapEngine {
         Ok(())
     }
 
-    /// Permanently remove `\Deleted`-flagged messages from the selected folder,
-    /// draining the untagged `EXPUNGE` responses.
-    async fn expunge_all<S>(&self, session: &mut async_imap::Session<S>) -> Result<(), MailError>
+    /// Permanently remove ONLY the target `uid_set` from the selected folder
+    /// via RFC 4315 `UID EXPUNGE`, draining its untagged `EXPUNGE` responses.
+    ///
+    /// A bare `EXPUNGE` (RFC 3501) removes EVERY `\Deleted` message in the
+    /// mailbox, so it would collaterally destroy any other message a different
+    /// client had already flagged `\Deleted`. `UID EXPUNGE` is scoped to
+    /// exactly the given UIDs, so it is the only safe expunge in a shared
+    /// mailbox. It requires the `UIDPLUS` capability; if the server does not
+    /// advertise it, this fails closed with an honest error rather than
+    /// falling back to the destructive mailbox-wide `EXPUNGE`.
+    async fn uid_expunge_scoped<S>(
+        &self,
+        session: &mut async_imap::Session<S>,
+        uid_set: &str,
+    ) -> Result<(), MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
-        let expunged = session
-            .expunge()
+        let caps = session
+            .capabilities()
             .await
-            .map_err(|e| MailError::ImapError(format!("EXPUNGE failed: {e}")))?;
+            .map_err(|e| MailError::ImapError(format!("CAPABILITY query failed: {e}")))?;
+        let has_uidplus = caps.has_str("UIDPLUS");
+        drop(caps);
+        if !has_uidplus {
+            return Err(MailError::ImapError(format!(
+                "refusing to expunge uid {uid_set}: server does not advertise UIDPLUS, so a \
+                 UID-scoped EXPUNGE (RFC 4315) is unavailable; a bare EXPUNGE could destroy \
+                 other \\Deleted messages in the folder"
+            )));
+        }
+
+        let expunged = session
+            .uid_expunge(uid_set)
+            .await
+            .map_err(|e| MailError::ImapError(format!("UID EXPUNGE {uid_set} failed: {e}")))?;
         tokio::pin!(expunged);
         while let Some(item) = expunged.next().await {
             item.map_err(|e| {
-                MailError::ImapError(format!("reading EXPUNGE response failed: {e}"))
+                MailError::ImapError(format!("reading UID EXPUNGE response failed: {e}"))
             })?;
         }
         Ok(())
     }
 
     /// Move a message by UID, preferring RFC 6851 `UID MOVE` and falling back
-    /// to `UID COPY` + `UID STORE +FLAGS (\Deleted)` + `EXPUNGE` when the
-    /// server does not advertise the `MOVE` capability.
+    /// to `UID COPY` + `UID STORE +FLAGS (\Deleted)` + UID-scoped `UID EXPUNGE`
+    /// when the server does not advertise the `MOVE` capability. The fallback's
+    /// expunge is scoped to the target UID (never a mailbox-wide `EXPUNGE`) and
+    /// requires `UIDPLUS`, failing closed otherwise.
     async fn uid_move<S>(
         &self,
         session: &mut async_imap::Session<S>,
@@ -947,7 +978,7 @@ impl ImapEngine {
         })?;
         self.uid_store_flags(session, uid_set, "+FLAGS", "\\Deleted")
             .await?;
-        self.expunge_all(session).await
+        self.uid_expunge_scoped(session, uid_set).await
     }
 
     /// Apply a remote mutation over a freshly authenticated session. See
@@ -1565,12 +1596,14 @@ mod tests {
 
     /// Drive a mutation over a scripted IMAP server (in-memory duplex),
     /// capturing every command line the client issued so the test can assert
-    /// on the exact protocol commands. `advertise_move` controls whether the
-    /// scripted `CAPABILITY` response includes `MOVE`; `select_uid_validity` is
-    /// the UIDVALIDITY the scripted `SELECT` reports.
+    /// on the exact protocol commands. `advertise_move`/`advertise_uidplus`
+    /// control whether the scripted `CAPABILITY` response includes `MOVE`/
+    /// `UIDPLUS`; `select_uid_validity` is the UIDVALIDITY the scripted
+    /// `SELECT` reports.
     async fn run_scripted_mutation(
         spec: &RemoteMutationSpec,
         advertise_move: bool,
+        advertise_uidplus: bool,
         select_uid_validity: u32,
     ) -> (Result<(), MailError>, Vec<String>) {
         let (client_io, server_io) = tokio::io::duplex(8192);
@@ -1597,16 +1630,22 @@ mod tests {
                     );
                     let _ = io.write_all(resp.as_bytes()).await;
                 } else if upper.contains("CAPABILITY") {
-                    let caps = if advertise_move {
-                        "IMAP4rev1 MOVE UIDPLUS"
-                    } else {
-                        "IMAP4rev1 UIDPLUS"
-                    };
+                    let mut caps = String::from("IMAP4rev1");
+                    if advertise_move {
+                        caps.push_str(" MOVE");
+                    }
+                    if advertise_uidplus {
+                        caps.push_str(" UIDPLUS");
+                    }
                     let _ = io
                         .write_all(
                             format!("* CAPABILITY {caps}\r\n{tag} OK CAPABILITY done\r\n")
                                 .as_bytes(),
                         )
+                        .await;
+                } else if upper.contains("UID EXPUNGE") {
+                    let _ = io
+                        .write_all(format!("{tag} OK UID EXPUNGE completed\r\n").as_bytes())
                         .await;
                 } else if upper.contains("UID STORE") {
                     let _ = io
@@ -1648,6 +1687,15 @@ mod tests {
         (result, captured)
     }
 
+    /// True if `line` is a bare mailbox-wide `EXPUNGE` (RFC 3501), NOT a
+    /// UID-scoped `UID EXPUNGE` (RFC 4315). Lets a test prove the destructive
+    /// mailbox-wide form is never issued (a plain `contains("EXPUNGE")` would
+    /// be satisfied by the safe `UID EXPUNGE` too).
+    fn is_bare_expunge(line: &str) -> bool {
+        let u = line.to_ascii_uppercase();
+        u.contains("EXPUNGE") && !u.contains("UID EXPUNGE")
+    }
+
     fn imap_spec(kind: RemoteMutationKind, checkpoint: Option<&str>) -> RemoteMutationSpec {
         RemoteMutationSpec {
             message_id: "imap-uid-42".to_string(),
@@ -1665,6 +1713,7 @@ mod tests {
                 Some("1:105"),
             ),
             false,
+            true,
             1,
         )
         .await;
@@ -1687,6 +1736,7 @@ mod tests {
                 Some("1:105"),
             ),
             true,
+            true,
             1,
         )
         .await;
@@ -1702,7 +1752,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imap_apply_mutation_move_falls_back_to_copy_store_expunge_without_move_capability() {
+    async fn imap_apply_mutation_move_falls_back_to_copy_store_uid_expunge_without_move_capability()
+    {
         let (result, commands) = run_scripted_mutation(
             &imap_spec(
                 RemoteMutationKind::Move {
@@ -1711,6 +1762,7 @@ mod tests {
                 Some("1:105"),
             ),
             false,
+            true,
             1,
         )
         .await;
@@ -1719,7 +1771,16 @@ mod tests {
         assert!(commands
             .iter()
             .any(|c| c.contains("UID STORE 42 +FLAGS (\\Deleted)")));
-        assert!(commands.iter().any(|c| c.contains("EXPUNGE")));
+        // The expunge MUST be scoped to the target UID, never a mailbox-wide
+        // bare EXPUNGE that could destroy other \Deleted messages.
+        assert!(
+            commands.iter().any(|c| c.contains("UID EXPUNGE 42")),
+            "fallback must issue a UID-scoped UID EXPUNGE 42, got: {commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|c| is_bare_expunge(c)),
+            "fallback must NOT issue a bare mailbox-wide EXPUNGE, got: {commands:?}"
+        );
         assert!(
             !commands.iter().any(|c| c.contains("UID MOVE")),
             "must not issue UID MOVE without the capability: {commands:?}"
@@ -1727,10 +1788,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imap_apply_mutation_delete_stores_deleted_and_expunges() {
+    async fn imap_apply_mutation_delete_stores_deleted_and_uid_expunges_the_target_only() {
         let (result, commands) = run_scripted_mutation(
             &imap_spec(RemoteMutationKind::Delete, Some("1:105")),
             false,
+            true,
             1,
         )
         .await;
@@ -1738,7 +1800,69 @@ mod tests {
         assert!(commands
             .iter()
             .any(|c| c.contains("UID STORE 42 +FLAGS (\\Deleted)")));
-        assert!(commands.iter().any(|c| c.contains("EXPUNGE")));
+        // The expunge MUST target exactly the deleted UID (RFC 4315), never a
+        // mailbox-wide bare EXPUNGE that would also destroy other client's
+        // \Deleted messages in the same folder.
+        assert!(
+            commands.iter().any(|c| c.contains("UID EXPUNGE 42")),
+            "delete must issue a UID-scoped UID EXPUNGE 42, got: {commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|c| is_bare_expunge(c)),
+            "delete must NOT issue a bare mailbox-wide EXPUNGE, got: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn imap_apply_mutation_delete_fails_closed_without_uidplus_and_issues_no_bare_expunge() {
+        // Without UIDPLUS there is no UID-scoped expunge; the op MUST fail
+        // closed rather than fall back to a destructive mailbox-wide EXPUNGE.
+        let (result, commands) = run_scripted_mutation(
+            &imap_spec(RemoteMutationKind::Delete, Some("1:105")),
+            false,
+            false,
+            1,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(MailError::ImapError(_))),
+            "delete without UIDPLUS must fail closed, got: {result:?}"
+        );
+        assert!(
+            !commands
+                .iter()
+                .any(|c| c.to_ascii_uppercase().contains("EXPUNGE")),
+            "no expunge of any kind may be issued when UIDPLUS is unavailable, got: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn imap_apply_mutation_move_fallback_fails_closed_without_uidplus() {
+        // The no-MOVE-capability move fallback also relies on a UID-scoped
+        // expunge; without UIDPLUS it must fail closed and issue no bare
+        // EXPUNGE (the preceding COPY/STORE are non-destructive to others).
+        let (result, commands) = run_scripted_mutation(
+            &imap_spec(
+                RemoteMutationKind::Move {
+                    to_folder: "Archive".to_string(),
+                },
+                Some("1:105"),
+            ),
+            false,
+            false,
+            1,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(MailError::ImapError(_))),
+            "move fallback without UIDPLUS must fail closed, got: {result:?}"
+        );
+        assert!(
+            !commands
+                .iter()
+                .any(|c| c.to_ascii_uppercase().contains("EXPUNGE")),
+            "no expunge of any kind may be issued when UIDPLUS is unavailable, got: {commands:?}"
+        );
     }
 
     #[tokio::test]
@@ -1749,6 +1873,7 @@ mod tests {
         let (result, commands) = run_scripted_mutation(
             &imap_spec(RemoteMutationKind::Delete, Some("1:105")),
             false,
+            true,
             2,
         )
         .await;
@@ -1771,7 +1896,8 @@ mod tests {
         // With no stored checkpoint there is no UIDVALIDITY to prove the UID
         // still addresses the intended message, so the op is refused.
         let (result, _commands) =
-            run_scripted_mutation(&imap_spec(RemoteMutationKind::Delete, None), false, 1).await;
+            run_scripted_mutation(&imap_spec(RemoteMutationKind::Delete, None), false, true, 1)
+                .await;
         assert!(matches!(
             result.expect_err("missing checkpoint must be refused"),
             MailError::ImapError(_)

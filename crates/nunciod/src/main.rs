@@ -106,37 +106,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // failure is retried on later ticks and a permanent one (gone message,
     // unknown action) fails honestly -- success is never fabricated.
     let db_outbox = db.clone();
-    let outbox_env =
-        match nunciod::outbox::ProductionExecutionEnv::new(db.clone(), account_secrets.clone()) {
-            Ok(env) => Some(Arc::new(env)),
-            Err(e) => {
-                // Without a vault-provisioned webhook signing key we cannot sign
-                // webhook payloads; rather than dispatch unsigned, the worker does
-                // not run. Mailbox mutations would also be unable to reach the
-                // keyring in this state.
-                tracing::error!(
-                "outbox worker disabled: failed to initialize remote execution environment: {e}"
-            );
-                None
+    let outbox_env = Arc::new(nunciod::outbox::ProductionExecutionEnv::new(
+        db.clone(),
+        account_secrets.clone(),
+    ));
+    let _outbox_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let summary =
+                nunciod::outbox::execute_pending_mutations(&db_outbox, outbox_env.as_ref(), 50)
+                    .await;
+            if summary.completed > 0 || summary.failed > 0 {
+                tracing::info!(
+                    "outbox drain: {} completed, {} retried, {} failed",
+                    summary.completed,
+                    summary.retried,
+                    summary.failed
+                );
             }
-        };
-    let _outbox_task = outbox_env.map(|env| {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let summary =
-                    nunciod::outbox::execute_pending_mutations(&db_outbox, env.as_ref(), 50).await;
-                if summary.completed > 0 || summary.failed > 0 {
-                    tracing::info!(
-                        "outbox drain: {} completed, {} retried, {} failed",
-                        summary.completed,
-                        summary.retried,
-                        summary.failed
-                    );
-                }
-            }
-        })
+        }
     });
 
     // Background Auto-Update Check Listener Loop (24h interval).

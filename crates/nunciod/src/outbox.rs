@@ -357,34 +357,61 @@ async fn find_account_config(
 }
 
 /// Production [`RemoteExecutionEnv`]: resolves real per-account IMAP/JMAP mail
-/// backends and SMTP senders from the store plus the OS keyring, and owns a
-/// single SSRF-hardened [`WebhookDispatcher`] keyed by a daemon-wide signing
-/// secret provisioned from the vault.
+/// backends and SMTP senders from the store plus the OS keyring, and lazily
+/// builds a single SSRF-hardened [`WebhookDispatcher`] keyed by a daemon-wide
+/// signing secret provisioned from the vault.
+///
+/// The webhook signing key is provisioned lazily -- only the first time a
+/// `CALL WEBHOOK` mutation is actually dispatched -- so a vault issue with that
+/// one key can never disable the mailbox-mutation and forward paths, which do
+/// not need it.
 pub struct ProductionExecutionEnv {
     db: Arc<DatabaseEngine>,
     secrets: Arc<SecretManager>,
-    webhook: WebhookDispatcher,
+    webhook: std::sync::OnceLock<WebhookDispatcher>,
 }
 
 impl ProductionExecutionEnv {
-    /// Build the production environment, provisioning (or loading) the
-    /// daemon-wide webhook signing key from the vault. Fails closed if the
-    /// vault is unavailable, so a `CALL WEBHOOK` is never dispatched unsigned.
-    pub fn new(
-        db: Arc<DatabaseEngine>,
-        secrets: Arc<SecretManager>,
-    ) -> Result<Self, OutboxExecuteError> {
-        let key_bytes = secrets.get_or_create_key_bytes(WEBHOOK_SIGNING_KEY_ACCOUNT, 32)?;
-        let webhook = WebhookDispatcher::new(hex::encode(key_bytes));
-        Ok(Self {
+    /// Build the production environment. Infallible: no vault access happens
+    /// here, so the outbox worker can always start; the webhook signing key is
+    /// provisioned on first webhook dispatch instead (see the struct doc).
+    pub fn new(db: Arc<DatabaseEngine>, secrets: Arc<SecretManager>) -> Self {
+        Self {
             db,
             secrets,
-            webhook,
-        })
+            webhook: std::sync::OnceLock::new(),
+        }
     }
 
     async fn account(&self, account_id: &str) -> Result<AccountConfig, OutboxExecuteError> {
         find_account_config(&self.db, account_id).await
+    }
+
+    /// Return the lazily-provisioned webhook dispatcher, minting (or loading)
+    /// the daemon-wide signing key from the vault on first use. Fails closed if
+    /// the vault is unavailable, so a `CALL WEBHOOK` is never dispatched
+    /// unsigned -- and, being lazy, that failure is isolated to webhook
+    /// dispatch and never disables the other mutation paths.
+    fn webhook_dispatcher(&self) -> Result<&WebhookDispatcher, WebhookError> {
+        if let Some(dispatcher) = self.webhook.get() {
+            return Ok(dispatcher);
+        }
+        let key_bytes = self
+            .secrets
+            .get_or_create_key_bytes(WEBHOOK_SIGNING_KEY_ACCOUNT, 32)
+            .map_err(|e| {
+                WebhookError::SigningError(format!(
+                    "failed to provision webhook signing key from the vault: {e}"
+                ))
+            })?;
+        // A concurrent caller may win the race to set it; either way the stored
+        // dispatcher is authoritative.
+        let _ = self
+            .webhook
+            .set(WebhookDispatcher::new(hex::encode(key_bytes)));
+        self.webhook.get().ok_or_else(|| {
+            WebhookError::SigningError("webhook dispatcher unavailable after provisioning".into())
+        })
     }
 }
 
@@ -425,7 +452,7 @@ impl RemoteExecutionEnv for ProductionExecutionEnv {
     ) -> Result<u16, WebhookError> {
         // Production keeps the secure default egress policy (private/loopback
         // targets are rejected).
-        self.webhook
+        self.webhook_dispatcher()?
             .dispatch_with_options(
                 url,
                 rule_id,
