@@ -52,8 +52,6 @@ pub enum CoreCommand {
         /// Human-readable error description.
         message: String,
     },
-    /// Reload filter rules cache in memory.
-    ReloadFilters,
     /// Request graceful shutdown of the core engine.
     Shutdown,
 }
@@ -153,8 +151,6 @@ pub struct AppState {
     pub status: EngineStatus,
     /// Total number of loaded accounts.
     pub accounts_loaded: usize,
-    /// Total unread message count across loaded accounts.
-    pub unread_count: usize,
     /// Last error message, if any.
     pub last_error: Option<String>,
 }
@@ -259,20 +255,12 @@ impl EventBus {
                 });
             }
             CoreCommand::MarkRead { message_id, read } => {
-                self.update_state(|s| {
-                    if read {
-                        s.unread_count = s.unread_count.saturating_sub(1);
-                    } else {
-                        s.unread_count = s.unread_count.saturating_add(1);
-                    }
-                });
                 self.publish_event(CoreEvent::MessageFlagsChanged { message_id, read });
             }
             CoreCommand::ReportError { message } => {
                 self.update_state(|s| s.last_error = Some(message.clone()));
                 self.publish_event(CoreEvent::Error { message });
             }
-            CoreCommand::ReloadFilters => {}
             CoreCommand::Shutdown => {
                 self.update_state(|s| s.status = EngineStatus::ShuttingDown);
                 self.publish_event(CoreEvent::ShuttingDown);
@@ -308,7 +296,6 @@ mod tests {
         let seed = AppState {
             status: EngineStatus::Idle,
             accounts_loaded: 3,
-            unread_count: 5,
             last_error: None,
         };
         let bus = EventBus::with_initial_state(seed.clone());
@@ -400,18 +387,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_mark_read_adjusts_unread_count_both_directions() {
-        let bus = EventBus::with_initial_state(AppState {
-            unread_count: 1,
-            ..AppState::default()
-        });
+    async fn process_mark_read_emits_flags_changed_for_each_call() {
+        let bus = EventBus::new();
         let mut events = bus.subscribe_events();
 
         bus.process_command(CoreCommand::MarkRead {
             message_id: "msg-1".to_string(),
             read: false,
         });
-        assert_eq!(bus.current_state().unread_count, 2);
         assert_eq!(
             events.recv().await.expect("event received"),
             CoreEvent::MessageFlagsChanged {
@@ -424,15 +407,13 @@ mod tests {
             message_id: "msg-1".to_string(),
             read: true,
         });
-        bus.process_command(CoreCommand::MarkRead {
-            message_id: "msg-1".to_string(),
-            read: true,
-        });
-        bus.process_command(CoreCommand::MarkRead {
-            message_id: "msg-1".to_string(),
-            read: true,
-        });
-        assert_eq!(bus.current_state().unread_count, 0);
+        assert_eq!(
+            events.recv().await.expect("event received"),
+            CoreEvent::MessageFlagsChanged {
+                message_id: "msg-1".to_string(),
+                read: true
+            }
+        );
     }
 
     #[tokio::test]
