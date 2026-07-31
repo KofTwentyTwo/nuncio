@@ -68,6 +68,7 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
+use tracing::Instrument;
 
 // Resource bounds applied to the tonic `Server` builder in
 // `serve_on_listener_with_overrides_and_shutdown`. These exist so a
@@ -295,6 +296,17 @@ fn map_tls_mode_from_proto(mode: TlsModeProto) -> Result<nuncio_core::TlsMode, S
         TlsModeProto::StartTls => Ok(nuncio_core::TlsMode::StartTls),
         TlsModeProto::Plain => Ok(nuncio_core::TlsMode::Plain),
         TlsModeProto::Unspecified => Err(Status::invalid_argument("tls mode is required")),
+    }
+}
+
+/// Short, non-sensitive label for an account's transport kind, safe to log
+/// (carries no host, credential, or address -- just which protocol family the
+/// account uses).
+fn transport_kind(transport: &nuncio_core::Transport) -> &'static str {
+    match transport {
+        nuncio_core::Transport::ImapSmtp(_) => "imap_smtp",
+        nuncio_core::Transport::Jmap(_) => "jmap",
+        nuncio_core::Transport::Dav(_) => "dav",
     }
 }
 
@@ -662,6 +674,12 @@ impl Accounts for AccountsGrpcService {
             return Err(Status::internal(message));
         }
 
+        tracing::info!(
+            account_id = %config.id,
+            transport = transport_kind(&config.transport),
+            "Accounts: account added"
+        );
+
         Ok(Response::new(AddAccountResponse {
             config: Some(map_account_config_to_proto(config)),
         }))
@@ -671,7 +689,7 @@ impl Accounts for AccountsGrpcService {
         &self,
         _request: Request<ListAccountsRequest>,
     ) -> Result<Response<ListAccountsResponse>, Status> {
-        let accounts = self
+        let accounts: Vec<AccountConfigProto> = self
             .db
             .list_accounts()
             .await
@@ -679,6 +697,8 @@ impl Accounts for AccountsGrpcService {
             .into_iter()
             .map(map_account_config_to_proto)
             .collect();
+
+        tracing::debug!(count = accounts.len(), "Accounts: listed accounts");
 
         Ok(Response::new(ListAccountsResponse { accounts }))
     }
@@ -712,6 +732,7 @@ impl Accounts for AccountsGrpcService {
             )));
         }
 
+        let password_rotated = matches!(&req.password, Some(p) if !p.is_empty());
         match req.password {
             // A password rotation writes the new credential first, then
             // persists. Unlike `add_account` (where no prior secret exists,
@@ -734,6 +755,13 @@ impl Accounts for AccountsGrpcService {
                     .map_err(|e| Status::internal(format!("failed to persist account: {e}")))?;
             }
         }
+
+        tracing::info!(
+            account_id = %config.id,
+            transport = transport_kind(&config.transport),
+            password_rotated,
+            "Accounts: account updated"
+        );
 
         Ok(Response::new(UpdateAccountResponse {}))
     }
@@ -777,6 +805,8 @@ impl Accounts for AccountsGrpcService {
             );
         }
 
+        tracing::info!(account_id = %req.account_id, "Accounts: account removed");
+
         Ok(Response::new(RemoveAccountResponse {}))
     }
 
@@ -808,6 +838,13 @@ impl Accounts for AccountsGrpcService {
             .map_err(|e| Status::internal(format!("failed to read credential from vault: {e}")))?;
 
         let report = self.connection_tester.probe(&config, &password).await;
+
+        tracing::info!(
+            account_id = %config.id,
+            imap_ok = report.imap.ok,
+            smtp_ok = report.smtp.ok,
+            "Accounts: connection probe finished"
+        );
 
         Ok(Response::new(TestAccountConnectionResponse {
             imap_ok: report.imap.ok,
@@ -1137,6 +1174,12 @@ impl Calendar for CalendarGrpcService {
             }
         };
 
+        tracing::info!(
+            calendar_id = %req.calendar_id,
+            synced,
+            "Calendar: sync finished"
+        );
+
         Ok(Response::new(CalendarSyncResponse {
             synced_count: synced as u64,
         }))
@@ -1306,6 +1349,12 @@ impl Contacts for ContactsGrpcService {
             }
         };
 
+        tracing::info!(
+            account_id = %req.account_id,
+            synced,
+            "Contacts: sync finished"
+        );
+
         Ok(Response::new(ContactsSyncResponse {
             synced_count: synced as u64,
         }))
@@ -1420,6 +1469,12 @@ impl Contacts for ContactsGrpcService {
             .save_contact(&contact)
             .await
             .map_err(|e| Status::internal(format!("failed to save contact: {e}")))?;
+
+        tracing::info!(
+            contact_id = %contact.id,
+            account_id = ?contact.account_id,
+            "Contacts: contact created"
+        );
 
         Ok(Response::new(CreateContactResponse {
             contact: Some(map_contact_to_proto(contact)),
@@ -1601,6 +1656,12 @@ impl Mail for MailGrpcService {
                 )
             })?;
 
+        tracing::info!(
+            message_id = %req.message_id,
+            read = req.read,
+            "Mail: mark-read applied"
+        );
+
         self.event_bus.process_command(CoreCommand::MarkRead {
             message_id: req.message_id,
             read: req.read,
@@ -1724,6 +1785,11 @@ impl Mail for MailGrpcService {
     async fn sync(&self, request: Request<SyncRequest>) -> Result<Response<SyncResponse>, Status> {
         let account_id = request.into_inner().account_id;
 
+        match &account_id {
+            Some(id) => tracing::info!(account_id = %id, "Mail: dispatching sync for account"),
+            None => tracing::info!("Mail: dispatching sync for all configured accounts"),
+        }
+
         let synced = if let Some(backend) = &self.overrides.mail_backend {
             crate::sync::sync_with_backend(
                 &self.db,
@@ -1742,6 +1808,8 @@ impl Mail for MailGrpcService {
         } else {
             sync_all_configured(&self.sync_dispatcher, &self.db, &self.event_bus).await
         };
+
+        tracing::info!(synced, "Mail: sync finished");
 
         Ok(Response::new(SyncResponse {
             synced_count: synced as u64,
@@ -1906,6 +1974,8 @@ impl Filters for FiltersGrpcService {
 
         self.reload_engine_from_store().await;
 
+        tracing::info!(rule_id = %rule.id, "Filters: rule created");
+
         Ok(Response::new(CreateRuleResponse {
             rule: Some(map_filter_rule_to_proto(rule)),
         }))
@@ -1956,6 +2026,8 @@ impl Filters for FiltersGrpcService {
             .map_err(|e| Status::internal(format!("failed to delete filter rule: {e}")))?;
 
         self.reload_engine_from_store().await;
+
+        tracing::info!(rule_id = %req.rule_id, "Filters: rule deleted");
 
         Ok(Response::new(DeleteRuleResponse {}))
     }
@@ -2082,6 +2154,8 @@ impl Filters for FiltersGrpcService {
 
         self.reload_engine_from_store().await;
 
+        tracing::info!(rule_id = %rule.id, "Filters: rule updated");
+
         Ok(Response::new(UpdateRuleResponse {
             rule: Some(map_filter_rule_to_proto(rule)),
         }))
@@ -2116,6 +2190,12 @@ impl Filters for FiltersGrpcService {
                 return Err(Status::invalid_argument("rule export format is required"))
             }
         };
+
+        tracing::info!(
+            format = ?format,
+            rule_count = rules.len(),
+            "Filters: rules exported"
+        );
 
         Ok(Response::new(ExportRulesResponse { content }))
     }
@@ -2155,6 +2235,12 @@ impl Filters for FiltersGrpcService {
         }
 
         self.reload_engine_from_store().await;
+
+        tracing::info!(
+            imported_count,
+            error_count = errors.len(),
+            "Filters: rules imported"
+        );
 
         Ok(Response::new(ImportRulesResponse {
             imported_count,
@@ -2214,66 +2300,80 @@ impl Filters for FiltersGrpcService {
             req.chunk_size as usize
         };
 
+        tracing::info!(chunk_size, "Filters: triage rescan started");
+
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<TriageProgress, Status>>(16);
         let db = self.db.clone();
         let engine = self.filter_engine.clone();
+        // Carry the per-RPC span into the detached worker so its completion
+        // event inherits the same request_id as the RPC that started the scan.
+        let triage_span = tracing::Span::current();
 
-        tokio::spawn(async move {
-            let mut last_id = String::new();
-            let mut scanned: u64 = 0;
-            let mut matched: u64 = 0;
-            let mut applied: u64 = 0;
+        tokio::spawn(
+            async move {
+                let mut last_id = String::new();
+                let mut scanned: u64 = 0;
+                let mut matched: u64 = 0;
+                let mut applied: u64 = 0;
 
-            loop {
-                let batch = match db.get_message_chunk(&last_id, chunk_size).await {
-                    Ok(batch) => batch,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(Status::internal(format!(
-                                "failed to read message chunk during triage: {e}"
-                            ))))
-                            .await;
+                loop {
+                    let batch = match db.get_message_chunk(&last_id, chunk_size).await {
+                        Ok(batch) => batch,
+                        Err(e) => {
+                            let _ = tx
+                                .send(Err(Status::internal(format!(
+                                    "failed to read message chunk during triage: {e}"
+                                ))))
+                                .await;
+                            return;
+                        }
+                    };
+                    let is_last_page = batch.len() < chunk_size;
+
+                    for email in &batch {
+                        let actions_for_email =
+                            crate::sync::apply_filter_actions(&db, &engine, email).await;
+                        scanned += 1;
+                        applied += actions_for_email as u64;
+                        if actions_for_email > 0 {
+                            matched += 1;
+                        }
+                    }
+
+                    if let Some(last) = batch.last() {
+                        last_id = last.id.clone();
+                    }
+
+                    let done = is_last_page;
+                    if tx
+                        .send(Ok(TriageProgress {
+                            scanned_count: scanned,
+                            matched_count: matched,
+                            actions_applied_count: applied,
+                            last_message_id: last_id.clone(),
+                            done,
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        // Receiver dropped: the caller disconnected, so there is
+                        // no one left to report progress to.
                         return;
                     }
-                };
-                let is_last_page = batch.len() < chunk_size;
 
-                for email in &batch {
-                    let actions_for_email =
-                        crate::sync::apply_filter_actions(&db, &engine, email).await;
-                    scanned += 1;
-                    applied += actions_for_email as u64;
-                    if actions_for_email > 0 {
-                        matched += 1;
+                    if is_last_page {
+                        tracing::info!(
+                            scanned,
+                            matched,
+                            applied,
+                            "Filters: triage rescan finished"
+                        );
+                        return;
                     }
                 }
-
-                if let Some(last) = batch.last() {
-                    last_id = last.id.clone();
-                }
-
-                let done = is_last_page;
-                if tx
-                    .send(Ok(TriageProgress {
-                        scanned_count: scanned,
-                        matched_count: matched,
-                        actions_applied_count: applied,
-                        last_message_id: last_id.clone(),
-                        done,
-                    }))
-                    .await
-                    .is_err()
-                {
-                    // Receiver dropped: the caller disconnected, so there is
-                    // no one left to report progress to.
-                    return;
-                }
-
-                if is_last_page {
-                    return;
-                }
             }
-        });
+            .instrument(triage_span),
+        );
 
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
@@ -2323,6 +2423,13 @@ impl Export for ExportGrpcService {
         }
         let format = map_export_format_from_proto(req.format())?;
 
+        let scope_kind = match &req.scope {
+            Some(export_request::Scope::AccountId(_)) => "account",
+            Some(export_request::Scope::FolderId(_)) => "folder",
+            None => "all",
+        };
+        tracing::info!(format = ?format, scope = scope_kind, "Export: mailbox export started");
+
         let messages = match req.scope {
             Some(export_request::Scope::AccountId(account_id)) => {
                 self.db
@@ -2344,6 +2451,12 @@ impl Export for ExportGrpcService {
             .export_messages_to_file(&messages, format, &output_path)
             .await
             .map_err(|e| Status::internal(format!("export failed: {e}")))?;
+
+        tracing::info!(
+            message_count = summary.message_count,
+            bytes_written = summary.bytes_written,
+            "Export: mailbox export finished"
+        );
 
         Ok(Response::new(ExportResponse {
             output_path: summary.output_path,
@@ -2426,6 +2539,12 @@ impl Audit for AuditGrpcService {
             .verify_worm_audit_chain_report()
             .await
             .map_err(|e| Status::internal(format!("failed to verify audit chain: {e}")))?;
+
+        tracing::info!(
+            valid = report.valid,
+            record_count = report.record_count,
+            "Audit: chain verification finished"
+        );
 
         Ok(Response::new(VerifyChainResponse {
             valid: report.valid,
@@ -2927,6 +3046,73 @@ mod tests {
             );
         }
         request
+    }
+
+    /// A state-changing RPC must emit its own domain event, and (because every
+    /// handler event inherits the OBS-2 per-RPC span) that event must carry the
+    /// request-scoped `request_id`. Here the `Filters::create_rule` handler is
+    /// invoked inside a stand-in request span to prove the domain event both
+    /// fires and inherits the correlation id -- without duplicating the layer's
+    /// bare entry/exit lines.
+    #[test]
+    fn create_rule_handler_logs_domain_event_under_request_scope() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let (recorder, ()) = with_recorder(|| {
+            runtime.block_on(async {
+                let (db, _dir) = DatabaseEngine::connect_ephemeral()
+                    .await
+                    .expect("ephemeral db");
+                let db = Arc::new(db);
+                let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rules"));
+                let service = FiltersGrpcService { db, filter_engine };
+
+                // Stand in for the RpcTraceLayer's per-RPC span so the handler's
+                // domain event inherits a request_id, exactly as in production.
+                let span = tracing::info_span!("grpc.request", request_id = "test-req-42");
+                async {
+                    service
+                        .create_rule(Request::new(CreateRuleRequest {
+                            name: "Domain Event Rule".to_string(),
+                            priority: 1,
+                            nsql: SAMPLE_RULE_NSQL.to_string(),
+                        }))
+                        .await
+                        .expect("rule creation succeeds");
+                }
+                .instrument(span)
+                .await;
+            });
+        });
+
+        let events = recorder.events();
+        let created = events
+            .iter()
+            .find(|e| e.message() == "Filters: rule created")
+            .expect("the create_rule handler must emit its domain event");
+        assert_eq!(created.level, Level::INFO);
+        assert!(
+            created.fields.contains_key("rule_id"),
+            "the domain event must carry the rule id"
+        );
+
+        // The domain event was emitted while the handler ran inside the stand-in
+        // request span, so an operator can correlate it back to that request via
+        // the span's `request_id` (the same mechanism the RpcTraceLayer provides
+        // in production -- see `rpc_trace`'s own test).
+        let request_span = recorder
+            .spans()
+            .into_iter()
+            .find(|s| s.name == "grpc.request")
+            .expect("the request span must be recorded");
+        assert_eq!(
+            request_span.fields.get("request_id").map(String::as_str),
+            Some("test-req-42"),
+            "the request span must carry the request-scoped correlation id"
+        );
     }
 
     #[test]

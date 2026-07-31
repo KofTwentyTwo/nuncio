@@ -88,7 +88,12 @@ impl ShutdownController {
     /// Initiates shutdown. Idempotent: calling it more than once (e.g. a
     /// second Ctrl+C while already draining) is a no-op beyond the first.
     pub fn trigger(&self) {
+        // Drives the event bus to `ShuttingDown` and publishes the
+        // `CoreEvent::ShuttingDown` event to every subscriber (e.g. clients on
+        // `System/Subscribe`), so a graceful shutdown is observable over the
+        // API and not just in local logs.
         self.event_bus.process_command(CoreCommand::Shutdown);
+        tracing::info!("shutdown: ShuttingDown event published to subscribers");
         let _ = self.tx.send(true);
     }
 }
@@ -164,6 +169,29 @@ mod tests {
         let mut late_clone = signal.clone();
         late_clone.wait().await;
         assert!(late_clone.is_requested());
+    }
+
+    /// Triggering shutdown must both publish the `ShuttingDown` event (flipping
+    /// bus state) and emit a traceable lifecycle log line, so a clean shutdown
+    /// is observable in the logs and not only over the API.
+    #[test]
+    fn trigger_emits_a_traceable_shutting_down_lifecycle_log() {
+        use crate::test_tracing::with_recorder;
+
+        let (recorder, ()) = with_recorder(|| {
+            let event_bus = Arc::new(EventBus::new());
+            let (controller, _signal) = ShutdownController::new(event_bus.clone());
+            controller.trigger();
+            assert_eq!(event_bus.current_state().status, EngineStatus::ShuttingDown);
+        });
+
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|e| e.message() == "shutdown: ShuttingDown event published to subscribers"),
+            "trigger must emit the ShuttingDown lifecycle log"
+        );
     }
 
     #[tokio::test]
