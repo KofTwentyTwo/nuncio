@@ -1350,6 +1350,37 @@ impl DatabaseEngine {
         })
     }
 
+    /// Return the subset of `ids` already present in the `messages` table, as a single
+    /// `SELECT id FROM messages WHERE id IN (...)` query.
+    ///
+    /// Lets a caller classify a whole fetched batch as new-vs-seen with one round trip instead
+    /// of one existence lookup per id. Passing an empty slice short-circuits to an empty set
+    /// without querying at all, since `IN ()` is not valid SQL.
+    pub async fn existing_message_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashSet<String>, DatabaseError> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> =
+            sqlx::QueryBuilder::new("SELECT id FROM messages WHERE id IN (");
+        let mut separated = builder.separated(", ");
+        for id in ids {
+            separated.push_bind(id);
+        }
+        builder.push(")");
+
+        let rows: Vec<(String,)> = builder
+            .build_query_as()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     /// Save a [`nuncio_core::model::CalendarEvent`] to SQLite (INSERT OR REPLACE).
     ///
     /// Unlike [`Self::save_email`], calendar event summary/location are never encrypted at
@@ -3728,6 +3759,42 @@ mod tests {
             body_html: None,
             attachments: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn existing_message_ids_returns_only_the_ids_already_persisted() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        engine
+            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
+            .await
+            .unwrap();
+        engine
+            .save_email(&export_test_email("msg-2", "acct-a", "inbox"))
+            .await
+            .unwrap();
+
+        let found = engine
+            .existing_message_ids(&[
+                "msg-1".to_string(),
+                "msg-2".to_string(),
+                "msg-3-never-saved".to_string(),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(found.len(), 2);
+        assert!(found.contains("msg-1"));
+        assert!(found.contains("msg-2"));
+        assert!(!found.contains("msg-3-never-saved"));
+    }
+
+    #[tokio::test]
+    async fn existing_message_ids_with_empty_input_returns_empty_set_without_querying() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let found = engine.existing_message_ids(&[]).await.unwrap();
+
+        assert!(found.is_empty());
     }
 
     #[tokio::test]

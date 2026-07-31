@@ -195,39 +195,26 @@ pub async fn apply_filter_actions(
     applied
 }
 
-/// Reports whether `message_id` is not yet present in the store.
-///
-/// Sync is not yet incremental (a re-sync re-fetches every message the
-/// backend still reports, not just genuinely new ones), so this is the guard
-/// that keeps filter actions firing exactly once per message: it must be
-/// checked BEFORE `save_email` persists (or re-persists) the message, since
-/// `save_email` is `INSERT OR REPLACE` and would otherwise erase the
-/// distinction between "arriving for the first time" and "seen again".
-///
-/// A lookup failure that is not "not found" (a genuine DB error) is logged
-/// and treated as "not new", the conservative choice: firing filters again on
-/// a message we can't positively identify as new risks duplicate remote
-/// mutations, which is worse than occasionally missing a fire on a message
-/// that was in fact new.
-async fn is_new_message(db: &nuncio_store::db::DatabaseEngine, message_id: &str) -> bool {
-    match db.get_message(message_id).await {
-        Ok(_) => false,
-        Err(e) if e.is_not_found() => true,
-        Err(e) => {
-            tracing::warn!(
-                "could not determine whether message '{message_id}' is new before sync \
-                 (treating as not-new to avoid duplicate filter firing): {e}"
-            );
-            false
-        }
-    }
-}
-
 /// Fetch every folder and every message in every folder from `backend`,
 /// persisting each message via [`DatabaseEngine::save_email`] and, for
 /// messages genuinely new to the store, evaluating it against
-/// `filter_engine` via [`apply_filter_actions`] (see [`is_new_message`] for
-/// why this must be gated rather than run on every persisted message).
+/// `filter_engine` via [`apply_filter_actions`].
+///
+/// Sync is not yet incremental (a re-sync re-fetches every message the
+/// backend still reports, not just genuinely new ones), so new-vs-seen must
+/// be determined BEFORE `save_email` persists (or re-persists) anything --
+/// `save_email` is `INSERT OR REPLACE` and would otherwise erase the
+/// distinction between "arriving for the first time" and "seen again". Doing
+/// that with one existence lookup per message (`DatabaseEngine::get_message`)
+/// is an N+1 query pattern over a fetched chunk; instead, this classifies an
+/// entire folder's chunk with a single batched
+/// `DatabaseEngine::existing_message_ids` lookup up front, then folds in a
+/// per-batch "already seen this pass" set while iterating so a chunk that
+/// itself contains a repeated id (e.g. a backend surfacing the same message
+/// twice in one fetch) still fires at most once -- exactly as if each
+/// message's existence had been checked one at a time immediately before its
+/// own `save_email`.
+///
 /// Returns the total number of messages processed (a message id "processed"
 /// more than once, e.g. by a backend that returns the same id from multiple
 /// folders, is counted once per occurrence -- `save_email` itself is
@@ -260,8 +247,19 @@ async fn fetch_and_persist(
             .sync_messages(&folder.id, last_state.as_deref())
             .await?;
         let fetched = emails.len();
+
+        // One round trip classifies the whole chunk instead of one lookup per
+        // message. A lookup failure that is not "not found" would be a
+        // genuine DB error; `existing_message_ids` surfaces those as `Err`
+        // rather than silently treating the batch as "not new", so callers
+        // never persist and skip-filter on an unverified assumption.
+        let chunk_ids: Vec<String> = emails.iter().map(|e| e.id.clone()).collect();
+        let already_present = db.existing_message_ids(&chunk_ids).await?;
+        let mut seen_this_pass = std::collections::HashSet::new();
+
         for email in emails {
-            let is_new = is_new_message(db, &email.id).await;
+            let is_new =
+                !already_present.contains(&email.id) && seen_this_pass.insert(email.id.clone());
             db.save_email(&email).await?;
             if is_new {
                 apply_filter_actions(db, filter_engine, &email).await;
@@ -1301,6 +1299,81 @@ mod tests {
             pending_after_second.len(),
             1,
             "no new outbox mutation should be enqueued on a repeat sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_with_backend_fires_filters_only_for_new_messages_in_a_mixed_batch() {
+        // A single fetched chunk containing a mix of an already-seen message
+        // (persisted by a prior sync) and genuinely new ones must fire filter
+        // actions ONLY for the new ones, via the batched
+        // `existing_message_ids` classification -- not a per-message lookup.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+
+        let mark_read_rule = nuncio_filter::NsqlParser::parse_rule(
+            "Urgent Auto-Read",
+            1,
+            "WHERE subject CONTAINS 'Urgent' ACTION MARK READ",
+        )
+        .expect("parse rule");
+        let filter_engine = FilterEngine::new(vec![mark_read_rule]).expect("compile rule");
+
+        // Pre-seed one message directly, simulating it having landed in a
+        // prior sync pass. It must NOT re-fire even though this pass's
+        // backend still reports it (sync is not yet incremental).
+        db.save_email(&mock_email(
+            "m-already-seen",
+            "inbox",
+            "Urgent: known issue",
+        ))
+        .await
+        .expect("pre-seed existing message");
+
+        let mock = MockMailBackend::new();
+        mock.add_folder(Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 3,
+            unread_messages: 3,
+        });
+        // Mixed chunk: one already-present id, two genuinely new ids.
+        mock.add_message(mock_email("m-already-seen", "inbox", "Urgent: known issue"));
+        mock.add_message(mock_email("m-new-1", "inbox", "Urgent: brand new"));
+        mock.add_message(mock_email("m-new-2", "inbox", "Urgent: also new"));
+
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+            .await
+            .expect("sync succeeds");
+        assert_eq!(synced, 3, "every fetched message is still persisted");
+
+        let logs = db
+            .list_filter_execution_logs(10)
+            .await
+            .expect("list execution logs");
+        assert_eq!(
+            logs.len(),
+            2,
+            "filters fire only for the two genuinely new messages in the mixed batch"
+        );
+        let fired_ids: std::collections::HashSet<String> =
+            logs.iter().map(|l| l.message_id.clone()).collect();
+        assert!(fired_ids.contains("m-new-1"));
+        assert!(fired_ids.contains("m-new-2"));
+        assert!(!fired_ids.contains("m-already-seen"));
+
+        // The pre-seeded message must still be persisted (INSERT OR REPLACE
+        // semantics are unaffected by the batched new/seen classification)
+        // but its read flag must be untouched by this pass's MARK READ rule.
+        let already_seen = db
+            .get_message("m-already-seen")
+            .await
+            .expect("still persisted");
+        assert!(
+            !already_seen.read,
+            "a message that already existed before this sync must not re-fire MARK READ"
         );
     }
 
