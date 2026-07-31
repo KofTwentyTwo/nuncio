@@ -178,7 +178,7 @@ async fn rejects_calls_to_new_filters_rpcs_without_a_bearer_token() {
 
     let err = client
         .update_rule(nuncio_proto::v1::UpdateRuleRequest {
-            id: "rule-1".to_string(),
+            rule_id: "rule-1".to_string(),
             name: None,
             nsql: None,
             priority: None,
@@ -221,7 +221,7 @@ async fn rejects_calls_to_new_accounts_rpcs_without_a_bearer_token() {
 
     let remove_err = client
         .remove_account(nuncio_proto::v1::RemoveAccountRequest {
-            id: "acct-1".to_string(),
+            account_id: "acct-1".to_string(),
         })
         .await
         .expect_err("unauthenticated remove_account must be rejected");
@@ -229,7 +229,7 @@ async fn rejects_calls_to_new_accounts_rpcs_without_a_bearer_token() {
 
     let test_err = client
         .test_account_connection(nuncio_proto::v1::TestAccountConnectionRequest {
-            id: "acct-1".to_string(),
+            account_id: "acct-1".to_string(),
         })
         .await
         .expect_err("unauthenticated test_account_connection must be rejected");

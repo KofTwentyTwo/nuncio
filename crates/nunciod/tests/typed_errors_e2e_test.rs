@@ -93,7 +93,7 @@ async fn typed_error_reasons_decode_from_status_details_over_the_wire() {
         .expect("accounts client connects");
     let status = accounts
         .remove_account(RemoveAccountRequest {
-            id: "no-such-account".to_string(),
+            account_id: "no-such-account".to_string(),
         })
         .await
         .expect_err("removing a nonexistent account must fail");

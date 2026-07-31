@@ -255,7 +255,10 @@ enum TlsMode {
 // a separate `password` field) and as the response payload of
 // `ListAccounts`, and the password MUST NEVER appear in the latter.
 message AccountConfig {
-  // Unique identifier for the account configuration.
+  // Unique identifier for the account configuration. OPAQUE and
+  // server-assigned: clients MUST NOT parse or construct this value, only
+  // pass it back verbatim (see `Message.id`'s doc comment for the general
+  // rule that applies to every entity id in this API).
   string id = 1;
   // User-friendly display name (e.g. "Work Mail").
   string name = 2;
@@ -300,10 +303,13 @@ message AddAccountRequest {
   string password = 2;
 }
 
-// AddAccountResponse deliberately carries only the persisted account's id,
-// never the password nor the full config (callers already have both).
+// AddAccountResponse carries the persisted account configuration exactly as
+// `ListAccounts` would report it, mirroring how the other create RPCs
+// (`CreateRule`, `CreateContact`) return the created object rather than just
+// its id. The password credential is NEVER included here -- see
+// `AccountConfig`'s doc comment.
 message AddAccountResponse {
-  string id = 1;
+  AccountConfig config = 1;
 }
 
 // ListAccountsRequest currently carries no parameters.
@@ -333,7 +339,7 @@ message UpdateAccountResponse {}
 
 // RemoveAccountRequest names the account configuration to delete by id.
 message RemoveAccountRequest {
-  string id = 1;
+  string account_id = 1;
 }
 
 // RemoveAccountResponse currently carries no fields; a successful RPC
@@ -342,7 +348,7 @@ message RemoveAccountResponse {}
 
 // TestAccountConnectionRequest names the persisted account to probe by id.
 message TestAccountConnectionRequest {
-  string id = 1;
+  string account_id = 1;
 }
 
 // TestAccountConnectionResponse reports the REAL, independent outcome of
@@ -427,7 +433,13 @@ message Attachment {
 // (rather than `Email`) to avoid colliding with common generated-code
 // identifiers in hand-written Rust using this module.
 message Message {
-  // Unique message identifier.
+  // Unique message identifier. OPAQUE and server-assigned: a deterministic
+  // surrogate derived from the message's stable protocol identity, never a
+  // raw upstream protocol id (e.g. an IMAP UID, which is only stable within
+  // a single IMAP session and is NOT a durable cross-session identifier).
+  // Clients MUST treat this as an opaque token -- pass it back verbatim in
+  // later requests, but never parse, construct, or assume any structure in
+  // its value.
   string id = 1;
   // Account identifier owning the message.
   string account_id = 2;
@@ -553,7 +565,7 @@ message SearchMessagesRequest {
 // Mirrors `nuncio_store::search::SearchHit`.
 message MessageSearchHit {
   // Matching message ID.
-  string id = 1;
+  string message_id = 1;
   // Matching subject/title.
   string title = 2;
   // Text snippet matching the search term.
@@ -690,7 +702,9 @@ service Filters {
 // NSQL-rendered form (`RuleAction::to_nsql`) of the rule's parsed action
 // list, included for display purposes.
 message FilterRule {
-  // Rule unique identifier.
+  // Rule unique identifier. OPAQUE and server-assigned -- see `Message.id`'s
+  // doc comment for the general rule that applies to every entity id in
+  // this API.
   string id = 1;
   // Rule display name.
   string name = 2;
@@ -752,7 +766,7 @@ message ListRulesResponse {
 // DeleteRuleRequest.
 message DeleteRuleRequest {
   // Rule unique identifier.
-  string id = 1;
+  string rule_id = 1;
 }
 
 // DeleteRuleResponse currently carries no parameters; a successful RPC
@@ -810,12 +824,12 @@ message PreviewRuleResponse {
   repeated string condition_traces = 7;
 }
 
-// UpdateRuleRequest carries a persisted rule's `id` plus optional
+// UpdateRuleRequest carries a persisted rule's `rule_id` plus optional
 // per-field overrides; an absent field leaves that field unchanged on the
 // existing rule.
 message UpdateRuleRequest {
   // Rule unique identifier.
-  string id = 1;
+  string rule_id = 1;
   // New display name, if changing.
   optional string name = 2;
   // New full NSQL source code text, if changing.
@@ -1019,7 +1033,9 @@ service Calendar {
 // `CalendarEvent` (matching the core model) rather than `Event` -- `Event` is
 // already taken by `System`'s push-event wrapper.
 message CalendarEvent {
-  // Event identifier.
+  // Event identifier. OPAQUE and server-assigned -- see `Message.id`'s doc
+  // comment for the general rule that applies to every entity id in this
+  // API.
   string id = 1;
   // Account identifier owning the event.
   string account_id = 2;
@@ -1153,7 +1169,9 @@ message ContactPhone {
 // for them was identified for this vertical; they can be added additively
 // later if one arises.
 message Contact {
-  // Contact unique identifier.
+  // Contact unique identifier. OPAQUE and server-assigned -- see
+  // `Message.id`'s doc comment for the general rule that applies to every
+  // entity id in this API.
   string id = 1;
   // Account identifier owning this contact's address book entry.
   optional string account_id = 2;

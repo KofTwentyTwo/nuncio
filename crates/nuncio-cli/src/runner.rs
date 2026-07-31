@@ -876,7 +876,7 @@ impl HeadlessRunner {
                 .iter()
                 .map(|h| {
                     json!({
-                        "id": h.id,
+                        "id": h.message_id,
                         "title": h.title,
                         "snippet": h.snippet,
                     })
@@ -1383,7 +1383,9 @@ impl HeadlessRunner {
         };
 
         match client
-            .delete_rule(nuncio_proto::v1::DeleteRuleRequest { id: id.to_string() })
+            .delete_rule(nuncio_proto::v1::DeleteRuleRequest {
+                rule_id: id.to_string(),
+            })
             .await
         {
             Ok(_) => {
@@ -1518,7 +1520,7 @@ impl HeadlessRunner {
 
         match client
             .update_rule(nuncio_proto::v1::UpdateRuleRequest {
-                id: id.to_string(),
+                rule_id: id.to_string(),
                 name: name.map(str::to_string),
                 nsql: sql.map(str::to_string),
                 priority,
@@ -1888,7 +1890,14 @@ impl HeadlessRunner {
             .await
         {
             Ok(response) => {
-                let account_id = response.into_inner().id;
+                // Prefer the daemon-confirmed id from the persisted config it
+                // echoes back; fall back to the id this call requested if
+                // the response is somehow missing its config.
+                let account_id = response
+                    .into_inner()
+                    .config
+                    .map(|c| c.id)
+                    .unwrap_or(account_id);
                 if is_caldav {
                     let collection = collection_url.unwrap_or_default();
                     if json_mode {
@@ -2173,7 +2182,9 @@ impl HeadlessRunner {
         };
 
         match client
-            .remove_account(nuncio_proto::v1::RemoveAccountRequest { id: id.to_string() })
+            .remove_account(nuncio_proto::v1::RemoveAccountRequest {
+                account_id: id.to_string(),
+            })
             .await
         {
             Ok(_) => {
@@ -2208,7 +2219,7 @@ impl HeadlessRunner {
 
         match client
             .test_account_connection(nuncio_proto::v1::TestAccountConnectionRequest {
-                id: id.to_string(),
+                account_id: id.to_string(),
             })
             .await
         {
@@ -3046,16 +3057,12 @@ mod tests {
                 request: tonic::Request<AddAccountRequest>,
             ) -> Result<tonic::Response<AddAccountResponse>, tonic::Status> {
                 let req = request.into_inner();
-                let id = req
-                    .config
-                    .as_ref()
-                    .map(|c| c.id.clone())
-                    .unwrap_or_default();
+                let config = req.config.clone();
                 *self
                     .last_add_request
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = Some(req);
-                Ok(tonic::Response::new(AddAccountResponse { id }))
+                Ok(tonic::Response::new(AddAccountResponse { config }))
             }
 
             async fn update_account(
@@ -3397,7 +3404,7 @@ mod tests {
                 let req = request.into_inner();
                 Ok(tonic::Response::new(SearchMessagesResponse {
                     hits: vec![MessageSearchHit {
-                        id: "msg-stub-1".to_string(),
+                        message_id: "msg-stub-1".to_string(),
                         title: "Stub Subject".to_string(),
                         snippet: format!("...{}...", req.query),
                     }],
@@ -4283,13 +4290,13 @@ mod tests {
                 request: tonic::Request<UpdateRuleRequest>,
             ) -> Result<tonic::Response<UpdateRuleResponse>, tonic::Status> {
                 let req = request.into_inner();
-                if req.id != "rule-stub-1" {
+                if req.rule_id != "rule-stub-1" {
                     return Err(tonic::Status::not_found("no such rule"));
                 }
                 *self.last_update.lock().unwrap_or_else(|e| e.into_inner()) = Some(req.clone());
                 Ok(tonic::Response::new(UpdateRuleResponse {
                     rule: Some(FilterRuleProto {
-                        id: req.id,
+                        id: req.rule_id,
                         name: req.name.unwrap_or_else(|| "Stub Rule".to_string()),
                         target_account: "*".to_string(),
                         priority: req.priority.unwrap_or(5),
@@ -4467,7 +4474,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .expect("stub daemon received a delete_rule request");
-        assert_eq!(recorded_delete.id, "rule-stub-1");
+        assert_eq!(recorded_delete.rule_id, "rule-stub-1");
 
         // `filter validate` valid + invalid.
         let validate_ok = runner
@@ -4533,7 +4540,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .expect("stub daemon received an update_rule request");
-        assert_eq!(recorded_update.id, "rule-stub-1");
+        assert_eq!(recorded_update.rule_id, "rule-stub-1");
         assert_eq!(recorded_update.name.as_deref(), Some("Renamed Rule"));
         assert_eq!(recorded_update.nsql, None);
         assert_eq!(recorded_update.priority, Some(9));

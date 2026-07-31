@@ -164,7 +164,13 @@ async fn account_lifecycle_round_trips_over_authenticated_grpc_offline() {
         .await
         .expect("add_account succeeds")
         .into_inner();
-    assert_eq!(add_response.id, ACCOUNT_ID);
+    assert_eq!(
+        add_response
+            .config
+            .expect("response carries the created config")
+            .id,
+        ACCOUNT_ID
+    );
 
     // ---- (b) ListAccounts round-trips BOTH distinct TLS modes ----
     let listed = accounts_client
@@ -204,7 +210,7 @@ async fn account_lifecycle_round_trips_over_authenticated_grpc_offline() {
     // ---- (d) TestAccountConnection reports the GENUINE per-protocol result ----
     let report = accounts_client
         .test_account_connection(TestAccountConnectionRequest {
-            id: ACCOUNT_ID.to_string(),
+            account_id: ACCOUNT_ID.to_string(),
         })
         .await
         .expect("test_account_connection succeeds")
@@ -220,7 +226,7 @@ async fn account_lifecycle_round_trips_over_authenticated_grpc_offline() {
     // ---- (e) RemoveAccount genuinely deletes it ----
     accounts_client
         .remove_account(RemoveAccountRequest {
-            id: ACCOUNT_ID.to_string(),
+            account_id: ACCOUNT_ID.to_string(),
         })
         .await
         .expect("remove_account succeeds");
@@ -237,7 +243,7 @@ async fn account_lifecycle_round_trips_over_authenticated_grpc_offline() {
     // fabricated success.
     let err = accounts_client
         .test_account_connection(TestAccountConnectionRequest {
-            id: ACCOUNT_ID.to_string(),
+            account_id: ACCOUNT_ID.to_string(),
         })
         .await
         .expect_err("testing a removed account must fail");
