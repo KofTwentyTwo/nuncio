@@ -153,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         account_secrets.clone(),
     ));
     let mut outbox_shutdown = shutdown_signal.clone();
+    let mut outbox_drain_shutdown = shutdown_signal.clone();
     let outbox_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -162,13 +163,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     break;
                 }
                 _ = interval.tick() => {
-                    // Runs to completion once selected: a drain pass already
-                    // in progress is never aborted mid-write by a shutdown
-                    // signal that arrives after this branch was chosen.
+                    // A drain pass already in progress is never aborted
+                    // mid-write by a shutdown signal that arrives after this
+                    // branch was chosen -- but `execute_pending_mutations`
+                    // itself races each item's execution against
+                    // `outbox_drain_shutdown`, so a hung remote op cannot
+                    // block this pass (and therefore shutdown) indefinitely.
                     let summary = nunciod::outbox::execute_pending_mutations(
                         &db_outbox,
                         outbox_env.as_ref(),
                         50,
+                        &mut outbox_drain_shutdown,
                     )
                     .await;
                     if summary.completed > 0 || summary.failed > 0 {
