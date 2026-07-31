@@ -89,6 +89,7 @@ fn sample_account_config() -> AccountConfig {
         sync_interval_secs: 60,
         smtp_host: "smtp.nuncio.mx".to_string(),
         smtp_port: 25,
+        collection_url: String::new(),
     }
 }
 
