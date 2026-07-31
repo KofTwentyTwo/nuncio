@@ -422,20 +422,38 @@ impl SqliteRecoveryEngine {
                             Self::parse_salvaged_tls_mode(&id, "imap_tls_mode", &imap_tls_mode_raw);
                         let smtp_tls_mode =
                             Self::parse_salvaged_tls_mode(&id, "smtp_tls_mode", &smtp_tls_mode_raw);
+                        // Reconstruct the transport variant from the salvaged
+                        // `protocol` discriminator, mirroring
+                        // `DatabaseEngine::list_accounts`.
+                        let transport = match protocol {
+                            nuncio_core::AccountProtocol::ImapSmtp => {
+                                nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                                    imap_host: server_host,
+                                    imap_port: server_port as u16,
+                                    imap_tls_mode,
+                                    smtp_host: resolved_smtp_host,
+                                    smtp_port: resolved_smtp_port,
+                                    smtp_tls_mode,
+                                })
+                            }
+                            nuncio_core::AccountProtocol::Jmap => {
+                                nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+                                    endpoint_host: server_host,
+                                })
+                            }
+                            nuncio_core::AccountProtocol::CalDav => {
+                                nuncio_core::Transport::Dav(nuncio_core::DavTransport {
+                                    collection_url: collection_url.unwrap_or_default(),
+                                })
+                            }
+                        };
                         nuncio_core::AccountConfig {
                             id,
                             name,
                             email_address,
-                            protocol,
-                            server_host,
-                            server_port: server_port as u16,
-                            smtp_host: resolved_smtp_host,
-                            smtp_port: resolved_smtp_port,
-                            imap_tls_mode,
-                            smtp_tls_mode,
                             keyring_secret_key,
                             sync_interval_secs: sync_interval_secs as u64,
-                            collection_url: collection_url.unwrap_or_default(),
+                            transport,
                         }
                     },
                 )
@@ -598,16 +616,16 @@ mod tests {
                 id: "acct-test-1".to_string(),
                 name: "Work Account".to_string(),
                 email_address: "work@nuncio.mx".to_string(),
-                protocol: nuncio_core::AccountProtocol::ImapSmtp,
-                server_host: "imap.nuncio.mx".to_string(),
-                server_port: 993,
-                smtp_host: "smtp.nuncio.mx".to_string(),
-                smtp_port: 465,
-                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-test-1".to_string(),
                 sync_interval_secs: 60,
-                collection_url: String::new(),
+                transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                    imap_host: "imap.nuncio.mx".to_string(),
+                    imap_port: 993,
+                    imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                    smtp_host: "smtp.nuncio.mx".to_string(),
+                    smtp_port: 465,
+                    smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                }),
             };
             engine.save_account(&acct).await.unwrap();
             assert!(engine.check_integrity().await.unwrap());
@@ -659,16 +677,16 @@ mod tests {
                 id: "acct-salvage-1".to_string(),
                 name: "Salvage Account".to_string(),
                 email_address: "salvage@nuncio.mx".to_string(),
-                protocol: nuncio_core::AccountProtocol::ImapSmtp,
-                server_host: "imap.nuncio.mx".to_string(),
-                server_port: 993,
-                smtp_host: "smtp.nuncio.mx".to_string(),
-                smtp_port: 465,
-                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-salvage-1".to_string(),
                 sync_interval_secs: 60,
-                collection_url: String::new(),
+                transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                    imap_host: "imap.nuncio.mx".to_string(),
+                    imap_port: 993,
+                    imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                    smtp_host: "smtp.nuncio.mx".to_string(),
+                    smtp_port: 465,
+                    smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                }),
             };
             engine.save_account(&acct).await.unwrap();
 
@@ -796,16 +814,16 @@ mod tests {
                 id: "acct-starttls-1".to_string(),
                 name: "STARTTLS Account".to_string(),
                 email_address: "starttls@nuncio.mx".to_string(),
-                protocol: nuncio_core::AccountProtocol::ImapSmtp,
-                server_host: "imap.nuncio.mx".to_string(),
-                server_port: 143,
-                smtp_host: "smtp.nuncio.mx".to_string(),
-                smtp_port: 587,
-                imap_tls_mode: nuncio_core::TlsMode::StartTls,
-                smtp_tls_mode: nuncio_core::TlsMode::Plain,
                 keyring_secret_key: "nuncio/acct-starttls-1".to_string(),
                 sync_interval_secs: 60,
-                collection_url: String::new(),
+                transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                    imap_host: "imap.nuncio.mx".to_string(),
+                    imap_port: 143,
+                    imap_tls_mode: nuncio_core::TlsMode::StartTls,
+                    smtp_host: "smtp.nuncio.mx".to_string(),
+                    smtp_port: 587,
+                    smtp_tls_mode: nuncio_core::TlsMode::Plain,
+                }),
             };
             engine.save_account(&acct).await.unwrap();
         }
@@ -824,8 +842,9 @@ mod tests {
             .unwrap();
         let accounts = fresh.list_accounts().await.unwrap();
         assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].imap_tls_mode, nuncio_core::TlsMode::StartTls);
-        assert_eq!(accounts[0].smtp_tls_mode, nuncio_core::TlsMode::Plain);
+        let salvaged_t = accounts[0].imap_smtp().expect("imap-smtp transport");
+        assert_eq!(salvaged_t.imap_tls_mode, nuncio_core::TlsMode::StartTls);
+        assert_eq!(salvaged_t.smtp_tls_mode, nuncio_core::TlsMode::Plain);
     }
 
     // NOTE: there is deliberately no test combining *header* corruption (bytes 0-16 -- the

@@ -250,10 +250,54 @@ enum TlsMode {
   TLS_MODE_PLAIN = 3;
 }
 
-// Mirrors `nuncio_core::AccountConfig` field-for-field, MINUS the password
-// credential: this message is used both as the request payload (alongside
-// a separate `password` field) and as the response payload of
-// `ListAccounts`, and the password MUST NEVER appear in the latter.
+// IMAP/SMTP transport parameters: an account whose inbound mail is fetched
+// over IMAP4rev1 and whose outbound mail is submitted over SMTP. Inbound and
+// outbound carry independent host/port/TLS settings because a provider's
+// IMAP and SMTP endpoints commonly differ.
+message ImapSmtpTransport {
+  // IMAP server hostname or IP address (inbound mail).
+  string imap_host = 1;
+  // IMAP server port number (1..=65535).
+  uint32 imap_port = 2;
+  // IMAP connection security transport mode.
+  TlsMode imap_tls_mode = 3;
+  // SMTP server hostname or IP address (outbound mail).
+  string smtp_host = 4;
+  // SMTP server port number (1..=65535).
+  uint32 smtp_port = 5;
+  // SMTP connection security transport mode.
+  TlsMode smtp_tls_mode = 6;
+}
+
+// JMAP transport parameters (RFC 8620 / RFC 8621). A JMAP account addresses
+// its provider by a session endpoint host; the daemon derives the well-known
+// session URL from it. JMAP always runs over HTTPS, so there is no separate
+// cleartext TLS mode to configure here.
+message JmapTransport {
+  // JMAP session endpoint host (the daemon derives the session URL from it).
+  string endpoint_host = 1;
+}
+
+// DAV transport parameters (CalDAV RFC 4791 today, CardDAV later). A DAV
+// account is addressed by a fully-qualified collection URL rather than a mail
+// host/port, because a DAV client dispatches requests directly at that URL.
+message DavTransport {
+  // Fully-qualified collection URL (scheme + host + path), e.g. a CalDAV
+  // calendar collection or, later, a CardDAV address-book collection.
+  string collection_url = 1;
+}
+
+// Mirrors `nuncio_core::AccountConfig`, MINUS the password credential: this
+// message is used both as the request payload (alongside a separate
+// `password` field) and as the response payload of `ListAccounts`, and the
+// password MUST NEVER appear in the latter.
+//
+// An account has EXACTLY ONE transport, carried in the `transport` oneof. This
+// makes a nonsensical mix (e.g. IMAP host + JMAP endpoint + DAV url all set at
+// once) structurally unrepresentable rather than merely discouraged: the
+// transport-specific fields live inside their variant sub-message, so only one
+// variant's fields can ever be populated. A request with no transport case set
+// is rejected as a validation failure.
 message AccountConfig {
   // Unique identifier for the account configuration. OPAQUE and
   // server-assigned: clients MUST NOT parse or construct this value, only
@@ -264,34 +308,25 @@ message AccountConfig {
   string name = 2;
   // Primary email address associated with the account.
   string email_address = 3;
-  // Protocol engine type.
-  AccountProtocol protocol = 4;
-  // Server hostname or IP address (IMAP/JMAP).
-  string server_host = 5;
-  // Server port number (1..=65535) (IMAP/JMAP).
-  uint32 server_port = 6;
-  reserved 7;
-  reserved "use_tls";
-  // IMAP connection security transport mode.
-  TlsMode imap_tls_mode = 8;
-  // SMTP connection security transport mode.
-  TlsMode smtp_tls_mode = 9;
+  // Field numbers 4-9 and 12-14 held the flat, transport-specific fields
+  // (protocol, server_host, server_port, use_tls, imap/smtp TLS modes,
+  // smtp_host, smtp_port, collection_url) before they moved into the
+  // per-transport sub-messages carried by the `transport` oneof. They are
+  // reserved so those numbers are never reused with an incompatible meaning.
+  reserved 4, 5, 6, 7, 8, 9, 12, 13, 14;
+  reserved "protocol", "server_host", "server_port", "use_tls", "imap_tls_mode",
+    "smtp_tls_mode", "smtp_host", "smtp_port", "collection_url";
   // Keyring entry key used to retrieve OS vault credentials.
   string keyring_secret_key = 10;
   // Background sync polling interval (minimum 10s).
   google.protobuf.Duration sync_interval = 11;
-  // SMTP server hostname or IP address, used for outbound mail. Distinct
-  // from `server_host` because a mail provider's inbound (IMAP/JMAP) and
-  // outbound (SMTP) endpoints commonly differ.
-  string smtp_host = 12;
-  // SMTP server port number (1..=65535), used for outbound mail.
-  uint32 smtp_port = 13;
-  // Fully-qualified collection URL for DAV-protocol accounts (e.g. a CalDAV
-  // calendar collection or, later, a CardDAV address-book collection). Set
-  // for accounts whose protocol speaks WebDAV; empty for mail accounts. This
-  // is a full URL (scheme + host + path), not a bare host, because a DAV
-  // client dispatches requests directly at the collection URL.
-  string collection_url = 14;
+  // The account's single transport. Exactly one case is set; a request with
+  // none set is rejected.
+  oneof transport {
+    ImapSmtpTransport imap_smtp = 15;
+    JmapTransport jmap = 16;
+    DavTransport dav = 17;
+  }
 }
 
 // AddAccountRequest carries the full account configuration plus the raw

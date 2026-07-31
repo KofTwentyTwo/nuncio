@@ -4,8 +4,8 @@
 //! / `CoreCommand::SyncAccount` only moved `EngineStatus` to `Syncing` and
 //! published `SyncStarted`, and nothing ever fetched a real message from a
 //! real server into the store. This module closes that gap: for a configured
-//! account it connects a real [`MailBackend`] (a real [`ImapEngine`] for
-//! [`AccountProtocol::ImapSmtp`], built from [`AccountConfig`] plus the
+//! account it connects a real [`MailBackend`] (a real [`ImapEngine`] for an
+//! IMAP/SMTP transport, built from [`AccountConfig`] plus the
 //! account's keyring-stored password), fetches folders and messages, and
 //! persists every message through [`DatabaseEngine::save_email`].
 //!
@@ -20,7 +20,7 @@
 //! all-accounts sync fans these per-account runs out through
 //! [`crate::sync_dispatcher::sync_all_configured`], so concurrency and the
 //! per-account timeout are bounded in one place rather than serialized here.
-use nuncio_core::{AccountConfig, AccountProtocol, CoreCommand, CoreEvent, EventBus};
+use nuncio_core::{AccountConfig, CoreCommand, CoreEvent, EventBus, Transport};
 use nuncio_filter::{FilterEngine, OutboxManager, RuleAction};
 use nuncio_mail::{ImapEngine, JmapEngine, MailBackend, MailError};
 use nuncio_store::db::DatabaseError;
@@ -347,24 +347,24 @@ pub(crate) fn build_mail_backend(
     config: &AccountConfig,
     password: &str,
 ) -> Result<Box<dyn MailBackend>, SyncError> {
-    match config.protocol {
-        AccountProtocol::ImapSmtp => Ok(Box::new(ImapEngine::with_credentials(
+    match &config.transport {
+        Transport::ImapSmtp(t) => Ok(Box::new(ImapEngine::with_credentials(
             &config.id,
-            &config.server_host,
-            config.server_port,
-            config.imap_tls_mode,
+            &t.imap_host,
+            t.imap_port,
+            t.imap_tls_mode,
             &config.email_address,
             password,
         ))),
-        AccountProtocol::Jmap => Ok(Box::new(JmapEngine::with_credentials(
+        Transport::Jmap(t) => Ok(Box::new(JmapEngine::with_credentials(
             &config.id,
-            &config.server_host,
+            &t.endpoint_host,
             &config.email_address,
             password,
         ))),
         // A DAV-protocol account (e.g. CalDAV) has no inbound mail backend;
         // it is synced through its own domain service, not the mail path.
-        AccountProtocol::CalDav => Err(SyncError::NotAMailAccount(config.id.clone())),
+        Transport::Dav(_) => Err(SyncError::NotAMailAccount(config.id.clone())),
     }
 }
 
@@ -436,16 +436,11 @@ mod tests {
             id: id.to_string(),
             name: "JMAP Test Account".to_string(),
             email_address: format!("{id}@nuncio.mx"),
-            protocol: AccountProtocol::Jmap,
-            server_host: host.to_string(),
-            server_port: 443,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
-            imap_tls_mode: TlsMode::ImplicitTls,
-            smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: Transport::Jmap(nuncio_core::JmapTransport {
+                endpoint_host: host.to_string(),
+            }),
         }
     }
 
@@ -527,16 +522,16 @@ mod tests {
             id: id.to_string(),
             name: "IMAP Test Account".to_string(),
             email_address: format!("{id}@nuncio.mx"),
-            protocol: AccountProtocol::ImapSmtp,
-            server_host: "imap.nuncio.mx".to_string(),
-            server_port: 993,
-            smtp_host: "smtp.nuncio.mx".to_string(),
-            smtp_port: 465,
-            imap_tls_mode: TlsMode::ImplicitTls,
-            smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
-            collection_url: String::new(),
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: TlsMode::ImplicitTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: TlsMode::ImplicitTls,
+            }),
         }
     }
 

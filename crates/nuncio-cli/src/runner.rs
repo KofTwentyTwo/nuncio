@@ -53,6 +53,64 @@ fn parse_account_protocol(protocol: &str) -> Result<nuncio_proto::v1::AccountPro
     }
 }
 
+/// Renders an account's active transport as a set of `--json` fields (protocol
+/// discriminant plus that transport's own endpoint fields), so `account
+/// list`/`show` expose exactly the fields the active transport carries.
+fn account_transport_json(config: &nuncio_proto::v1::AccountConfig) -> serde_json::Value {
+    use nuncio_proto::v1::account_config::Transport;
+    match &config.transport {
+        Some(Transport::ImapSmtp(t)) => json!({
+            "protocol": "imap-smtp",
+            "imap_host": t.imap_host,
+            "imap_port": t.imap_port,
+            "imap_tls_mode": t.imap_tls_mode().as_str_name(),
+            "smtp_host": t.smtp_host,
+            "smtp_port": t.smtp_port,
+            "smtp_tls_mode": t.smtp_tls_mode().as_str_name(),
+        }),
+        Some(Transport::Jmap(t)) => json!({
+            "protocol": "jmap",
+            "endpoint_host": t.endpoint_host,
+        }),
+        Some(Transport::Dav(t)) => json!({
+            "protocol": "caldav",
+            "collection_url": t.collection_url,
+        }),
+        None => json!({ "protocol": "unspecified" }),
+    }
+}
+
+/// Merges the top-level object fields of `extra` into `base` (both must be
+/// JSON objects). Used to fold an account's transport-specific fields into its
+/// common-field object without hand-writing every combination.
+fn merge_json(base: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(base), serde_json::Value::Object(extra)) = (base.as_object_mut(), extra) {
+        for (k, v) in extra {
+            base.insert(k, v);
+        }
+    }
+}
+
+/// Renders an account's active transport as a single human-readable summary
+/// line fragment for `account list`/`show`.
+fn account_transport_summary(config: &nuncio_proto::v1::AccountConfig) -> String {
+    use nuncio_proto::v1::account_config::Transport;
+    match &config.transport {
+        Some(Transport::ImapSmtp(t)) => format!(
+            "IMAP {}:{} ({})  SMTP {}:{} ({})",
+            t.imap_host,
+            t.imap_port,
+            t.imap_tls_mode().as_str_name(),
+            t.smtp_host,
+            t.smtp_port,
+            t.smtp_tls_mode().as_str_name(),
+        ),
+        Some(Transport::Jmap(t)) => format!("JMAP {}", t.endpoint_host),
+        Some(Transport::Dav(t)) => format!("CalDAV {}", t.collection_url),
+        None => "(no transport configured)".to_string(),
+    }
+}
+
 /// Parses a `filter export --format` CLI string into its wire-format
 /// `nuncio.v1.RuleExportFormat` value. Rejects anything else rather than
 /// silently falling back to one rendering, since a typo'd format should
@@ -1869,30 +1927,45 @@ impl HeadlessRunner {
         let keyring_key = format!("nuncio/{}", email);
         let account_id = format!("acct-{}", email.replace('@', "-at-").replace('.', "-"));
 
-        // A CalDAV account is addressed by its collection URL, not by mail
-        // host/port endpoints, so those are left empty for it.
+        // Build the single transport the account speaks. Each transport carries
+        // only its own endpoint fields, so a nonsensical mix is unrepresentable.
+        let transport = match account_protocol {
+            nuncio_proto::v1::AccountProtocol::ImapSmtp => {
+                nuncio_proto::v1::account_config::Transport::ImapSmtp(
+                    nuncio_proto::v1::ImapSmtpTransport {
+                        imap_host: imap_host.to_string(),
+                        imap_port: u32::from(imap_port),
+                        imap_tls_mode: map_tls_mode_to_proto(imap_tls_mode).into(),
+                        smtp_host: smtp_host.to_string(),
+                        smtp_port: u32::from(smtp_port),
+                        smtp_tls_mode: map_tls_mode_to_proto(smtp_tls_mode).into(),
+                    },
+                )
+            }
+            nuncio_proto::v1::AccountProtocol::Jmap => {
+                // A JMAP account addresses its provider by a session endpoint
+                // host; the `--imap-host` flag supplies it.
+                nuncio_proto::v1::account_config::Transport::Jmap(nuncio_proto::v1::JmapTransport {
+                    endpoint_host: imap_host.to_string(),
+                })
+            }
+            nuncio_proto::v1::AccountProtocol::Caldav => {
+                nuncio_proto::v1::account_config::Transport::Dav(nuncio_proto::v1::DavTransport {
+                    collection_url: collection_url.unwrap_or_default().to_string(),
+                })
+            }
+            nuncio_proto::v1::AccountProtocol::Unspecified => {
+                return Self::render_error("account protocol is required", json_mode)
+            }
+        };
+
         let proto_config = nuncio_proto::v1::AccountConfig {
             id: account_id.clone(),
             name: email.to_string(),
             email_address: email.to_string(),
-            protocol: account_protocol.into(),
-            server_host: if is_caldav {
-                String::new()
-            } else {
-                imap_host.to_string()
-            },
-            server_port: if is_caldav { 0 } else { u32::from(imap_port) },
-            imap_tls_mode: map_tls_mode_to_proto(imap_tls_mode).into(),
-            smtp_tls_mode: map_tls_mode_to_proto(smtp_tls_mode).into(),
             keyring_secret_key: keyring_key.clone(),
             sync_interval: Some(nuncio_proto::time::duration_from_secs(300)),
-            smtp_host: if is_caldav {
-                String::new()
-            } else {
-                smtp_host.to_string()
-            },
-            smtp_port: if is_caldav { 0 } else { u32::from(smtp_port) },
-            collection_url: collection_url.unwrap_or_default().to_string(),
+            transport: Some(transport),
         };
 
         let mut client = match self.connect_accounts_client().await {
@@ -1916,6 +1989,7 @@ impl HeadlessRunner {
                     .config
                     .map(|c| c.id)
                     .unwrap_or(account_id);
+                let is_jmap = account_protocol == nuncio_proto::v1::AccountProtocol::Jmap;
                 if is_caldav {
                     let collection = collection_url.unwrap_or_default();
                     if json_mode {
@@ -1930,6 +2004,21 @@ impl HeadlessRunner {
                     } else {
                         format!(
                             "CalDAV account '{email}' (ID: {account_id}) added via nunciod daemon with collection URL {collection}"
+                        )
+                    }
+                } else if is_jmap {
+                    if json_mode {
+                        format_json(&json!({
+                            "configured": true,
+                            "account_id": account_id,
+                            "email": email,
+                            "protocol": "jmap",
+                            "endpoint_host": imap_host,
+                            "keyring_key": keyring_key
+                        }))
+                    } else {
+                        format!(
+                            "JMAP account '{email}' (ID: {account_id}) added via nunciod daemon with endpoint host {imap_host}"
                         )
                     }
                 } else if json_mode {
@@ -1983,21 +2072,15 @@ impl HeadlessRunner {
                     let accounts_json: Vec<serde_json::Value> = accounts
                         .iter()
                         .map(|a| {
-                            json!({
+                            let mut base = json!({
                                 "id": a.id,
                                 "name": a.name,
                                 "email_address": a.email_address,
-                                "protocol": a.protocol().as_str_name(),
-                                "server_host": a.server_host,
-                                "server_port": a.server_port,
-                                "smtp_host": a.smtp_host,
-                                "smtp_port": a.smtp_port,
-                                "imap_tls_mode": a.imap_tls_mode().as_str_name(),
-                                "smtp_tls_mode": a.smtp_tls_mode().as_str_name(),
                                 "keyring_secret_key": a.keyring_secret_key,
                                 "sync_interval_secs": duration_secs(&a.sync_interval),
-                                "collection_url": a.collection_url,
-                            })
+                            });
+                            merge_json(&mut base, account_transport_json(a));
+                            base
                         })
                         .collect();
                     format_json(&json!({ "accounts": accounts_json }))
@@ -2007,25 +2090,13 @@ impl HeadlessRunner {
                         accounts.len()
                     );
                     for a in &accounts {
-                        if a.protocol() == nuncio_proto::v1::AccountProtocol::Caldav {
-                            out.push_str(&format!(
-                                "\n  [{}] {} <{}>  CalDAV {}",
-                                a.id, a.name, a.email_address, a.collection_url,
-                            ));
-                        } else {
-                            out.push_str(&format!(
-                                "\n  [{}] {} <{}>  IMAP {}:{} ({})  SMTP {}:{} ({})",
-                                a.id,
-                                a.name,
-                                a.email_address,
-                                a.server_host,
-                                a.server_port,
-                                a.imap_tls_mode().as_str_name(),
-                                a.smtp_host,
-                                a.smtp_port,
-                                a.smtp_tls_mode().as_str_name(),
-                            ));
-                        }
+                        out.push_str(&format!(
+                            "\n  [{}] {} <{}>  {}",
+                            a.id,
+                            a.name,
+                            a.email_address,
+                            account_transport_summary(a),
+                        ));
                     }
                     out
                 }
@@ -2078,32 +2149,22 @@ impl HeadlessRunner {
         };
 
         if json_mode {
-            format_json(&json!({
+            let mut base = json!({
                 "id": account.id,
                 "name": account.name,
                 "email_address": account.email_address,
-                "protocol": account.protocol().as_str_name(),
-                "server_host": account.server_host,
-                "server_port": account.server_port,
-                "smtp_host": account.smtp_host,
-                "smtp_port": account.smtp_port,
-                "imap_tls_mode": account.imap_tls_mode().as_str_name(),
-                "smtp_tls_mode": account.smtp_tls_mode().as_str_name(),
                 "keyring_secret_key": account.keyring_secret_key,
                 "sync_interval_secs": duration_secs(&account.sync_interval),
-            }))
+            });
+            merge_json(&mut base, account_transport_json(&account));
+            format_json(&base)
         } else {
             format!(
-                "Account [{}] {} <{}>  IMAP {}:{} ({})  SMTP {}:{} ({})",
+                "Account [{}] {} <{}>  {}",
                 account.id,
                 account.name,
                 account.email_address,
-                account.server_host,
-                account.server_port,
-                account.imap_tls_mode().as_str_name(),
-                account.smtp_host,
-                account.smtp_port,
-                account.smtp_tls_mode().as_str_name(),
+                account_transport_summary(&account),
             )
         }
     }
@@ -2134,28 +2195,51 @@ impl HeadlessRunner {
         if let Some(email) = email {
             config.email_address = email.to_string();
         }
-        if let Some(host) = imap_host {
-            config.server_host = host.to_string();
-        }
-        if let Some(port) = imap_port {
-            config.server_port = u32::from(port);
-        }
-        if let Some(host) = smtp_host {
-            config.smtp_host = host.to_string();
-        }
-        if let Some(port) = smtp_port {
-            config.smtp_port = u32::from(port);
-        }
-        if let Some(mode) = imap_mode {
-            match parse_tls_mode(mode) {
-                Ok(mode) => config.imap_tls_mode = map_tls_mode_to_proto(mode).into(),
-                Err(e) => return Self::render_error(&e, json_mode),
-            }
-        }
-        if let Some(mode) = smtp_mode {
-            match parse_tls_mode(mode) {
-                Ok(mode) => config.smtp_tls_mode = map_tls_mode_to_proto(mode).into(),
-                Err(e) => return Self::render_error(&e, json_mode),
+
+        // The IMAP/SMTP endpoint flags only apply to an imap-smtp account; the
+        // transport oneof makes the alternatives (JMAP endpoint, DAV URL)
+        // structurally distinct, so applying these to another transport would
+        // be meaningless -- reject it rather than silently ignoring the flags.
+        let touches_imap_smtp_fields = imap_host.is_some()
+            || imap_port.is_some()
+            || smtp_host.is_some()
+            || smtp_port.is_some()
+            || imap_mode.is_some()
+            || smtp_mode.is_some();
+        if touches_imap_smtp_fields {
+            match &mut config.transport {
+                Some(nuncio_proto::v1::account_config::Transport::ImapSmtp(t)) => {
+                    if let Some(host) = imap_host {
+                        t.imap_host = host.to_string();
+                    }
+                    if let Some(port) = imap_port {
+                        t.imap_port = u32::from(port);
+                    }
+                    if let Some(host) = smtp_host {
+                        t.smtp_host = host.to_string();
+                    }
+                    if let Some(port) = smtp_port {
+                        t.smtp_port = u32::from(port);
+                    }
+                    if let Some(mode) = imap_mode {
+                        match parse_tls_mode(mode) {
+                            Ok(mode) => t.imap_tls_mode = map_tls_mode_to_proto(mode).into(),
+                            Err(e) => return Self::render_error(&e, json_mode),
+                        }
+                    }
+                    if let Some(mode) = smtp_mode {
+                        match parse_tls_mode(mode) {
+                            Ok(mode) => t.smtp_tls_mode = map_tls_mode_to_proto(mode).into(),
+                            Err(e) => return Self::render_error(&e, json_mode),
+                        }
+                    }
+                }
+                _ => {
+                    return Self::render_error(
+                        "the IMAP/SMTP flags only apply to an imap-smtp account",
+                        json_mode,
+                    )
+                }
             }
         }
 
@@ -3050,11 +3134,10 @@ mod tests {
     async fn account_add_and_list_round_trip_over_grpc_to_a_stub_daemon() {
         use nuncio_proto::v1::accounts_server::{Accounts as AccountsService, AccountsServer};
         use nuncio_proto::v1::{
-            AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
-            AddAccountRequest, AddAccountResponse, ListAccountsRequest, ListAccountsResponse,
-            RemoveAccountRequest, RemoveAccountResponse, TestAccountConnectionRequest,
-            TestAccountConnectionResponse, TlsMode as TlsModeProto, UpdateAccountRequest,
-            UpdateAccountResponse,
+            AccountConfig as AccountConfigProto, AddAccountRequest, AddAccountResponse,
+            ListAccountsRequest, ListAccountsResponse, RemoveAccountRequest, RemoveAccountResponse,
+            TestAccountConnectionRequest, TestAccountConnectionResponse, TlsMode as TlsModeProto,
+            UpdateAccountRequest, UpdateAccountResponse,
         };
         use std::sync::Mutex;
 
@@ -3117,16 +3200,18 @@ mod tests {
                         id: "acct-stub-1".to_string(),
                         name: "Stub Account".to_string(),
                         email_address: "stub@nuncio.mx".to_string(),
-                        protocol: AccountProtocolProto::ImapSmtp.into(),
-                        server_host: "imap.nuncio.mx".to_string(),
-                        server_port: 993,
-                        imap_tls_mode: TlsModeProto::ImplicitTls.into(),
-                        smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
                         keyring_secret_key: "nuncio/acct-stub-1".to_string(),
                         sync_interval: Some(nuncio_proto::time::duration_from_secs(300)),
-                        smtp_host: "smtp.nuncio.mx".to_string(),
-                        smtp_port: 465,
-                        collection_url: String::new(),
+                        transport: Some(nuncio_proto::v1::account_config::Transport::ImapSmtp(
+                            nuncio_proto::v1::ImapSmtpTransport {
+                                imap_host: "imap.nuncio.mx".to_string(),
+                                imap_port: 993,
+                                imap_tls_mode: TlsModeProto::ImplicitTls.into(),
+                                smtp_host: "smtp.nuncio.mx".to_string(),
+                                smtp_port: 465,
+                                smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
+                            },
+                        )),
                     }],
                 }))
             }
@@ -3201,7 +3286,8 @@ mod tests {
             .await;
         assert!(list_out.contains("acct-stub-1"));
         assert!(list_out.contains("stub@nuncio.mx"));
-        assert!(list_out.contains(r#""protocol":"ACCOUNT_PROTOCOL_IMAP_SMTP""#));
+        assert!(list_out.contains(r#""protocol":"imap-smtp""#));
+        assert!(list_out.contains(r#""imap_host":"imap.nuncio.mx""#));
 
         let list_out_text = runner
             .execute_command(

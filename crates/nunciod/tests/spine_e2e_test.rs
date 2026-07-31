@@ -37,8 +37,8 @@ use nuncio_filter::FilterEngine;
 use nuncio_mail::{MockMailBackend, MockMessageSender};
 use nuncio_proto::v1::event::Kind;
 use nuncio_proto::v1::{
-    AccountConfig, AccountProtocol, AddAccountRequest, GetMessageRequest, ListAccountsRequest,
-    ListMessagesRequest, MarkReadRequest, SendMessageRequest, SyncRequest, TlsMode,
+    AccountConfig, AddAccountRequest, GetMessageRequest, ListAccountsRequest, ListMessagesRequest,
+    MarkReadRequest, SendMessageRequest, SyncRequest, TlsMode,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
@@ -58,16 +58,18 @@ fn sample_account_config() -> AccountConfig {
         id: ACCOUNT_ID.to_string(),
         name: "Spine E2E Test Account".to_string(),
         email_address: ACCOUNT_EMAIL.to_string(),
-        protocol: AccountProtocol::ImapSmtp.into(),
-        server_host: "imap.nuncio.mx".to_string(),
-        server_port: 993,
-        imap_tls_mode: TlsMode::ImplicitTls.into(),
-        smtp_tls_mode: TlsMode::ImplicitTls.into(),
         keyring_secret_key: KEYRING_KEY.to_string(),
         sync_interval: Some(nuncio_proto::time::duration_from_secs(60)),
-        smtp_host: "smtp.nuncio.mx".to_string(),
-        smtp_port: 465,
-        collection_url: String::new(),
+        transport: Some(nuncio_proto::v1::account_config::Transport::ImapSmtp(
+            nuncio_proto::v1::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: TlsMode::ImplicitTls.into(),
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: TlsMode::ImplicitTls.into(),
+            },
+        )),
     }
 }
 

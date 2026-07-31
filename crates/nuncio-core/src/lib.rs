@@ -10,7 +10,10 @@ pub mod model;
 pub mod update;
 pub mod worm_audit;
 
-pub use config::{AccountConfig, AccountProtocol, ConfigError, TlsMode};
+pub use config::{
+    AccountConfig, AccountProtocol, ConfigError, DavTransport, ImapSmtpTransport, JmapTransport,
+    TlsMode, Transport,
+};
 pub use export::{ExportEngine, ExportError, ExportFormat, ExportSummary};
 pub use mcp_policy::{AgentPermissions, DataType, McpAgentPolicy};
 pub use model::{Attachment, CalendarEvent, Contact, DaemonTelemetry, Email, Folder};
