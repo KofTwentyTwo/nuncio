@@ -165,7 +165,7 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
                 imap_tls_mode: TlsModeProto::ImplicitTls.into(),
                 smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
                 keyring_secret_key: KEYRING_KEY.to_string(),
-                sync_interval_secs: 300,
+                sync_interval: Some(nuncio_proto::time::duration_from_secs(300)),
                 smtp_host: String::new(),
                 smtp_port: 0,
                 collection_url: collection_url.clone(),
@@ -183,8 +183,8 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
         .sync(CalendarSyncRequest {
             account_id: ACCOUNT_ID.to_string(),
             calendar_id: CALENDAR_ID.to_string(),
-            start_window: 1_700_000_000,
-            end_window: 1_800_000_000,
+            start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_000_000)),
+            end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_800_000_000)),
         })
         .await
         .expect("production CalDAV sync succeeds")
@@ -196,8 +196,8 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
         .list_events(ListEventsRequest {
             account_id: ACCOUNT_ID.to_string(),
             calendar_id: CALENDAR_ID.to_string(),
-            start_window: 1_700_000_000,
-            end_window: 1_800_000_000,
+            start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_000_000)),
+            end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_800_000_000)),
         })
         .await
         .expect("list_events succeeds")
@@ -216,8 +216,8 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
         .sync(CalendarSyncRequest {
             account_id: "acct-does-not-exist".to_string(),
             calendar_id: CALENDAR_ID.to_string(),
-            start_window: 1_700_000_000,
-            end_window: 1_800_000_000,
+            start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_000_000)),
+            end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_800_000_000)),
         })
         .await
         .expect_err("a sync targeting an unconfigured account must fail honestly");
@@ -232,8 +232,8 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
         .list_events(ListEventsRequest {
             account_id: ACCOUNT_ID.to_string(),
             calendar_id: CALENDAR_ID.to_string(),
-            start_window: 0,
-            end_window: i64::MAX,
+            start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
+            end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
         })
         .await
         .expect_err("missing bearer token must be rejected");

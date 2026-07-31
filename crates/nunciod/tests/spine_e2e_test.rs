@@ -65,7 +65,7 @@ fn sample_account_config() -> AccountConfig {
         imap_tls_mode: TlsMode::ImplicitTls.into(),
         smtp_tls_mode: TlsMode::ImplicitTls.into(),
         keyring_secret_key: KEYRING_KEY.to_string(),
-        sync_interval_secs: 60,
+        sync_interval: Some(nuncio_proto::time::duration_from_secs(60)),
         smtp_host: "smtp.nuncio.mx".to_string(),
         smtp_port: 465,
         collection_url: String::new(),
