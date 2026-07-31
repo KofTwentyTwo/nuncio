@@ -11,6 +11,7 @@ use regex::Regex;
 use sha2::Sha256;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 /// Pre-compiled single filter rule optimizing regex and predicate execution.
 #[derive(Clone)]
@@ -233,6 +234,26 @@ impl CompiledFilterSet {
     }
 }
 
+/// Map each action to its variant name for observability logging, deliberately
+/// dropping any destination data (folder name, forward address, webhook URL)
+/// that the action variants carry.
+fn action_kinds(actions: &[RuleAction]) -> Vec<&'static str> {
+    actions
+        .iter()
+        .map(|action| match action {
+            RuleAction::MoveTo(_) => "MOVE_TO",
+            RuleAction::CopyTo(_) => "COPY_TO",
+            RuleAction::MarkRead => "MARK_READ",
+            RuleAction::MarkUnread => "MARK_UNREAD",
+            RuleAction::Flag => "FLAG",
+            RuleAction::Unflag => "UNFLAG",
+            RuleAction::Delete => "DELETE",
+            RuleAction::ForwardTo(_) => "FORWARD_TO",
+            RuleAction::CallWebhook(_) => "CALL_WEBHOOK",
+        })
+        .collect()
+}
+
 /// Lock-free Filter Engine wrapping `ArcSwap<CompiledFilterSet>`.
 pub struct FilterEngine {
     cache: Arc<ArcSwap<CompiledFilterSet>>,
@@ -250,7 +271,9 @@ impl FilterEngine {
     /// Swap / reload active filter rules atomically (<5ns latencies).
     pub fn reload_rules(&self, rules: Vec<FilterRule>) -> Result<(), String> {
         let set = CompiledFilterSet::new(rules)?;
+        let rule_count = set.filters.len();
         self.cache.store(Arc::new(set));
+        info!(rule_count, "filter engine rules reloaded");
         Ok(())
     }
 
@@ -266,6 +289,12 @@ impl FilterEngine {
 
         for filter in &guard.filters {
             if filter.rule.matches_account(&email.account_id) && filter.evaluate_condition(email) {
+                debug!(
+                    rule_id = %filter.rule.id,
+                    rule_name = %filter.rule.name,
+                    actions = ?action_kinds(&filter.rule.actions),
+                    "rule matched; dispatching actions"
+                );
                 results.push((filter.rule.clone(), filter.rule.actions.clone()));
             }
         }
@@ -274,28 +303,66 @@ impl FilterEngine {
     }
 
     /// Evaluate with a Tokio hard timeout for ReDoS safety.
+    ///
+    /// Each rule's condition evaluation is timed independently (on a
+    /// blocking-pool task, so a real timeout can actually preempt a
+    /// long-running synchronous evaluation rather than merely racing a timer
+    /// that a purely synchronous future would never yield to). A rule whose
+    /// evaluation exceeds `timeout_duration` is treated as **non-matching**
+    /// for this message — the documented, fail-closed outcome — but unlike a
+    /// bare `unwrap_or_default()`, the timeout is never silent: it is logged
+    /// with the rule's identity via `warn!`, and evaluation continues with
+    /// the remaining rules rather than aborting the whole batch.
     pub async fn evaluate_with_timeout(
         &self,
         email: &Email,
         timeout_duration: Duration,
     ) -> Vec<(FilterRule, Vec<RuleAction>)> {
-        let email_clone = email.clone();
-        let engine_cache = self.cache.clone();
+        let guard = self.cache.load();
+        let mut results = Vec::new();
 
-        tokio::time::timeout(timeout_duration, async move {
-            let guard = engine_cache.load();
-            let mut results = Vec::new();
-            for filter in &guard.filters {
-                if filter.rule.matches_account(&email_clone.account_id)
-                    && filter.evaluate_condition(&email_clone)
-                {
+        for filter in &guard.filters {
+            if !filter.rule.matches_account(&email.account_id) {
+                continue;
+            }
+
+            let filter_for_task = filter.clone();
+            let email_for_task = email.clone();
+            let eval_task = tokio::task::spawn_blocking(move || {
+                filter_for_task.evaluate_condition(&email_for_task)
+            });
+
+            match tokio::time::timeout(timeout_duration, eval_task).await {
+                Ok(Ok(true)) => {
+                    debug!(
+                        rule_id = %filter.rule.id,
+                        rule_name = %filter.rule.name,
+                        actions = ?action_kinds(&filter.rule.actions),
+                        "rule matched; dispatching actions"
+                    );
                     results.push((filter.rule.clone(), filter.rule.actions.clone()));
                 }
+                Ok(Ok(false)) => {}
+                Ok(Err(join_error)) => {
+                    warn!(
+                        rule_id = %filter.rule.id,
+                        rule_name = %filter.rule.name,
+                        error = %join_error,
+                        "rule evaluation task failed to complete; treating rule as non-matching"
+                    );
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        rule_id = %filter.rule.id,
+                        rule_name = %filter.rule.name,
+                        timeout_ms = timeout_duration.as_millis(),
+                        "rule evaluation timed out (ReDoS guard); treating rule as non-matching"
+                    );
+                }
             }
-            results
-        })
-        .await
-        .unwrap_or_default()
+        }
+
+        results
     }
 
     /// Dry-run preview evaluation returning detailed microsecond traces.
@@ -367,6 +434,51 @@ impl FilterEngine {
 mod tests {
     use super::*;
     use nuncio_core::model::Email;
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing::span;
+
+    /// Minimal `tracing::Subscriber` that records a formatted line per event
+    /// so tests can assert on emitted level + fields without pulling in
+    /// `tracing-subscriber`'s registry machinery.
+    struct CapturingSubscriber {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct LineVisitor<'a>(&'a mut String);
+
+    impl Visit for LineVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!(" {}={:?}", field.name(), value));
+        }
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut line = format!("{}", event.metadata().level());
+            let mut visitor = LineVisitor(&mut line);
+            event.record(&mut visitor);
+            if let Ok(mut events) = self.events.lock() {
+                events.push(line);
+            }
+        }
+
+        fn enter(&self, _span: &span::Id) {}
+
+        fn exit(&self, _span: &span::Id) {}
+    }
 
     fn test_email(account_id: &str, subject: &str, folder_id: &str) -> Email {
         Email {
@@ -575,5 +687,59 @@ mod tests {
 
         let email = test_email("acct-1", "Anything", "inbox");
         assert_eq!(engine.evaluate(&email).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_with_timeout_logs_warn_and_treats_timeout_as_non_match() {
+        // A crafted, slow-to-evaluate condition (large body scanned by a
+        // CONTAINS check) paired with a near-zero timeout budget forces the
+        // per-rule timeout path deterministically: the evaluation runs on a
+        // real blocking-pool thread while the timer races it on the async
+        // task, so the timer reliably wins for any evaluation slower than a
+        // few microseconds.
+        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: events.clone(),
+        };
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let rule = FilterRule {
+            id: "slow-rule".to_string(),
+            name: "Slow Rule".to_string(),
+            target_account: "*".to_string(),
+            priority: 1,
+            enabled: true,
+            nsql_text: String::new(),
+            conditions: ConditionNode::Leaf(ConditionLeaf {
+                field: FilterField::Body,
+                operator: FilterOperator::Contains,
+                value: FilterValue::String("nonexistent-token".to_string()),
+            }),
+            actions: vec![RuleAction::MarkRead],
+            created_at: 0,
+            updated_at: 0,
+        };
+        let engine = FilterEngine::new(vec![rule]).unwrap();
+
+        let mut email = test_email("acct-1", "Anything", "inbox");
+        email.body_plain = Some("A".repeat(60_000_000));
+
+        let results = engine
+            .evaluate_with_timeout(&email, Duration::from_millis(1))
+            .await;
+
+        assert!(
+            results.is_empty(),
+            "documented outcome: a timed-out rule must be treated as non-matching, \
+             not fabricated as a match"
+        );
+
+        let captured = events.lock().unwrap();
+        assert!(
+            captured.iter().any(|line| line.contains("WARN")
+                && line.contains("timed out")
+                && line.contains("slow-rule")),
+            "expected a WARN log carrying the rule id for the timed-out evaluation, got: {captured:?}"
+        );
     }
 }
