@@ -35,8 +35,10 @@ pub struct ValidationOptions {
     pub allowed_forward_domains: Option<Vec<String>>,
     /// When set, reject webhook targets that point at private, loopback,
     /// link-local, or metadata address ranges. The validator checks literal-IP
-    /// hosts; the dispatcher additionally checks addresses a hostname resolves
-    /// to before connecting.
+    /// hosts; the dispatcher additionally resolves hostnames, checks every
+    /// candidate address, and then pins the outbound connection to the
+    /// checked address so it cannot be swapped for an unchecked one by a
+    /// second DNS lookup.
     pub block_private_webhooks: bool,
 }
 

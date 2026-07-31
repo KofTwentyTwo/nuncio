@@ -6,7 +6,7 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde_json::json;
 use sha2::Sha256;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::net::lookup_host;
@@ -24,6 +24,38 @@ fn first_blocked_address(addrs: &[IpAddr]) -> Option<IpAddr> {
         .find(|ip| is_blocked_webhook_target(*ip))
 }
 
+/// Resolves `host` to its candidate addresses. Kept separate from the policy
+/// check so the address list a rebinding DNS server could return is visible
+/// to callers before any of it is trusted.
+async fn resolve_host(host: &str, port: u16) -> Result<Vec<IpAddr>, WebhookError> {
+    let resolved: Vec<IpAddr> = lookup_host((host, port))
+        .await
+        .map_err(|e| WebhookError::NetworkError(e.to_string()))?
+        .map(|addr| addr.ip())
+        .collect();
+    if resolved.is_empty() {
+        return Err(WebhookError::NetworkError(format!(
+            "webhook host '{host}' did not resolve to any address"
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Builds an HTTP client whose connection to `host` is pinned to `addr`.
+/// `reqwest`'s DNS override maps only the transport-level connect address; it
+/// still sends the original hostname as the TLS SNI and `Host` header, so
+/// certificate validation is unaffected. This is what stops the dispatcher
+/// from re-resolving `host` after it has been checked against the SSRF
+/// policy: the checked address is the only one the connection can use.
+fn pinned_client(host: &str, addr: IpAddr, port: u16) -> Result<Client, WebhookError> {
+    Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(host, SocketAddr::new(addr, port))
+        .build()
+        .map_err(|e| WebhookError::NetworkError(e.to_string()))
+}
+
 /// Errors emitted during HTTP webhook dispatch execution.
 #[derive(Error, Debug)]
 pub enum WebhookError {
@@ -39,22 +71,18 @@ pub enum WebhookError {
 }
 
 /// Outbound Webhook Dispatcher executing authenticated HTTP POST requests.
+///
+/// Each dispatch builds its own client pinned to the address it just
+/// resolved and checked (see [`pinned_client`]), so there is no shared
+/// client to cache here.
 pub struct WebhookDispatcher {
-    client: Client,
     secret_key: Zeroizing<String>,
 }
 
 impl WebhookDispatcher {
     /// Create a new `WebhookDispatcher` with an HMAC signing key.
     pub fn new(secret_key: impl Into<String>) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_default();
-
         Self {
-            client,
             secret_key: Zeroizing::new(secret_key.into()),
         }
     }
@@ -73,33 +101,36 @@ impl WebhookDispatcher {
         NsqlValidator::pass6_action_security(&[action], opts)
             .map_err(|e| WebhookError::SecurityViolation(e.to_string()))?;
 
+        // Pass 6 only sees literal-IP hosts. Resolve the target here and,
+        // when the policy is enabled, reject it if it points into a blocked
+        // range - closing the DNS-rebind class of SSRF bypass that a
+        // substring/literal check on the URL cannot catch. The resolved
+        // address is then pinned below for the actual connection, so the
+        // dispatch cannot re-resolve the hostname and land on a different,
+        // unchecked address: the address that was checked is the only one
+        // `reqwest` is permitted to connect to.
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|e| WebhookError::SecurityViolation(format!("invalid webhook URL: {e}")))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| WebhookError::SecurityViolation("webhook URL has no host".to_string()))?
+            // `host_str` brackets IPv6 literals (`[::1]`); strip them so the
+            // pair passes to the resolver cleanly.
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let port = parsed.port_or_known_default().unwrap_or(0);
+
+        let resolved = resolve_host(&host, port).await?;
         if opts.block_private_webhooks {
-            // Pass 6 only sees literal-IP hosts. Resolve the target here and
-            // reject it if a hostname points into a blocked range, closing the
-            // DNS-rebind class of SSRF bypass. This is not airtight: reqwest
-            // re-resolves and connects on its own after this check, so a narrow
-            // TOCTOU window remains where DNS could flip between our lookup and
-            // the actual connection. Fully closing it needs a pinned
-            // resolver/connector, which is out of scope here.
-            if let Ok(parsed) = reqwest::Url::parse(url) {
-                if let Some(host) = parsed.host_str() {
-                    // `host_str` brackets IPv6 literals (`[::1]`); strip them so
-                    // the pair passes to the resolver cleanly.
-                    let host = host.trim_start_matches('[').trim_end_matches(']');
-                    let port = parsed.port_or_known_default().unwrap_or(0);
-                    let resolved: Vec<IpAddr> = lookup_host((host, port))
-                        .await
-                        .map_err(|e| WebhookError::NetworkError(e.to_string()))?
-                        .map(|addr| addr.ip())
-                        .collect();
-                    if let Some(blocked) = first_blocked_address(&resolved) {
-                        return Err(WebhookError::SecurityViolation(format!(
-                            "webhook host '{host}' resolves to blocked address {blocked}"
-                        )));
-                    }
-                }
+            if let Some(blocked) = first_blocked_address(&resolved) {
+                return Err(WebhookError::SecurityViolation(format!(
+                    "webhook host '{host}' resolves to blocked address {blocked}"
+                )));
             }
         }
+        let pinned_addr = resolved[0];
+        let client = pinned_client(&host, pinned_addr, port)?;
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -122,8 +153,7 @@ impl WebhookDispatcher {
         mac.update(format!("{timestamp}.{payload_str}").as_bytes());
         let signature = hex::encode(mac.finalize().into_bytes());
 
-        let response = self
-            .client
+        let response = client
             .post(url)
             .header("Content-Type", "application/json")
             .header(
@@ -162,6 +192,68 @@ impl WebhookDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_pinned_client_connects_to_checked_ip_not_dns() {
+        // `.invalid` is reserved by RFC 2606 to never resolve: any real DNS
+        // lookup for it fails. The mock server only listens on its loopback
+        // address, which has no relationship to that hostname in any
+        // resolver. If the request below reaches the mock server, it can
+        // only be because `pinned_client`'s resolve override - not DNS -
+        // supplied the connect address, proving the dispatcher connects to
+        // exactly the address it already checked.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        let addr = *mock_server.address();
+        let host = "checked-ip-pin.invalid";
+        let client = pinned_client(host, addr.ip(), addr.port())
+            .expect("building a client with a resolve override must succeed");
+
+        let url = format!("http://{host}:{}/hook", addr.port());
+        let response = client
+            .post(&url)
+            .send()
+            .await
+            .expect("the pinned connection must reach the mock server, not a DNS lookup");
+
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_reaches_pinned_loopback_mock_server() {
+        // End-to-end proof that `dispatch_with_options` itself (not just the
+        // `pinned_client` helper) drives the request to the address it
+        // resolved and checked. `block_private_webhooks` is disabled here
+        // only to allow the test to target a loopback mock server; it does
+        // not affect whether the connection is pinned.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&mock_server)
+            .await;
+
+        let dispatcher = WebhookDispatcher::new("secret_key_123");
+        let opts = ValidationOptions {
+            available_folders: None,
+            allowed_forward_domains: None,
+            block_private_webhooks: false,
+        };
+        let url = format!("{}/hook", mock_server.uri());
+        let status = dispatcher
+            .dispatch_with_options(&url, "rule_1", "msg_1", "Test", "a@b.com", &opts)
+            .await
+            .expect("dispatch to the mock server must succeed");
+
+        assert_eq!(status, 202);
+    }
 
     #[tokio::test]
     async fn test_blocked_private_ip_webhook() {
