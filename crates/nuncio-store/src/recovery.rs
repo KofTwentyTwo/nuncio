@@ -25,6 +25,7 @@ type SalvagedAccountRow = (
     Option<i64>,
     String,
     String,
+    Option<String>,
 );
 
 /// Summary report of database self-healing recovery output.
@@ -383,7 +384,7 @@ impl SqliteRecoveryEngine {
 
     async fn salvage_accounts(pool: &sqlx::SqlitePool) -> Vec<nuncio_core::AccountConfig> {
         let rows: Result<Vec<SalvagedAccountRow>, _> = sqlx::query_as(
-            "SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode FROM accounts"
+            "SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url FROM accounts"
         )
         .fetch_all(pool)
         .await;
@@ -406,6 +407,7 @@ impl SqliteRecoveryEngine {
                         smtp_port,
                         imap_tls_mode_raw,
                         smtp_tls_mode_raw,
+                        collection_url,
                     )| {
                         let protocol = serde_json::from_str(&protocol_str)
                             .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
@@ -436,6 +438,7 @@ impl SqliteRecoveryEngine {
                             smtp_tls_mode,
                             keyring_secret_key,
                             sync_interval_secs: sync_interval_secs as u64,
+                            collection_url: collection_url.unwrap_or_default(),
                         }
                     },
                 )
@@ -608,6 +611,7 @@ mod tests {
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-test-1".to_string(),
                 sync_interval_secs: 60,
+                collection_url: String::new(),
             };
             engine.save_account(&acct).await.unwrap();
             assert!(engine.check_integrity().await.unwrap());
@@ -669,6 +673,7 @@ mod tests {
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-salvage-1".to_string(),
                 sync_interval_secs: 60,
+                collection_url: String::new(),
             };
             engine.save_account(&acct).await.unwrap();
 
@@ -806,6 +811,7 @@ mod tests {
                 smtp_tls_mode: nuncio_core::TlsMode::Plain,
                 keyring_secret_key: "nuncio/acct-starttls-1".to_string(),
                 sync_interval_secs: 60,
+                collection_url: String::new(),
             };
             engine.save_account(&acct).await.unwrap();
         }

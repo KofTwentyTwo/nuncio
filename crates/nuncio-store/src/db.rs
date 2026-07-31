@@ -503,7 +503,8 @@ impl DatabaseEngine {
                 smtp_host TEXT,
                 smtp_port INTEGER,
                 imap_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls',
-                smtp_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls'
+                smtp_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls',
+                collection_url TEXT
             );
 
             CREATE TABLE IF NOT EXISTS filter_rules (
@@ -709,6 +710,7 @@ impl DatabaseEngine {
 
         self.ensure_accounts_smtp_columns().await?;
         self.ensure_accounts_tls_mode_columns().await?;
+        self.ensure_accounts_dav_columns().await?;
         self.backfill_message_fts().await?;
 
         Ok(())
@@ -795,6 +797,37 @@ impl DatabaseEngine {
         Ok(())
     }
 
+    /// Additive, backfill-safe migration that adds the `collection_url`
+    /// column to a pre-existing `accounts` table that predates DAV-protocol
+    /// (CalDAV/CardDAV) accounts.
+    ///
+    /// A fresh database already gets this column from `CREATE TABLE IF NOT
+    /// EXISTS accounts` above, so on a fresh database this is a no-op. For a
+    /// pre-existing database file the column is added as a `NULL`-able column,
+    /// so every existing (mail) row keeps loading successfully with an empty
+    /// collection URL (see [`Self::list_accounts`], which maps a `NULL`
+    /// `collection_url` to an empty string). SQLite has no `ADD COLUMN IF NOT
+    /// EXISTS`, so column presence is checked explicitly via `PRAGMA
+    /// table_info` first, making this safe to run on every daemon startup.
+    async fn ensure_accounts_dav_columns(&self) -> Result<(), DatabaseError> {
+        let existing_columns: Vec<String> = sqlx::query("PRAGMA table_info(accounts)")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+
+        if !existing_columns.iter().any(|c| c == "collection_url") {
+            sqlx::query("ALTER TABLE accounts ADD COLUMN collection_url TEXT")
+                .execute(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+        }
+
+        Ok(())
+    }
+
     /// Backfill `messages_fts` for any `messages` row that does not yet have a matching FTS
     /// entry -- e.g. rows written before the FTS5 index existed, or written directly by a
     /// process that bypassed `save_email`'s explicit index population. Run automatically as
@@ -846,8 +879,8 @@ impl DatabaseEngine {
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO accounts
-            (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&config.id)
@@ -863,6 +896,7 @@ impl DatabaseEngine {
         .bind(config.smtp_port as i64)
         .bind(tls_mode_to_db(config.imap_tls_mode))
         .bind(tls_mode_to_db(config.smtp_tls_mode))
+        .bind(&config.collection_url)
         .execute(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
@@ -908,9 +942,10 @@ impl DatabaseEngine {
             Option<i64>,
             String,
             String,
+            Option<String>,
         )> = sqlx::query_as(
             r#"
-            SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode
+            SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url
             FROM accounts
             "#,
         )
@@ -935,6 +970,7 @@ impl DatabaseEngine {
                     smtp_port,
                     imap_tls_mode,
                     smtp_tls_mode,
+                    collection_url,
                 )| {
                     let protocol = serde_json::from_str(&protocol_str)
                         .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
@@ -963,6 +999,7 @@ impl DatabaseEngine {
                         smtp_tls_mode: tls_mode_from_db(&smtp_tls_mode),
                         keyring_secret_key,
                         sync_interval_secs: sync_interval_secs as u64,
+                        collection_url: collection_url.unwrap_or_default(),
                     }
                 },
             )
@@ -2280,6 +2317,7 @@ mod tests {
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-contended-1".to_string(),
                 sync_interval_secs: 60,
+                collection_url: String::new(),
             };
             engine.save_account(&acct).await.unwrap();
             engine.close().await;
@@ -2853,6 +2891,7 @@ mod tests {
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-test-1".to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         };
 
         engine
@@ -2896,6 +2935,7 @@ mod tests {
             smtp_tls_mode: nuncio_core::TlsMode::Plain,
             keyring_secret_key: "nuncio/acct-tls-1".to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         };
 
         engine.save_account(&acct).await.expect("save succeeds");
@@ -2913,6 +2953,44 @@ mod tests {
         assert_eq!(fetched.imap_tls_mode, nuncio_core::TlsMode::StartTls);
         assert_eq!(fetched.smtp_tls_mode, nuncio_core::TlsMode::Plain);
         assert_eq!(fetched, acct);
+    }
+
+    /// A CalDAV account's `collection_url` must survive save/reload, and a
+    /// mail account's empty `collection_url` must round-trip as empty (not
+    /// NULL-mangled), proving the backfill-safe column persists both.
+    #[tokio::test]
+    async fn caldav_collection_url_survives_save_and_reload() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let caldav = nuncio_core::AccountConfig {
+            id: "acct-caldav-store-1".to_string(),
+            name: "Work Calendar".to_string(),
+            email_address: "cal@nuncio.mx".to_string(),
+            protocol: nuncio_core::AccountProtocol::CalDav,
+            server_host: String::new(),
+            server_port: 0,
+            smtp_host: String::new(),
+            smtp_port: 0,
+            use_tls: true,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            keyring_secret_key: "nuncio/acct-caldav-store-1".to_string(),
+            sync_interval_secs: 300,
+            collection_url: "https://dav.example.com/calendars/user/work/".to_string(),
+        };
+        engine.save_account(&caldav).await.expect("save succeeds");
+
+        let fetched = engine
+            .get_account("acct-caldav-store-1")
+            .await
+            .expect("get succeeds")
+            .expect("account present");
+        assert_eq!(fetched, caldav);
+        assert_eq!(fetched.protocol, nuncio_core::AccountProtocol::CalDav);
+        assert_eq!(
+            fetched.collection_url,
+            "https://dav.example.com/calendars/user/work/"
+        );
     }
 
     /// Proves `get_account` resolves a saved account by id and returns `None`
@@ -2936,6 +3014,7 @@ mod tests {
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-del-1".to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         };
         engine.save_account(&acct).await.expect("save succeeds");
 
@@ -3127,6 +3206,7 @@ mod tests {
             smtp_tls_mode: nuncio_core::TlsMode::StartTls,
             keyring_secret_key: "nuncio/acct-post-migration".to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         };
         engine
             .save_account(&new_acct)
