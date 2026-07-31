@@ -308,10 +308,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
+    // From here down is the graceful-shutdown drain: the gRPC server has
+    // stopped accepting new connections, so log each remaining teardown step
+    // to make a clean shutdown fully traceable end to end.
+    tracing::info!(
+        "shutdown: gRPC server stopped accepting connections; draining background workers"
+    );
+
     // Bound how long the background workers get to notice the shutdown
     // signal and exit their loops before the database is closed out from
     // under them.
-    let _ = tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, async {
+    let workers_drained = tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, async {
         if let Some(task) = sync_command_task {
             let _ = task.await;
         }
@@ -321,12 +328,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     })
     .await;
+    match workers_drained {
+        Ok(()) => tracing::info!("shutdown: background workers (sync, outbox, update) drained"),
+        Err(_) => tracing::warn!(
+            "shutdown: background workers did not all exit within the {:?} grace period; \
+             proceeding to close the database",
+            SHUTDOWN_GRACE_PERIOD
+        ),
+    }
     signal_task.abort();
 
     // Force the WAL checkpoint before the process exits so no committed
     // page is left for SQLite's own deferred "last connection closes"
     // teardown to race (see `DatabaseEngine::close`'s doc comment).
+    tracing::info!("shutdown: closing database and checkpointing the WAL");
     db.close().await;
+    tracing::info!("shutdown: complete");
 
     grpc_result.map_err(|e| format!("nunciod gRPC server failed: {e}"))?;
 

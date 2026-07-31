@@ -155,6 +155,16 @@ pub async fn execute_pending_mutations(
 
     let mut summary = ExecutionSummary::default();
     for item in pending {
+        // Log the executor's decision-level attempt before issuing the real
+        // remote op: the mutation identity, its operation, and the surrogate
+        // message id it targets (never the message body/subject/recipients).
+        tracing::info!(
+            mutation_id = %item.id,
+            op = %item.mutation_type,
+            message_id = %item.message_id,
+            retry_count = item.retry_count,
+            "outbox: attempting mutation"
+        );
         let outcome = tokio::select! {
             biased;
             _ = shutdown.wait() => {
@@ -174,7 +184,14 @@ pub async fn execute_pending_mutations(
         };
         let next_retry = item.retry_count + 1;
         let (status, retry, tally): (&str, i32, fn(&mut ExecutionSummary)) = match disposition {
-            Disposition::Completed => ("completed", item.retry_count, |s| s.completed += 1),
+            Disposition::Completed => {
+                tracing::info!(
+                    mutation_id = %item.id,
+                    op = %item.mutation_type,
+                    "outbox: mutation completed"
+                );
+                ("completed", item.retry_count, |s| s.completed += 1)
+            }
             Disposition::Permanent(reason) => {
                 tracing::warn!(
                     mutation_id = %item.id,
@@ -297,6 +314,14 @@ async fn dispatch_mailbox_mutation(
         uid_validity: email.uid_validity.clone(),
         kind,
     };
+
+    tracing::debug!(
+        op = %mutation.mutation_type,
+        remote_id = %spec.remote_id,
+        folder_id = %spec.folder_id,
+        uid_validity = %spec.uid_validity,
+        "outbox: issuing mailbox mutation against remote backend"
+    );
 
     match backend.apply_mutation(&spec).await {
         Ok(()) => Disposition::Completed,
@@ -503,5 +528,159 @@ impl RemoteExecutionEnv for ProductionExecutionEnv {
                 &ValidationOptions::default(),
             )
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lifecycle::{ShutdownController, ShutdownSignal};
+    use crate::test_tracing::with_recorder;
+    use nuncio_core::model::Email;
+    use nuncio_core::EventBus;
+    use nuncio_filter::MutationPayload;
+    use nuncio_mail::MockMailBackend;
+    use tracing::Level;
+
+    /// Minimal test [`RemoteExecutionEnv`] whose mailbox mutations always
+    /// genuinely succeed against a recording [`MockMailBackend`]; the forward
+    /// and webhook paths are unused by these tests.
+    struct SucceedingEnv {
+        backend: MockMailBackend,
+    }
+
+    #[async_trait]
+    impl RemoteExecutionEnv for SucceedingEnv {
+        async fn mail_backend(
+            &self,
+            _account_id: &str,
+        ) -> Result<Box<dyn MailBackend>, OutboxExecuteError> {
+            Ok(Box::new(self.backend.clone()))
+        }
+
+        async fn message_sender(
+            &self,
+            account_id: &str,
+        ) -> Result<Box<dyn MessageSender>, OutboxExecuteError> {
+            // The FLAG-only tests never take the forward path; surface an error
+            // rather than a panic if that assumption ever changes.
+            Err(OutboxExecuteError::NotAMailAccount(account_id.to_string()))
+        }
+
+        async fn dispatch_webhook(
+            &self,
+            _url: &str,
+            _rule_id: &str,
+            _message_id: &str,
+            _subject: &str,
+            _sender: &str,
+        ) -> Result<u16, WebhookError> {
+            // The FLAG-only tests never take the webhook path.
+            Err(WebhookError::SigningError(
+                "webhook path unused in test".into(),
+            ))
+        }
+    }
+
+    fn no_shutdown() -> (ShutdownController, ShutdownSignal) {
+        ShutdownController::new(Arc::new(EventBus::new()))
+    }
+
+    fn sample_email() -> Email {
+        Email {
+            id: "msg-outbox-log".to_string(),
+            account_id: "acct-outbox-log".to_string(),
+            folder_id: "INBOX".to_string(),
+            remote_id: "77".to_string(),
+            uid_validity: "9".to_string(),
+            subject: "Confidential outbox subject".to_string(),
+            sender: "alice@example.com".to_string(),
+            recipient: "owner@nuncio.mx".to_string(),
+            received_at: 1_700_000_000,
+            read: false,
+            body_plain: Some("secret outbox body".to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn flag_mutation() -> PendingRemoteMutation {
+        PendingRemoteMutation {
+            id: "mut-1".to_string(),
+            rule_id: "rule-1".to_string(),
+            message_id: "msg-outbox-log".to_string(),
+            mutation_type: "FLAG".to_string(),
+            payload: serde_json::to_string(&MutationPayload {
+                action_type: "FLAG".to_string(),
+                target: None,
+            })
+            .expect("serialize payload"),
+            status: "pending".to_string(),
+            retry_count: 0,
+            created_at: 1_700_000_000,
+        }
+    }
+
+    /// An outbox drain must log the executor's decision-level attempt BEFORE
+    /// issuing the remote op and the Completed result AFTER, carrying the
+    /// mutation id and operation -- and never the message body or subject.
+    #[test]
+    fn drain_logs_attempt_and_completion_without_leaking_message_content() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let (recorder, ()) = with_recorder(|| {
+            runtime.block_on(async {
+                let (db, _dir) = DatabaseEngine::connect_ephemeral()
+                    .await
+                    .expect("ephemeral db");
+                db.save_folder_sync_state("acct-outbox-log", "INBOX", "9:100")
+                    .await
+                    .expect("save folder checkpoint");
+                db.save_email(&sample_email()).await.expect("save email");
+                db.save_pending_mutation(&flag_mutation())
+                    .await
+                    .expect("save pending mutation");
+
+                let env = SucceedingEnv {
+                    backend: MockMailBackend::new(),
+                };
+                let (_ctl, mut shutdown) = no_shutdown();
+                let summary = execute_pending_mutations(&db, &env, 10, &mut shutdown).await;
+                assert_eq!(summary.completed, 1, "the mutation must complete");
+            });
+        });
+
+        let events = recorder.events();
+        let attempt = events
+            .iter()
+            .find(|e| e.message() == "outbox: attempting mutation")
+            .expect("an attempt event must be logged before issuing the op");
+        assert_eq!(attempt.level, Level::INFO);
+        assert_eq!(attempt.fields.get("op").map(String::as_str), Some("FLAG"));
+        assert_eq!(
+            attempt.fields.get("mutation_id").map(String::as_str),
+            Some("mut-1")
+        );
+
+        let completed = events
+            .iter()
+            .find(|e| e.message() == "outbox: mutation completed")
+            .expect("a completion event must be logged after a genuine success");
+        assert_eq!(completed.level, Level::INFO);
+        assert_eq!(completed.fields.get("op").map(String::as_str), Some("FLAG"));
+
+        for value in recorder.all_field_values() {
+            assert!(
+                !value.contains("Confidential outbox subject"),
+                "subject leaked into telemetry: {value}"
+            );
+            assert!(
+                !value.contains("secret outbox body"),
+                "body leaked into telemetry: {value}"
+            );
+        }
     }
 }

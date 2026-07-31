@@ -43,12 +43,28 @@ pub async fn sync_with_backend(
     backend: &dyn ContactsBackend,
     account_id: &str,
 ) -> Result<usize, ContactsSyncError> {
-    let contacts = backend.fetch_contacts(account_id).await?;
+    tracing::info!(
+        account_id = %account_id,
+        "contacts sync: dispatching sync for account"
+    );
+    let contacts = backend.fetch_contacts(account_id).await.inspect_err(|e| {
+        tracing::warn!(
+            account_id = %account_id,
+            "contacts sync: backend fetch failed: {e}"
+        );
+    })?;
+    let fetched = contacts.len();
     let mut synced = 0usize;
     for contact in contacts {
         db.save_contact(&contact).await?;
         synced += 1;
     }
+    tracing::info!(
+        account_id = %account_id,
+        fetched,
+        synced,
+        "contacts sync: persisted fetched contacts"
+    );
     Ok(synced)
 }
 
@@ -119,5 +135,46 @@ mod tests {
             .expect_err("sync fails");
         assert!(matches!(err, ContactsSyncError::Backend(_)));
         assert!(err.to_string().contains("contacts backend error"));
+    }
+
+    /// A contacts sync must emit a followable INFO event carrying the account
+    /// id and the persisted count.
+    #[test]
+    fn sync_with_backend_logs_account_id_and_synced_count() {
+        use crate::test_tracing::with_recorder;
+        use tracing::Level;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let (recorder, ()) = with_recorder(|| {
+            runtime.block_on(async {
+                let (db, _dir) = DatabaseEngine::connect_ephemeral()
+                    .await
+                    .expect("ephemeral db");
+                let mock = MockContactsBackend::new();
+                mock.add_contact(mock_contact("ct-1", "acct-contacts-1", "Alice"));
+                sync_with_backend(&db, &mock, "acct-contacts-1")
+                    .await
+                    .expect("sync succeeds");
+            });
+        });
+
+        let events = recorder.events();
+        let persisted = events
+            .iter()
+            .find(|e| e.message() == "contacts sync: persisted fetched contacts")
+            .expect("a domain event for the persisted sync must be logged");
+        assert_eq!(persisted.level, Level::INFO);
+        assert_eq!(
+            persisted.fields.get("account_id").map(String::as_str),
+            Some("acct-contacts-1")
+        );
+        assert_eq!(
+            persisted.fields.get("synced").map(String::as_str),
+            Some("1")
+        );
     }
 }

@@ -43,14 +43,33 @@ pub async fn sync_with_backend(
     start_window: i64,
     end_window: i64,
 ) -> Result<usize, CalendarSyncError> {
+    tracing::debug!(
+        calendar_id = %calendar_id,
+        start_window,
+        end_window,
+        "calendar sync: fetching events from backend"
+    );
     let events = backend
         .fetch_events(calendar_id, start_window, end_window)
-        .await?;
+        .await
+        .inspect_err(|e| {
+            tracing::warn!(
+                calendar_id = %calendar_id,
+                "calendar sync: backend fetch failed: {e}"
+            );
+        })?;
+    let fetched = events.len();
     let mut synced = 0usize;
     for event in events {
         db.save_calendar_event(&event).await?;
         synced += 1;
     }
+    tracing::info!(
+        calendar_id = %calendar_id,
+        fetched,
+        synced,
+        "calendar sync: persisted fetched events"
+    );
     Ok(synced)
 }
 
@@ -72,6 +91,11 @@ pub async fn sync_caldav_account(
     start_window: i64,
     end_window: i64,
 ) -> Result<usize, CalendarSyncError> {
+    tracing::info!(
+        account_id = %account.id,
+        calendar_id = %calendar_id,
+        "calendar sync: dispatching CalDAV sync for account"
+    );
     let client = CalDavClient::new(CalDavAccountConfig {
         account_id: account.id.clone(),
         caldav_url: account.dav_collection_url().unwrap_or_default().to_string(),
@@ -169,5 +193,51 @@ mod tests {
             .expect_err("sync fails");
         assert!(matches!(err, CalendarSyncError::Backend(_)));
         assert!(err.to_string().contains("calendar backend error"));
+    }
+
+    /// A calendar sync must emit a followable INFO event carrying the calendar
+    /// id and the persisted count, so an operator can trace what a sync did.
+    #[test]
+    fn sync_with_backend_logs_calendar_id_and_synced_count() {
+        use crate::test_tracing::with_recorder;
+        use tracing::Level;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let (recorder, ()) = with_recorder(|| {
+            runtime.block_on(async {
+                let (db, _dir) = DatabaseEngine::connect_ephemeral()
+                    .await
+                    .expect("ephemeral db");
+                let mock = MockCalendarBackend::new();
+                mock.add_event(mock_event(
+                    "evt-1",
+                    "cal-work",
+                    1_700_000_000,
+                    1_700_003_600,
+                ));
+                sync_with_backend(&db, &mock, "cal-work", 0, i64::MAX)
+                    .await
+                    .expect("sync succeeds");
+            });
+        });
+
+        let events = recorder.events();
+        let persisted = events
+            .iter()
+            .find(|e| e.message() == "calendar sync: persisted fetched events")
+            .expect("a domain event for the persisted sync must be logged");
+        assert_eq!(persisted.level, Level::INFO);
+        assert_eq!(
+            persisted.fields.get("calendar_id").map(String::as_str),
+            Some("cal-work")
+        );
+        assert_eq!(
+            persisted.fields.get("synced").map(String::as_str),
+            Some("1")
+        );
     }
 }

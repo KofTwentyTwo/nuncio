@@ -183,6 +183,15 @@ pub async fn send_message_for_account(
     request: ComposeRequest,
 ) -> Result<String, SendError> {
     let config = resolve_sending_account(db, request.account_id.as_deref()).await?;
+    let account_id = config.id.clone();
+    let attachment_count = request.attachments.len();
+    tracing::info!(
+        account_id = %account_id,
+        transport = "smtp",
+        has_cc = request.cc.is_some(),
+        attachment_count,
+        "mail send: dispatching outbound message over real SMTP transport"
+    );
     let password = secrets.get_secret(&config.keyring_secret_key)?;
     let sender = build_smtp_sender(&config, &password)?;
 
@@ -196,8 +205,24 @@ pub async fn send_message_for_account(
         attachments: request.attachments,
     };
 
-    send_with_sender(&sender, &outbound).await?;
-    Ok(generate_message_id())
+    match send_with_sender(&sender, &outbound).await {
+        Ok(()) => {
+            let message_id = generate_message_id();
+            tracing::info!(
+                account_id = %account_id,
+                message_id = %message_id,
+                "mail send: outbound message accepted by SMTP transport"
+            );
+            Ok(message_id)
+        }
+        Err(e) => {
+            tracing::warn!(
+                account_id = %account_id,
+                "mail send: SMTP transport rejected the outbound message: {e}"
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Test/E2E entry point for the `SendMessage` RPC when a
@@ -215,6 +240,14 @@ pub async fn send_message_with_injected_sender(
     request: ComposeRequest,
 ) -> Result<String, SendError> {
     let config = resolve_sending_account(db, request.account_id.as_deref()).await?;
+    let account_id = config.id.clone();
+    tracing::info!(
+        account_id = %account_id,
+        transport = "injected",
+        has_cc = request.cc.is_some(),
+        attachment_count = request.attachments.len(),
+        "mail send: dispatching outbound message via injected sender"
+    );
 
     let outbound = OutboundMessage {
         from: config.email_address,
@@ -226,8 +259,24 @@ pub async fn send_message_with_injected_sender(
         attachments: request.attachments,
     };
 
-    send_with_sender(sender, &outbound).await?;
-    Ok(generate_message_id())
+    match send_with_sender(sender, &outbound).await {
+        Ok(()) => {
+            let message_id = generate_message_id();
+            tracing::info!(
+                account_id = %account_id,
+                message_id = %message_id,
+                "mail send: outbound message accepted by injected sender"
+            );
+            Ok(message_id)
+        }
+        Err(e) => {
+            tracing::warn!(
+                account_id = %account_id,
+                "mail send: injected sender rejected the outbound message: {e}"
+            );
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -533,5 +582,78 @@ mod tests {
         .expect_err("unknown account id must fail");
         assert!(matches!(err, SendError::AccountNotFound(id) if id == "acct-does-not-exist"));
         assert!(mock.sent_messages().is_empty());
+    }
+
+    /// A send must be followable in the log: a dispatch event before the send
+    /// and an acceptance event after, both scoped to the account id -- and the
+    /// recipient address, subject, and body must never appear in any logged
+    /// field.
+    #[test]
+    fn send_logs_dispatch_and_acceptance_without_leaking_recipient_or_subject() {
+        use crate::test_tracing::with_recorder;
+        use tracing::Level;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let (recorder, ()) = with_recorder(|| {
+            runtime.block_on(async {
+                let (db, _dir) = DatabaseEngine::connect_ephemeral()
+                    .await
+                    .expect("ephemeral db");
+                let config = sample_account("acct-log");
+                db.save_account(&config).await.expect("save account");
+
+                let mock = MockMessageSender::new();
+                send_message_with_injected_sender(
+                    &db,
+                    &mock,
+                    ComposeRequest {
+                        to: "secret-recipient@example.com".to_string(),
+                        cc: None,
+                        subject: "Confidential Subject Line".to_string(),
+                        body_text: Some("secret body".to_string()),
+                        body_html: None,
+                        attachments: Vec::new(),
+                        account_id: None,
+                    },
+                )
+                .await
+                .expect("send succeeds");
+            });
+        });
+
+        let events = recorder.events();
+        let dispatch = events
+            .iter()
+            .find(|e| e.message() == "mail send: dispatching outbound message via injected sender")
+            .expect("dispatch event must be logged");
+        assert_eq!(dispatch.level, Level::INFO);
+        assert_eq!(
+            dispatch.fields.get("account_id").map(String::as_str),
+            Some("acct-log")
+        );
+        assert!(events
+            .iter()
+            .any(|e| e.message() == "mail send: outbound message accepted by injected sender"));
+
+        // Secret-safety: no recipient, subject, or body text may appear in any
+        // recorded telemetry field.
+        for value in recorder.all_field_values() {
+            assert!(
+                !value.contains("secret-recipient@example.com"),
+                "recipient leaked into telemetry: {value}"
+            );
+            assert!(
+                !value.contains("Confidential Subject Line"),
+                "subject leaked into telemetry: {value}"
+            );
+            assert!(
+                !value.contains("secret body"),
+                "body leaked into telemetry: {value}"
+            );
+        }
     }
 }
