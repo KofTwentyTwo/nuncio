@@ -65,7 +65,7 @@ impl NsqlParser {
 
         let now = chrono::Utc::now().timestamp();
         Ok(FilterRule {
-            id: format!("rule-{}", uuid_or_simple_hash(&name_str, nsql)),
+            id: format!("rule-{}", generate_rule_id()),
             name: name_str,
             target_account,
             priority,
@@ -610,12 +610,18 @@ fn split_comma_outside_quotes(text: &str) -> Vec<String> {
     result
 }
 
-fn uuid_or_simple_hash(name: &str, nsql: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
-    hasher.update(nsql.as_bytes());
-    hex::encode(&hasher.finalize()[..8])
+/// Generates a fresh, collision-resistant rule id from the same CSPRNG
+/// (`aes-gcm`'s `OsRng`) that `nuncio-store` uses to source key material,
+/// rather than deriving the id from the rule's name/NSQL text. Two rules
+/// created with identical name and NSQL text MUST still get distinct ids --
+/// deriving the id from their content would make the second `CreateRule`
+/// silently overwrite the first via `save_filter_rule`'s `INSERT OR
+/// REPLACE`.
+fn generate_rule_id() -> String {
+    use aes_gcm::aead::{rand_core::RngCore, OsRng};
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 #[cfg(test)]

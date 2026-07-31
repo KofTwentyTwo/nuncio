@@ -4333,6 +4333,65 @@ mod tests {
             .is_empty());
     }
 
+    /// Two `CreateRule` calls with the SAME name AND the SAME NSQL text
+    /// must persist as two distinct rules rather than the second silently
+    /// overwriting the first. Rule ids used to be derived deterministically
+    /// from `sha256(name + nsql)`, so identical name+NSQL produced identical
+    /// ids and `save_filter_rule`'s `INSERT OR REPLACE` clobbered the first
+    /// rule with no warning.
+    #[tokio::test]
+    async fn create_rule_with_duplicate_name_and_nsql_does_not_overwrite_the_first() {
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let first = client
+            .create_rule(authed_bearer_request(CreateRuleRequest {
+                name: "Duplicate Rule".to_string(),
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+                priority: 1,
+            }))
+            .await
+            .expect("first create_rule succeeds")
+            .into_inner()
+            .rule
+            .expect("response carries the rule");
+
+        let second = client
+            .create_rule(authed_bearer_request(CreateRuleRequest {
+                name: "Duplicate Rule".to_string(),
+                nsql: SAMPLE_RULE_NSQL.to_string(),
+                priority: 1,
+            }))
+            .await
+            .expect("second create_rule succeeds")
+            .into_inner()
+            .rule
+            .expect("response carries the rule");
+
+        assert_ne!(
+            first.id, second.id,
+            "identical name+NSQL must still get distinct ids"
+        );
+
+        let list_response = client
+            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .await
+            .expect("list_rules succeeds")
+            .into_inner();
+        assert_eq!(
+            list_response.rules.len(),
+            2,
+            "both rules must persist, neither overwritten"
+        );
+        let ids: std::collections::HashSet<_> =
+            list_response.rules.iter().map(|r| r.id.clone()).collect();
+        assert!(ids.contains(&first.id));
+        assert!(ids.contains(&second.id));
+    }
+
     #[tokio::test]
     async fn delete_rule_rejects_empty_id() {
         let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
