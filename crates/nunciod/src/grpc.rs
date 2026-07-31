@@ -54,15 +54,67 @@ use nuncio_store::search::SearchEngine;
 use nuncio_store::vault::SecretManager;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream, TcpListenerStream};
 use tokio_stream::{Stream, StreamExt};
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
+
+// Resource bounds applied to the tonic `Server` builder in
+// `serve_on_listener_with_overrides_and_shutdown`. These exist so a
+// misbehaving or malicious client cannot exhaust the daemon by opening
+// unbounded connections/streams, sending oversized frames, or holding a
+// handler open forever.
+
+/// Caps in-flight requests per client connection. A single connection that
+/// opens far more concurrent streams than any legitimate client needs (the
+/// CLI and future native clients issue a handful of concurrent calls at
+/// most) is throttled rather than allowed to consume worker capacity.
+const GRPC_CONCURRENCY_LIMIT_PER_CONNECTION: usize = 32;
+
+/// Per-call deadline applied by the tonic transport to every RPC's request
+/// future. This bounds unary handlers (a stuck backend call must not hang
+/// the connection forever) while staying generous enough for the longest
+/// legitimate unary call, `Mail.Sync`/`Calendar.Sync`/`Contacts.Sync`
+/// against a large, slow upstream mailbox.
+///
+/// Server-streaming RPCs (`System.Subscribe`) are unaffected in practice:
+/// tonic's timeout wraps the handler's future, which for a streaming
+/// response resolves as soon as the response headers/body stream are
+/// constructed, not when the stream itself finishes emitting items -- so a
+/// long-lived `Subscribe` connection is not cut off by this deadline.
+const GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// HTTP/2 concurrent stream cap per connection, independent of the
+/// concurrency limiter above (this bounds protocol-level multiplexing;
+/// `concurrency_limit_per_connection` bounds how many of those streams are
+/// actively dispatched to a handler at once).
+const GRPC_MAX_CONCURRENT_STREAMS: u32 = 64;
+
+/// Largest inbound gRPC message the daemon will decode, per service.
+/// Deliberately larger than tonic's unconfigured 4 MiB default: `Mail`
+/// requests can legitimately carry a full message body plus attachment
+/// bytes inline (`SendMessageRequest.attachments`), so 4 MiB is too tight
+/// for a real email with a modest attachment. 16 MiB comfortably covers
+/// that case while still bounding the allocation a client can force with
+/// one oversized frame far below "unbounded".
+const GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES: usize = 16 * 1024 * 1024;
+
+/// TCP-level keepalive so a half-open connection (client crashed or network
+/// dropped without a clean close) is detected and reclaimed instead of
+/// holding a connection slot indefinitely.
+const GRPC_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
+
+/// HTTP/2 PING-based keepalive: send a ping after this much idle time...
+const GRPC_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// ...and close the connection if the pong doesn't arrive within this long.
+const GRPC_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 // The gRPC loopback address defaults/resolver live in `nuncio-proto` (see
 // `nuncio_proto::addr`) so that thin presentation-shell clients (e.g.
@@ -2625,7 +2677,11 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
         event_bus: event_bus.clone(),
     };
     let system_interceptor = BearerAuthInterceptor::new(token.clone());
-    let system_svc = SystemServer::with_interceptor(system_service, system_interceptor);
+    let system_svc = InterceptedService::new(
+        SystemServer::new(system_service)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES),
+        system_interceptor,
+    );
 
     let accounts_service = AccountsGrpcService {
         db: db.clone(),
@@ -2635,7 +2691,11 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
             .unwrap_or_else(|| Arc::new(RealAccountConnectionTester)),
     };
     let accounts_interceptor = BearerAuthInterceptor::new(token.clone());
-    let accounts_svc = AccountsServer::with_interceptor(accounts_service, accounts_interceptor);
+    let accounts_svc = InterceptedService::new(
+        AccountsServer::new(accounts_service)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES),
+        accounts_interceptor,
+    );
 
     // Mail: mounted behind its own `BearerAuthInterceptor`, exactly like
     // `System` and `Accounts` above -- see the hard invariant documented on
@@ -2648,7 +2708,11 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
         overrides,
     };
     let mail_interceptor = BearerAuthInterceptor::new(token.clone());
-    let mail_svc = MailServer::with_interceptor(mail_service, mail_interceptor);
+    let mail_svc = InterceptedService::new(
+        MailServer::new(mail_service)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES),
+        mail_interceptor,
+    );
 
     // Filters: mounted behind its own `BearerAuthInterceptor`, exactly like
     // `System`/`Accounts`/`Mail` above -- see the hard invariant documented
@@ -2658,21 +2722,33 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
         filter_engine,
     };
     let filters_interceptor = BearerAuthInterceptor::new(token.clone());
-    let filters_svc = FiltersServer::with_interceptor(filters_service, filters_interceptor);
+    let filters_svc = InterceptedService::new(
+        FiltersServer::new(filters_service)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES),
+        filters_interceptor,
+    );
 
     // Export: mounted behind its own `BearerAuthInterceptor`, exactly like
     // every other service above -- see the hard invariant documented on
     // this function's doc comment.
     let export_service = ExportGrpcService { db: db.clone() };
     let export_interceptor = BearerAuthInterceptor::new(token.clone());
-    let export_svc = ExportServer::with_interceptor(export_service, export_interceptor);
+    let export_svc = InterceptedService::new(
+        ExportServer::new(export_service)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES),
+        export_interceptor,
+    );
 
     // Audit: mounted behind its own `BearerAuthInterceptor`, exactly like
     // every other service above -- see the hard invariant documented on
     // this function's doc comment.
     let audit_service = AuditGrpcService { db: db.clone() };
     let audit_interceptor = BearerAuthInterceptor::new(token.clone());
-    let audit_svc = AuditServer::with_interceptor(audit_service, audit_interceptor);
+    let audit_svc = InterceptedService::new(
+        AuditServer::new(audit_service)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES),
+        audit_interceptor,
+    );
 
     // Calendar: mounted behind its own `BearerAuthInterceptor`, exactly like
     // every other service above -- see the hard invariant documented on
@@ -2683,7 +2759,11 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
         overrides: calendar_overrides,
     };
     let calendar_interceptor = BearerAuthInterceptor::new(token.clone());
-    let calendar_svc = CalendarServer::with_interceptor(calendar_service, calendar_interceptor);
+    let calendar_svc = InterceptedService::new(
+        CalendarServer::new(calendar_service)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES),
+        calendar_interceptor,
+    );
 
     // Contacts: mounted behind its own `BearerAuthInterceptor`, exactly like
     // every other service above -- see the hard invariant documented on
@@ -2693,9 +2773,19 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
         overrides: contacts_overrides,
     };
     let contacts_interceptor = BearerAuthInterceptor::new(token);
-    let contacts_svc = ContactsServer::with_interceptor(contacts_service, contacts_interceptor);
+    let contacts_svc = InterceptedService::new(
+        ContactsServer::new(contacts_service)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES),
+        contacts_interceptor,
+    );
 
     Server::builder()
+        .concurrency_limit_per_connection(GRPC_CONCURRENCY_LIMIT_PER_CONNECTION)
+        .timeout(GRPC_REQUEST_TIMEOUT)
+        .max_concurrent_streams(GRPC_MAX_CONCURRENT_STREAMS)
+        .tcp_keepalive(Some(GRPC_TCP_KEEPALIVE))
+        .http2_keepalive_interval(Some(GRPC_HTTP2_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(GRPC_HTTP2_KEEPALIVE_TIMEOUT))
         .add_service(system_svc)
         .add_service(accounts_svc)
         .add_service(mail_svc)
@@ -4304,6 +4394,53 @@ mod tests {
             .await
             .expect_err("empty subject must be rejected");
         assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    /// Proves the server's configured `max_decoding_message_size` (see
+    /// `GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES`) is actually wired into the
+    /// `Server::builder()` chain and not just documented: a message body
+    /// that exceeds the configured limit is rejected with
+    /// `OutOfRange` at decode time, before the handler (and its field
+    /// validation, or the "no account configured" business-logic error)
+    /// ever runs.
+    #[tokio::test]
+    async fn send_message_rejects_body_larger_than_max_decoding_message_size() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let mut req = valid_send_message_request();
+        req.body_text = "x".repeat(GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES + 1);
+        let err = client
+            .send_message(authed_bearer_request(req))
+            .await
+            .expect_err("oversized message must be rejected");
+        assert_eq!(err.code(), Code::OutOfRange);
+    }
+
+    /// Proves the raised limit is real, not a no-op: a body larger than
+    /// tonic's unconfigured 4 MiB default but still under the daemon's
+    /// configured `GRPC_MAX_DECODING_MESSAGE_SIZE_BYTES` decodes
+    /// successfully and reaches the handler -- surfacing the expected
+    /// "no account configured" business error rather than
+    /// `OutOfRange`.
+    #[tokio::test]
+    async fn send_message_accepts_body_above_default_but_within_configured_limit() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let mut req = valid_send_message_request();
+        req.body_text = "x".repeat(6 * 1024 * 1024);
+        let err = client
+            .send_message(authed_bearer_request(req))
+            .await
+            .expect_err("no configured account must still be rejected");
+        assert_eq!(err.code(), Code::Internal);
     }
 
     /// Proves `SendMessage` never fabricates success -- with no account
