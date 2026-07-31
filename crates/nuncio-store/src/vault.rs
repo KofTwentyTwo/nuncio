@@ -27,6 +27,14 @@ pub const LEDGER_KEY_ACCOUNT: &str = "ledger-hmac-key";
 /// and hex-encoded for use as an `authorization: Bearer <token>` header value.
 pub const GRPC_TOKEN_ACCOUNT: &str = "grpc-bearer-token";
 
+/// Keyring account name for the HMAC-SHA256 key that signs outbound filter
+/// `CALL WEBHOOK` payloads (the `X-Nuncio-Signature` header produced by
+/// `nuncio_filter::WebhookDispatcher`). Minted on first use via
+/// [`SecretManager::get_or_create_key_bytes`] and hex-encoded; a single
+/// daemon-wide signing key lets a webhook receiver verify that a delivery
+/// genuinely originated from this daemon.
+pub const WEBHOOK_SIGNING_KEY_ACCOUNT: &str = "webhook-signing-key";
+
 /// Zeroized sensitive string wrapper ensuring heap bytes are wiped on drop.
 #[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct ZeroizingSecret(String);

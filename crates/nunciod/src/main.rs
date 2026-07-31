@@ -3,7 +3,7 @@
 //! filter automation engine, outbox retries, and the multi-client gRPC API.
 
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
-use nuncio_filter::{FilterEngine, OutboxManager};
+use nuncio_filter::FilterEngine;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -98,40 +98,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
 
-    // Background Outbox Worker Task
+    // Background Outbox Worker Task. Each tick drains the pending remote
+    // mutations the filter engine enqueued (move/copy/flag/unflag/delete on the
+    // real mail server, forward via SMTP, or a signed webhook call) and applies
+    // them against the resolved account's backend. A mutation is marked
+    // "completed" ONLY when the real operation genuinely succeeded; a transient
+    // failure is retried on later ticks and a permanent one (gone message,
+    // unknown action) fails honestly -- success is never fabricated.
     let db_outbox = db.clone();
-    let _outbox_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-        loop {
-            interval.tick().await;
-            if let Ok(pending) = db_outbox.list_pending_mutations(50).await {
-                for item in pending {
-                    let next_retry = item.retry_count + 1;
-                    if next_retry > OutboxManager::MAX_RETRIES {
-                        let _ = db_outbox
-                            .update_mutation_status(&item.id, "failed", next_retry)
-                            .await;
-                        continue;
-                    }
-                    let backoff_ms = OutboxManager::calculate_backoff_ms(item.retry_count);
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    // Outbound IMAP/JMAP remote mutation execution (actually
-                    // applying a filter action like move/delete/flag on the
-                    // real mail server) is not yet wired to a real mail
-                    // server. This worker deliberately does NOT mark
-                    // mutations "completed": doing so would fabricate
-                    // success for work that never happened. It only bumps
-                    // the retry counter (so an item that keeps failing still
-                    // eventually flips to "failed" once retries are
-                    // exhausted) and leaves the item "pending" so it is
-                    // retried on the next poll tick once a real sender is
-                    // wired in.
-                    let _ = db_outbox
-                        .update_mutation_status(&item.id, "pending", next_retry)
-                        .await;
+    let outbox_env =
+        match nunciod::outbox::ProductionExecutionEnv::new(db.clone(), account_secrets.clone()) {
+            Ok(env) => Some(Arc::new(env)),
+            Err(e) => {
+                // Without a vault-provisioned webhook signing key we cannot sign
+                // webhook payloads; rather than dispatch unsigned, the worker does
+                // not run. Mailbox mutations would also be unable to reach the
+                // keyring in this state.
+                tracing::error!(
+                "outbox worker disabled: failed to initialize remote execution environment: {e}"
+            );
+                None
+            }
+        };
+    let _outbox_task = outbox_env.map(|env| {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let summary =
+                    nunciod::outbox::execute_pending_mutations(&db_outbox, env.as_ref(), 50).await;
+                if summary.completed > 0 || summary.failed > 0 {
+                    tracing::info!(
+                        "outbox drain: {} completed, {} retried, {} failed",
+                        summary.completed,
+                        summary.retried,
+                        summary.failed
+                    );
                 }
             }
-        }
+        })
     });
 
     // Background Auto-Update Check Listener Loop (24h interval).
