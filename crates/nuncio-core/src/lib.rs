@@ -3,23 +3,17 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
-pub mod ai;
 pub mod config;
-pub mod e2ee;
 pub mod export;
 pub mod mcp_policy;
 pub mod model;
-pub mod plugin;
 pub mod update;
 pub mod worm_audit;
 
-pub use ai::{ActionItem, AiEngineError, LocalAiEngine, ThreadSummary};
 pub use config::{AccountConfig, AccountProtocol, ConfigError, TlsMode};
-pub use e2ee::{E2eeEngine, E2eeError, EncryptionType, SecurityBadge, SignatureStatus};
 pub use export::{ExportEngine, ExportError, ExportFormat, ExportSummary};
 pub use mcp_policy::{AgentPermissions, DataType, McpAgentPolicy};
 pub use model::{Attachment, CalendarEvent, Contact, DaemonTelemetry, Email, Folder};
-pub use plugin::{PluginError, PluginHook, PluginManifest, PluginRuntime};
 pub use update::{ReleaseInfo, UpdateCheckResult, UpdateEngine, UpdateError};
 pub use worm_audit::{verify_worm_chain, WormAuditError, WormAuditRecord};
 
