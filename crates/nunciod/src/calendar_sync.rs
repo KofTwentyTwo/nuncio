@@ -4,17 +4,16 @@
 //! fetches events from a [`CalendarBackend`] for a single calendar collection and
 //! time window, then persists each event via [`DatabaseEngine::save_calendar_event`].
 //!
-//! # No production entry point yet
+//! # Production entry point
 //!
-//! Unlike `sync.rs`'s `run_account_sync`/`run_all_accounts_sync`, this module
-//! deliberately has NO production entry point that resolves a real account's
-//! CalDAV collection URL and credential and builds a real `CalDavClient` from
-//! them: `nuncio_core::AccountConfig` carries no CalDAV fields today, so there
-//! is nothing persisted to build one from. [`sync_with_backend`] is the only
-//! function here; it is exercised directly in tests with `MockCalendarBackend`,
-//! and it is the same seam a future story's production entry point will call
-//! once per-account CalDAV configuration exists.
-use nuncio_cal::CalendarBackend;
+//! [`sync_caldav_account`] is the production entry point: it builds a real
+//! [`nuncio_cal::CalDavClient`] from a persisted [`nuncio_core::AccountConfig`]
+//! (its `collection_url`) plus the credential resolved from the OS keyring,
+//! then delegates to [`sync_with_backend`]. [`sync_with_backend`] is the
+//! shared fetch-and-persist seam that both the production client and the
+//! test-only `MockCalendarBackend` flow through, mirroring `sync.rs`'s
+//! `fetch_and_persist`.
+use nuncio_cal::{CalDavAccountConfig, CalDavClient, CalendarBackend};
 use nuncio_store::db::DatabaseError;
 use thiserror::Error;
 
@@ -53,6 +52,33 @@ pub async fn sync_with_backend(
         synced += 1;
     }
     Ok(synced)
+}
+
+/// Production entry point: build a real [`CalDavClient`] for `account` from its
+/// persisted `collection_url` and the `password` resolved from the OS keyring
+/// vault, then fetch-and-persist `calendar_id`'s events in `[start_window,
+/// end_window]` via [`sync_with_backend`]. Returns the number of events synced.
+///
+/// `account.collection_url` must be a fully-qualified CalDAV calendar
+/// collection URL (validated at `AddAccount` time); the account's
+/// `email_address` is used as the DAV basic-auth username. No fabricated data
+/// is ever returned -- a transport or persistence failure surfaces as a
+/// [`CalendarSyncError`].
+pub async fn sync_caldav_account(
+    db: &nuncio_store::db::DatabaseEngine,
+    account: &nuncio_core::AccountConfig,
+    password: &str,
+    calendar_id: &str,
+    start_window: i64,
+    end_window: i64,
+) -> Result<usize, CalendarSyncError> {
+    let client = CalDavClient::new(CalDavAccountConfig {
+        account_id: account.id.clone(),
+        caldav_url: account.collection_url.clone(),
+        username: account.email_address.clone(),
+        auth_token: password.to_string(),
+    });
+    sync_with_backend(db, &client, calendar_id, start_window, end_window).await
 }
 
 #[cfg(test)]

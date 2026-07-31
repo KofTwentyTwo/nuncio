@@ -40,6 +40,10 @@ pub enum SyncError {
     /// A database persistence error occurred while saving synced messages.
     #[error("database error: {0}")]
     Store(#[from] DatabaseError),
+    /// The account's protocol is not a mail protocol (e.g. a CalDAV account),
+    /// so it has no inbound mail backend to sync.
+    #[error("account '{0}' is not a mail account and cannot be mail-synced")]
+    NotAMailAccount(String),
 }
 
 /// Map a [`RuleAction`] to the short mutation tag persisted on
@@ -339,22 +343,28 @@ async fn find_account(
 /// keyring by the caller). This is the ONLY place a concrete protocol engine
 /// is chosen; every other function in this module only ever sees `&dyn
 /// MailBackend`.
-pub(crate) fn build_mail_backend(config: &AccountConfig, password: &str) -> Box<dyn MailBackend> {
+pub(crate) fn build_mail_backend(
+    config: &AccountConfig,
+    password: &str,
+) -> Result<Box<dyn MailBackend>, SyncError> {
     match config.protocol {
-        AccountProtocol::ImapSmtp => Box::new(ImapEngine::with_credentials(
+        AccountProtocol::ImapSmtp => Ok(Box::new(ImapEngine::with_credentials(
             &config.id,
             &config.server_host,
             config.server_port,
             config.imap_tls_mode,
             &config.email_address,
             password,
-        )),
-        AccountProtocol::Jmap => Box::new(JmapEngine::with_credentials(
+        ))),
+        AccountProtocol::Jmap => Ok(Box::new(JmapEngine::with_credentials(
             &config.id,
             &config.server_host,
             &config.email_address,
             password,
-        )),
+        ))),
+        // A DAV-protocol account (e.g. CalDAV) has no inbound mail backend;
+        // it is synced through its own domain service, not the mail path.
+        AccountProtocol::CalDav => Err(SyncError::NotAMailAccount(config.id.clone())),
     }
 }
 
@@ -376,7 +386,7 @@ pub async fn run_account_sync(
     let setup = async {
         let config = find_account(db, account_id).await?;
         let password = secrets.get_secret(&config.keyring_secret_key)?;
-        Ok::<_, SyncError>(build_mail_backend(&config, &password))
+        build_mail_backend(&config, &password)
     }
     .await;
 
@@ -419,9 +429,26 @@ pub async fn run_all_accounts_sync(
     match db.list_accounts().await {
         Ok(accounts) => {
             for config in accounts {
+                // DAV-protocol accounts (e.g. CalDAV) are not mail accounts;
+                // they sync through their own domain service, so skip them
+                // here rather than attempting to build a mail backend.
+                if config.protocol.is_dav() {
+                    continue;
+                }
                 match secrets.get_secret(&config.keyring_secret_key) {
                     Ok(password) => {
-                        let backend = build_mail_backend(&config, &password);
+                        let backend = match build_mail_backend(&config, &password) {
+                            Ok(backend) => backend,
+                            Err(e) => {
+                                event_bus.process_command(CoreCommand::ReportError {
+                                    message: format!(
+                                        "sync skipped for account '{}': {e}",
+                                        config.id
+                                    ),
+                                });
+                                continue;
+                            }
+                        };
                         match fetch_and_persist(
                             db,
                             event_bus,
@@ -500,6 +527,7 @@ mod tests {
             smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         }
     }
 
@@ -591,6 +619,7 @@ mod tests {
             smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         }
     }
 

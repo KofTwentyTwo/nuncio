@@ -223,6 +223,7 @@ fn map_account_protocol_to_proto(protocol: nuncio_core::AccountProtocol) -> Acco
     match protocol {
         nuncio_core::AccountProtocol::Jmap => AccountProtocolProto::Jmap,
         nuncio_core::AccountProtocol::ImapSmtp => AccountProtocolProto::ImapSmtp,
+        nuncio_core::AccountProtocol::CalDav => AccountProtocolProto::Caldav,
     }
 }
 
@@ -236,6 +237,7 @@ fn map_account_protocol_from_proto(
     match protocol {
         AccountProtocolProto::Jmap => Ok(nuncio_core::AccountProtocol::Jmap),
         AccountProtocolProto::ImapSmtp => Ok(nuncio_core::AccountProtocol::ImapSmtp),
+        AccountProtocolProto::Caldav => Ok(nuncio_core::AccountProtocol::CalDav),
         AccountProtocolProto::Unspecified => {
             Err(Status::invalid_argument("account protocol is required"))
         }
@@ -284,6 +286,7 @@ fn map_account_config_to_proto(config: nuncio_core::AccountConfig) -> AccountCon
         sync_interval_secs: config.sync_interval_secs,
         smtp_host: config.smtp_host,
         smtp_port: u32::from(config.smtp_port),
+        collection_url: config.collection_url,
     }
 }
 
@@ -315,6 +318,7 @@ fn map_account_config_from_proto(
         smtp_tls_mode,
         keyring_secret_key: config.keyring_secret_key,
         sync_interval_secs: config.sync_interval_secs,
+        collection_url: config.collection_url,
     })
 }
 
@@ -405,7 +409,21 @@ impl AccountConnectionTester for RealAccountConnectionTester {
             nuncio_core::AccountProtocol::Jmap => ProtocolProbe::failed(
                 "IMAP connection probe is not applicable to a JMAP account".to_string(),
             ),
+            nuncio_core::AccountProtocol::CalDav => ProtocolProbe::failed(
+                "IMAP connection probe is not applicable to a CalDAV account".to_string(),
+            ),
         };
+
+        // A CalDAV account has no SMTP endpoint to probe; report that honestly
+        // rather than dialing the (empty) mail endpoint fields.
+        if config.protocol == nuncio_core::AccountProtocol::CalDav {
+            return AccountConnectionReport {
+                imap,
+                smtp: ProtocolProbe::failed(
+                    "SMTP connection probe is not applicable to a CalDAV account".to_string(),
+                ),
+            };
+        }
 
         let smtp = match SmtpTransportEngine::new(
             &config.smtp_host,
@@ -872,15 +890,16 @@ fn expand_events_for_window(
 ///
 /// Production (every existing caller of [`serve`] / [`serve_on_listener`])
 /// never constructs a non-default instance: [`Default`] yields
-/// `calendar_backend: None`, which routes `Calendar/Sync` to an honest
-/// error, since there is currently no persisted per-account CalDAV
-/// configuration to build a real backend from. Only a full-daemon E2E test
-/// supplies `Some(..)`, standing in a [`nuncio_cal::MockCalendarBackend`]
-/// for real network I/O.
+/// `calendar_backend: None`, which routes `Calendar/Sync` through the real
+/// production path -- resolving configured CalDAV accounts, building a real
+/// [`nuncio_cal::CalDavClient`] from each account's collection URL and
+/// keyring credential, and syncing genuinely fetched events. Only a
+/// full-daemon E2E test that wants to bypass the real network transport
+/// supplies `Some(..)`, standing in a [`nuncio_cal::MockCalendarBackend`].
 #[derive(Clone, Default)]
 pub struct CalendarEngineOverrides {
-    /// When `Some`, `Calendar/Sync` fetches from this backend instead of
-    /// returning an honest "no CalDAV configuration" error.
+    /// When `Some`, `Calendar/Sync` fetches from this injected backend instead
+    /// of building a real per-account CalDAV client. Used only by tests.
     pub calendar_backend: Option<Arc<dyn CalendarBackend>>,
 }
 
@@ -897,12 +916,91 @@ impl std::fmt::Debug for CalendarEngineOverrides {
 ///
 /// `ListEvents`/`GetEvent` always read genuinely persisted data. `Sync`
 /// fetches from [`CalendarEngineOverrides::calendar_backend`] when injected;
-/// otherwise it returns an honest error, since there is no persisted
-/// per-account CalDAV configuration to build a real backend from yet (see
-/// `nunciod::calendar_sync`'s doc comment).
+/// otherwise it runs the real production path -- resolving configured CalDAV
+/// accounts and building a real [`nuncio_cal::CalDavClient`] per account from
+/// its persisted collection URL and keyring credential. It returns an honest
+/// error only when no CalDAV account is configured (see
+/// `nunciod::calendar_sync`).
 struct CalendarGrpcService {
     db: Arc<DatabaseEngine>,
+    secrets: Arc<SecretManager>,
     overrides: CalendarEngineOverrides,
+}
+
+impl CalendarGrpcService {
+    /// Production `Calendar/Sync` path (no injected test backend): resolve the
+    /// configured CalDAV account(s), build a real [`nuncio_cal::CalDavClient`]
+    /// per account from its persisted collection URL and keyring credential,
+    /// and sync the requested calendar/window into the store. Returns the
+    /// total number of events synced across the resolved accounts.
+    ///
+    /// A request naming a specific `account_id` is scoped to that account; an
+    /// empty `account_id` syncs every configured CalDAV account. When no
+    /// CalDAV account matches, this returns an honest error rather than a
+    /// fabricated zero-count success -- there is genuinely no remote calendar
+    /// to fetch from.
+    async fn sync_configured_caldav_accounts(
+        &self,
+        req: &CalendarSyncRequest,
+    ) -> Result<usize, Status> {
+        let caldav_accounts: Vec<nuncio_core::AccountConfig> = self
+            .db
+            .list_accounts()
+            .await
+            .map_err(|e| Status::internal(format!("failed to list accounts: {e}")))?
+            .into_iter()
+            .filter(|a| a.protocol == nuncio_core::AccountProtocol::CalDav)
+            .filter(|a| req.account_id.is_empty() || a.id == req.account_id)
+            .collect();
+
+        if caldav_accounts.is_empty() {
+            return Err(Status::failed_precondition(if req.account_id.is_empty() {
+                "no CalDAV account is configured; add one with protocol CALDAV and a \
+                 collection_url before syncing"
+                    .to_string()
+            } else {
+                format!(
+                    "no CalDAV account with id '{}' is configured",
+                    req.account_id
+                )
+            }));
+        }
+
+        let mut total = 0usize;
+        for account in caldav_accounts {
+            // The credential lives ONLY in the OS keyring vault, keyed by the
+            // account's `keyring_secret_key`; it is read just-in-time here and
+            // wrapped so its backing memory is zeroized on drop.
+            let password = zeroize::Zeroizing::new(
+                self.secrets
+                    .get_secret(&account.keyring_secret_key)
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "failed to read CalDAV credential for account '{}': {e}",
+                            account.id
+                        ))
+                    })?,
+            );
+
+            total += crate::calendar_sync::sync_caldav_account(
+                &self.db,
+                &account,
+                &password,
+                &req.calendar_id,
+                req.start_window,
+                req.end_window,
+            )
+            .await
+            .map_err(|e| {
+                Status::internal(format!(
+                    "CalDAV sync failed for account '{}': {e}",
+                    account.id
+                ))
+            })?;
+        }
+
+        Ok(total)
+    }
 }
 
 #[tonic::async_trait]
@@ -923,13 +1021,7 @@ impl Calendar for CalendarGrpcService {
             )
             .await
             .map_err(|e| Status::internal(format!("calendar sync failed: {e}")))?,
-            None => {
-                return Err(Status::internal(format!(
-                    "no CalDAV configuration exists for account '{}'; per-account CalDAV \
-                     configuration is not yet implemented",
-                    req.account_id
-                )));
-            }
+            None => self.sync_configured_caldav_accounts(&req).await?,
         };
 
         Ok(Response::new(CalendarSyncResponse {
@@ -2275,6 +2367,7 @@ pub async fn serve_on_listener_with_overrides(
     // this function's doc comment.
     let calendar_service = CalendarGrpcService {
         db: db.clone(),
+        secrets: secrets.clone(),
         overrides: calendar_overrides,
     };
     let calendar_interceptor = BearerAuthInterceptor::new(token.clone());
@@ -2875,6 +2968,7 @@ mod tests {
             smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
             keyring_secret_key: keyring_secret_key.to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
         }
@@ -3263,6 +3357,7 @@ mod tests {
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: key.to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         };
 
         // Force `save_account` to fail for real by closing the pool, exactly
@@ -3306,6 +3401,7 @@ mod tests {
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: key.to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         };
 
         db.close().await;
@@ -3752,6 +3848,7 @@ mod tests {
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-send-1".to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         };
         db.save_account(&config).await.expect("save account");
         secrets
@@ -3920,6 +4017,7 @@ mod tests {
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-injected-send-1".to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         };
         // Deliberately never stores a keyring credential -- this path must
         // never need one.
@@ -4036,6 +4134,7 @@ mod tests {
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-injected-send-fail-1".to_string(),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         };
         db.save_account(&config).await.expect("save account");
 
@@ -5417,12 +5516,12 @@ mod tests {
         assert_eq!(err.code(), Code::NotFound);
     }
 
-    /// With no `CalendarEngineOverrides::calendar_backend` injected, `Sync`
-    /// returns an honest error -- there is no persisted per-account CalDAV
-    /// configuration to build a real backend from -- never a fabricated
-    /// `synced_count`.
+    /// With no `CalendarEngineOverrides::calendar_backend` injected AND no
+    /// CalDAV account configured, `Sync` returns an honest
+    /// `FailedPrecondition` error naming the missing account -- never a
+    /// fabricated `synced_count`.
     #[tokio::test]
-    async fn calendar_sync_without_override_reports_honest_error() {
+    async fn calendar_sync_without_override_or_config_reports_honest_error() {
         use nuncio_proto::v1::calendar_client::CalendarClient;
         use nuncio_proto::v1::CalendarSyncRequest;
 
@@ -5441,9 +5540,8 @@ mod tests {
             }))
             .await
             .expect_err("sync with no injected backend and no CalDAV config must fail");
-        assert_eq!(err.code(), Code::Internal);
+        assert_eq!(err.code(), Code::FailedPrecondition);
         assert!(err.message().contains("acct-cal-no-config"));
-        assert!(err.message().contains("no CalDAV configuration"));
     }
 
     /// With a [`CalendarEngineOverrides::calendar_backend`] injected, `Sync`
