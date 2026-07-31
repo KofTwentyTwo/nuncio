@@ -9,6 +9,7 @@ pub mod lifecycle;
 pub mod lock;
 pub mod orchestrator;
 pub mod outbox;
+pub mod pagination;
 pub mod send;
 pub mod sync;
 pub use orchestrator::SelfHealingSyncOrchestrator;

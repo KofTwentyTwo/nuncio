@@ -498,8 +498,8 @@ impl HeadlessRunner {
             Commands::System { action } => match action {
                 SystemSubcommand::Status => self.handle_system_status(json_mode).await,
                 SystemSubcommand::Audit { action } => match action {
-                    AuditSubcommand::List { limit, offset } => {
-                        self.handle_audit_list(*limit, *offset, json_mode).await
+                    AuditSubcommand::List { page_size } => {
+                        self.handle_audit_list(*page_size, json_mode).await
                     }
                     AuditSubcommand::Verify => self.handle_audit_verify(json_mode).await,
                 },
@@ -726,33 +726,48 @@ impl HeadlessRunner {
             Err(e) => return Self::render_error(&e, json_mode),
         };
 
-        match client
-            .list_messages(nuncio_proto::v1::ListMessagesRequest {
-                folder_id: folder.to_string(),
-                limit: 0,
-            })
-            .await
-        {
-            Ok(response) => {
-                let messages = response.into_inner().messages;
-                if json_mode {
-                    let messages_json: Vec<serde_json::Value> =
-                        messages.iter().map(message_proto_to_json).collect();
-                    format_json(&json!({
-                        "folder": folder,
-                        "messages": messages_json
-                    }))
-                } else {
-                    format!("Folder '{}': {} message(s) found", folder, messages.len())
+        // Follow `next_page_token` to the end so the command shows the whole
+        // folder, transparently exercising the keyset pagination convention.
+        let mut messages = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            match client
+                .list_messages(nuncio_proto::v1::ListMessagesRequest {
+                    folder_id: folder.to_string(),
+                    page_size: 0,
+                    page_token: page_token.clone(),
+                })
+                .await
+            {
+                Ok(response) => {
+                    let page = response.into_inner();
+                    messages.extend(page.messages);
+                    if page.next_page_token.is_empty() {
+                        break;
+                    }
+                    page_token = page.next_page_token;
+                }
+                Err(status) => {
+                    return Self::render_error(
+                        &format!(
+                            "nunciod daemon rejected list_messages: {}",
+                            Self::clean_status_message(&status)
+                        ),
+                        json_mode,
+                    );
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected list_messages: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+        }
+
+        if json_mode {
+            let messages_json: Vec<serde_json::Value> =
+                messages.iter().map(message_proto_to_json).collect();
+            format_json(&json!({
+                "folder": folder,
+                "messages": messages_json
+            }))
+        } else {
+            format!("Folder '{}': {} message(s) found", folder, messages.len())
         }
     }
 
@@ -824,40 +839,55 @@ impl HeadlessRunner {
             Err(e) => return Self::render_error(&e, json_mode),
         };
 
-        match client
-            .search_messages(nuncio_proto::v1::SearchMessagesRequest {
-                query: query.to_string(),
-            })
-            .await
-        {
-            Ok(response) => {
-                let hits = response.into_inner().hits;
-                if json_mode {
-                    let hits_json: Vec<serde_json::Value> = hits
-                        .iter()
-                        .map(|h| {
-                            json!({
-                                "id": h.id,
-                                "title": h.title,
-                                "snippet": h.snippet,
-                            })
-                        })
-                        .collect();
-                    format_json(&json!({
-                        "query": query,
-                        "results": hits_json
-                    }))
-                } else {
-                    format!("Search complete for '{}' ({} matches)", query, hits.len())
+        // Follow `next_page_token` to the end so search returns every hit.
+        let mut hits = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            match client
+                .search_messages(nuncio_proto::v1::SearchMessagesRequest {
+                    query: query.to_string(),
+                    page_size: 0,
+                    page_token: page_token.clone(),
+                })
+                .await
+            {
+                Ok(response) => {
+                    let page = response.into_inner();
+                    hits.extend(page.hits);
+                    if page.next_page_token.is_empty() {
+                        break;
+                    }
+                    page_token = page.next_page_token;
+                }
+                Err(status) => {
+                    return Self::render_error(
+                        &format!(
+                            "nunciod daemon rejected search_messages: {}",
+                            Self::clean_status_message(&status)
+                        ),
+                        json_mode,
+                    );
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected search_messages: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+        }
+
+        if json_mode {
+            let hits_json: Vec<serde_json::Value> = hits
+                .iter()
+                .map(|h| {
+                    json!({
+                        "id": h.id,
+                        "title": h.title,
+                        "snippet": h.snippet,
+                    })
+                })
+                .collect();
+            format_json(&json!({
+                "query": query,
+                "results": hits_json
+            }))
+        } else {
+            format!("Search complete for '{}' ({} matches)", query, hits.len())
         }
     }
 
@@ -869,36 +899,52 @@ impl HeadlessRunner {
             Err(e) => return Self::render_error(&e, json_mode),
         };
 
-        match client
-            .list_folders(nuncio_proto::v1::ListFoldersRequest {})
-            .await
-        {
-            Ok(response) => {
-                let folders = response.into_inner().folders;
-                if json_mode {
-                    let folders_json: Vec<serde_json::Value> = folders
-                        .iter()
-                        .map(|f| {
-                            json!({
-                                "id": f.id,
-                                "name": f.name,
-                                "total_messages": f.total_messages,
-                                "unread_messages": f.unread_messages,
-                            })
-                        })
-                        .collect();
-                    format_json(&json!({ "folders": folders_json }))
-                } else {
-                    format!("Available Mailbox Folders: {} folders found", folders.len())
+        // Follow `next_page_token` to the end so every folder is listed.
+        let mut folders = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            match client
+                .list_folders(nuncio_proto::v1::ListFoldersRequest {
+                    page_size: 0,
+                    page_token: page_token.clone(),
+                })
+                .await
+            {
+                Ok(response) => {
+                    let page = response.into_inner();
+                    folders.extend(page.folders);
+                    if page.next_page_token.is_empty() {
+                        break;
+                    }
+                    page_token = page.next_page_token;
+                }
+                Err(status) => {
+                    return Self::render_error(
+                        &format!(
+                            "nunciod daemon rejected list_folders: {}",
+                            Self::clean_status_message(&status)
+                        ),
+                        json_mode,
+                    );
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected list_folders: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+        }
+
+        if json_mode {
+            let folders_json: Vec<serde_json::Value> = folders
+                .iter()
+                .map(|f| {
+                    json!({
+                        "id": f.id,
+                        "name": f.name,
+                        "total_messages": f.total_messages,
+                        "unread_messages": f.unread_messages,
+                    })
+                })
+                .collect();
+            format_json(&json!({ "folders": folders_json }))
+        } else {
+            format!("Available Mailbox Folders: {} folders found", folders.len())
         }
     }
 
@@ -1093,46 +1139,63 @@ impl HeadlessRunner {
     /// `system audit list`: a real thin gRPC client of the running
     /// `nunciod` daemon's `nuncio.v1.Audit` API. Lists a page of the
     /// daemon's real, persisted WORM audit ledger, sequence ascending.
-    async fn handle_audit_list(&self, limit: u32, offset: u32, json_mode: bool) -> String {
+    async fn handle_audit_list(&self, page_size: u32, json_mode: bool) -> String {
         let mut client = match self.connect_audit_client().await {
             Ok(client) => client,
             Err(e) => return Self::render_error(&e, json_mode),
         };
 
-        match client
-            .list_records(nuncio_proto::v1::ListRecordsRequest { limit, offset })
-            .await
-        {
-            Ok(response) => {
-                let records = response.into_inner().records;
-                if json_mode {
-                    let records_json: Vec<serde_json::Value> =
-                        records.iter().map(audit_record_proto_to_json).collect();
-                    format_json(&json!({ "records": records_json }))
-                } else if records.is_empty() {
-                    "No audit records recorded.".to_string()
-                } else {
-                    let mut out =
-                        String::from("SEQ  ACTOR                ACTION               TIMESTAMP\n");
-                    for r in records {
-                        out.push_str(&format!(
-                            "{:<4} {:<20} {:<20} {}\n",
-                            r.sequence,
-                            r.actor,
-                            r.action,
-                            format_timestamp(&r.timestamp)
-                        ));
+        // Follow `next_page_token` to the end so the whole ledger is listed,
+        // fetching `page_size` records per keyset page.
+        let mut records = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            match client
+                .list_records(nuncio_proto::v1::ListRecordsRequest {
+                    page_size,
+                    page_token: page_token.clone(),
+                })
+                .await
+            {
+                Ok(response) => {
+                    let page = response.into_inner();
+                    records.extend(page.records);
+                    if page.next_page_token.is_empty() {
+                        break;
                     }
-                    out
+                    page_token = page.next_page_token;
+                }
+                Err(status) => {
+                    return Self::render_error(
+                        &format!(
+                            "nunciod daemon rejected list_records: {}",
+                            Self::clean_status_message(&status)
+                        ),
+                        json_mode,
+                    );
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected list_records: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+        }
+
+        if json_mode {
+            let records_json: Vec<serde_json::Value> =
+                records.iter().map(audit_record_proto_to_json).collect();
+            format_json(&json!({ "records": records_json }))
+        } else if records.is_empty() {
+            "No audit records recorded.".to_string()
+        } else {
+            let mut out =
+                String::from("SEQ  ACTOR                ACTION               TIMESTAMP\n");
+            for r in records {
+                out.push_str(&format!(
+                    "{:<4} {:<20} {:<20} {}\n",
+                    r.sequence,
+                    r.actor,
+                    r.action,
+                    format_timestamp(&r.timestamp)
+                ));
+            }
+            out
         }
     }
 
@@ -1208,37 +1271,52 @@ impl HeadlessRunner {
             Err(e) => return Self::render_error(&e, json_mode),
         };
 
-        match client
-            .list_rules(nuncio_proto::v1::ListRulesRequest {})
-            .await
-        {
-            Ok(response) => {
-                let rules = response.into_inner().rules;
-                if json_mode {
-                    let rules_json: Vec<serde_json::Value> =
-                        rules.iter().map(filter_rule_proto_to_json).collect();
-                    format_json(&json!({ "rules": rules_json }))
-                } else if rules.is_empty() {
-                    "No filter rules configured.".to_string()
-                } else {
-                    let mut out =
-                        String::from("ID         PRIORITY ENABLED NAME                  NSQL\n");
-                    for r in rules {
-                        out.push_str(&format!(
-                            "{:<10} {:<8} {:<7} {:<20} {}\n",
-                            r.id, r.priority, r.enabled, r.name, r.nsql_text
-                        ));
+        // Follow `next_page_token` to the end so every rule is listed.
+        let mut rules = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            match client
+                .list_rules(nuncio_proto::v1::ListRulesRequest {
+                    page_size: 0,
+                    page_token: page_token.clone(),
+                })
+                .await
+            {
+                Ok(response) => {
+                    let page = response.into_inner();
+                    rules.extend(page.rules);
+                    if page.next_page_token.is_empty() {
+                        break;
                     }
-                    out
+                    page_token = page.next_page_token;
+                }
+                Err(status) => {
+                    return Self::render_error(
+                        &format!(
+                            "nunciod daemon rejected list_rules: {}",
+                            Self::clean_status_message(&status)
+                        ),
+                        json_mode,
+                    );
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected list_rules: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+        }
+
+        if json_mode {
+            let rules_json: Vec<serde_json::Value> =
+                rules.iter().map(filter_rule_proto_to_json).collect();
+            format_json(&json!({ "rules": rules_json }))
+        } else if rules.is_empty() {
+            "No filter rules configured.".to_string()
+        } else {
+            let mut out = String::from("ID         PRIORITY ENABLED NAME                  NSQL\n");
+            for r in rules {
+                out.push_str(&format!(
+                    "{:<10} {:<8} {:<7} {:<20} {}\n",
+                    r.id, r.priority, r.enabled, r.name, r.nsql_text
+                ));
+            }
+            out
         }
     }
 
@@ -2240,36 +2318,52 @@ impl HeadlessRunner {
             Err(e) => return Self::render_error(&e, json_mode),
         };
 
-        match client
-            .list_events(nuncio_proto::v1::ListEventsRequest {
-                account_id: account.to_string(),
-                calendar_id: calendar.to_string(),
-                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(start)),
-                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(end)),
-            })
-            .await
-        {
-            Ok(response) => {
-                let events = response.into_inner().events;
-                if json_mode {
-                    let events_json: Vec<serde_json::Value> =
-                        events.iter().map(calendar_event_proto_to_json).collect();
-                    format_json(&json!({
-                        "account": account,
-                        "calendar": calendar,
-                        "events": events_json
-                    }))
-                } else {
-                    format!("Calendar Events: {} event(s) found", events.len())
+        // Follow `next_page_token` to the end so every event in the window is
+        // listed, transparently exercising keyset pagination.
+        let mut events = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            match client
+                .list_events(nuncio_proto::v1::ListEventsRequest {
+                    account_id: account.to_string(),
+                    calendar_id: calendar.to_string(),
+                    start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(start)),
+                    end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(end)),
+                    page_size: 0,
+                    page_token: page_token.clone(),
+                })
+                .await
+            {
+                Ok(response) => {
+                    let page = response.into_inner();
+                    events.extend(page.events);
+                    if page.next_page_token.is_empty() {
+                        break;
+                    }
+                    page_token = page.next_page_token;
+                }
+                Err(status) => {
+                    return Self::render_error(
+                        &format!(
+                            "nunciod daemon rejected list_events: {}",
+                            Self::clean_status_message(&status)
+                        ),
+                        json_mode,
+                    );
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected list_events: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+        }
+
+        if json_mode {
+            let events_json: Vec<serde_json::Value> =
+                events.iter().map(calendar_event_proto_to_json).collect();
+            format_json(&json!({
+                "account": account,
+                "calendar": calendar,
+                "events": events_json
+            }))
+        } else {
+            format!("Calendar Events: {} event(s) found", events.len())
         }
     }
 
@@ -2348,33 +2442,57 @@ impl HeadlessRunner {
             Err(e) => return Self::render_error(&e, json_mode),
         };
 
-        match client
-            .list_contacts(nuncio_proto::v1::ListContactsRequest {
-                account_id: account.to_string(),
-            })
-            .await
-        {
-            Ok(response) => {
-                let contacts = response.into_inner().contacts;
-                if json_mode {
-                    let contacts_json: Vec<serde_json::Value> =
-                        contacts.iter().map(contact_proto_to_json).collect();
-                    format_json(&json!({ "account": account, "contacts": contacts_json }))
-                } else {
-                    format!(
-                        "Contacts: {} contact(s) found in address book.",
-                        contacts.len()
-                    )
-                }
+        let contacts = match self.fetch_all_contacts(&mut client, account).await {
+            Ok(contacts) => contacts,
+            Err(status) => {
+                return Self::render_error(
+                    &format!(
+                        "nunciod daemon rejected list_contacts: {}",
+                        Self::clean_status_message(&status)
+                    ),
+                    json_mode,
+                );
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected list_contacts: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+        };
+
+        if json_mode {
+            let contacts_json: Vec<serde_json::Value> =
+                contacts.iter().map(contact_proto_to_json).collect();
+            format_json(&json!({ "account": account, "contacts": contacts_json }))
+        } else {
+            format!(
+                "Contacts: {} contact(s) found in address book.",
+                contacts.len()
+            )
         }
+    }
+
+    /// Follows `next_page_token` to fetch every contact in `account`'s address
+    /// book over the keyset-paginated `ListContacts` RPC, shared by
+    /// [`Self::handle_contact_list`] and [`Self::handle_contact_search`].
+    async fn fetch_all_contacts(
+        &self,
+        client: &mut nuncio_proto::client::AuthenticatedContactsClient,
+        account: &str,
+    ) -> Result<Vec<nuncio_proto::v1::Contact>, tonic::Status> {
+        let mut contacts = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let page = client
+                .list_contacts(nuncio_proto::v1::ListContactsRequest {
+                    account_id: account.to_string(),
+                    page_size: 0,
+                    page_token: page_token.clone(),
+                })
+                .await?
+                .into_inner();
+            contacts.extend(page.contacts);
+            if page.next_page_token.is_empty() {
+                break;
+            }
+            page_token = page.next_page_token;
+        }
+        Ok(contacts)
     }
 
     /// `contact search`: fetches `account`'s full `ListContacts` result over
@@ -2387,42 +2505,37 @@ impl HeadlessRunner {
             Err(e) => return Self::render_error(&e, json_mode),
         };
 
-        match client
-            .list_contacts(nuncio_proto::v1::ListContactsRequest {
-                account_id: account.to_string(),
-            })
-            .await
-        {
-            Ok(response) => {
-                let matches: Vec<_> = response
-                    .into_inner()
-                    .contacts
-                    .into_iter()
-                    .filter(|c| contact_matches_query(c, query))
-                    .collect();
-                if json_mode {
-                    let contacts_json: Vec<serde_json::Value> =
-                        matches.iter().map(contact_proto_to_json).collect();
-                    format_json(&json!({
-                        "account": account,
-                        "query": query,
-                        "contacts": contacts_json
-                    }))
-                } else {
-                    format!(
-                        "Search ('{}'): {} contact(s) matched.",
-                        query,
-                        matches.len()
-                    )
-                }
+        let contacts = match self.fetch_all_contacts(&mut client, account).await {
+            Ok(contacts) => contacts,
+            Err(status) => {
+                return Self::render_error(
+                    &format!(
+                        "nunciod daemon rejected list_contacts: {}",
+                        Self::clean_status_message(&status)
+                    ),
+                    json_mode,
+                );
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected list_contacts: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+        };
+
+        let matches: Vec<_> = contacts
+            .into_iter()
+            .filter(|c| contact_matches_query(c, query))
+            .collect();
+        if json_mode {
+            let contacts_json: Vec<serde_json::Value> =
+                matches.iter().map(contact_proto_to_json).collect();
+            format_json(&json!({
+                "account": account,
+                "query": query,
+                "contacts": contacts_json
+            }))
+        } else {
+            format!(
+                "Search ('{}'): {} contact(s) matched.",
+                query,
+                matches.len()
+            )
         }
     }
 
@@ -3231,6 +3344,7 @@ mod tests {
                         total_messages: 3,
                         unread_messages: 1,
                     }],
+                    next_page_token: String::new(),
                 }))
             }
 
@@ -3243,6 +3357,7 @@ mod tests {
                 message.folder_id = req.folder_id;
                 Ok(tonic::Response::new(ListMessagesResponse {
                     messages: vec![message],
+                    next_page_token: String::new(),
                 }))
             }
 
@@ -3286,6 +3401,7 @@ mod tests {
                         title: "Stub Subject".to_string(),
                         snippet: format!("...{}...", req.query),
                     }],
+                    next_page_token: String::new(),
                 }))
             }
 
@@ -3693,6 +3809,7 @@ mod tests {
                     .unwrap_or_else(|e| e.into_inner()) = Some(req);
                 Ok(tonic::Response::new(ListEventsResponse {
                     events: vec![stub_event()],
+                    next_page_token: String::new(),
                 }))
             }
 
@@ -3875,6 +3992,7 @@ mod tests {
                         stub_contact("ct-stub-1", "Alice Stub", "Kof22", "alice@nuncio.mx"),
                         stub_contact("ct-stub-2", "Bob Other", "OtherCo", "bob@nuncio.mx"),
                     ],
+                    next_page_token: String::new(),
                 }))
             }
 
@@ -4114,6 +4232,7 @@ mod tests {
                             1_700_000_000,
                         )),
                     }],
+                    next_page_token: String::new(),
                 }))
             }
 
@@ -4723,6 +4842,7 @@ mod tests {
                         previous_block_hash: "GENESIS".to_string(),
                         record_hmac: "cafebabe".to_string(),
                     }],
+                    next_page_token: String::new(),
                 }))
             }
 
@@ -4758,10 +4878,7 @@ mod tests {
             .execute_command(
                 &Commands::System {
                     action: SystemSubcommand::Audit {
-                        action: AuditSubcommand::List {
-                            limit: 0,
-                            offset: 0,
-                        },
+                        action: AuditSubcommand::List { page_size: 0 },
                     },
                 },
                 true,
@@ -4824,10 +4941,7 @@ mod tests {
             .execute_command(
                 &Commands::System {
                     action: SystemSubcommand::Audit {
-                        action: AuditSubcommand::List {
-                            limit: 0,
-                            offset: 0,
-                        },
+                        action: AuditSubcommand::List { page_size: 0 },
                     },
                 },
                 true,

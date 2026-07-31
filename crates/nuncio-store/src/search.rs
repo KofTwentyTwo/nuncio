@@ -68,6 +68,71 @@ impl<'a> SearchEngine<'a> {
             .collect())
     }
 
+    /// Keyset-paginated full-text search over message subjects, senders, and
+    /// bodies, ordered by relevance (`rank ASC, id ASC`). `after` is the
+    /// `(rank, id)` of the last hit of the previous page; `None` starts from
+    /// the highest-ranked hit. Fetches `page_size + 1` hits to detect a
+    /// following page and returns the `(rank, id)` cursor of the last returned
+    /// hit when more remain.
+    ///
+    /// The bm25 `rank` is materialized in an inner query (where the FTS5
+    /// `MATCH` is in scope) into an ordinary column, so the outer query can
+    /// both keyset-filter and order by `(rank, id)` -- preserving relevance
+    /// order across pages while resuming strictly after the previous page's
+    /// last hit.
+    pub async fn search_messages_page(
+        &self,
+        query: &str,
+        after: Option<(f64, String)>,
+        page_size: usize,
+    ) -> Result<(Vec<SearchHit>, Option<(f64, String)>), DatabaseError> {
+        let clean_query = Self::sanitize_fts5_query(query);
+        if clean_query.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let fetch = page_size.saturating_add(1);
+
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "SELECT id, title, snippet, rk FROM ( \
+             SELECT id, subject AS title, \
+             snippet(messages_fts, 3, '<b>', '</b>', '...', 10) AS snippet, rank AS rk \
+             FROM messages_fts WHERE messages_fts MATCH ",
+        );
+        builder.push_bind(clean_query);
+        builder.push(") ");
+        if let Some((rank, id)) = &after {
+            builder.push("WHERE (rk > ");
+            builder.push_bind(*rank);
+            builder.push(" OR (rk = ");
+            builder.push_bind(*rank);
+            builder.push(" AND id > ");
+            builder.push_bind(id.clone());
+            builder.push("))");
+        }
+        builder.push(" ORDER BY rk ASC, id ASC LIMIT ");
+        builder.push_bind(fetch as i64);
+
+        let rows = builder
+            .build_query_as::<(String, String, String, f64)>()
+            .fetch_all(self.db.pool())
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        let has_more = rows.len() > page_size;
+        let mut last_key: Option<(f64, String)> = None;
+        let hits: Vec<SearchHit> = rows
+            .into_iter()
+            .take(page_size)
+            .map(|(id, title, snippet, rk)| {
+                last_key = Some((rk, id.clone()));
+                SearchHit { id, title, snippet }
+            })
+            .collect();
+
+        let next = if has_more { last_key } else { None };
+        Ok((hits, next))
+    }
+
     /// Perform a full-text trigram search over calendar event summaries and locations.
     pub async fn search_events(&self, query: &str) -> Result<Vec<SearchHit>, DatabaseError> {
         let clean_query = Self::sanitize_fts5_query(query);
@@ -222,6 +287,52 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "msg-legacy-1");
         assert_eq!(hits[0].title, "Legacy Roadmap Notes");
+    }
+
+    /// Paging FTS search results across multiple pages via the `(rank, id)`
+    /// keyset must return every matching hit EXACTLY ONCE, no dupes and no
+    /// gaps -- proving the rank-materializing subquery keyset works end to
+    /// end over the real encrypt-then-index write path.
+    #[tokio::test]
+    async fn search_messages_page_returns_every_hit_once_no_gaps() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        for i in 0..5 {
+            db.save_email(&sample_email(
+                &format!("msg-{i}"),
+                "Budget Planning Meeting",
+                "annual budget revenue forecast discussion",
+            ))
+            .await
+            .unwrap();
+        }
+
+        let search = SearchEngine::new(&db);
+        let mut seen = Vec::new();
+        let mut after: Option<(f64, String)> = None;
+        let mut pages = 0;
+        loop {
+            let (hits, next) = search
+                .search_messages_page("budget", after.clone(), 2)
+                .await
+                .unwrap();
+            pages += 1;
+            assert!(hits.len() <= 2, "page must not exceed page_size");
+            seen.extend(hits.iter().map(|h| h.id.clone()));
+            match next {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+            assert!(pages < 100, "pagination must terminate");
+        }
+
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            5,
+            "every matching message returned exactly once"
+        );
+        assert!(pages >= 3, "5 hits at page_size 2 must span multiple pages");
     }
 
     #[tokio::test]

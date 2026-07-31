@@ -1291,6 +1291,102 @@ impl DatabaseEngine {
             .collect::<Result<Vec<_>, DatabaseError>>()
     }
 
+    /// Keyset-paginated listing of a folder's messages, newest first
+    /// (`received_at DESC, id DESC`). `after` is the `(received_at, id)` of
+    /// the last message of the previous page; `None` starts from the newest.
+    /// Fetches `page_size + 1` rows to detect a following page: returns at
+    /// most `page_size` messages plus the `(received_at, id)` cursor of the
+    /// last returned message when more remain (else `None`).
+    #[allow(clippy::type_complexity)]
+    pub async fn list_messages_page(
+        &self,
+        folder_id: &str,
+        after: Option<(i64, String)>,
+        page_size: usize,
+    ) -> Result<(Vec<nuncio_core::model::Email>, Option<(i64, String)>), DatabaseError> {
+        let fetch = page_size.saturating_add(1);
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity FROM messages WHERE folder_id = ",
+        );
+        builder.push_bind(folder_id.to_string());
+        if let Some((ts, id)) = &after {
+            builder.push(" AND (received_at < ");
+            builder.push_bind(*ts);
+            builder.push(" OR (received_at = ");
+            builder.push_bind(*ts);
+            builder.push(" AND id < ");
+            builder.push_bind(id.clone());
+            builder.push("))");
+        }
+        builder.push(" ORDER BY received_at DESC, id DESC LIMIT ");
+        builder.push_bind(fetch as i64);
+
+        let rows = builder
+            .build_query_as::<(
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                i64,
+                i64,
+                Option<String>,
+                Option<String>,
+                String,
+                String,
+            )>()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        let has_more = rows.len() > page_size;
+        let mut emails = rows
+            .into_iter()
+            .take(page_size)
+            .map(|r| {
+                let dec_plain =
+                    r.8.map(|p| {
+                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
+                    })
+                    .transpose()
+                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+                let dec_html =
+                    r.9.map(|h| {
+                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
+                    })
+                    .transpose()
+                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+                Ok(nuncio_core::model::Email {
+                    id: r.0,
+                    account_id: r.1,
+                    folder_id: r.2,
+                    remote_id: r.10,
+                    uid_validity: r.11,
+                    subject: r.3,
+                    sender: r.4,
+                    recipient: r.5,
+                    received_at: r.6,
+                    read: r.7 != 0,
+                    body_plain: dec_plain,
+                    body_html: dec_html,
+                    attachments: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+        let next = if has_more {
+            emails
+                .last()
+                .map(|e| (e.received_at, e.id.clone()))
+                .filter(|_| !emails.is_empty())
+        } else {
+            None
+        };
+        emails.shrink_to_fit();
+        Ok((emails, next))
+    }
+
     /// Retrieve a single message by ID.
     #[allow(clippy::type_complexity)]
     pub async fn get_message(
@@ -1632,6 +1728,69 @@ impl DatabaseEngine {
         Ok(rows.iter().map(contact_from_row).collect())
     }
 
+    /// Keyset-paginated listing of `account_id`'s contacts, in the same order
+    /// as [`Self::list_contacts`] (`interaction_count DESC, display_name ASC,
+    /// id ASC`). `after` is the `(interaction_count, display_name, id)` of the
+    /// last contact of the previous page. Fetches `page_size + 1` rows to
+    /// detect a following page and returns the `(interaction_count,
+    /// display_name, id)` cursor of the last returned contact when more remain.
+    ///
+    /// See the confidentiality/dependency note on [`Self::save_contact`].
+    #[allow(clippy::type_complexity)]
+    pub async fn list_contacts_page(
+        &self,
+        account_id: &str,
+        after: Option<(i64, String, String)>,
+        page_size: usize,
+    ) -> Result<(Vec<nuncio_contacts::Contact>, Option<(i64, String, String)>), DatabaseError> {
+        let fetch = page_size.saturating_add(1);
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "SELECT id, account_id, display_name, given_name, family_name, organization, \
+             job_title, notes, avatar_url, emails_json, phones_json, is_favorite, \
+             interaction_count, last_interacted_at, created_at, updated_at \
+             FROM contacts WHERE account_id = ",
+        );
+        builder.push_bind(account_id.to_string());
+        if let Some((ic, dn, id)) = &after {
+            builder.push(" AND (interaction_count < ");
+            builder.push_bind(*ic);
+            builder.push(" OR (interaction_count = ");
+            builder.push_bind(*ic);
+            builder.push(" AND (display_name > ");
+            builder.push_bind(dn.clone());
+            builder.push(" OR (display_name = ");
+            builder.push_bind(dn.clone());
+            builder.push(" AND id > ");
+            builder.push_bind(id.clone());
+            builder.push("))))");
+        }
+        builder.push(" ORDER BY interaction_count DESC, display_name ASC, id ASC LIMIT ");
+        builder.push_bind(fetch as i64);
+
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        let has_more = rows.len() > page_size;
+        let contacts: Vec<nuncio_contacts::Contact> =
+            rows.iter().take(page_size).map(contact_from_row).collect();
+
+        let next = if has_more {
+            contacts.last().map(|c| {
+                (
+                    c.interaction_count as i64,
+                    c.display_name.clone(),
+                    c.id.clone(),
+                )
+            })
+        } else {
+            None
+        };
+        Ok((contacts, next))
+    }
+
     /// Retrieve a single contact by ID.
     ///
     /// See the confidentiality/dependency note on [`Self::save_contact`].
@@ -1704,6 +1863,52 @@ impl DatabaseEngine {
             .collect())
     }
 
+    /// Keyset-paginated listing of folders with message counts, folder id
+    /// ascending. `after` is the id of the last folder of the previous page.
+    /// Fetches `page_size + 1` groups to detect a following page and returns
+    /// the id of the last returned folder as the cursor when more remain.
+    pub async fn list_folders_page(
+        &self,
+        after: Option<String>,
+        page_size: usize,
+    ) -> Result<(Vec<nuncio_core::model::Folder>, Option<String>), DatabaseError> {
+        let fetch = page_size.saturating_add(1);
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "SELECT folder_id, COUNT(*) as total, SUM(CASE WHEN read_flag = 0 THEN 1 ELSE 0 END) as unread FROM messages ",
+        );
+        if let Some(id) = &after {
+            builder.push("WHERE folder_id > ");
+            builder.push_bind(id.clone());
+        }
+        builder.push(" GROUP BY folder_id ORDER BY folder_id ASC LIMIT ");
+        builder.push_bind(fetch as i64);
+
+        let rows = builder
+            .build_query_as::<(String, i64, i64)>()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        let has_more = rows.len() > page_size;
+        let folders: Vec<nuncio_core::model::Folder> = rows
+            .into_iter()
+            .take(page_size)
+            .map(|(folder_id, total, unread)| nuncio_core::model::Folder {
+                id: folder_id.clone(),
+                name: folder_id,
+                total_messages: total as usize,
+                unread_messages: unread as usize,
+            })
+            .collect();
+
+        let next = if has_more {
+            folders.last().map(|f| f.id.clone())
+        } else {
+            None
+        };
+        Ok((folders, next))
+    }
+
     /// Save or replace a [`nuncio_filter::FilterRule`].
     pub async fn save_filter_rule(
         &self,
@@ -1770,6 +1975,77 @@ impl DatabaseEngine {
             }
         }
         Ok(rules)
+    }
+
+    /// Keyset-paginated listing of persisted filter rules, `priority ASC, id
+    /// ASC`. `after` is the `(priority, id)` of the last rule of the previous
+    /// page. Fetches `page_size + 1` rows to detect a following page.
+    ///
+    /// The following-page detection and the returned cursor are computed from
+    /// the RAW rows (their stored `(priority, id)`), before parsing -- a row
+    /// whose stored NSQL no longer parses is skipped from the returned rules
+    /// exactly as [`Self::list_filter_rules`] does, but it still counts toward
+    /// the page boundary, so a page with skipped rows still advances the
+    /// cursor correctly and never re-emits or gaps around a rule.
+    #[allow(clippy::type_complexity)]
+    pub async fn list_filter_rules_page(
+        &self,
+        after: Option<(i32, String)>,
+        page_size: usize,
+    ) -> Result<(Vec<nuncio_filter::FilterRule>, Option<(i32, String)>), DatabaseError> {
+        let fetch = page_size.saturating_add(1);
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "SELECT id, name, priority, enabled, nsql_text, created_at, updated_at FROM filter_rules ",
+        );
+        if let Some((priority, id)) = &after {
+            builder.push("WHERE (priority > ");
+            builder.push_bind(*priority as i64);
+            builder.push(" OR (priority = ");
+            builder.push_bind(*priority as i64);
+            builder.push(" AND id > ");
+            builder.push_bind(id.clone());
+            builder.push("))");
+        }
+        builder.push(" ORDER BY priority ASC, id ASC LIMIT ");
+        builder.push_bind(fetch as i64);
+
+        let rows = builder
+            .build_query_as::<(String, String, i64, i64, String, i64, i64)>()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        let has_more = rows.len() > page_size;
+        let page: Vec<(String, String, i64, i64, String, i64, i64)> =
+            rows.into_iter().take(page_size).collect();
+
+        let next = if has_more {
+            page.last().map(|r| (r.2 as i32, r.0.clone()))
+        } else {
+            None
+        };
+
+        let mut rules = Vec::new();
+        for (id, name, priority, enabled, nsql_text, created_at, updated_at) in page {
+            match nuncio_filter::NsqlParser::parse_rule(&name, priority as i32, &nsql_text) {
+                Ok(mut parsed) => {
+                    parsed.id = id;
+                    parsed.enabled = enabled != 0;
+                    parsed.created_at = created_at;
+                    parsed.updated_at = updated_at;
+                    rules.push(parsed);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        rule_id = %id,
+                        rule_name = %name,
+                        error = %err,
+                        "stored filter rule failed to parse and will not be enforced"
+                    );
+                }
+            }
+        }
+        Ok((rules, next))
     }
 
     /// Delete a [`nuncio_filter::FilterRule`] by ID.
@@ -2259,6 +2535,57 @@ impl DatabaseEngine {
                 record_hmac: r.6,
             })
             .collect())
+    }
+
+    /// Keyset-paginated listing of the WORM audit ledger, `sequence ASC`.
+    /// `after` is the sequence of the last record of the previous page;
+    /// `None` starts from the lowest sequence. Fetches `page_size + 1` rows to
+    /// detect a following page and returns the sequence of the last returned
+    /// record as the cursor when more remain. Keyset paging on the
+    /// monotonically increasing sequence is stable under concurrent appends,
+    /// unlike the previous limit/offset paging.
+    pub async fn list_worm_audit_records_page(
+        &self,
+        after: Option<u64>,
+        page_size: usize,
+    ) -> Result<(Vec<nuncio_core::WormAuditRecord>, Option<u64>), DatabaseError> {
+        let fetch = page_size.saturating_add(1);
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "SELECT sequence, timestamp_ns, actor, action, data_hash, previous_block_hash, record_hmac FROM worm_audit_records ",
+        );
+        if let Some(seq) = after {
+            builder.push("WHERE sequence > ");
+            builder.push_bind(seq as i64);
+        }
+        builder.push(" ORDER BY sequence ASC LIMIT ");
+        builder.push_bind(fetch as i64);
+
+        let rows = builder
+            .build_query_as::<(i64, i64, String, String, String, String, String)>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let has_more = rows.len() > page_size;
+        let records: Vec<nuncio_core::WormAuditRecord> = rows
+            .into_iter()
+            .take(page_size)
+            .map(|r| nuncio_core::WormAuditRecord {
+                sequence: r.0 as u64,
+                timestamp_ns: r.1,
+                actor: r.2,
+                action: r.3,
+                data_hash: r.4,
+                previous_block_hash: r.5,
+                record_hmac: r.6,
+            })
+            .collect();
+
+        let next = if has_more {
+            records.last().map(|r| r.sequence)
+        } else {
+            None
+        };
+        Ok((records, next))
     }
 
     /// Verify the entire WORM cryptographic audit log chain, using the WORM HMAC key

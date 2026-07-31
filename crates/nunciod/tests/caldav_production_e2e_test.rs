@@ -198,6 +198,8 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
             calendar_id: CALENDAR_ID.to_string(),
             start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_000_000)),
             end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_800_000_000)),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list_events succeeds")
@@ -234,6 +236,8 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
             calendar_id: CALENDAR_ID.to_string(),
             start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
             end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect_err("missing bearer token must be rejected");
