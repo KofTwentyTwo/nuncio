@@ -2152,14 +2152,15 @@ impl DatabaseEngine {
             }
         };
 
-        // Record WORM audit log for this data export
-        let _ = self
-            .append_worm_audit_record(
-                "system.export",
-                "data.export",
-                output_path.to_string_lossy().as_bytes(),
-            )
-            .await;
+        // Record WORM audit log for this data export. If the audit record cannot be
+        // persisted, the export must not report success: an export without a WORM
+        // record is indistinguishable from an unaudited (and thus untrusted) export.
+        self.append_worm_audit_record(
+            "system.export",
+            "data.export",
+            output_path.to_string_lossy().as_bytes(),
+        )
+        .await?;
 
         Ok(nuncio_core::ExportSummary {
             output_path: output_path.to_string_lossy().to_string(),
@@ -3391,6 +3392,33 @@ mod tests {
             .unwrap();
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].id, "msg-1");
+    }
+
+    /// An export whose WORM audit record cannot be persisted must never report success --
+    /// an unaudited export would be indistinguishable from a properly-audited one, defeating
+    /// the tamper-evidence the WORM log exists to provide. Forces a genuine storage failure
+    /// (the pool is closed out from under the engine) rather than a contrived one.
+    #[tokio::test]
+    async fn export_messages_to_file_fails_when_worm_audit_write_fails() {
+        let (engine, dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        engine
+            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
+            .await
+            .unwrap();
+        let messages = engine.list_messages_for_export(None, None).await.unwrap();
+
+        engine.close().await;
+
+        let output_path = dir.path().join("export.json");
+        let result = engine
+            .export_messages_to_file(&messages, nuncio_core::ExportFormat::Json, &output_path)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "an export whose WORM audit record cannot be written must never report success; \
+             got: {result:?}"
+        );
     }
 
     #[tokio::test]
