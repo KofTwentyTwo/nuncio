@@ -84,6 +84,7 @@ prost = "0.14"
 tonic-prost-build = "0.14"
 protoc-bin-vendored = "3.2"
 subtle = "2.6"
+fs4 = "0.13"
 
 
 

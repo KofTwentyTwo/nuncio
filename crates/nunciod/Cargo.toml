@@ -34,6 +34,7 @@ subtle.workspace = true
 hex.workspace = true
 bytes.workspace = true
 zeroize.workspace = true
+fs4.workspace = true
 
 [dev-dependencies]
 nuncio-cli = { path = "../nuncio-cli" }

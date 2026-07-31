@@ -6,6 +6,7 @@ pub mod calendar_sync;
 pub mod contacts_sync;
 pub mod grpc;
 pub mod lifecycle;
+pub mod lock;
 pub mod orchestrator;
 pub mod outbox;
 pub mod send;
