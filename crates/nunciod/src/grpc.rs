@@ -10,6 +10,7 @@ use nuncio_contacts::ContactsBackend;
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
 use nuncio_mail::{ImapEngine, MailBackend, MessageSender, SmtpTransportEngine};
+use nuncio_proto::errors;
 use nuncio_proto::v1::accounts_server::{Accounts, AccountsServer};
 use nuncio_proto::v1::audit_server::{Audit, AuditServer};
 use nuncio_proto::v1::calendar_server::{Calendar, CalendarServer};
@@ -19,6 +20,7 @@ use nuncio_proto::v1::export_server::{Export, ExportServer};
 use nuncio_proto::v1::filters_server::{Filters, FiltersServer};
 use nuncio_proto::v1::mail_server::{Mail, MailServer};
 use nuncio_proto::v1::system_server::{System, SystemServer};
+use nuncio_proto::v1::ErrorReason;
 use nuncio_proto::v1::{
     export_request, AccountConfig as AccountConfigProto, AccountProtocol as AccountProtocolProto,
     AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto,
@@ -549,7 +551,7 @@ impl Accounts for AccountsGrpcService {
         let config = map_account_config_from_proto(proto_config)?;
         config
             .validate()
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            .map_err(|e| errors::status(ErrorReason::ValidationFailed, e.to_string()))?;
 
         // Store the password credential in the OS keyring FIRST, keyed by
         // this account's `keyring_secret_key` -- it is never written to
@@ -615,7 +617,7 @@ impl Accounts for AccountsGrpcService {
         let config = map_account_config_from_proto(proto_config)?;
         config
             .validate()
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            .map_err(|e| errors::status(ErrorReason::ValidationFailed, e.to_string()))?;
 
         // Updating a non-existent account is a client error, not a silent
         // create: reject it so a typo'd id never conjures a new account row.
@@ -672,7 +674,13 @@ impl Accounts for AccountsGrpcService {
             .get_account(&req.id)
             .await
             .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
-            .ok_or_else(|| Status::not_found(format!("account '{}' not found", req.id)))?;
+            .ok_or_else(|| {
+                errors::status_with_metadata(
+                    ErrorReason::AccountNotFound,
+                    format!("account '{}' not found", req.id),
+                    [("account_id".to_string(), req.id.clone())],
+                )
+            })?;
 
         self.db
             .delete_account(&req.id)
@@ -708,7 +716,13 @@ impl Accounts for AccountsGrpcService {
             .get_account(&req.id)
             .await
             .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
-            .ok_or_else(|| Status::not_found(format!("account '{}' not found", req.id)))?;
+            .ok_or_else(|| {
+                errors::status_with_metadata(
+                    ErrorReason::AccountNotFound,
+                    format!("account '{}' not found", req.id),
+                    [("account_id".to_string(), req.id.clone())],
+                )
+            })?;
 
         let password = self
             .secrets
@@ -954,16 +968,19 @@ impl CalendarGrpcService {
             .collect();
 
         if caldav_accounts.is_empty() {
-            return Err(Status::failed_precondition(if req.account_id.is_empty() {
-                "no CalDAV account is configured; add one with protocol CALDAV and a \
-                 collection_url before syncing"
-                    .to_string()
-            } else {
-                format!(
-                    "no CalDAV account with id '{}' is configured",
-                    req.account_id
-                )
-            }));
+            return Err(errors::status(
+                ErrorReason::NotConfigured,
+                if req.account_id.is_empty() {
+                    "no CalDAV account is configured; add one with protocol CALDAV and a \
+                     collection_url before syncing"
+                        .to_string()
+                } else {
+                    format!(
+                        "no CalDAV account with id '{}' is configured",
+                        req.account_id
+                    )
+                },
+            ));
         }
 
         let mut total = 0usize;
@@ -1076,7 +1093,13 @@ impl Calendar for CalendarGrpcService {
             .db
             .get_calendar_event(&req.event_id)
             .await
-            .map_err(|e| Status::not_found(format!("event '{}' not found: {e}", req.event_id)))?;
+            .map_err(|e| {
+                errors::status_with_metadata(
+                    ErrorReason::EventNotFound,
+                    format!("event '{}' not found: {e}", req.event_id),
+                    [("event_id".to_string(), req.event_id.clone())],
+                )
+            })?;
 
         Ok(Response::new(GetEventResponse {
             event: Some(map_calendar_event_to_proto(event)),
@@ -1183,7 +1206,11 @@ impl Contacts for ContactsGrpcService {
         }
 
         let contact = self.db.get_contact(&req.contact_id).await.map_err(|e| {
-            Status::not_found(format!("contact '{}' not found: {e}", req.contact_id))
+            errors::status_with_metadata(
+                ErrorReason::ContactNotFound,
+                format!("contact '{}' not found: {e}", req.contact_id),
+                [("contact_id".to_string(), req.contact_id.clone())],
+            )
         })?;
 
         Ok(Response::new(GetContactResponse {
@@ -1358,7 +1385,11 @@ impl Mail for MailGrpcService {
         }
 
         let email = self.db.get_message(&req.message_id).await.map_err(|e| {
-            Status::not_found(format!("message '{}' not found: {e}", req.message_id))
+            errors::status_with_metadata(
+                ErrorReason::MessageNotFound,
+                format!("message '{}' not found: {e}", req.message_id),
+                [("message_id".to_string(), req.message_id.clone())],
+            )
         })?;
 
         Ok(Response::new(GetMessageResponse {
@@ -1387,7 +1418,11 @@ impl Mail for MailGrpcService {
             .set_message_read(&req.message_id, req.read)
             .await
             .map_err(|e| {
-                Status::not_found(format!("message '{}' not found: {e}", req.message_id))
+                errors::status_with_metadata(
+                    ErrorReason::MessageNotFound,
+                    format!("message '{}' not found: {e}", req.message_id),
+                    [("message_id".to_string(), req.message_id.clone())],
+                )
             })?;
 
         self.event_bus.process_command(CoreCommand::MarkRead {
@@ -1652,11 +1687,19 @@ impl Filters for FiltersGrpcService {
     ) -> Result<Response<CreateRuleResponse>, Status> {
         let req = request.into_inner();
 
-        let rule = NsqlParser::parse_rule(req.name, req.priority, &req.nsql)
-            .map_err(|e| Status::invalid_argument(format!("NSQL syntax error: {e}")))?;
+        let rule = NsqlParser::parse_rule(req.name, req.priority, &req.nsql).map_err(|e| {
+            errors::status(
+                ErrorReason::ValidationFailed,
+                format!("NSQL syntax error: {e}"),
+            )
+        })?;
 
-        NsqlValidator::validate(&rule, &ValidationOptions::default())
-            .map_err(|e| Status::invalid_argument(format!("NSQL validation error: {e}")))?;
+        NsqlValidator::validate(&rule, &ValidationOptions::default()).map_err(|e| {
+            errors::status(
+                ErrorReason::ValidationFailed,
+                format!("NSQL validation error: {e}"),
+            )
+        })?;
 
         self.db
             .save_filter_rule(&rule)
@@ -1748,8 +1791,12 @@ impl Filters for FiltersGrpcService {
     ) -> Result<Response<PreviewRuleResponse>, Status> {
         let req = request.into_inner();
 
-        let rule = NsqlParser::parse_rule("Preview Rule", 0, &req.nsql)
-            .map_err(|e| Status::invalid_argument(format!("NSQL syntax error: {e}")))?;
+        let rule = NsqlParser::parse_rule("Preview Rule", 0, &req.nsql).map_err(|e| {
+            errors::status(
+                ErrorReason::ValidationFailed,
+                format!("NSQL syntax error: {e}"),
+            )
+        })?;
 
         let preview_engine = FilterEngine::new(vec![rule])
             .map_err(|e| Status::internal(format!("failed to build preview engine: {e}")))?;
@@ -1788,17 +1835,31 @@ impl Filters for FiltersGrpcService {
             .map_err(|e| Status::internal(format!("failed to list filter rules: {e}")))?
             .into_iter()
             .find(|r| r.id == req.id)
-            .ok_or_else(|| Status::not_found(format!("filter rule '{}' not found", req.id)))?;
+            .ok_or_else(|| {
+                errors::status_with_metadata(
+                    ErrorReason::RuleNotFound,
+                    format!("filter rule '{}' not found", req.id),
+                    [("rule_id".to_string(), req.id.clone())],
+                )
+            })?;
 
         let name = req.name.unwrap_or(existing.name);
         let nsql = req.nsql.unwrap_or(existing.nsql_text);
         let priority = req.priority.unwrap_or(existing.priority);
 
-        let mut rule = NsqlParser::parse_rule(name, priority, &nsql)
-            .map_err(|e| Status::invalid_argument(format!("NSQL syntax error: {e}")))?;
+        let mut rule = NsqlParser::parse_rule(name, priority, &nsql).map_err(|e| {
+            errors::status(
+                ErrorReason::ValidationFailed,
+                format!("NSQL syntax error: {e}"),
+            )
+        })?;
 
-        NsqlValidator::validate(&rule, &ValidationOptions::default())
-            .map_err(|e| Status::invalid_argument(format!("NSQL validation error: {e}")))?;
+        NsqlValidator::validate(&rule, &ValidationOptions::default()).map_err(|e| {
+            errors::status(
+                ErrorReason::ValidationFailed,
+                format!("NSQL validation error: {e}"),
+            )
+        })?;
 
         rule.id = existing.id;
 
