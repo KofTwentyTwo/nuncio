@@ -43,6 +43,13 @@ pub enum DatabaseError {
     /// genuinely empty body on read-back.
     #[error("payload encryption failed: {0}")]
     Encryption(String),
+    /// A body payload failed AEAD decryption (or UTF-8/hex decoding) on read.
+    /// This is a fail-closed error: it is returned instead of ever reading back a
+    /// corrupted or tampered ciphertext column as a silently-empty body, which would
+    /// defeat the AEAD's integrity guarantee exactly where it matters -- detecting
+    /// tampering on read.
+    #[error("payload decryption failed: {0}")]
+    Decryption(String),
 }
 
 impl From<crate::cipher::CipherError> for DatabaseError {
@@ -811,6 +818,8 @@ impl DatabaseEngine {
         for (id, subject, sender, body_plain) in rows {
             let dec_plain = body_plain
                 .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
+                .transpose()
+                .map_err(|e| DatabaseError::Decryption(e.to_string()))?
                 .unwrap_or_default();
 
             sqlx::query(
@@ -1112,8 +1121,7 @@ impl DatabaseEngine {
         .await
         .map_err(DatabaseError::Query)?;
 
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(
                 |(
                     id,
@@ -1127,13 +1135,25 @@ impl DatabaseEngine {
                     body_plain,
                     body_html,
                 )| {
-                    let dec_plain = body_plain.map(|p| {
-                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
-                    });
-                    let dec_html = body_html.map(|h| {
-                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
-                    });
-                    nuncio_core::model::Email {
+                    let dec_plain = body_plain
+                        .map(|p| {
+                            crate::cipher::PayloadCipher::decrypt_text_at_rest(
+                                &self.storage_key,
+                                &p,
+                            )
+                        })
+                        .transpose()
+                        .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+                    let dec_html = body_html
+                        .map(|h| {
+                            crate::cipher::PayloadCipher::decrypt_text_at_rest(
+                                &self.storage_key,
+                                &h,
+                            )
+                        })
+                        .transpose()
+                        .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+                    Ok(nuncio_core::model::Email {
                         id,
                         account_id,
                         folder_id,
@@ -1145,10 +1165,10 @@ impl DatabaseEngine {
                         body_plain: dec_plain,
                         body_html: dec_html,
                         attachments: Vec::new(),
-                    }
+                    })
                 },
             )
-            .collect())
+            .collect::<Result<Vec<_>, DatabaseError>>()
     }
 
     /// Retrieve a single message by ID.
@@ -1182,10 +1202,14 @@ impl DatabaseEngine {
 
         let dec_plain = row
             .8
-            .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p));
+            .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
+            .transpose()
+            .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
         let dec_html = row
             .9
-            .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h));
+            .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h))
+            .transpose()
+            .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
 
         Ok(nuncio_core::model::Email {
             id: row.0,
@@ -1839,16 +1863,21 @@ impl DatabaseEngine {
             .await
             .map_err(DatabaseError::Query)?;
 
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(|r| {
-                let dec_plain = r.8.map(|p| {
-                    crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
-                });
-                let dec_html = r.9.map(|h| {
-                    crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
-                });
-                nuncio_core::model::Email {
+                let dec_plain =
+                    r.8.map(|p| {
+                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
+                    })
+                    .transpose()
+                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+                let dec_html =
+                    r.9.map(|h| {
+                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
+                    })
+                    .transpose()
+                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+                Ok(nuncio_core::model::Email {
                     id: r.0,
                     account_id: r.1,
                     folder_id: r.2,
@@ -1860,9 +1889,9 @@ impl DatabaseEngine {
                     body_plain: dec_plain,
                     body_html: dec_html,
                     attachments: Vec::new(),
-                }
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>, DatabaseError>>()
     }
 
     /// Query messages across the WHOLE store for export purposes,
@@ -1914,16 +1943,21 @@ impl DatabaseEngine {
             .await
             .map_err(DatabaseError::Query)?;
 
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(|r| {
-                let dec_plain = r.8.map(|p| {
-                    crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
-                });
-                let dec_html = r.9.map(|h| {
-                    crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
-                });
-                nuncio_core::model::Email {
+                let dec_plain =
+                    r.8.map(|p| {
+                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
+                    })
+                    .transpose()
+                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+                let dec_html =
+                    r.9.map(|h| {
+                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
+                    })
+                    .transpose()
+                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+                Ok(nuncio_core::model::Email {
                     id: r.0,
                     account_id: r.1,
                     folder_id: r.2,
@@ -1935,9 +1969,9 @@ impl DatabaseEngine {
                     body_plain: dec_plain,
                     body_html: dec_html,
                     attachments: Vec::new(),
-                }
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>, DatabaseError>>()
     }
 
     /// Append a new immutable WORM audit record to the log ledger, signed with the WORM
@@ -2400,6 +2434,64 @@ mod tests {
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].id, "INBOX");
         assert_eq!(folders[0].unread_messages, 1);
+    }
+
+    /// A `body_plain` column corrupted after a legitimate write (simulating tampering or
+    /// bit-rot) must make `get_message` and `list_messages` return
+    /// `Err(DatabaseError::Decryption)`, never a silently-empty body -- that would defeat
+    /// the AEAD's integrity guarantee exactly where it matters: detecting tampering on read.
+    #[tokio::test]
+    async fn corrupted_body_ciphertext_fails_closed_on_read() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let email = nuncio_core::model::Email {
+            id: "msg-db-corrupt".to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "INBOX".to_string(),
+            subject: "Corrupted At Rest".to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1700000000,
+            read: false,
+            body_plain: Some("Sensitive plaintext body".to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+        };
+        engine
+            .save_email(&email)
+            .await
+            .expect("save email succeeds");
+
+        // Flip a byte in the stored (still valid-hex) ciphertext to simulate tampering or
+        // storage bit-rot.
+        let (stored,): (String,) = sqlx::query_as("SELECT body_plain FROM messages WHERE id = ?")
+            .bind("msg-db-corrupt")
+            .fetch_one(&engine.pool)
+            .await
+            .expect("fetch stored ciphertext");
+        let mut bytes = hex::decode(&stored).expect("stored ciphertext is valid hex");
+        let last_idx = bytes.len() - 1;
+        bytes[last_idx] ^= 0xFF;
+        let tampered = hex::encode(bytes);
+
+        sqlx::query("UPDATE messages SET body_plain = ? WHERE id = ?")
+            .bind(&tampered)
+            .bind("msg-db-corrupt")
+            .execute(&engine.pool)
+            .await
+            .expect("corrupt stored ciphertext");
+
+        let err = engine
+            .get_message("msg-db-corrupt")
+            .await
+            .expect_err("get_message must fail closed on corrupted ciphertext");
+        assert!(matches!(err, DatabaseError::Decryption(_)));
+
+        let err = engine
+            .list_messages("INBOX", 10)
+            .await
+            .expect_err("list_messages must fail closed on corrupted ciphertext");
+        assert!(matches!(err, DatabaseError::Decryption(_)));
     }
 
     fn sample_calendar_event(id: &str, account_id: &str) -> nuncio_core::model::CalendarEvent {

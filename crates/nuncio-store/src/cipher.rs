@@ -74,18 +74,20 @@ impl PayloadCipher {
 
     /// Decrypt text payload from database column storage at rest using a caller-supplied
     /// AES-256-GCM key. See [`PayloadCipher::encrypt_text_at_rest`].
-    pub fn decrypt_text_at_rest(key: &[u8; 32], stored: &str) -> String {
+    ///
+    /// Fails closed: a hex-decode error, an AEAD authentication failure (tampered or
+    /// corrupted ciphertext), or a non-UTF-8 decrypted payload is returned as an error
+    /// rather than silently read back as an empty body -- an empty stored ciphertext is
+    /// the only case that legitimately yields `Ok(String::new())`.
+    pub fn decrypt_text_at_rest(key: &[u8; 32], stored: &str) -> Result<String, CipherError> {
         if stored.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
-        if let Ok(bytes) = hex::decode(stored) {
-            if let Ok(decrypted) = Self::decrypt_bytes(key, &bytes) {
-                if let Ok(s) = String::from_utf8(decrypted) {
-                    return s;
-                }
-            }
-        }
-        String::new()
+        let bytes = hex::decode(stored)
+            .map_err(|e| CipherError::DecryptionFailed(format!("invalid hex encoding: {e}")))?;
+        let decrypted = Self::decrypt_bytes(key, &bytes)?;
+        String::from_utf8(decrypted)
+            .map_err(|e| CipherError::DecryptionFailed(format!("invalid utf-8 payload: {e}")))
     }
 
     /// Encrypt binary attachment payload using `age` passphrase encryption.
@@ -240,28 +242,62 @@ mod tests {
             PayloadCipher::encrypt_text_at_rest(&key, text).expect("encryption succeeds");
         assert_ne!(text, encrypted);
 
-        let decrypted = PayloadCipher::decrypt_text_at_rest(&key, &encrypted);
+        let decrypted =
+            PayloadCipher::decrypt_text_at_rest(&key, &encrypted).expect("decryption succeeds");
         assert_eq!(text, decrypted);
 
         assert_eq!(
             PayloadCipher::encrypt_text_at_rest(&key, "").expect("empty text is not encrypted"),
             ""
         );
-        assert_eq!(PayloadCipher::decrypt_text_at_rest(&key, ""), "");
+        assert_eq!(
+            PayloadCipher::decrypt_text_at_rest(&key, "").expect("empty ciphertext decrypts"),
+            ""
+        );
     }
 
     #[test]
-    fn text_at_rest_wrong_key_fails_to_decrypt() {
+    fn text_at_rest_wrong_key_fails_closed() {
         // Proves there is no compiled-in default key: ciphertext produced under one
-        // caller-supplied key cannot be recovered using a different key.
+        // caller-supplied key cannot be recovered using a different key, and the failure
+        // is surfaced as an error rather than a silently-empty body.
         let key_a = [1u8; 32];
         let key_b = [2u8; 32];
         let text = "Confidential ledger payload";
 
         let encrypted =
             PayloadCipher::encrypt_text_at_rest(&key_a, text).expect("encryption succeeds");
-        let decrypted_with_wrong_key = PayloadCipher::decrypt_text_at_rest(&key_b, &encrypted);
+        let err = PayloadCipher::decrypt_text_at_rest(&key_b, &encrypted)
+            .expect_err("wrong key must fail closed");
 
-        assert_eq!(decrypted_with_wrong_key, "");
+        assert!(matches!(err, CipherError::DecryptionFailed(_)));
+    }
+
+    #[test]
+    fn text_at_rest_tampered_ciphertext_fails_closed() {
+        // A corrupted-but-valid-hex ciphertext column must surface as an error, not read
+        // back as an empty body -- this is the read-path twin of the AEAD integrity
+        // guarantee: tampering must be detectable, not silently masked.
+        let key = [9u8; 32];
+        let text = "Do not silently drop this on tamper";
+        let encrypted =
+            PayloadCipher::encrypt_text_at_rest(&key, text).expect("encryption succeeds");
+
+        let mut bytes = hex::decode(&encrypted).expect("valid hex");
+        let last_idx = bytes.len() - 1;
+        bytes[last_idx] ^= 0xFF;
+        let tampered = hex::encode(bytes);
+
+        let err = PayloadCipher::decrypt_text_at_rest(&key, &tampered)
+            .expect_err("tampered ciphertext must fail closed");
+        assert!(matches!(err, CipherError::DecryptionFailed(_)));
+    }
+
+    #[test]
+    fn text_at_rest_invalid_hex_fails_closed() {
+        let key = [3u8; 32];
+        let err = PayloadCipher::decrypt_text_at_rest(&key, "not-valid-hex")
+            .expect_err("invalid hex must fail closed");
+        assert!(matches!(err, CipherError::DecryptionFailed(_)));
     }
 }
