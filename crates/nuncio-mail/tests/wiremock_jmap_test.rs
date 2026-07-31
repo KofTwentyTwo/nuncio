@@ -84,7 +84,11 @@ async fn wiremock_jmap_session_discovery_and_email_get_sync() {
         .expect("parse email get");
 
     assert_eq!(emails.len(), 1);
-    assert_eq!(emails[0].id, "msg-wm-100");
+    // The JMAP object id is preserved as the protocol-native `remote_id`, while
+    // the persisted id is an opaque 64-char surrogate hash (never the raw id).
+    assert_eq!(emails[0].remote_id, "msg-wm-100");
+    assert_ne!(emails[0].id, "msg-wm-100");
+    assert_eq!(emails[0].id.len(), 64);
     assert_eq!(emails[0].subject, "WireMock JMAP E2E Test");
     assert_eq!(emails[0].sender, "sender@nuncio.mx");
     assert_eq!(new_state, "sync-state-500");
@@ -200,7 +204,9 @@ async fn jmap_engine_sync_folders_and_messages_through_mail_backend_trait() {
         .await
         .expect("sync_messages succeeds");
     assert_eq!(emails.len(), 1);
-    assert_eq!(emails[0].id, "msg-wm-200");
+    assert_eq!(emails[0].remote_id, "msg-wm-200");
+    assert_ne!(emails[0].id, "msg-wm-200");
+    assert_eq!(emails[0].id.len(), 64);
     assert_eq!(emails[0].subject, "Trait-Level JMAP Sync");
     assert_eq!(emails[0].sender, "sender@nuncio.mx");
     assert_eq!(emails[0].received_at, 1700002000);
@@ -264,9 +270,10 @@ fn jmap_engine(mock_server: &MockServer) -> JmapEngine {
 
 fn spec(kind: RemoteMutationKind) -> RemoteMutationSpec {
     RemoteMutationSpec {
-        message_id: "jmap-msg-1".to_string(),
+        message_id: "surrogate-jmap-msg-1".to_string(),
+        remote_id: "jmap-msg-1".to_string(),
         folder_id: "mb-inbox".to_string(),
-        folder_checkpoint: None,
+        uid_validity: "jmap".to_string(),
         kind,
     }
 }

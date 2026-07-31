@@ -244,6 +244,8 @@ mod tests {
             id: "msg-mock-1".to_string(),
             account_id: "acct-1".to_string(),
             folder_id: "inbox".to_string(),
+            remote_id: "1".to_string(),
+            uid_validity: "1".to_string(),
             subject: "Mock Test".to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),

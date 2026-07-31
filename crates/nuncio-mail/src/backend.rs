@@ -36,25 +36,31 @@ pub enum RemoteMutationKind {
     Delete,
 }
 
-/// A fully-addressed remote mutation for a single message: which message
-/// (protocol-native id), the folder it currently lives in, that folder's
-/// stored sync checkpoint (carrying IMAP UIDVALIDITY), and the change to
-/// apply.
+/// A fully-addressed remote mutation for a single message: the protocol-native
+/// id to address it on the server, the folder it currently lives in, the
+/// UIDVALIDITY scope that id was captured under, and the change to apply.
 ///
-/// `folder_checkpoint` is the value persisted by a prior sync
-/// (`"{uidvalidity}:{uidnext}"` for IMAP). The IMAP backend uses it to refuse
-/// to act when the mailbox's current UIDVALIDITY no longer matches -- a
-/// renumbered mailbox reassigns UIDs, so the stored UID would otherwise
-/// address the wrong message. Protocols that do not use UIDVALIDITY (JMAP)
-/// ignore it.
+/// Addressing is driven by `remote_id` (the IMAP UID / JMAP object id), NOT by
+/// the opaque `message_id` -- so remote-mutation targeting never depends on the
+/// shape of the surrogate id. `uid_validity` is the mailbox UIDVALIDITY the
+/// `remote_id` was captured under; the IMAP backend refuses to act unless the
+/// mailbox's current UIDVALIDITY still matches it, because a renumbered mailbox
+/// (RFC 3501 s2.3.1.1) reassigns UIDs and the stored UID would otherwise
+/// address the wrong message. Protocols without a UIDVALIDITY (JMAP) carry a
+/// stable sentinel and ignore this guard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteMutationSpec {
-    /// Protocol-native message id (IMAP `imap-uid-{uid}`, JMAP object id).
+    /// Opaque surrogate id of the target message. Diagnostic only -- it names
+    /// the message in errors/logs and is never used to address it on the wire.
     pub message_id: String,
+    /// Protocol-native id used to address the message on its server: the IMAP
+    /// UID as a decimal string, or the JMAP Email object id.
+    pub remote_id: String,
     /// Folder the message currently lives in.
     pub folder_id: String,
-    /// The source folder's stored sync checkpoint, if any.
-    pub folder_checkpoint: Option<String>,
+    /// The UIDVALIDITY the `remote_id` was captured under (IMAP; decimal
+    /// string), or a protocol sentinel for servers without UIDVALIDITY (JMAP).
+    pub uid_validity: String,
     /// The change to apply.
     pub kind: RemoteMutationKind,
 }

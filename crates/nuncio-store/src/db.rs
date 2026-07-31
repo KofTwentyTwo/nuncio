@@ -471,6 +471,8 @@ impl DatabaseEngine {
                 id TEXT PRIMARY KEY NOT NULL,
                 account_id TEXT NOT NULL,
                 folder_id TEXT NOT NULL,
+                remote_id TEXT NOT NULL DEFAULT '',
+                uid_validity TEXT NOT NULL DEFAULT '',
                 subject TEXT NOT NULL,
                 sender TEXT NOT NULL,
                 recipient TEXT NOT NULL,
@@ -711,7 +713,63 @@ impl DatabaseEngine {
         self.ensure_accounts_smtp_columns().await?;
         self.ensure_accounts_tls_mode_columns().await?;
         self.ensure_accounts_dav_columns().await?;
+        self.ensure_messages_identity_columns().await?;
         self.backfill_message_fts().await?;
+
+        Ok(())
+    }
+
+    /// Additive, backfill-safe migration that adds the `remote_id` /
+    /// `uid_validity` message-identity columns to a pre-existing `messages`
+    /// table that predated the opaque surrogate id, and installs the
+    /// `UNIQUE(account_id, folder_id, uid_validity, remote_id)` index that is
+    /// the real correctness guard against a shared protocol id (e.g. an IMAP
+    /// UID reused across folders/accounts) overwriting an unrelated message.
+    ///
+    /// A fresh database already gets both columns from `CREATE TABLE IF NOT
+    /// EXISTS messages` above, so on a fresh database the `PRAGMA table_info`
+    /// check finds them present and only the index is created. For a
+    /// pre-existing database file the columns are added with an empty-string
+    /// default; every legacy row is then backfilled to `remote_id = id` (the
+    /// old primary key, which was globally unique) so the new UNIQUE index can
+    /// be built without collisions. SQLite has no `ADD COLUMN IF NOT EXISTS`,
+    /// so column presence is checked explicitly first, making this safe to run
+    /// on every daemon startup.
+    async fn ensure_messages_identity_columns(&self) -> Result<(), DatabaseError> {
+        let existing_columns: Vec<String> = sqlx::query("PRAGMA table_info(messages)")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+
+        if !existing_columns.iter().any(|c| c == "remote_id") {
+            sqlx::query("ALTER TABLE messages ADD COLUMN remote_id TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+            // Seed legacy rows with a unique, non-empty remote id (the old
+            // primary key) so the UNIQUE identity index below is satisfiable.
+            sqlx::query("UPDATE messages SET remote_id = id WHERE remote_id = ''")
+                .execute(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+        }
+        if !existing_columns.iter().any(|c| c == "uid_validity") {
+            sqlx::query("ALTER TABLE messages ADD COLUMN uid_validity TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+        }
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_identity \
+             ON messages (account_id, folder_id, uid_validity, remote_id)",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
 
         Ok(())
     }
@@ -1081,13 +1139,15 @@ impl DatabaseEngine {
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO messages
-            (id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, account_id, folder_id, remote_id, uid_validity, subject, sender, recipient, received_at, read_flag, body_plain, body_html)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&email.id)
         .bind(&email.account_id)
         .bind(&email.folder_id)
+        .bind(&email.remote_id)
+        .bind(&email.uid_validity)
         .bind(&email.subject)
         .bind(&email.sender)
         .bind(&email.recipient)
@@ -1143,9 +1203,11 @@ impl DatabaseEngine {
             i64,
             Option<String>,
             Option<String>,
+            String,
+            String,
         )> = sqlx::query_as(
             r#"
-            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html
+            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity
             FROM messages
             WHERE folder_id = ?
             ORDER BY received_at DESC
@@ -1171,6 +1233,8 @@ impl DatabaseEngine {
                     read_flag,
                     body_plain,
                     body_html,
+                    remote_id,
+                    uid_validity,
                 )| {
                     let dec_plain = body_plain
                         .map(|p| {
@@ -1194,6 +1258,8 @@ impl DatabaseEngine {
                         id,
                         account_id,
                         folder_id,
+                        remote_id,
+                        uid_validity,
                         subject,
                         sender,
                         recipient,
@@ -1225,9 +1291,11 @@ impl DatabaseEngine {
             i64,
             Option<String>,
             Option<String>,
+            String,
+            String,
         ) = sqlx::query_as(
             r#"
-            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html
+            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity
             FROM messages
             WHERE id = ?
             "#,
@@ -1252,6 +1320,8 @@ impl DatabaseEngine {
             id: row.0,
             account_id: row.1,
             folder_id: row.2,
+            remote_id: row.10,
+            uid_validity: row.11,
             subject: row.3,
             sender: row.4,
             recipient: row.5,
@@ -1902,7 +1972,7 @@ impl DatabaseEngine {
         limit: usize,
     ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html FROM messages "
+            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity FROM messages "
         );
         if !last_id.is_empty() {
             builder.push("WHERE id > ");
@@ -1922,6 +1992,8 @@ impl DatabaseEngine {
             i64,
             Option<String>,
             Option<String>,
+            String,
+            String,
         )>();
 
         let rows = query
@@ -1947,6 +2019,8 @@ impl DatabaseEngine {
                     id: r.0,
                     account_id: r.1,
                     folder_id: r.2,
+                    remote_id: r.10,
+                    uid_validity: r.11,
                     subject: r.3,
                     sender: r.4,
                     recipient: r.5,
@@ -1972,7 +2046,7 @@ impl DatabaseEngine {
         folder_id: Option<&str>,
     ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html FROM messages"
+            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity FROM messages"
         );
 
         let mut has_filter = false;
@@ -2002,6 +2076,8 @@ impl DatabaseEngine {
             i64,
             Option<String>,
             Option<String>,
+            String,
+            String,
         )>();
 
         let rows = query
@@ -2027,6 +2103,8 @@ impl DatabaseEngine {
                     id: r.0,
                     account_id: r.1,
                     folder_id: r.2,
+                    remote_id: r.10,
+                    uid_validity: r.11,
                     subject: r.3,
                     sender: r.4,
                     recipient: r.5,
@@ -2483,6 +2561,8 @@ mod tests {
             id: "msg-db-100".to_string(),
             account_id: "acct-1".to_string(),
             folder_id: "INBOX".to_string(),
+            remote_id: "100".to_string(),
+            uid_validity: "1".to_string(),
             subject: "Database Sync Test".to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
@@ -2530,6 +2610,8 @@ mod tests {
             id: "msg-db-corrupt".to_string(),
             account_id: "acct-1".to_string(),
             folder_id: "INBOX".to_string(),
+            remote_id: "corrupt".to_string(),
+            uid_validity: "1".to_string(),
             subject: "Corrupted At Rest".to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
@@ -2832,6 +2914,8 @@ mod tests {
             id: "msg-mark-1".to_string(),
             account_id: "acct-1".to_string(),
             folder_id: "INBOX".to_string(),
+            remote_id: "mark-1".to_string(),
+            uid_validity: "1".to_string(),
             subject: "Mark Read Test".to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
@@ -3362,6 +3446,8 @@ mod tests {
                 id: format!("msg-{i:03}"),
                 account_id: "acct-1".to_string(),
                 folder_id: "inbox".to_string(),
+                remote_id: format!("{i}"),
+                uid_validity: "1".to_string(),
                 subject: format!("Subject {i}"),
                 sender: "alice@nuncio.mx".to_string(),
                 recipient: "bob@nuncio.mx".to_string(),
@@ -3469,11 +3555,94 @@ mod tests {
         );
     }
 
+    /// Build a message exactly as a real sync would: an opaque surrogate id
+    /// hashed over its addressing coordinates, with the protocol-native id and
+    /// UIDVALIDITY scope carried in their own columns.
+    fn synced_email(
+        account_id: &str,
+        folder_id: &str,
+        uid_validity: &str,
+        remote_id: &str,
+    ) -> nuncio_core::model::Email {
+        nuncio_core::model::Email {
+            id: nuncio_core::model::Email::surrogate_id(
+                account_id,
+                folder_id,
+                uid_validity,
+                remote_id,
+            ),
+            account_id: account_id.to_string(),
+            folder_id: folder_id.to_string(),
+            remote_id: remote_id.to_string(),
+            uid_validity: uid_validity.to_string(),
+            subject: format!("{folder_id}/{remote_id}"),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1_700_000_000,
+            read: false,
+            body_plain: Some("body".to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// The C1 regression: the same protocol UID reused across folders or
+    /// accounts must persist as DISTINCT rows (never silently overwrite), and a
+    /// re-sync of the SAME message must upsert the one row it already owns.
+    #[tokio::test]
+    async fn message_identity_prevents_cross_folder_and_cross_account_collision() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        // Same UID (5) in two folders of one account, and again in a second
+        // account -- the exact shapes that used to collapse to `imap-uid-5`.
+        let inbox = synced_email("acct-1", "INBOX", "42", "5");
+        let sent = synced_email("acct-1", "Sent", "7", "5");
+        let other_account = synced_email("acct-2", "INBOX", "99", "5");
+
+        // Every surrogate id is distinct, so none can overwrite another.
+        assert_ne!(inbox.id, sent.id);
+        assert_ne!(inbox.id, other_account.id);
+        assert_ne!(sent.id, other_account.id);
+
+        engine.save_email(&inbox).await.expect("save inbox");
+        engine.save_email(&sent).await.expect("save sent");
+        engine
+            .save_email(&other_account)
+            .await
+            .expect("save other account");
+
+        // All three coexist as separate rows, addressed by their own folder.
+        assert_eq!(engine.list_messages("INBOX", 10).await.unwrap().len(), 2);
+        assert_eq!(engine.list_messages("Sent", 10).await.unwrap().len(), 1);
+
+        // Re-syncing the SAME message recomputes the SAME id, so the upsert
+        // updates the one row rather than duplicating it.
+        let inbox_resynced = synced_email("acct-1", "INBOX", "42", "5");
+        assert_eq!(inbox_resynced.id, inbox.id);
+        engine
+            .save_email(&inbox_resynced)
+            .await
+            .expect("re-sync upserts");
+        assert_eq!(
+            engine.list_messages("INBOX", 10).await.unwrap().len(),
+            2,
+            "a re-sync must upsert, not duplicate"
+        );
+
+        // The recovered row round-trips its protocol addressing columns.
+        let fetched = engine.get_message(&inbox.id).await.expect("get message");
+        assert_eq!(fetched.remote_id, "5");
+        assert_eq!(fetched.uid_validity, "42");
+        assert_eq!(fetched.folder_id, "INBOX");
+    }
+
     fn export_test_email(id: &str, account_id: &str, folder_id: &str) -> nuncio_core::model::Email {
         nuncio_core::model::Email {
             id: id.to_string(),
             account_id: account_id.to_string(),
             folder_id: folder_id.to_string(),
+            remote_id: id.to_string(),
+            uid_validity: "1".to_string(),
             subject: format!("Subject {id}"),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),

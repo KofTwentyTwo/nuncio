@@ -129,6 +129,10 @@ impl MimeParserAdapter {
             id: id.to_string(),
             account_id: account_id.to_string(),
             folder_id: folder_id.to_string(),
+            // The MIME body carries no protocol addressing; the caller (the
+            // IMAP sync) fills these from the transport before persisting.
+            remote_id: String::new(),
+            uid_validity: String::new(),
             subject,
             sender,
             recipient,

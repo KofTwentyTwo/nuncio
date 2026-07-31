@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Real-time daemon health, performance metrics, and telemetry payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,12 +64,30 @@ pub struct Attachment {
 /// Email message domain entity owned by Nuncio core.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Email {
-    /// Unique message identifier.
+    /// Opaque, deterministic surrogate identifier for the message.
+    ///
+    /// Derived from [`Email::surrogate_id`] over the account, folder,
+    /// UIDVALIDITY, and protocol-native id. It carries no decodable internal
+    /// encoding (callers must treat it as opaque) and is stable across
+    /// re-syncs of the same message, so persisting it upserts the same row
+    /// rather than duplicating. Distinct messages that happen to share a
+    /// protocol id across folders or accounts hash to distinct surrogates, so
+    /// one can never silently overwrite another.
     pub id: String,
     /// Account identifier owning the message.
     pub account_id: String,
     /// Mailbox folder identifier (e.g. "inbox").
     pub folder_id: String,
+    /// Protocol-native message id used to address the message on its server:
+    /// the IMAP UID as a decimal string, or the JMAP Email object id. This is
+    /// what a remote mutation must use to identify the message on the wire --
+    /// never the opaque [`Email::id`].
+    pub remote_id: String,
+    /// The addressing scope the `remote_id` is only meaningful within: the IMAP
+    /// folder UIDVALIDITY as a decimal string. Protocols without a UIDVALIDITY
+    /// (JMAP) carry a stable sentinel instead, so the surrogate id stays
+    /// deterministic.
+    pub uid_validity: String,
     /// Subject line.
     pub subject: String,
     /// Sender address (e.g. "alice@nuncio.mx").
@@ -85,6 +104,33 @@ pub struct Email {
     pub body_html: Option<String>,
     /// List of attached files.
     pub attachments: Vec<Attachment>,
+}
+
+impl Email {
+    /// Compute the deterministic, collision-resistant surrogate id for a
+    /// message from its addressing coordinates.
+    ///
+    /// The four coordinates together uniquely identify a stored message: a
+    /// protocol-native `remote_id` (IMAP UID / JMAP object id) is only unique
+    /// within one `uid_validity` scope of one `folder_id` of one `account_id`,
+    /// so all four must participate. Each field is fed length-prefixed so that
+    /// no two distinct coordinate tuples can serialize to the same byte stream
+    /// (e.g. `("a", "bc")` and `("ab", "c")` must not collide). The SHA-256
+    /// digest is hex-encoded, yielding a stable opaque token that leaks none of
+    /// its inputs' encoding on the wire.
+    pub fn surrogate_id(
+        account_id: &str,
+        folder_id: &str,
+        uid_validity: &str,
+        remote_id: &str,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        for field in [account_id, folder_id, uid_validity, remote_id] {
+            hasher.update((field.len() as u64).to_le_bytes());
+            hasher.update(field.as_bytes());
+        }
+        hex::encode(hasher.finalize())
+    }
 }
 
 /// Mailbox folder entity.
@@ -167,5 +213,38 @@ mod tests {
         let parsed: DaemonTelemetry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.status, "HEALTHY");
         assert_eq!(parsed.total_emails, 15000);
+    }
+
+    #[test]
+    fn surrogate_id_is_deterministic_and_opaque() {
+        let a = Email::surrogate_id("acct-1", "INBOX", "42", "5");
+        let b = Email::surrogate_id("acct-1", "INBOX", "42", "5");
+        assert_eq!(a, b, "identical coordinates must hash identically");
+        // A 32-byte SHA-256 digest hex-encodes to 64 chars, and the token must
+        // not leak the protocol-native id it was built from.
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!a.contains("imap-uid-"));
+    }
+
+    #[test]
+    fn surrogate_id_distinguishes_the_cross_folder_and_cross_account_collision() {
+        // The same protocol UID (5) in two different folders of one account, or
+        // in two different accounts, must NOT collapse to the same surrogate.
+        let inbox = Email::surrogate_id("acct-1", "INBOX", "42", "5");
+        let sent = Email::surrogate_id("acct-1", "Sent", "7", "5");
+        let other_account = Email::surrogate_id("acct-2", "INBOX", "42", "5");
+        assert_ne!(inbox, sent, "same UID in two folders must not collide");
+        assert_ne!(
+            inbox, other_account,
+            "same UID in two accounts must not collide"
+        );
+
+        // Field boundaries are unambiguous: shifting a delimiter-like split
+        // across two adjacent fields yields a different id.
+        assert_ne!(
+            Email::surrogate_id("a", "bc", "1", "1"),
+            Email::surrogate_id("ab", "c", "1", "1"),
+        );
     }
 }

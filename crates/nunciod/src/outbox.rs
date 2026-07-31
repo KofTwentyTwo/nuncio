@@ -204,7 +204,7 @@ async fn execute_one(
 
     match mutation.mutation_type.as_str() {
         "MOVE" | "COPY" | "FLAG" | "UNFLAG" | "DELETE" => {
-            dispatch_mailbox_mutation(db, env, mutation, &email, &payload).await
+            dispatch_mailbox_mutation(env, mutation, &email, &payload).await
         }
         "FORWARD" => dispatch_forward(db, env, &email, &payload).await,
         "WEBHOOK" => dispatch_webhook(env, mutation, &email, &payload).await,
@@ -213,10 +213,10 @@ async fn execute_one(
 }
 
 /// Execute a mailbox-affecting mutation (move/copy/flag/unflag/delete) against
-/// the account's mail backend, threading the source folder's stored checkpoint
-/// so the backend can enforce its UIDVALIDITY guard.
+/// the account's mail backend, recovering the remote addressing (protocol id +
+/// UIDVALIDITY scope) from the stored message row so the backend can enforce
+/// its UIDVALIDITY guard.
 async fn dispatch_mailbox_mutation(
-    db: &DatabaseEngine,
     env: &dyn RemoteExecutionEnv,
     mutation: &PendingRemoteMutation,
     email: &nuncio_core::model::Email,
@@ -245,23 +245,20 @@ async fn dispatch_mailbox_mutation(
         other => return Disposition::Permanent(format!("unexpected mailbox mutation '{other}'")),
     };
 
-    let folder_checkpoint = match db
-        .get_folder_sync_state(&email.account_id, &email.folder_id)
-        .await
-    {
-        Ok(checkpoint) => checkpoint,
-        Err(e) => return Disposition::Retry(format!("failed to read folder checkpoint: {e}")),
-    };
-
     let backend = match env.mail_backend(&email.account_id).await {
         Ok(backend) => backend,
         Err(e) => return Disposition::Retry(format!("failed to build mail backend: {e}")),
     };
 
+    // Recover the remote addressing from the stored message row -- the
+    // protocol-native id and the UIDVALIDITY scope it was captured under --
+    // rather than parsing it out of the opaque surrogate id. The backend still
+    // SELECT-verifies the UIDVALIDITY before mutating.
     let spec = RemoteMutationSpec {
         message_id: email.id.clone(),
+        remote_id: email.remote_id.clone(),
         folder_id: email.folder_id.clone(),
-        folder_checkpoint,
+        uid_validity: email.uid_validity.clone(),
         kind,
     };
 
