@@ -202,7 +202,13 @@ async fn full_mail_spine_round_trips_over_authenticated_grpc_with_mocked_protoco
         .await
         .expect("add_account succeeds")
         .into_inner();
-    assert_eq!(add_response.id, ACCOUNT_ID);
+    assert_eq!(
+        add_response
+            .config
+            .expect("response carries the created config")
+            .id,
+        ACCOUNT_ID
+    );
 
     let list_response = accounts_client
         .list_accounts(ListAccountsRequest {})

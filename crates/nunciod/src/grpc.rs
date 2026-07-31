@@ -592,7 +592,9 @@ impl Accounts for AccountsGrpcService {
             return Err(Status::internal(message));
         }
 
-        Ok(Response::new(AddAccountResponse { id: config.id }))
+        Ok(Response::new(AddAccountResponse {
+            config: Some(map_account_config_to_proto(config)),
+        }))
     }
 
     async fn list_accounts(
@@ -671,25 +673,25 @@ impl Accounts for AccountsGrpcService {
         request: Request<RemoveAccountRequest>,
     ) -> Result<Response<RemoveAccountResponse>, Status> {
         let req = request.into_inner();
-        if req.id.is_empty() {
-            return Err(Status::invalid_argument("id is required"));
+        if req.account_id.is_empty() {
+            return Err(Status::invalid_argument("account_id is required"));
         }
 
         let existing = self
             .db
-            .get_account(&req.id)
+            .get_account(&req.account_id)
             .await
             .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
             .ok_or_else(|| {
                 errors::status_with_metadata(
                     ErrorReason::AccountNotFound,
-                    format!("account '{}' not found", req.id),
-                    [("account_id".to_string(), req.id.clone())],
+                    format!("account '{}' not found", req.account_id),
+                    [("account_id".to_string(), req.account_id.clone())],
                 )
             })?;
 
         self.db
-            .delete_account(&req.id)
+            .delete_account(&req.account_id)
             .await
             .map_err(|e| Status::internal(format!("failed to remove account: {e}")))?;
 
@@ -713,20 +715,20 @@ impl Accounts for AccountsGrpcService {
         request: Request<TestAccountConnectionRequest>,
     ) -> Result<Response<TestAccountConnectionResponse>, Status> {
         let req = request.into_inner();
-        if req.id.is_empty() {
-            return Err(Status::invalid_argument("id is required"));
+        if req.account_id.is_empty() {
+            return Err(Status::invalid_argument("account_id is required"));
         }
 
         let config = self
             .db
-            .get_account(&req.id)
+            .get_account(&req.account_id)
             .await
             .map_err(|e| Status::internal(format!("failed to look up account: {e}")))?
             .ok_or_else(|| {
                 errors::status_with_metadata(
                     ErrorReason::AccountNotFound,
-                    format!("account '{}' not found", req.id),
-                    [("account_id".to_string(), req.id.clone())],
+                    format!("account '{}' not found", req.account_id),
+                    [("account_id".to_string(), req.account_id.clone())],
                 )
             })?;
 
@@ -1557,7 +1559,7 @@ impl Mail for MailGrpcService {
         let hits = hits
             .into_iter()
             .map(|hit| MessageSearchHit {
-                id: hit.id,
+                message_id: hit.id,
                 title: hit.title,
                 snippet: hit.snippet,
             })
@@ -1872,12 +1874,12 @@ impl Filters for FiltersGrpcService {
         request: Request<DeleteRuleRequest>,
     ) -> Result<Response<DeleteRuleResponse>, Status> {
         let req = request.into_inner();
-        if req.id.is_empty() {
-            return Err(Status::invalid_argument("id is required"));
+        if req.rule_id.is_empty() {
+            return Err(Status::invalid_argument("rule_id is required"));
         }
 
         self.db
-            .delete_filter_rule(&req.id)
+            .delete_filter_rule(&req.rule_id)
             .await
             .map_err(|e| Status::internal(format!("failed to delete filter rule: {e}")))?;
 
@@ -1972,12 +1974,12 @@ impl Filters for FiltersGrpcService {
             .await
             .map_err(|e| Status::internal(format!("failed to list filter rules: {e}")))?
             .into_iter()
-            .find(|r| r.id == req.id)
+            .find(|r| r.id == req.rule_id)
             .ok_or_else(|| {
                 errors::status_with_metadata(
                     ErrorReason::RuleNotFound,
-                    format!("filter rule '{}' not found", req.id),
-                    [("rule_id".to_string(), req.id.clone())],
+                    format!("filter rule '{}' not found", req.rule_id),
+                    [("rule_id".to_string(), req.rule_id.clone())],
                 )
             })?;
 
@@ -3466,7 +3468,13 @@ mod tests {
             .await
             .expect("add_account succeeds")
             .into_inner();
-        assert_eq!(add_response.id, "acct-restart-1");
+        assert_eq!(
+            add_response
+                .config
+                .expect("response carries the created config")
+                .id,
+            "acct-restart-1"
+        );
 
         db_first_run.close().await;
 
@@ -4216,7 +4224,7 @@ mod tests {
             .into_inner()
             .hits;
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].id, "msg-mail-1");
+        assert_eq!(hits[0].message_id, "msg-mail-1");
 
         // MarkRead persists: a second GetMessage call reflects the flip.
         client
@@ -4745,7 +4753,7 @@ mod tests {
 
         let err = client
             .delete_rule(DeleteRuleRequest {
-                id: "rule-1".to_string(),
+                rule_id: "rule-1".to_string(),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -4770,7 +4778,7 @@ mod tests {
 
         let err = client
             .update_rule(UpdateRuleRequest {
-                id: "rule-1".to_string(),
+                rule_id: "rule-1".to_string(),
                 name: None,
                 nsql: None,
                 priority: None,
@@ -4877,7 +4885,7 @@ mod tests {
         // DeleteRule removes it AND reloads the engine back to empty.
         client
             .delete_rule(authed_bearer_request(DeleteRuleRequest {
-                id: rule_id.clone(),
+                rule_id: rule_id.clone(),
             }))
             .await
             .expect("delete_rule succeeds");
@@ -5018,7 +5026,7 @@ mod tests {
 
         let err = client
             .delete_rule(authed_bearer_request(DeleteRuleRequest {
-                id: String::new(),
+                rule_id: String::new(),
             }))
             .await
             .expect_err("empty id must be rejected");
@@ -5221,7 +5229,7 @@ mod tests {
 
         let updated = client
             .update_rule(authed_bearer_request(UpdateRuleRequest {
-                id: rule_id.clone(),
+                rule_id: rule_id.clone(),
                 name: Some("Renamed".to_string()),
                 nsql: None,
                 priority: Some(1),
@@ -5281,7 +5289,7 @@ mod tests {
 
         let err = client
             .update_rule(authed_bearer_request(UpdateRuleRequest {
-                id: "no-such-rule".to_string(),
+                rule_id: "no-such-rule".to_string(),
                 name: Some("Whatever".to_string()),
                 nsql: None,
                 priority: None,
@@ -5313,7 +5321,7 @@ mod tests {
 
         let err = client
             .update_rule(authed_bearer_request(UpdateRuleRequest {
-                id: created.id,
+                rule_id: created.id,
                 name: None,
                 nsql: Some("THIS IS NOT VALID NSQL AT ALL {{{".to_string()),
                 priority: None,
