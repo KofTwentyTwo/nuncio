@@ -1704,15 +1704,27 @@ impl DatabaseEngine {
 
     /// Record a cryptographically hash-chained [`nuncio_filter::FilterExecutionLog`], signed
     /// with the ledger HMAC key provisioned for this engine from the secret vault.
+    ///
+    /// The read of the latest chain hash and the dependent insert run inside a single
+    /// `BEGIN IMMEDIATE` transaction: `BEGIN IMMEDIATE` acquires SQLite's write lock before
+    /// any statement runs, so a second concurrent append (from another pooled connection,
+    /// since `DatabaseEngine` is shared as an `Arc` across the daemon) blocks until this one
+    /// commits rather than reading the same prev-hash and forking the chain.
     pub async fn save_filter_execution_log(
         &self,
         rule_id: &str,
         message_id: &str,
         action_taken: &str,
     ) -> Result<nuncio_filter::FilterExecutionLog, DatabaseError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(DatabaseError::Query)?;
+
         let latest_hash: Option<(String,)> =
             sqlx::query_as("SELECT hash FROM filter_execution_logs ORDER BY id DESC LIMIT 1")
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await
                 .map_err(DatabaseError::Query)?;
 
@@ -1741,10 +1753,12 @@ impl DatabaseEngine {
         .bind(matched_at)
         .bind(&prev_hash)
         .bind(&hash)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(DatabaseError::Query)?
         .last_insert_rowid();
+
+        tx.commit().await.map_err(DatabaseError::Query)?;
 
         Ok(nuncio_filter::FilterExecutionLog {
             id,
@@ -1976,6 +1990,12 @@ impl DatabaseEngine {
 
     /// Append a new immutable WORM audit record to the log ledger, signed with the WORM
     /// HMAC key provisioned for this engine from the secret vault.
+    ///
+    /// The read of the latest sequence/hash and the dependent insert run inside a single
+    /// `BEGIN IMMEDIATE` transaction: `BEGIN IMMEDIATE` acquires SQLite's write lock before
+    /// any statement runs, so a second concurrent append (from another pooled connection,
+    /// since `DatabaseEngine` is shared as an `Arc` across the daemon) blocks until this one
+    /// commits rather than reading the same prev-hash and forking the chain.
     pub async fn append_worm_audit_record(
         &self,
         actor: &str,
@@ -1987,10 +2007,16 @@ impl DatabaseEngine {
             .unwrap_or_default()
             .as_nanos() as i64;
 
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(DatabaseError::Query)?;
+
         let last_row: Option<(i64, String)> = sqlx::query_as(
             "SELECT sequence, record_hmac FROM worm_audit_records ORDER BY sequence DESC LIMIT 1",
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         let (next_seq, prev_hash) = match last_row {
@@ -2020,8 +2046,10 @@ impl DatabaseEngine {
         .bind(&record.data_hash)
         .bind(&record.previous_block_hash)
         .bind(&record.record_hmac)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await.map_err(DatabaseError::Query)?;
 
         Ok(record)
     }
@@ -3419,6 +3447,143 @@ mod tests {
         assert!(!report.valid);
         assert_eq!(report.record_count, 1);
         assert_eq!(report.first_broken_seq, Some(1));
+    }
+
+    /// Regression test for a race between the read-latest-hash and the dependent insert in
+    /// `append_worm_audit_record`: fires many concurrent appends against the same
+    /// `Arc`-shared engine (mirroring how `nunciod` shares `DatabaseEngine`) and requires the
+    /// persisted chain to come back as exactly one unbroken sequence, with no forked or
+    /// duplicated prev-hash. Without the `BEGIN IMMEDIATE` fix, two tasks can both read the
+    /// same latest hash before either inserts, producing two records that both claim the same
+    /// `previous_block_hash` -- a fork that `verify_worm_audit_chain` would reject.
+    #[tokio::test]
+    async fn append_worm_audit_record_is_atomic_under_concurrency() {
+        const CONCURRENT_APPENDS: usize = 20;
+
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let engine = std::sync::Arc::new(engine);
+
+        let mut handles = Vec::with_capacity(CONCURRENT_APPENDS);
+        for i in 0..CONCURRENT_APPENDS {
+            let engine = std::sync::Arc::clone(&engine);
+            handles.push(tokio::spawn(async move {
+                engine
+                    .append_worm_audit_record(
+                        "system.test",
+                        "concurrent.append",
+                        format!("payload-{i}").as_bytes(),
+                    )
+                    .await
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("append task must not panic").expect(
+                "a concurrent append must never fail outright -- it must serialize, not error",
+            );
+        }
+
+        let records = engine
+            .list_worm_audit_records(CONCURRENT_APPENDS as u32 + 1, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            records.len(),
+            CONCURRENT_APPENDS,
+            "every concurrent append must persist exactly one record -- no lost writes"
+        );
+
+        let mut seen_sequences = std::collections::HashSet::new();
+        for (idx, record) in records.iter().enumerate() {
+            assert_eq!(
+                record.sequence,
+                idx as u64 + 1,
+                "sequence numbers must be contiguous with no gaps or duplicates"
+            );
+            assert!(
+                seen_sequences.insert(record.sequence),
+                "duplicate sequence number {} indicates a forked chain",
+                record.sequence
+            );
+            let expected_prev = if idx == 0 {
+                "GENESIS".to_string()
+            } else {
+                records[idx - 1].record_hmac.clone()
+            };
+            assert_eq!(
+                record.previous_block_hash, expected_prev,
+                "record at sequence {} must chain from the immediately preceding record's hmac \
+                 -- a mismatch here means two appends forked off the same prev-hash",
+                record.sequence
+            );
+        }
+
+        engine
+            .verify_worm_audit_chain()
+            .await
+            .expect("the full persisted chain must verify as a single valid sequence");
+    }
+
+    /// Same regression, for the filter execution log ledger: concurrent
+    /// `save_filter_execution_log` calls must serialize into one unbroken `prev_hash`/`hash`
+    /// chain rather than forking when two tasks read the same latest hash.
+    #[tokio::test]
+    async fn save_filter_execution_log_is_atomic_under_concurrency() {
+        const CONCURRENT_APPENDS: usize = 20;
+
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let engine = std::sync::Arc::new(engine);
+
+        let mut handles = Vec::with_capacity(CONCURRENT_APPENDS);
+        for i in 0..CONCURRENT_APPENDS {
+            let engine = std::sync::Arc::clone(&engine);
+            handles.push(tokio::spawn(async move {
+                engine
+                    .save_filter_execution_log(&format!("rule-{i}"), &format!("msg-{i}"), "DELETE")
+                    .await
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("append task must not panic").expect(
+                "a concurrent ledger append must never fail outright -- it must serialize, not error",
+            );
+        }
+
+        let mut logs = engine
+            .list_filter_execution_logs(CONCURRENT_APPENDS + 1)
+            .await
+            .unwrap();
+        // `list_filter_execution_logs` returns newest-first; put it back in chain order.
+        logs.reverse();
+        assert_eq!(
+            logs.len(),
+            CONCURRENT_APPENDS,
+            "every concurrent ledger append must persist exactly one record -- no lost writes"
+        );
+
+        let mut seen_ids = std::collections::HashSet::new();
+        for (idx, log) in logs.iter().enumerate() {
+            assert!(
+                seen_ids.insert(log.id),
+                "duplicate row id {} indicates a lost or double-counted write",
+                log.id
+            );
+            let expected_prev = if idx == 0 {
+                "GENESIS".to_string()
+            } else {
+                logs[idx - 1].hash.clone()
+            };
+            assert_eq!(
+                log.prev_hash, expected_prev,
+                "log entry {} must chain from the immediately preceding entry's hash -- a \
+                 mismatch here means two appends forked off the same prev-hash",
+                log.id
+            );
+        }
+
+        assert!(
+            engine.verify_execution_log_chain().await.unwrap(),
+            "the full persisted ledger must verify as a single valid chain"
+        );
     }
 
     /// Proves the zeroize mechanism `Zeroizing`'s `Drop` relies on is real, not
