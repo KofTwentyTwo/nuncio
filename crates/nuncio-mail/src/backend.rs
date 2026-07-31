@@ -18,9 +18,6 @@ pub trait MailBackend: Send + Sync {
         folder_id: &str,
         since_state: Option<&str>,
     ) -> Result<(Vec<Email>, String), MailError>;
-
-    /// Send an email message over the configured transport.
-    async fn send_email(&self, email: &Email) -> Result<(), MailError>;
 }
 
 /// A composed outbound email message ready to send over SMTP. Deliberately

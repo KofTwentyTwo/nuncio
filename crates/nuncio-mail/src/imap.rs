@@ -742,24 +742,9 @@ impl ImapEngine {
         let (username, password) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
             _ => {
-                // Credential-less fixture path used by unit tests that never
-                // reach a real server. The checkpoint (one past the fixture's
-                // UID) is internally consistent with the fixture rather than
-                // derived from `emails.len()`.
-                let mock_emails = vec![Email {
-                    id: "imap-uid-100".to_string(),
-                    account_id: self.account_id.clone(),
-                    folder_id: folder_id.to_string(),
-                    subject: "IMAP Sync Message".to_string(),
-                    sender: "sender@nuncio.mx".to_string(),
-                    recipient: "me@nuncio.mx".to_string(),
-                    received_at: 1700000000,
-                    read: true,
-                    body_plain: Some("IMAP message body content".to_string()),
-                    body_html: None,
-                    attachments: Vec::new(),
-                }];
-                return Ok((mock_emails, "101".to_string()));
+                return Err(MailError::AuthError(
+                    "IMAP message sync requires credentials".to_string(),
+                ))
             }
         };
 
@@ -875,47 +860,37 @@ impl ImapEngine {
 #[async_trait]
 impl MailBackend for ImapEngine {
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError> {
-        if let (Some(u), Some(p)) = (&self.username, &self.password) {
-            let mut session = self.socket_manager.connect_session(u, p).await?;
-            let mut mailboxes = session
-                .list(None, Some("*"))
-                .await
-                .map_err(|e| MailError::ImapError(format!("failed to list mailboxes: {}", e)))?;
-
-            let mut folders = Vec::new();
-            while let Some(mb_res) = mailboxes.next().await {
-                let mb = mb_res.map_err(|e| {
-                    MailError::ImapError(format!("failed reading mailbox item: {}", e))
-                })?;
-                let folder_name = mb.name().to_string();
-                folders.push(Folder {
-                    id: folder_name.clone(),
-                    name: folder_name,
-                    total_messages: 0,
-                    unread_messages: 0,
-                });
+        let (u, p) = match (&self.username, &self.password) {
+            (Some(u), Some(p)) => (u.as_str(), p.as_str()),
+            _ => {
+                return Err(MailError::AuthError(
+                    "IMAP folder sync requires credentials".to_string(),
+                ))
             }
-            drop(mailboxes);
-            let _ = session.logout().await;
-            if !folders.is_empty() {
-                return Ok(folders);
-            }
-        }
+        };
+        let mut session = self.socket_manager.connect_session(u, p).await?;
+        let mut mailboxes = session
+            .list(None, Some("*"))
+            .await
+            .map_err(|e| MailError::ImapError(format!("failed to list mailboxes: {}", e)))?;
 
-        Ok(vec![
-            Folder {
-                id: "INBOX".to_string(),
-                name: "Inbox".to_string(),
-                total_messages: 10,
-                unread_messages: 2,
-            },
-            Folder {
-                id: "Sent".to_string(),
-                name: "Sent Messages".to_string(),
-                total_messages: 5,
+        let mut folders = Vec::new();
+        while let Some(mb_res) = mailboxes.next().await {
+            let mb = mb_res
+                .map_err(|e| MailError::ImapError(format!("failed reading mailbox item: {}", e)))?;
+            let folder_name = mb.name().to_string();
+            folders.push(Folder {
+                id: folder_name.clone(),
+                name: folder_name,
+                total_messages: 0,
                 unread_messages: 0,
-            },
-        ])
+            });
+        }
+        drop(mailboxes);
+        let _ = session.logout().await;
+        // An empty mailbox is a genuine result, not a signal to fall back to
+        // placeholder folders -- the caller gets exactly what the server reported.
+        Ok(folders)
     }
 
     async fn sync_messages(
@@ -924,10 +899,6 @@ impl MailBackend for ImapEngine {
         since_state: Option<&str>,
     ) -> Result<(Vec<Email>, String), MailError> {
         self.sync_folder_messages(folder_id, since_state).await
-    }
-
-    async fn send_email(&self, _email: &Email) -> Result<(), MailError> {
-        Ok(())
     }
 }
 
@@ -952,20 +923,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imap_engine_sync_folders_and_messages() -> Result<(), MailError> {
+    async fn sync_folders_and_sync_messages_require_credentials() {
+        // Without credentials there is no server to sync against; both
+        // methods must surface an honest auth error rather than fabricating
+        // folders or messages.
         let engine = ImapEngine::new("acct-1", "mail.kof22.com", 993);
-        let folders = engine.sync_folders().await?;
+
+        let err = engine
+            .sync_folders()
+            .await
+            .expect_err("credential-less sync_folders must fail");
+        assert!(matches!(err, MailError::AuthError(_)));
+
+        let err = engine
+            .sync_messages("INBOX", None)
+            .await
+            .expect_err("credential-less sync_messages must fail");
+        assert!(matches!(err, MailError::AuthError(_)));
+    }
+
+    #[tokio::test]
+    async fn sync_folders_lists_real_mailboxes_over_a_scripted_server() {
+        // Drives `MailBackend::sync_folders` against a real, plain-TCP
+        // loopback IMAP server scripted to answer LOGIN/LIST/LOGOUT -- proving
+        // the returned folder list is genuinely read off the wire.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept connection");
+            while let Some(line) = read_scripted_line(&mut socket).await {
+                let tag = line.split_whitespace().next().unwrap_or("").to_string();
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("LOGIN") {
+                    let _ = socket
+                        .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("LIST") {
+                    let resp = format!(
+                        "* LIST () \"/\" INBOX\r\n* LIST () \"/\" Archive\r\n{tag} OK LIST completed\r\n"
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                } else if upper.contains("LOGOUT") {
+                    let _ = socket
+                        .write_all(format!("* BYE\r\n{tag} OK LOGOUT\r\n").as_bytes())
+                        .await;
+                    break;
+                }
+            }
+        });
+
+        let engine = ImapEngine::with_credentials(
+            "acct-1",
+            "127.0.0.1",
+            addr.port(),
+            TlsMode::Plain,
+            "user",
+            "pass",
+        );
+        let folders = engine.sync_folders().await.expect("sync_folders succeeds");
+        server.await.expect("scripted server task completes");
+
         assert_eq!(folders.len(), 2);
         assert_eq!(folders[0].id, "INBOX");
-
-        let (emails, checkpoint) = engine.sync_messages("INBOX", None).await?;
-        // Credential-less fixture: checkpoint is one past the fixture UID.
-        assert_eq!(checkpoint, "101");
-        assert_eq!(emails.len(), 1);
-        assert_eq!(emails[0].id, "imap-uid-100");
-
-        engine.send_email(&emails[0]).await?;
-        Ok(())
+        assert_eq!(folders[1].id, "Archive");
     }
 
     #[test]
