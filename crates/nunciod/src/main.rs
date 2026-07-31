@@ -17,7 +17,22 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt::init();
+    // PERSISTENT database path: defaults to `~/.nuncio/nuncio.db` -- NOT a
+    // temp/ephemeral path -- so accounts (and everything else) survive a
+    // daemon restart. `NUNCIO_DB_PATH` overrides it, which tests/CI use to
+    // point at an isolated temp path instead of touching a real user's home
+    // directory. Resolved first so logging can place its rotating files in the
+    // sibling `logs/` directory of the same data root.
+    let db_path = std::env::var("NUNCIO_DB_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| nunciod::default_db_path());
+
+    // Install the layered tracing subscriber (EnvFilter + stderr console +
+    // rotating daily file sink). `_log_guards` owns the non-blocking writer's
+    // `WorkerGuard`; it MUST stay bound until the end of `main` or buffered
+    // file logs are dropped on exit. Logging never crashes the daemon: a bad
+    // filter or an unwritable log directory degrades to a working subset.
+    let _log_guards = nunciod::logging::init(&db_path);
     tracing::info!("Starting Nuncio Central Daemon Service (nunciod)...");
 
     // The `CoreCommand` receiver must be claimed BEFORE the `EventBus` is
@@ -37,14 +52,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (shutdown_controller, shutdown_signal) = ShutdownController::new(event_bus.clone());
     let shutdown_controller = Arc::new(shutdown_controller);
     let signal_task = tokio::spawn(install_signal_handlers(shutdown_controller));
-    // PERSISTENT database path: defaults to `~/.nuncio/nuncio.db` -- NOT a
-    // temp/ephemeral path -- so accounts (and everything else) survive a
-    // daemon restart.
-    // `NUNCIO_DB_PATH` overrides it, which tests/CI use to point at an
-    // isolated temp path instead of touching a real user's home directory.
-    let db_path = std::env::var("NUNCIO_DB_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| nunciod::default_db_path());
 
     // Exclusive single-instance lock on the database path, acquired BEFORE
     // the store is opened. Held for the entire process lifetime (dropped at

@@ -7,6 +7,7 @@ pub mod contacts_sync;
 pub mod grpc;
 pub mod lifecycle;
 pub mod lock;
+pub mod logging;
 pub mod orchestrator;
 pub mod outbox;
 pub mod pagination;
