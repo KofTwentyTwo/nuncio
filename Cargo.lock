@@ -2594,6 +2594,7 @@ dependencies = [
 name = "nuncio-proto"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "prost",
  "protoc-bin-vendored",
  "thiserror 1.0.69",

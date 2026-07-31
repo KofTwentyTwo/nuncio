@@ -2,6 +2,64 @@ syntax = "proto3";
 
 package nuncio.v1;
 
+// ErrorReason is the stable, machine-readable taxonomy of failure conditions
+// the daemon reports to clients. It is carried inside an `ErrorInfo` in a
+// failed RPC's gRPC status-details trailer so a client can branch on a
+// discriminant instead of string-matching human-readable (English) error
+// text. Each reason maps to a fixed canonical gRPC status code (see the
+// server-side helper that builds the `Status`), so the transport-level code
+// and this application-level reason always agree.
+//
+// Values are append-only: never renumber or repurpose an existing value.
+// New failure conditions get a new value; `ERROR_REASON_UNSPECIFIED` is the
+// zero value and is treated as a generic internal error by clients that do
+// not recognize a (newer) reason.
+enum ErrorReason {
+  ERROR_REASON_UNSPECIFIED = 0;
+  // A request was syntactically or semantically invalid (missing/blank
+  // required field, out-of-range value, unparseable NSQL, etc.).
+  ERROR_REASON_VALIDATION_FAILED = 1;
+  // No account exists for the referenced id.
+  ERROR_REASON_ACCOUNT_NOT_FOUND = 2;
+  // No filter rule exists for the referenced id.
+  ERROR_REASON_RULE_NOT_FOUND = 3;
+  // No stored message exists for the referenced id.
+  ERROR_REASON_MESSAGE_NOT_FOUND = 4;
+  // No stored calendar event exists for the referenced id.
+  ERROR_REASON_EVENT_NOT_FOUND = 5;
+  // No stored contact exists for the referenced id.
+  ERROR_REASON_CONTACT_NOT_FOUND = 6;
+  // The resource being created already exists.
+  ERROR_REASON_ALREADY_EXISTS = 7;
+  // A precondition is unmet: the operation requires configuration that is
+  // not present yet (e.g. no CalDAV/CardDAV account configured to sync).
+  ERROR_REASON_NOT_CONFIGURED = 8;
+  // A required backend (mail/calendar/contacts server) could not be reached.
+  ERROR_REASON_BACKEND_UNREACHABLE = 9;
+  // The call was not authenticated (missing/invalid bearer credentials).
+  ERROR_REASON_AUTH_REQUIRED = 10;
+  // The requested operation is not supported (no honest implementation).
+  ERROR_REASON_UNSUPPORTED = 11;
+  // An unexpected internal error the client cannot act on specifically.
+  ERROR_REASON_INTERNAL = 12;
+}
+
+// ErrorInfo is the structured error payload the daemon attaches to a failed
+// RPC's gRPC status-details (`grpc-status-details-bin`) trailer. It carries a
+// stable `reason` discriminant, optional structured `metadata` (e.g. the id
+// of the resource that was not found), and the same human-readable `message`
+// that the enclosing `Status` carries. Clients decode this to branch on
+// `reason` rather than parsing `message`.
+message ErrorInfo {
+  // Stable machine-readable failure discriminant.
+  ErrorReason reason = 1;
+  // Optional structured context (e.g. {"account_id": "acct-1"}). Keys are
+  // stable identifiers; values are the concrete offending inputs.
+  map<string, string> metadata = 2;
+  // Human-readable message, identical to the enclosing `Status` message.
+  string message = 3;
+}
+
 // System service exposes daemon-level introspection RPCs.
 //
 // This is the foundation of the versioned gRPC API (see

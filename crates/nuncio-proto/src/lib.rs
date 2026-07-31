@@ -22,6 +22,7 @@
 
 pub mod addr;
 pub mod client;
+pub mod errors;
 
 pub use addr::{grpc_addr_from_env, DEFAULT_GRPC_ADDR, GRPC_ADDR_ENV_VAR};
 
