@@ -104,7 +104,6 @@ fn sample_account() -> nuncio_core::AccountConfig {
         server_port: 993,
         smtp_host: "smtp.nuncio.mx".to_string(),
         smtp_port: 465,
-        use_tls: true,
         imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
         smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
         keyring_secret_key: format!("nuncio/{ACCOUNT_ID}"),

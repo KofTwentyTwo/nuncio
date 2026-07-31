@@ -95,8 +95,6 @@ pub struct AccountConfig {
     pub smtp_host: String,
     /// SMTP server port number, used for outbound mail.
     pub smtp_port: u16,
-    /// Whether TLS connection encryption is enabled.
-    pub use_tls: bool,
     /// IMAP connection security transport mode.
     pub imap_tls_mode: TlsMode,
     /// SMTP connection security transport mode.
@@ -247,7 +245,6 @@ mod tests {
             server_port: 443,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
-            use_tls: true,
             imap_tls_mode: TlsMode::ImplicitTls,
             smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-123".to_string(),
@@ -266,7 +263,6 @@ mod tests {
             server_port: 0,
             smtp_host: String::new(),
             smtp_port: 0,
-            use_tls: true,
             imap_tls_mode: TlsMode::ImplicitTls,
             smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-cal-1".to_string(),

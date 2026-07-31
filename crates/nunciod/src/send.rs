@@ -238,7 +238,6 @@ mod tests {
             server_port: 993,
             smtp_host: "127.0.0.1".to_string(),
             smtp_port: 1,
-            use_tls: true,
             imap_tls_mode: TlsMode::ImplicitTls,
             smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: format!("nuncio/{id}"),

@@ -61,7 +61,6 @@ fn sample_account_config() -> AccountConfig {
         protocol: AccountProtocol::ImapSmtp.into(),
         server_host: "imap.nuncio.mx".to_string(),
         server_port: 993,
-        use_tls: true,
         imap_tls_mode: TlsMode::ImplicitTls.into(),
         smtp_tls_mode: TlsMode::ImplicitTls.into(),
         keyring_secret_key: KEYRING_KEY.to_string(),

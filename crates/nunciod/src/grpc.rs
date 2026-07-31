@@ -41,13 +41,14 @@ use nuncio_proto::v1::{
     ListFoldersResponse, ListMessagesRequest, ListMessagesResponse, ListRecordsRequest,
     ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest, MarkReadResponse,
     Message as MessageProto, MessageFlagsChanged, MessageSearchHit, PreviewRuleRequest,
-    PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse, SearchMessagesRequest,
-    SearchMessagesResponse, SendMessageRequest, SendMessageResponse, ShuttingDown,
-    SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse, SyncStarted,
-    TestAccountConnectionRequest, TestAccountConnectionResponse, TlsMode as TlsModeProto,
-    TriageProgress, TriageRequest, UpdateAccountRequest, UpdateAccountResponse, UpdateAvailable,
-    UpdateRuleRequest, UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
-    VerifyChainRequest, VerifyChainResponse,
+    PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse,
+    RuleExportFormat as RuleExportFormatProto, SearchMessagesRequest, SearchMessagesResponse,
+    SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
+    SyncRequest, SyncResponse, SyncStarted, TestAccountConnectionRequest,
+    TestAccountConnectionResponse, TlsMode as TlsModeProto, TriageProgress, TriageRequest,
+    UpdateAccountRequest, UpdateAccountResponse, UpdateAvailable, UpdateRuleRequest,
+    UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest,
+    VerifyChainResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -282,7 +283,6 @@ fn map_account_config_to_proto(config: nuncio_core::AccountConfig) -> AccountCon
         protocol: map_account_protocol_to_proto(config.protocol).into(),
         server_host: config.server_host,
         server_port: u32::from(config.server_port),
-        use_tls: config.use_tls,
         imap_tls_mode: map_tls_mode_to_proto(config.imap_tls_mode).into(),
         smtp_tls_mode: map_tls_mode_to_proto(config.smtp_tls_mode).into(),
         keyring_secret_key: config.keyring_secret_key,
@@ -321,7 +321,6 @@ fn map_account_config_from_proto(
         server_port,
         smtp_host: config.smtp_host,
         smtp_port,
-        use_tls: config.use_tls,
         imap_tls_mode,
         smtp_tls_mode,
         keyring_secret_key: config.keyring_secret_key,
@@ -2024,6 +2023,7 @@ impl Filters for FiltersGrpcService {
         request: Request<ExportRulesRequest>,
     ) -> Result<Response<ExportRulesResponse>, Status> {
         let req = request.into_inner();
+        let format = req.format();
 
         let rules = self
             .db
@@ -2031,15 +2031,17 @@ impl Filters for FiltersGrpcService {
             .await
             .map_err(|e| Status::internal(format!("failed to list filter rules: {e}")))?;
 
-        let content = if req.format == "json" {
-            serde_json::to_string_pretty(&rules)
-                .map_err(|e| Status::internal(format!("failed to render rules as JSON: {e}")))?
-        } else {
-            rules
+        let content = match format {
+            RuleExportFormatProto::Sql => rules
                 .iter()
                 .map(|r| r.to_nsql())
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n"),
+            RuleExportFormatProto::Json => serde_json::to_string_pretty(&rules)
+                .map_err(|e| Status::internal(format!("failed to render rules as JSON: {e}")))?,
+            RuleExportFormatProto::Unspecified => {
+                return Err(Status::invalid_argument("rule export format is required"))
+            }
         };
 
         Ok(Response::new(ExportRulesResponse { content }))
@@ -3342,7 +3344,6 @@ mod tests {
             protocol: AccountProtocolProto::ImapSmtp.into(),
             server_host: "imap.nuncio.mx".to_string(),
             server_port: 993,
-            use_tls: true,
             imap_tls_mode: TlsModeProto::ImplicitTls.into(),
             smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
             keyring_secret_key: keyring_secret_key.to_string(),
@@ -3737,7 +3738,6 @@ mod tests {
             server_port: 993,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
-            use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: key.to_string(),
@@ -3781,7 +3781,6 @@ mod tests {
             server_port: 993,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
-            use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: key.to_string(),
@@ -4349,7 +4348,6 @@ mod tests {
             server_port: 993,
             smtp_host: "127.0.0.1".to_string(),
             smtp_port: 1,
-            use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-send-1".to_string(),
@@ -4518,7 +4516,6 @@ mod tests {
             server_port: 993,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
-            use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-injected-send-1".to_string(),
@@ -4635,7 +4632,6 @@ mod tests {
             server_port: 993,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
-            use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-injected-send-fail-1".to_string(),
@@ -4789,7 +4785,7 @@ mod tests {
 
         let err = client
             .export_rules(ExportRulesRequest {
-                format: "sql".to_string(),
+                format: RuleExportFormatProto::Sql.into(),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -5366,7 +5362,7 @@ mod tests {
 
         let sql_export = client
             .export_rules(authed_bearer_request(ExportRulesRequest {
-                format: "sql".to_string(),
+                format: RuleExportFormatProto::Sql.into(),
             }))
             .await
             .expect("export_rules succeeds")
@@ -5376,13 +5372,32 @@ mod tests {
 
         let json_export = client
             .export_rules(authed_bearer_request(ExportRulesRequest {
-                format: "json".to_string(),
+                format: RuleExportFormatProto::Json.into(),
             }))
             .await
             .expect("export_rules succeeds")
             .into_inner();
         assert!(json_export.content.contains("\"name\""));
         assert!(json_export.content.contains("Export Me"));
+    }
+
+    /// `ExportRules` rejects an unspecified format rather than silently
+    /// defaulting to one rendering.
+    #[tokio::test]
+    async fn export_rules_rejects_unspecified_format() {
+        let (addr, _handle, _db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
+
+        let mut client = FiltersClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .export_rules(authed_bearer_request(ExportRulesRequest {
+                format: RuleExportFormatProto::Unspecified.into(),
+            }))
+            .await
+            .expect_err("unspecified format must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
     }
 
     /// `ImportRules` persists every line that parses AND reports the parse
