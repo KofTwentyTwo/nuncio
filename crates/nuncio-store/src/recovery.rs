@@ -18,7 +18,6 @@ type SalvagedAccountRow = (
     String,
     String,
     i64,
-    i64,
     String,
     i64,
     Option<String>,
@@ -384,7 +383,7 @@ impl SqliteRecoveryEngine {
 
     async fn salvage_accounts(pool: &sqlx::SqlitePool) -> Vec<nuncio_core::AccountConfig> {
         let rows: Result<Vec<SalvagedAccountRow>, _> = sqlx::query_as(
-            "SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url FROM accounts"
+            "SELECT id, name, email_address, protocol, server_host, server_port, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url FROM accounts"
         )
         .fetch_all(pool)
         .await;
@@ -400,7 +399,6 @@ impl SqliteRecoveryEngine {
                         protocol_str,
                         server_host,
                         server_port,
-                        use_tls,
                         keyring_secret_key,
                         sync_interval_secs,
                         smtp_host,
@@ -433,7 +431,6 @@ impl SqliteRecoveryEngine {
                             server_port: server_port as u16,
                             smtp_host: resolved_smtp_host,
                             smtp_port: resolved_smtp_port,
-                            use_tls: use_tls != 0,
                             imap_tls_mode,
                             smtp_tls_mode,
                             keyring_secret_key,
@@ -606,7 +603,6 @@ mod tests {
                 server_port: 993,
                 smtp_host: "smtp.nuncio.mx".to_string(),
                 smtp_port: 465,
-                use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-test-1".to_string(),
@@ -668,7 +664,6 @@ mod tests {
                 server_port: 993,
                 smtp_host: "smtp.nuncio.mx".to_string(),
                 smtp_port: 465,
-                use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-salvage-1".to_string(),
@@ -806,7 +801,6 @@ mod tests {
                 server_port: 143,
                 smtp_host: "smtp.nuncio.mx".to_string(),
                 smtp_port: 587,
-                use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::StartTls,
                 smtp_tls_mode: nuncio_core::TlsMode::Plain,
                 keyring_secret_key: "nuncio/acct-starttls-1".to_string(),

@@ -161,7 +161,6 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
                 protocol: AccountProtocolProto::Caldav.into(),
                 server_host: String::new(),
                 server_port: 0,
-                use_tls: true,
                 imap_tls_mode: TlsModeProto::ImplicitTls.into(),
                 smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
                 keyring_secret_key: KEYRING_KEY.to_string(),

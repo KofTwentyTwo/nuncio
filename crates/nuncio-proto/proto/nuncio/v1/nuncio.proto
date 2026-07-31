@@ -270,8 +270,8 @@ message AccountConfig {
   string server_host = 5;
   // Server port number (1..=65535) (IMAP/JMAP).
   uint32 server_port = 6;
-  // Whether TLS connection encryption is enabled.
-  bool use_tls = 7;
+  reserved 7;
+  reserved "use_tls";
   // IMAP connection security transport mode.
   TlsMode imap_tls_mode = 8;
   // SMTP connection security transport mode.
@@ -844,10 +844,21 @@ message UpdateRuleResponse {
   FilterRule rule = 1;
 }
 
+// Rendering format for `ExportRules`. Kept distinct from `ExportFormat`
+// (the mailbox `Export` service's format enum) because the two have no
+// overlapping members and no shared meaning -- rule export renders lossless
+// NSQL source or a JSON array of rule definitions, never MBOX/EML/JSONL.
+enum RuleExportFormat {
+  RULE_EXPORT_FORMAT_UNSPECIFIED = 0;
+  // Lossless NSQL source text, one rule per line.
+  RULE_EXPORT_FORMAT_SQL = 1;
+  // JSON array of rule definitions.
+  RULE_EXPORT_FORMAT_JSON = 2;
+}
+
 // ExportRulesRequest names the rendering format for `ExportRules`.
 message ExportRulesRequest {
-  // "sql" or "json".
-  string format = 1;
+  RuleExportFormat format = 1;
 }
 
 // ExportRulesResponse carries every persisted rule pre-rendered as a single

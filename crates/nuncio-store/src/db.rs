@@ -499,7 +499,11 @@ impl DatabaseEngine {
                 protocol TEXT NOT NULL,
                 server_host TEXT NOT NULL,
                 server_port INTEGER NOT NULL,
-                use_tls INTEGER NOT NULL,
+                -- Retained (with a default) for on-disk compatibility with
+                -- rows written before `imap_tls_mode`/`smtp_tls_mode` became
+                -- the authoritative transport-security setting; no code
+                -- reads or writes this column anymore.
+                use_tls INTEGER NOT NULL DEFAULT 1,
                 keyring_secret_key TEXT NOT NULL,
                 sync_interval_secs INTEGER NOT NULL,
                 smtp_host TEXT,
@@ -964,7 +968,13 @@ impl DatabaseEngine {
         .bind(protocol_str)
         .bind(&config.server_host)
         .bind(config.server_port as i64)
-        .bind(if config.use_tls { 1i64 } else { 0i64 })
+        // `use_tls` is a retained-but-unread on-disk column (see the
+        // `CREATE TABLE`'s comment) -- written as a fixed placeholder since
+        // no `AccountConfig` field backs it anymore, satisfying its
+        // pre-existing `NOT NULL` constraint on every accounts table
+        // regardless of whether it was created before or after this column
+        // stopped being read.
+        .bind(1i64)
         .bind(&config.keyring_secret_key)
         .bind(config.sync_interval_secs as i64)
         .bind(&config.smtp_host)
@@ -1010,7 +1020,6 @@ impl DatabaseEngine {
             String,
             String,
             i64,
-            i64,
             String,
             i64,
             Option<String>,
@@ -1020,7 +1029,7 @@ impl DatabaseEngine {
             Option<String>,
         )> = sqlx::query_as(
             r#"
-            SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url
+            SELECT id, name, email_address, protocol, server_host, server_port, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url
             FROM accounts
             "#,
         )
@@ -1038,7 +1047,6 @@ impl DatabaseEngine {
                     protocol_str,
                     server_host,
                     server_port,
-                    use_tls,
                     keyring_secret_key,
                     sync_interval_secs,
                     smtp_host,
@@ -1069,7 +1077,6 @@ impl DatabaseEngine {
                         server_port: server_port as u16,
                         smtp_host: resolved_smtp_host,
                         smtp_port: resolved_smtp_port,
-                        use_tls: use_tls != 0,
                         imap_tls_mode: tls_mode_from_db(&imap_tls_mode),
                         smtp_tls_mode: tls_mode_from_db(&smtp_tls_mode),
                         keyring_secret_key,
@@ -2765,7 +2772,6 @@ mod tests {
                 server_port: 993,
                 smtp_host: "smtp.nuncio.mx".to_string(),
                 smtp_port: 465,
-                use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-contended-1".to_string(),
@@ -3345,7 +3351,6 @@ mod tests {
             server_port: 993,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
-            use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-test-1".to_string(),
@@ -3389,7 +3394,6 @@ mod tests {
             server_port: 143,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 25,
-            use_tls: false,
             imap_tls_mode: nuncio_core::TlsMode::StartTls,
             smtp_tls_mode: nuncio_core::TlsMode::Plain,
             keyring_secret_key: "nuncio/acct-tls-1".to_string(),
@@ -3430,7 +3434,6 @@ mod tests {
             server_port: 0,
             smtp_host: String::new(),
             smtp_port: 0,
-            use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-caldav-store-1".to_string(),
@@ -3468,7 +3471,6 @@ mod tests {
             server_port: 993,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
-            use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             keyring_secret_key: "nuncio/acct-del-1".to_string(),
@@ -3660,7 +3662,6 @@ mod tests {
             server_port: 993,
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 587,
-            use_tls: true,
             imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
             smtp_tls_mode: nuncio_core::TlsMode::StartTls,
             keyring_secret_key: "nuncio/acct-post-migration".to_string(),

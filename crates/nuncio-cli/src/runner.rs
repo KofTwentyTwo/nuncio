@@ -53,6 +53,20 @@ fn parse_account_protocol(protocol: &str) -> Result<nuncio_proto::v1::AccountPro
     }
 }
 
+/// Parses a `filter export --format` CLI string into its wire-format
+/// `nuncio.v1.RuleExportFormat` value. Rejects anything else rather than
+/// silently falling back to one rendering, since a typo'd format should
+/// surface as an error, not a surprising output shape.
+fn parse_rule_export_format(format: &str) -> Result<nuncio_proto::v1::RuleExportFormat, String> {
+    match format.to_ascii_lowercase().as_str() {
+        "sql" => Ok(nuncio_proto::v1::RuleExportFormat::Sql),
+        "json" => Ok(nuncio_proto::v1::RuleExportFormat::Json),
+        other => Err(format!(
+            "invalid export format '{other}' (expected sql or json)"
+        )),
+    }
+}
+
 /// Renders a wire-format `google.protobuf.Timestamp` as an RFC 3339 UTC
 /// string for human-readable and `--json` output. `nanos` outside
 /// `0..1_000_000_000` (never produced by the daemon's own mappers) and an
@@ -1561,6 +1575,11 @@ impl HeadlessRunner {
     /// the daemon's real, persistent store -- not this runner's own
     /// ephemeral local `db`.
     async fn handle_filter_export(&self, format: &str, json_mode: bool) -> String {
+        let format = match parse_rule_export_format(format) {
+            Ok(f) => f,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
         let mut client = match self.connect_filters_client().await {
             Ok(client) => client,
             Err(e) => return Self::render_error(&e, json_mode),
@@ -1568,7 +1587,7 @@ impl HeadlessRunner {
 
         match client
             .export_rules(nuncio_proto::v1::ExportRulesRequest {
-                format: format.to_string(),
+                format: format.into(),
             })
             .await
         {
@@ -1863,7 +1882,6 @@ impl HeadlessRunner {
                 imap_host.to_string()
             },
             server_port: if is_caldav { 0 } else { u32::from(imap_port) },
-            use_tls: true,
             imap_tls_mode: map_tls_mode_to_proto(imap_tls_mode).into(),
             smtp_tls_mode: map_tls_mode_to_proto(smtp_tls_mode).into(),
             keyring_secret_key: keyring_key.clone(),
@@ -1974,7 +1992,6 @@ impl HeadlessRunner {
                                 "server_port": a.server_port,
                                 "smtp_host": a.smtp_host,
                                 "smtp_port": a.smtp_port,
-                                "use_tls": a.use_tls,
                                 "imap_tls_mode": a.imap_tls_mode().as_str_name(),
                                 "smtp_tls_mode": a.smtp_tls_mode().as_str_name(),
                                 "keyring_secret_key": a.keyring_secret_key,
@@ -1997,15 +2014,16 @@ impl HeadlessRunner {
                             ));
                         } else {
                             out.push_str(&format!(
-                                "\n  [{}] {} <{}>  IMAP {}:{}  SMTP {}:{}  TLS={}",
+                                "\n  [{}] {} <{}>  IMAP {}:{} ({})  SMTP {}:{} ({})",
                                 a.id,
                                 a.name,
                                 a.email_address,
                                 a.server_host,
                                 a.server_port,
+                                a.imap_tls_mode().as_str_name(),
                                 a.smtp_host,
                                 a.smtp_port,
-                                a.use_tls,
+                                a.smtp_tls_mode().as_str_name(),
                             ));
                         }
                     }
@@ -2069,7 +2087,6 @@ impl HeadlessRunner {
                 "server_port": account.server_port,
                 "smtp_host": account.smtp_host,
                 "smtp_port": account.smtp_port,
-                "use_tls": account.use_tls,
                 "imap_tls_mode": account.imap_tls_mode().as_str_name(),
                 "smtp_tls_mode": account.smtp_tls_mode().as_str_name(),
                 "keyring_secret_key": account.keyring_secret_key,
@@ -3103,7 +3120,6 @@ mod tests {
                         protocol: AccountProtocolProto::ImapSmtp.into(),
                         server_host: "imap.nuncio.mx".to_string(),
                         server_port: 993,
-                        use_tls: true,
                         imap_tls_mode: TlsModeProto::ImplicitTls.into(),
                         smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
                         keyring_secret_key: "nuncio/acct-stub-1".to_string(),
@@ -4320,7 +4336,7 @@ mod tests {
                 request: tonic::Request<ExportRulesRequest>,
             ) -> Result<tonic::Response<ExportRulesResponse>, tonic::Status> {
                 let req = request.into_inner();
-                let content = if req.format == "json" {
+                let content = if req.format() == nuncio_proto::v1::RuleExportFormat::Json {
                     r#"[{"id":"rule-stub-1"}]"#.to_string()
                 } else {
                     "SELECT * FROM emails WHERE subject CONTAINS 'Urgent' ACTION MARK READ"

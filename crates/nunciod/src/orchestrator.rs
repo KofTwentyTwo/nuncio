@@ -157,7 +157,6 @@ mod tests {
                 server_port: 993,
                 smtp_host: "smtp.nuncio.mx".to_string(),
                 smtp_port: 465,
-                use_tls: true,
                 imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-orch-1".to_string(),
