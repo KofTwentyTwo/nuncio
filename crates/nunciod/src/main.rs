@@ -36,8 +36,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // wrapper instances.
     let account_secrets = Arc::new(nuncio_store::vault::SecretManager::production());
 
-    // Load active rules from SQLite
-    let initial_rules = db.list_filter_rules().await.unwrap_or_default();
+    // Load active rules from SQLite. See `load_initial_filter_rules` for why
+    // a load failure must fail startup rather than silently become an empty
+    // rule set.
+    let initial_rules = nunciod::load_initial_filter_rules(&db).await?;
     let filter_engine = Arc::new(FilterEngine::new(initial_rules)?);
 
     // Real inbound-sync `CoreCommand` consumer. This is the ONE place that

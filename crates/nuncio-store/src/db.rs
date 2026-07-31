@@ -1589,14 +1589,29 @@ impl DatabaseEngine {
 
         let mut rules = Vec::new();
         for (id, name, priority, enabled, nsql_text, created_at, updated_at) in rows {
-            if let Ok(mut parsed) =
-                nuncio_filter::NsqlParser::parse_rule(&name, priority as i32, &nsql_text)
-            {
-                parsed.id = id;
-                parsed.enabled = enabled != 0;
-                parsed.created_at = created_at;
-                parsed.updated_at = updated_at;
-                rules.push(parsed);
+            match nuncio_filter::NsqlParser::parse_rule(&name, priority as i32, &nsql_text) {
+                Ok(mut parsed) => {
+                    parsed.id = id;
+                    parsed.enabled = enabled != 0;
+                    parsed.created_at = created_at;
+                    parsed.updated_at = updated_at;
+                    rules.push(parsed);
+                }
+                Err(err) => {
+                    // A stored rule that no longer parses (e.g. the NSQL grammar
+                    // changed, or the row was hand-edited) must not vanish from
+                    // enforcement without a trace: that silently disables the
+                    // rule's protection with no operator-visible signal. Warn
+                    // loudly with the rule id and skip it rather than either
+                    // dropping it unnoticed or failing the whole listing over
+                    // one bad row.
+                    tracing::warn!(
+                        rule_id = %id,
+                        rule_name = %name,
+                        error = %err,
+                        "stored filter rule failed to parse and will not be enforced"
+                    );
+                }
             }
         }
         Ok(rules)
@@ -3178,6 +3193,84 @@ mod tests {
         engine.delete_filter_rule(&rule.id).await.unwrap();
         let rules_after = engine.list_filter_rules().await.unwrap();
         assert_eq!(rules_after.len(), 0);
+    }
+
+    /// A rule row that no longer re-parses (e.g. hand-edited NSQL, or a grammar
+    /// change that invalidates previously-stored text) must not vanish from
+    /// `list_filter_rules` invisibly. This asserts the observable policy chosen
+    /// for that case: the rule is excluded from the returned (enforced) set, but
+    /// a `WARN`-level log naming the specific rule id is emitted so an operator
+    /// can see that a rule stopped being enforced -- silent disappearance would
+    /// look identical to "this rule was never uploaded", which is the failure
+    /// mode this test guards against.
+    #[tokio::test]
+    async fn list_filter_rules_warns_on_unparseable_row_instead_of_dropping_silently() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for CapturedLogs {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("log buffer lock")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for CapturedLogs {
+            type Writer = CapturedLogs;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        // Build a structurally valid rule (so the store-level id/name/priority
+        // bookkeeping is untouched), then corrupt only the persisted NSQL text
+        // to simulate a row that no longer parses under the current grammar.
+        let nsql = "SELECT * FROM emails WHERE subject CONTAINS 'Spam' ACTION DELETE";
+        let mut rule = nuncio_filter::NsqlParser::parse_rule("Spam Filter", 1, nsql).unwrap();
+        rule.nsql_text = "THIS IS NOT VALID NSQL !!!".to_string();
+        engine
+            .save_filter_rule(&rule)
+            .await
+            .expect("save filter rule");
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+
+        // `set_default` returns a guard that stays active across `.await`
+        // points as long as this test stays on the single `#[tokio::test]`
+        // current-thread executor, which is the default runtime flavor and
+        // exactly what is used here.
+        let guard = tracing::subscriber::set_default(subscriber);
+        let rules = engine.list_filter_rules().await.expect("list filter rules");
+        drop(guard);
+
+        // The unparseable row must not appear in the enforced rule set.
+        assert!(rules.is_empty());
+
+        let captured = String::from_utf8(logs.0.lock().expect("log buffer lock").clone())
+            .expect("captured log is valid utf8");
+        assert!(
+            captured.contains(&rule.id),
+            "expected the specific rule id to be named in the WARN log, got: {captured}"
+        );
+        assert!(
+            captured.to_ascii_uppercase().contains("WARN"),
+            "expected a WARN-level log for the unparseable rule, got: {captured}"
+        );
     }
 
     #[tokio::test]
