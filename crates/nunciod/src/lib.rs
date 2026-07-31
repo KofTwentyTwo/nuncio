@@ -35,6 +35,27 @@ pub fn default_db_path() -> std::path::PathBuf {
     }
 }
 
+/// Loads the persisted filter rule set at daemon boot.
+///
+/// A load failure here is a genuine database problem, not "no rules are
+/// configured": an empty database legitimately has zero rules, but a query
+/// error does not mean zero rules, it means the true rule set is unknown.
+/// Collapsing that error into an empty `Vec` would silently disable all
+/// filtering with nothing in the logs to explain why. This surfaces the
+/// failure loudly and propagates it instead, so daemon startup fails
+/// visibly rather than starting with an unknown -- possibly wide open --
+/// filtering posture.
+pub async fn load_initial_filter_rules(
+    db: &nuncio_store::DatabaseEngine,
+) -> Result<Vec<nuncio_filter::FilterRule>, nuncio_store::DatabaseError> {
+    db.list_filter_rules().await.inspect_err(|err| {
+        tracing::error!(
+            error = %err,
+            "failed to load filter rules from database at startup; refusing to start with an unknown rule set"
+        );
+    })
+}
+
 /// Environment variable that opts `nunciod` in to its autonomous
 /// background auto-update-check loop.
 ///
@@ -90,6 +111,38 @@ mod tests {
         assert!(!auto_update_task_enabled());
         std::env::remove_var(AUTO_UPDATE_ENV_VAR);
         assert!(!auto_update_task_enabled());
+    }
+
+    #[tokio::test]
+    async fn load_initial_filter_rules_propagates_db_errors_instead_of_returning_empty() {
+        let (engine, _dir) = nuncio_store::DatabaseEngine::connect_ephemeral()
+            .await
+            .unwrap();
+
+        // A pool that has been closed makes every subsequent query fail
+        // deterministically, standing in for a genuine boot-time database
+        // problem (as opposed to a healthy, merely empty, rule table).
+        engine.close().await;
+
+        let result = load_initial_filter_rules(&engine).await;
+        assert!(
+            result.is_err(),
+            "a genuine database error must propagate as Err, not be silently \
+             mapped to an empty rule set (which would look identical to a \
+             database with zero rules configured)"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_initial_filter_rules_returns_empty_vec_for_a_healthy_empty_database() {
+        let (engine, _dir) = nuncio_store::DatabaseEngine::connect_ephemeral()
+            .await
+            .unwrap();
+
+        let rules = load_initial_filter_rules(&engine)
+            .await
+            .expect("a healthy, empty database must load successfully");
+        assert!(rules.is_empty());
     }
 
     #[test]
