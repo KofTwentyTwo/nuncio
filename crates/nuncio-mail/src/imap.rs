@@ -34,31 +34,21 @@ const FETCH_ITEM_TIMEOUT: Duration = Duration::from_secs(60);
 use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
 use crate::parser::{MailError, MimeParserAdapter};
 
-/// Prefix an IMAP [`Email::id`] carries in front of its raw numeric UID (see
-/// [`ImapEngine::sync_folder_messages_with_session`], which formats every id as
-/// `"imap-uid-{uid}"`). A remote mutation must recover the UID from the id to
-/// address the message, so the prefix is defined once here.
-const IMAP_UID_ID_PREFIX: &str = "imap-uid-";
-
-/// Recover the raw IMAP UID from an [`Email::id`] of the form
-/// `"imap-uid-{uid}"`. Returns `None` for any id that does not carry the
-/// expected prefix and a valid non-zero `u32` UID, so a mutation against a
-/// malformed/foreign id fails honestly rather than addressing UID 0.
-fn parse_imap_uid(message_id: &str) -> Option<u32> {
-    let raw = message_id.strip_prefix(IMAP_UID_ID_PREFIX)?;
-    let uid = raw.trim().parse::<u32>().ok()?;
+/// Recover a raw IMAP UID from a [`RemoteMutationSpec::remote_id`] (a decimal
+/// string). Returns `None` for anything that is not a valid non-zero `u32`, so
+/// a mutation against a malformed/foreign remote id fails honestly rather than
+/// addressing UID 0.
+fn parse_imap_uid(remote_id: &str) -> Option<u32> {
+    let uid = remote_id.trim().parse::<u32>().ok()?;
     (uid >= 1).then_some(uid)
 }
 
-/// Extract the UIDVALIDITY component of a stored folder checkpoint
-/// (`"{uidvalidity}:{uidnext}"`). Returns `None` for a missing, malformed, or
-/// legacy bare-number checkpoint -- the caller treats an absent stored
-/// UIDVALIDITY as "cannot prove the mailbox has not been renumbered" and
-/// refuses to act.
-fn checkpoint_uid_validity(checkpoint: Option<&str>) -> Option<u32> {
-    let raw = checkpoint?;
-    let (validity, _uid) = raw.split_once(CHECKPOINT_DELIM)?;
-    validity.trim().parse::<u32>().ok()
+/// Parse a stored [`RemoteMutationSpec::uid_validity`] (a decimal string) into
+/// a `u32`. Returns `None` for a missing or non-numeric value -- the caller
+/// treats an unparseable UIDVALIDITY as "cannot prove the mailbox has not been
+/// renumbered" and refuses to act.
+fn parse_uid_validity(uid_validity: &str) -> Option<u32> {
+    uid_validity.trim().parse::<u32>().ok()
 }
 
 /// Delimiter between the two components of a folder sync checkpoint. The
@@ -652,7 +642,16 @@ impl ImapEngine {
 
             let uid_num = fetch_data.uid.unwrap_or(0);
             max_uid_seen = max_uid_seen.max(uid_num);
-            let email_id = format!("imap-uid-{}", uid_num);
+            // The message is addressed on the wire by its UID within the
+            // folder's UIDVALIDITY scope; the persisted id is an opaque
+            // surrogate hashed over both plus the account and folder, so the
+            // same UID in another folder/account can never collide.
+            let remote_id = uid_num.to_string();
+            let uid_validity = server_uid_validity
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let email_id =
+                Email::surrogate_id(&self.account_id, folder_id, &uid_validity, &remote_id);
 
             let is_read = fetch_data
                 .flags()
@@ -665,6 +664,8 @@ impl ImapEngine {
                     folder_id,
                     raw_bytes,
                 )?;
+                email.remote_id = remote_id;
+                email.uid_validity = uid_validity;
                 email.read = is_read;
                 email
             } else {
@@ -721,6 +722,8 @@ impl ImapEngine {
                     id: email_id,
                     account_id: self.account_id.clone(),
                     folder_id: folder_id.to_string(),
+                    remote_id,
+                    uid_validity,
                     subject,
                     sender,
                     recipient,
@@ -815,10 +818,10 @@ impl ImapEngine {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
-        let uid = parse_imap_uid(&spec.message_id).ok_or_else(|| {
+        let uid = parse_imap_uid(&spec.remote_id).ok_or_else(|| {
             MailError::ImapError(format!(
-                "cannot parse an IMAP UID from message id '{}'",
-                spec.message_id
+                "cannot parse an IMAP UID from remote id '{}' (message '{}')",
+                spec.remote_id, spec.message_id
             ))
         })?;
 
@@ -831,7 +834,7 @@ impl ImapEngine {
 
         // Refuse to act unless the mailbox's current UIDVALIDITY provably
         // matches the one the stored UID was captured under.
-        let stored_validity = checkpoint_uid_validity(spec.folder_checkpoint.as_deref());
+        let stored_validity = parse_uid_validity(&spec.uid_validity);
         match (stored_validity, mailbox.uid_validity) {
             (Some(stored), Some(current)) if stored == current => {}
             (stored, current) => {
@@ -1575,23 +1578,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_imap_uid_recovers_uid_and_rejects_malformed_ids() {
-        assert_eq!(parse_imap_uid("imap-uid-42"), Some(42));
-        assert_eq!(parse_imap_uid("imap-uid-1"), Some(1));
-        // UID 0 is not a valid IMAP UID; a bare/foreign id yields nothing.
-        assert_eq!(parse_imap_uid("imap-uid-0"), None);
-        assert_eq!(parse_imap_uid("42"), None);
+    fn parse_imap_uid_recovers_uid_and_rejects_non_numeric_ids() {
+        assert_eq!(parse_imap_uid("42"), Some(42));
+        assert_eq!(parse_imap_uid(" 42 "), Some(42));
+        assert_eq!(parse_imap_uid("1"), Some(1));
+        // UID 0 is not a valid IMAP UID; a non-numeric/foreign id yields nothing.
+        assert_eq!(parse_imap_uid("0"), None);
+        assert_eq!(parse_imap_uid("imap-uid-42"), None);
         assert_eq!(parse_imap_uid("jmap-object-id"), None);
     }
 
     #[test]
-    fn checkpoint_uid_validity_extracts_only_a_well_formed_validity() {
-        assert_eq!(checkpoint_uid_validity(Some("7:105")), Some(7));
-        assert_eq!(checkpoint_uid_validity(Some(" 7 : 105 ")), Some(7));
-        assert_eq!(checkpoint_uid_validity(None), None);
-        // A legacy bare-number checkpoint carries no validity to compare.
-        assert_eq!(checkpoint_uid_validity(Some("105")), None);
-        assert_eq!(checkpoint_uid_validity(Some("x:105")), None);
+    fn parse_uid_validity_accepts_only_a_decimal_value() {
+        assert_eq!(parse_uid_validity("7"), Some(7));
+        assert_eq!(parse_uid_validity(" 7 "), Some(7));
+        assert_eq!(parse_uid_validity(""), None);
+        // The JMAP sentinel and a full checkpoint string are not a bare validity.
+        assert_eq!(parse_uid_validity("jmap"), None);
+        assert_eq!(parse_uid_validity("7:105"), None);
     }
 
     /// Drive a mutation over a scripted IMAP server (in-memory duplex),
@@ -1697,10 +1701,18 @@ mod tests {
     }
 
     fn imap_spec(kind: RemoteMutationKind, checkpoint: Option<&str>) -> RemoteMutationSpec {
+        // The tests express the captured scope as a "{uidvalidity}:{uidnext}"
+        // checkpoint string (mirroring how a sync stores it); the spec now
+        // carries just the UIDVALIDITY component the guard compares against.
+        let uid_validity = checkpoint
+            .and_then(|c| c.split(':').next())
+            .unwrap_or_default()
+            .to_string();
         RemoteMutationSpec {
-            message_id: "imap-uid-42".to_string(),
+            message_id: "surrogate-42".to_string(),
+            remote_id: "42".to_string(),
             folder_id: "INBOX".to_string(),
-            folder_checkpoint: checkpoint.map(str::to_string),
+            uid_validity,
             kind,
         }
     }

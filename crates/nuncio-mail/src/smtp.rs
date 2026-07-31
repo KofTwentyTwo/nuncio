@@ -329,6 +329,8 @@ mod tests {
             id: "msg-1".to_string(),
             account_id: "acct-1".to_string(),
             folder_id: "outbox".to_string(),
+            remote_id: "1".to_string(),
+            uid_validity: "1".to_string(),
             subject: "Status Update".to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),

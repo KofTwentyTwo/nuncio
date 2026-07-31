@@ -105,6 +105,8 @@ mod tests {
             id: id.to_string(),
             account_id: "acct-1".to_string(),
             folder_id: "inbox".to_string(),
+            remote_id: id.to_string(),
+            uid_validity: "1".to_string(),
             subject: subject.to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),

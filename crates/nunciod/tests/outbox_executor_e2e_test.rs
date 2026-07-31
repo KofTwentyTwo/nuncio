@@ -103,9 +103,11 @@ fn sample_account() -> nuncio_core::AccountConfig {
 
 fn sample_email(subject: &str) -> Email {
     Email {
-        id: "imap-uid-42".to_string(),
+        id: "surrogate-inbox-42".to_string(),
         account_id: ACCOUNT_ID.to_string(),
         folder_id: FOLDER_ID.to_string(),
+        remote_id: "42".to_string(),
+        uid_validity: "1".to_string(),
         subject: subject.to_string(),
         sender: "alice@nuncio.mx".to_string(),
         recipient: "owner@nuncio.mx".to_string(),
@@ -161,11 +163,13 @@ async fn move_rule_executes_against_backend_and_completes_with_uidvalidity_check
 
     let applied = env.backend.applied_mutations();
     assert_eq!(applied.len(), 1, "the backend op must genuinely run");
-    assert_eq!(applied[0].message_id, "imap-uid-42");
+    // Addressing is recovered from the stored row's columns, not by parsing the
+    // opaque surrogate id: the protocol-native UID and the UIDVALIDITY scope it
+    // was captured under, so the backend can enforce its guard.
+    assert_eq!(applied[0].message_id, "surrogate-inbox-42");
+    assert_eq!(applied[0].remote_id, "42");
     assert_eq!(applied[0].folder_id, FOLDER_ID);
-    // The source folder's stored checkpoint (carrying UIDVALIDITY) is threaded
-    // through so the backend can enforce its guard.
-    assert_eq!(applied[0].folder_checkpoint.as_deref(), Some(CHECKPOINT));
+    assert_eq!(applied[0].uid_validity, "1");
     assert_eq!(
         applied[0].kind,
         RemoteMutationKind::Move {

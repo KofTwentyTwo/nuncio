@@ -77,6 +77,8 @@ fn mock_inbound_email(id: &str, subject: &str, body: &str) -> Email {
         id: id.to_string(),
         account_id: ACCOUNT_ID.to_string(),
         folder_id: "inbox".to_string(),
+        remote_id: id.to_string(),
+        uid_validity: "1".to_string(),
         subject: subject.to_string(),
         sender: "alice@nuncio.mx".to_string(),
         recipient: ACCOUNT_EMAIL.to_string(),

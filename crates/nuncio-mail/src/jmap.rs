@@ -8,6 +8,14 @@ use serde_json::{json, Value};
 use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
 use crate::parser::MailError;
 
+/// Stand-in for the UIDVALIDITY scope on JMAP, which has no such concept: a
+/// JMAP Email object id is already globally stable within its account (RFC
+/// 8621), so a fixed sentinel keeps the surrogate-id computation uniform with
+/// IMAP without implying a UIDVALIDITY guard. The IMAP UIDVALIDITY guard treats
+/// this non-numeric value as "no validity to compare" and is never engaged for
+/// a JMAP mutation, which addresses messages by object id.
+const JMAP_UID_VALIDITY_SENTINEL: &str = "jmap";
+
 /// JMAP Session Object (RFC 8620 Section 2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -214,7 +222,9 @@ impl JmapEngine {
     /// `$flagged` keyword (`true` to set, `null` to clear), the JMAP equivalent
     /// of IMAP `\Flagged`.
     pub fn build_email_set_request(account_id: &str, spec: &RemoteMutationSpec) -> Value {
-        let id = &spec.message_id;
+        // Address the message by its protocol-native JMAP object id, never the
+        // opaque surrogate `message_id`.
+        let id = &spec.remote_id;
         let (update, destroy) = match &spec.kind {
             RemoteMutationKind::SetFlagged { value } => {
                 let keyword = if *value { json!(true) } else { Value::Null };
@@ -383,10 +393,23 @@ impl JmapEngine {
                     .map(|a| a.email.clone())
                     .unwrap_or_else(|| "me@nuncio.mx".to_string());
 
+                let folder_id = "inbox".to_string();
+                // The JMAP object id is the protocol-native id; the persisted
+                // id is an opaque surrogate hashed over it plus the account,
+                // folder, and (sentinel) scope so it stays uniform with IMAP.
+                let remote_id = item.id;
+                let id = Email::surrogate_id(
+                    &self.account_id,
+                    &folder_id,
+                    JMAP_UID_VALIDITY_SENTINEL,
+                    &remote_id,
+                );
                 Email {
-                    id: item.id,
+                    id,
                     account_id: self.account_id.clone(),
-                    folder_id: "inbox".to_string(),
+                    folder_id,
+                    remote_id,
+                    uid_validity: JMAP_UID_VALIDITY_SENTINEL.to_string(),
                     subject: item.subject.unwrap_or_else(|| "No Subject".to_string()),
                     sender,
                     recipient,
@@ -558,7 +581,7 @@ impl MailBackend for JmapEngine {
         let request = Self::build_email_set_request(&account_id, spec);
         let raw = self.post_jmap(&session.api_url, &request).await?;
         let expect_destroy = matches!(spec.kind, RemoteMutationKind::Delete);
-        Self::confirm_email_set_applied(&raw, &spec.message_id, expect_destroy)
+        Self::confirm_email_set_applied(&raw, &spec.remote_id, expect_destroy)
     }
 }
 
@@ -689,9 +712,10 @@ mod tests {
 
     fn spec(kind: RemoteMutationKind) -> RemoteMutationSpec {
         RemoteMutationSpec {
-            message_id: "m-1".to_string(),
+            message_id: "surrogate-m-1".to_string(),
+            remote_id: "m-1".to_string(),
             folder_id: "mb-inbox".to_string(),
-            folder_checkpoint: None,
+            uid_validity: JMAP_UID_VALIDITY_SENTINEL.to_string(),
             kind,
         }
     }

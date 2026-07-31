@@ -628,6 +628,8 @@ mod tests {
             id: id.to_string(),
             account_id: "acct-mock-1".to_string(),
             folder_id: folder_id.to_string(),
+            remote_id: id.to_string(),
+            uid_validity: "1".to_string(),
             subject: subject.to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
@@ -864,11 +866,16 @@ mod tests {
         // The wiremock stubs advertise 1 folder containing 1 message.
         assert_eq!(synced, 1);
 
+        // The message persists under an opaque surrogate id; it is recovered by
+        // folder, and its protocol-native JMAP object id round-trips in
+        // `remote_id`.
         let persisted = db
-            .get_message("jmap-msg-1")
+            .list_messages("inbox", 10)
             .await
             .expect("jmap message persisted");
-        assert_eq!(persisted.subject, "Welcome to JMAP Sync");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].subject, "Welcome to JMAP Sync");
+        assert_eq!(persisted[0].remote_id, "jmap-msg-1");
 
         assert_eq!(
             events.recv().await.expect("start event"),
