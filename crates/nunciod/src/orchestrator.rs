@@ -162,6 +162,7 @@ mod tests {
                 smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
                 keyring_secret_key: "nuncio/acct-orch-1".to_string(),
                 sync_interval_secs: 60,
+                collection_url: String::new(),
             };
             engine.save_account(&acct).await.unwrap();
             engine.close().await;

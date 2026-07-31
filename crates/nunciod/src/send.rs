@@ -243,6 +243,7 @@ mod tests {
             smtp_tls_mode: TlsMode::ImplicitTls,
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
+            collection_url: String::new(),
         }
     }
 
