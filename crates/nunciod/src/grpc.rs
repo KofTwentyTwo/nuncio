@@ -2283,6 +2283,73 @@ pub async fn serve_on_listener(
     .await
 }
 
+/// Binds a loopback TCP listener at `addr` exactly like [`serve`], but stops
+/// accepting new connections and begins draining in-flight requests as soon
+/// as `shutdown` resolves, instead of running until the transport errors.
+///
+/// `addr` MUST be a loopback address; see [`serve`].
+pub async fn serve_with_shutdown(
+    addr: &str,
+    event_bus: Arc<EventBus>,
+    db: Arc<DatabaseEngine>,
+    filter_engine: Arc<FilterEngine>,
+    secrets: Arc<SecretManager>,
+    token: impl Into<Arc<str>>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), GrpcServeError> {
+    let socket_addr = addr
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| GrpcServeError::NonLoopbackAddress(addr.to_string()))?;
+    if !socket_addr.ip().is_loopback() {
+        return Err(GrpcServeError::NonLoopbackAddress(addr.to_string()));
+    }
+
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|source| GrpcServeError::Bind {
+            addr: addr.to_string(),
+            source,
+        })?;
+    serve_on_listener_with_shutdown(
+        listener,
+        event_bus,
+        db,
+        filter_engine,
+        secrets,
+        token,
+        shutdown,
+    )
+    .await
+}
+
+/// Identical to [`serve_on_listener`], except the server stops accepting new
+/// connections and begins draining in-flight requests as soon as `shutdown`
+/// resolves.
+pub async fn serve_on_listener_with_shutdown(
+    listener: TcpListener,
+    event_bus: Arc<EventBus>,
+    db: Arc<DatabaseEngine>,
+    filter_engine: Arc<FilterEngine>,
+    secrets: Arc<SecretManager>,
+    token: impl Into<Arc<str>>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), GrpcServeError> {
+    serve_on_listener_with_overrides_and_shutdown(
+        listener,
+        event_bus,
+        db,
+        filter_engine,
+        secrets,
+        token,
+        MailEngineOverrides::default(),
+        CalendarEngineOverrides::default(),
+        ContactsEngineOverrides::default(),
+        AccountsEngineOverrides::default(),
+        shutdown,
+    )
+    .await
+}
+
 /// Identical to [`serve_on_listener`], except the `nuncio.v1.Mail` service's
 /// inbound sync and outbound send engines, the `nuncio.v1.Calendar`
 /// service's sync backend, and the `nuncio.v1.Contacts` service's sync
@@ -2306,6 +2373,45 @@ pub async fn serve_on_listener_with_overrides(
     calendar_overrides: CalendarEngineOverrides,
     contacts_overrides: ContactsEngineOverrides,
     accounts_overrides: AccountsEngineOverrides,
+) -> Result<(), GrpcServeError> {
+    // Delegates to the shutdown-aware variant with a shutdown future that
+    // never resolves, preserving this function's exact prior behavior (run
+    // until the transport itself errors) for every existing caller.
+    serve_on_listener_with_overrides_and_shutdown(
+        listener,
+        event_bus,
+        db,
+        filter_engine,
+        secrets,
+        token,
+        overrides,
+        calendar_overrides,
+        contacts_overrides,
+        accounts_overrides,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Identical to [`serve_on_listener_with_overrides`], except the server
+/// stops accepting new connections and begins draining in-flight requests
+/// as soon as `shutdown` resolves, instead of running until the transport
+/// errors. This is the function production actually calls (via
+/// [`serve_with_shutdown`]); [`serve_on_listener_with_overrides`] delegates
+/// here with a `shutdown` future that never resolves.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_on_listener_with_overrides_and_shutdown(
+    listener: TcpListener,
+    event_bus: Arc<EventBus>,
+    db: Arc<DatabaseEngine>,
+    filter_engine: Arc<FilterEngine>,
+    secrets: Arc<SecretManager>,
+    token: impl Into<Arc<str>>,
+    overrides: MailEngineOverrides,
+    calendar_overrides: CalendarEngineOverrides,
+    contacts_overrides: ContactsEngineOverrides,
+    accounts_overrides: AccountsEngineOverrides,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), GrpcServeError> {
     let token: Arc<str> = token.into();
 
@@ -2392,7 +2498,7 @@ pub async fn serve_on_listener_with_overrides(
         .add_service(audit_svc)
         .add_service(calendar_svc)
         .add_service(contacts_svc)
-        .serve_with_incoming(TcpListenerStream::new(listener))
+        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
         .await
         .map_err(GrpcServeError::Transport)
 }

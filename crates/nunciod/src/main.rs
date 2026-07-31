@@ -4,7 +4,16 @@
 
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
 use nuncio_filter::FilterEngine;
+use nunciod::lifecycle::{install_signal_handlers, ShutdownController};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Bound on how long shutdown waits for in-flight work (gRPC requests still
+/// being served, an outbox drain pass in progress, a background task's
+/// current loop iteration) to finish on its own before the process moves on
+/// to closing the database and exiting anyway. Keeps a stuck task from
+/// turning a graceful shutdown into a hang.
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -17,6 +26,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut event_bus_owned = EventBus::new();
     let command_rx = event_bus_owned.take_command_receiver();
     let event_bus = Arc::new(event_bus_owned);
+
+    // Single shutdown signal shared by every long-running task spawned
+    // below (the real-sync command consumer, the outbox worker, the
+    // update-check loop, and the gRPC server itself), so a Ctrl+C/SIGTERM
+    // drains all of them cleanly instead of the OS killing the process
+    // mid-write. `install_signal_handlers` also drives the existing
+    // `CoreCommand::Shutdown` / `CoreEvent::ShuttingDown` event-bus path,
+    // previously wired but never triggered outside tests.
+    let (shutdown_controller, shutdown_signal) = ShutdownController::new(event_bus.clone());
+    let shutdown_controller = Arc::new(shutdown_controller);
+    let signal_task = tokio::spawn(install_signal_handlers(shutdown_controller));
     // PERSISTENT database path: defaults to `~/.nuncio/nuncio.db` -- NOT a
     // temp/ephemeral path -- so accounts (and everything else) survive a
     // daemon restart.
@@ -52,13 +72,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // trigger_background_resync`'s post-recovery `send_command` calls a
     // consumer: previously nothing read this channel, so that resync
     // trigger was inert.
-    if let Some(mut command_rx) = command_rx {
+    let sync_command_task = if let Some(mut command_rx) = command_rx {
         let db_sync = db.clone();
         let secrets_sync = account_secrets.clone();
         let event_bus_sync = event_bus.clone();
         let filter_engine_sync = filter_engine.clone();
-        let _sync_command_task = tokio::spawn(async move {
-            while let Some(cmd) = command_rx.recv().await {
+        let mut shutdown = shutdown_signal.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                let cmd = tokio::select! {
+                    _ = shutdown.wait() => {
+                        tracing::info!("sync command consumer exiting on shutdown signal");
+                        break;
+                    }
+                    received = command_rx.recv() => match received {
+                        Some(cmd) => cmd,
+                        None => break,
+                    },
+                };
                 match cmd {
                     CoreCommand::SyncAll => {
                         let synced = nunciod::sync::run_all_accounts_sync(
@@ -93,12 +124,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     _ => {}
                 }
             }
-        });
+        }))
     } else {
         tracing::error!(
             "EventBus command receiver was already taken; real sync command processing will not run"
         );
-    }
+        None
+    };
 
     // Background Outbox Worker Task. Each tick drains the pending remote
     // mutations the filter engine enqueued (move/copy/flag/unflag/delete on the
@@ -112,20 +144,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         db.clone(),
         account_secrets.clone(),
     ));
-    let _outbox_task = tokio::spawn(async move {
+    let mut outbox_shutdown = shutdown_signal.clone();
+    let outbox_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
-            interval.tick().await;
-            let summary =
-                nunciod::outbox::execute_pending_mutations(&db_outbox, outbox_env.as_ref(), 50)
+            tokio::select! {
+                _ = outbox_shutdown.wait() => {
+                    tracing::info!("outbox worker exiting on shutdown signal");
+                    break;
+                }
+                _ = interval.tick() => {
+                    // Runs to completion once selected: a drain pass already
+                    // in progress is never aborted mid-write by a shutdown
+                    // signal that arrives after this branch was chosen.
+                    let summary = nunciod::outbox::execute_pending_mutations(
+                        &db_outbox,
+                        outbox_env.as_ref(),
+                        50,
+                    )
                     .await;
-            if summary.completed > 0 || summary.failed > 0 {
-                tracing::info!(
-                    "outbox drain: {} completed, {} retried, {} failed",
-                    summary.completed,
-                    summary.retried,
-                    summary.failed
-                );
+                    if summary.completed > 0 || summary.failed > 0 {
+                        tracing::info!(
+                            "outbox drain: {} completed, {} retried, {} failed",
+                            summary.completed,
+                            summary.retried,
+                            summary.failed
+                        );
+                    }
+                }
             }
         }
     });
@@ -138,21 +184,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // closed, nunciod must never autonomously check for or install
     // updates, so this loop only runs when an operator explicitly opts in
     // via `NUNCIO_AUTO_UPDATE_ENABLED=1`.
-    let _update_task = if nunciod::auto_update_task_enabled() {
+    let update_task = if nunciod::auto_update_task_enabled() {
         let event_bus_update = event_bus.clone();
+        let mut update_shutdown = shutdown_signal.clone();
         Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
             interval.tick().await;
             loop {
-                interval.tick().await;
-                if let Ok(updater) = nuncio_core::UpdateEngine::new() {
-                    if let Ok(result) = updater.check_for_updates().await {
-                        if result.update_available {
-                            if let Some(info) = result.release_info {
-                                event_bus_update.publish_event(CoreEvent::UpdateAvailable {
-                                    version: info.version,
-                                    release_notes: info.release_notes,
-                                });
+                tokio::select! {
+                    _ = update_shutdown.wait() => {
+                        tracing::info!("update-check loop exiting on shutdown signal");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        if let Ok(updater) = nuncio_core::UpdateEngine::new() {
+                            if let Ok(result) = updater.check_for_updates().await {
+                                if result.update_available {
+                                    if let Some(info) = result.release_info {
+                                        event_bus_update.publish_event(CoreEvent::UpdateAvailable {
+                                            version: info.version,
+                                            release_notes: info.release_notes,
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -192,17 +246,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // The gRPC server is the long-running foreground task that keeps this
     // process alive; every other subsystem above is a background worker
-    // spawned on top of it.
-    nunciod::grpc::serve(
-        &grpc_addr,
-        event_bus,
-        db,
-        filter_engine,
-        grpc_secrets,
-        grpc_token,
-    )
-    .await
-    .map_err(|e| format!("nunciod gRPC server failed: {e}"))?;
+    // spawned on top of it. `serve_with_shutdown` stops accepting new
+    // connections and starts draining in-flight requests as soon as
+    // `shutdown_signal` fires; the `select!` below bounds how long that
+    // drain is allowed to take before this process moves on regardless.
+    let db_for_serve = db.clone();
+    let mut grpc_shutdown_future = shutdown_signal.clone();
+    let mut grace_timer_signal = shutdown_signal.clone();
+    let grpc_result = tokio::select! {
+        result = nunciod::grpc::serve_with_shutdown(
+            &grpc_addr,
+            event_bus,
+            db_for_serve,
+            filter_engine,
+            grpc_secrets,
+            grpc_token,
+            async move { grpc_shutdown_future.wait().await },
+        ) => result,
+        _ = async move {
+            grace_timer_signal.wait().await;
+            tokio::time::sleep(SHUTDOWN_GRACE_PERIOD).await;
+        } => {
+            tracing::warn!(
+                "gRPC server did not finish draining in-flight requests within the {:?} \
+                 shutdown grace period; closing the database and exiting anyway",
+                SHUTDOWN_GRACE_PERIOD
+            );
+            Ok(())
+        }
+    };
+
+    // Bound how long the background workers get to notice the shutdown
+    // signal and exit their loops before the database is closed out from
+    // under them.
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, async {
+        if let Some(task) = sync_command_task {
+            let _ = task.await;
+        }
+        let _ = outbox_task.await;
+        if let Some(task) = update_task {
+            let _ = task.await;
+        }
+    })
+    .await;
+    signal_task.abort();
+
+    // Force the WAL checkpoint before the process exits so no committed
+    // page is left for SQLite's own deferred "last connection closes"
+    // teardown to race (see `DatabaseEngine::close`'s doc comment).
+    db.close().await;
+
+    grpc_result.map_err(|e| format!("nunciod gRPC server failed: {e}"))?;
 
     Ok(())
 }
