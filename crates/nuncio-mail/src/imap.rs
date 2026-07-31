@@ -31,6 +31,27 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// honest timeout rather than hanging the sync indefinitely.
 const FETCH_ITEM_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Upper bound on how many messages a single `UID FETCH` may pull full bodies
+/// for. A folder sync never issues one unbounded `UID FETCH <range>` that
+/// buffers every body at once; instead the messages in range are enumerated
+/// cheaply (UIDs + sizes, no bodies) and their bodies fetched in explicit
+/// UID-set batches of at most this many. This bounds the transient in-memory
+/// working set of full message bodies to a fixed window, so a mailbox with an
+/// enormous number of messages cannot drive the daemon to exhaust memory in a
+/// single fetch regardless of how many messages the server holds.
+const MAX_MESSAGES_PER_FETCH_BATCH: usize = 200;
+
+/// Upper bound on the RFC822 size (bytes) of a message whose full body the sync
+/// will pull into memory. The server reports each message's size via
+/// `RFC822.SIZE` during enumeration; a message above this bound is NOT fetched
+/// with its full body (which could be arbitrarily large and OOM the daemon).
+/// Instead only its headers are fetched and it is recorded with an empty body
+/// plus a WARN naming the UID and size, rather than being silently dropped or
+/// buffered whole. The bound matches the MIME parser's own maximum payload
+/// ([`MimeParserAdapter::MAX_PAYLOAD_BYTES`]): a body larger than the parser
+/// would ever accept is pointless to transfer only to reject.
+const MAX_MESSAGE_BODY_BYTES: u32 = 25 * 1024 * 1024;
+
 use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
 use crate::parser::{MailError, MimeParserAdapter};
 
@@ -189,6 +210,91 @@ pub fn build_tls_connector() -> Result<TlsConnector, MailError> {
 /// Helper function to build the IMAP fetch command query parameter string.
 pub fn build_fetch_command_query() -> &'static str {
     "(FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODY.PEEK[])"
+}
+
+/// The `UID FETCH` query for the cheap enumeration pass: UID plus `RFC822.SIZE`
+/// only, deliberately WITHOUT a `BODY.PEEK[]`. This lets the sync discover every
+/// message's UID and size (to decide per-message whether the body is safe to
+/// pull) without transferring any body, so the enumeration stays small even for
+/// a huge mailbox.
+fn build_enumerate_command_query() -> &'static str {
+    "(UID RFC822.SIZE)"
+}
+
+/// The `UID FETCH` query for a message whose body exceeds
+/// [`MAX_MESSAGE_BODY_BYTES`]: headers only (`BODY.PEEK[HEADER]`), never the
+/// full `BODY.PEEK[]`. The oversized body is intentionally left unfetched; the
+/// headers are enough to record honest metadata (subject, sender, date).
+fn build_headers_only_command_query() -> &'static str {
+    "(FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])"
+}
+
+/// Render an IMAP ENVELOPE address as `mailbox@host`, or bare `mailbox` when no
+/// host is present. Both components are decoded from their raw bytes lossily.
+/// Used only when a FETCH item carries an ENVELOPE but no body, so a minimal
+/// record can still name the sender/recipient.
+fn format_envelope_address(addr: &async_imap::imap_proto::Address) -> String {
+    let mailbox = addr
+        .mailbox
+        .as_ref()
+        .map_or("", |m| std::str::from_utf8(m).unwrap_or(""));
+    let host = addr
+        .host
+        .as_ref()
+        .map_or("", |h| std::str::from_utf8(h).unwrap_or(""));
+    if host.is_empty() {
+        mailbox.to_string()
+    } else {
+        format!("{}@{}", mailbox, host)
+    }
+}
+
+/// Render an explicit IMAP UID sequence-set from a batch of UIDs, e.g.
+/// `[12, 15, 18]` -> `"12,15,18"`. Used to fetch a bounded batch of specific
+/// messages rather than an open-ended `n:*` range.
+fn join_uid_batch(uids: &[u32]) -> String {
+    uids.iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Drive one already-issued `UID FETCH` response stream to completion,
+/// collecting its items. Every individual item read is bounded by
+/// [`FETCH_ITEM_TIMEOUT`]: a slow-but-progressing fetch is fine, but a single
+/// item that never arrives (dead socket, server-side hang) surfaces as an
+/// honest [`MailError::FetchStalled`] instead of hanging the sync. `read_so_far`
+/// is the count of messages already read across earlier batches, so the stall
+/// message reports the true progress.
+async fn drive_fetch_stream<St, E>(
+    stream: &mut St,
+    folder_id: &str,
+    read_so_far: usize,
+) -> Result<Vec<async_imap::types::Fetch>, MailError>
+where
+    St: tokio_stream::Stream<Item = Result<async_imap::types::Fetch, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    let mut items = Vec::new();
+    loop {
+        let next_item = tokio::time::timeout(FETCH_ITEM_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| {
+                MailError::FetchStalled(format!(
+                    "no FETCH response for folder '{}' within {}s ({} message(s) read so far)",
+                    folder_id,
+                    FETCH_ITEM_TIMEOUT.as_secs(),
+                    read_so_far + items.len()
+                ))
+            })?;
+        let Some(fetch_res) = next_item else {
+            break;
+        };
+        let fetch_data = fetch_res
+            .map_err(|e| MailError::ImapError(format!("failed reading fetch item: {}", e)))?;
+        items.push(fetch_data);
+    }
+    Ok(items)
 }
 
 /// Establish an encrypted TLS stream to an IMAP server.
@@ -586,6 +692,40 @@ impl ImapEngine {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
+        self.sync_folder_messages_batched(
+            folder_id,
+            since_state,
+            session,
+            MAX_MESSAGES_PER_FETCH_BATCH,
+        )
+        .await
+    }
+
+    /// Core folder sync, parameterised by the maximum number of messages whose
+    /// full bodies are pulled per `UID FETCH`. Production callers pass
+    /// [`MAX_MESSAGES_PER_FETCH_BATCH`]; the parameter is a seam so tests can
+    /// exercise the multi-batch path with a small window instead of a huge
+    /// fixture.
+    ///
+    /// The sync runs in two phases so the transient working set stays bounded
+    /// regardless of mailbox size:
+    /// 1. A cheap enumeration ([`build_enumerate_command_query`]) reads every
+    ///    in-range message's UID and `RFC822.SIZE` with NO body. Messages at or
+    ///    below [`MAX_MESSAGE_BODY_BYTES`] are queued for a full-body fetch;
+    ///    oversized ones are queued for a headers-only fetch and WARN-logged.
+    /// 2. Each queue is drained in explicit UID-set batches of at most
+    ///    `batch_size`, so the full bodies held in memory at once never exceed
+    ///    one batch.
+    async fn sync_folder_messages_batched<S>(
+        &self,
+        folder_id: &str,
+        since_state: Option<&str>,
+        session: &mut async_imap::Session<S>,
+        batch_size: usize,
+    ) -> Result<(Vec<Email>, String), MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
         let mailbox = session.select(folder_id).await.map_err(|e| {
             MailError::ImapError(format!("failed to select folder '{}': {}", folder_id, e))
         })?;
@@ -609,133 +749,93 @@ impl ImapEngine {
             FetchRange::Full | FetchRange::Incremental(_) => {}
         }
 
-        let query = build_fetch_command_query();
+        let batch_size = batch_size.max(1);
         let sequence_set = range.sequence_set();
-        let mut fetch_stream = session.uid_fetch(&sequence_set, query).await.map_err(|e| {
-            MailError::ImapError(format!(
-                "UID FETCH failed for folder '{}': {}",
-                folder_id, e
-            ))
-        })?;
 
-        let mut emails = Vec::new();
-        let mut max_uid_seen: u32 = 0;
-        loop {
-            // Bound EVERY individual item read: a slow-but-progressing large
-            // fetch is fine, but a single item that never arrives must surface
-            // as an honest `FetchStalled` instead of hanging the whole sync.
-            let next_item = tokio::time::timeout(FETCH_ITEM_TIMEOUT, fetch_stream.next())
+        // Phase 1: enumerate UIDs and sizes only -- no bodies transferred, so
+        // this stays small even for an enormous mailbox.
+        let enumeration = {
+            let mut enumerate_stream = session
+                .uid_fetch(&sequence_set, build_enumerate_command_query())
                 .await
-                .map_err(|_| {
-                    MailError::FetchStalled(format!(
-                        "no FETCH response for folder '{}' within {}s ({} message(s) read so far)",
-                        folder_id,
-                        FETCH_ITEM_TIMEOUT.as_secs(),
-                        emails.len()
+                .map_err(|e| {
+                    MailError::ImapError(format!(
+                        "UID FETCH (enumerate) failed for folder '{}': {}",
+                        folder_id, e
                     ))
                 })?;
-            let Some(fetch_res) = next_item else {
-                break;
+            drive_fetch_stream(&mut enumerate_stream, folder_id, 0).await?
+        };
+
+        let mut max_uid_seen: u32 = 0;
+        let mut body_uids: Vec<u32> = Vec::new();
+        let mut oversized_uids: Vec<u32> = Vec::new();
+        for item in &enumeration {
+            // A message with no UID cannot be addressed by a follow-up fetch,
+            // so it is skipped rather than issued a UID-less request.
+            let Some(uid) = item.uid.filter(|u| *u >= 1) else {
+                continue;
             };
-            let fetch_data = fetch_res
-                .map_err(|e| MailError::ImapError(format!("failed reading fetch item: {}", e)))?;
-
-            let uid_num = fetch_data.uid.unwrap_or(0);
-            max_uid_seen = max_uid_seen.max(uid_num);
-            // The message is addressed on the wire by its UID within the
-            // folder's UIDVALIDITY scope; the persisted id is an opaque
-            // surrogate hashed over both plus the account and folder, so the
-            // same UID in another folder/account can never collide.
-            let remote_id = uid_num.to_string();
-            let uid_validity = server_uid_validity
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            let email_id =
-                Email::surrogate_id(&self.account_id, folder_id, &uid_validity, &remote_id);
-
-            let is_read = fetch_data
-                .flags()
-                .any(|flag| matches!(flag, async_imap::types::Flag::Seen));
-
-            let email = if let Some(raw_bytes) = fetch_data.body() {
-                let mut email = MimeParserAdapter::parse_mime(
-                    &email_id,
-                    &self.account_id,
-                    folder_id,
-                    raw_bytes,
-                )?;
-                email.remote_id = remote_id;
-                email.uid_validity = uid_validity;
-                email.read = is_read;
-                email
-            } else {
-                let subject = fetch_data
-                    .envelope()
-                    .and_then(|env| env.subject.as_ref())
-                    .map_or("No Subject".to_string(), |s| {
-                        String::from_utf8_lossy(s).to_string()
-                    });
-
-                let sender = fetch_data
-                    .envelope()
-                    .and_then(|env| env.from.as_ref())
-                    .and_then(|froms| froms.first())
-                    .map_or("unknown@nuncio.mx".to_string(), |addr| {
-                        let mailbox = addr
-                            .mailbox
-                            .as_ref()
-                            .map_or("", |m| std::str::from_utf8(m).unwrap_or(""));
-                        let host = addr
-                            .host
-                            .as_ref()
-                            .map_or("", |h| std::str::from_utf8(h).unwrap_or(""));
-                        if host.is_empty() {
-                            mailbox.to_string()
-                        } else {
-                            format!("{}@{}", mailbox, host)
-                        }
-                    });
-
-                let recipient = fetch_data
-                    .envelope()
-                    .and_then(|env| env.to.as_ref())
-                    .and_then(|tos| tos.first())
-                    .map_or("me@nuncio.mx".to_string(), |addr| {
-                        let mailbox = addr
-                            .mailbox
-                            .as_ref()
-                            .map_or("", |m| std::str::from_utf8(m).unwrap_or(""));
-                        let host = addr
-                            .host
-                            .as_ref()
-                            .map_or("", |h| std::str::from_utf8(h).unwrap_or(""));
-                        if host.is_empty() {
-                            mailbox.to_string()
-                        } else {
-                            format!("{}@{}", mailbox, host)
-                        }
-                    });
-
-                let received_at = fetch_data.internal_date().map_or(0, |dt| dt.timestamp());
-
-                Email {
-                    id: email_id,
-                    account_id: self.account_id.clone(),
-                    folder_id: folder_id.to_string(),
-                    remote_id,
-                    uid_validity,
-                    subject,
-                    sender,
-                    recipient,
-                    received_at,
-                    read: is_read,
-                    body_plain: None,
-                    body_html: None,
-                    attachments: Vec::new(),
+            max_uid_seen = max_uid_seen.max(uid);
+            match item.size {
+                Some(size) if size > MAX_MESSAGE_BODY_BYTES => {
+                    tracing::warn!(
+                        folder_id,
+                        uid,
+                        size,
+                        max_body_bytes = MAX_MESSAGE_BODY_BYTES,
+                        "message body exceeds the per-message size cap; fetching headers only \
+                         and recording it with an empty body instead of buffering the full body"
+                    );
+                    oversized_uids.push(uid);
                 }
-            };
+                _ => body_uids.push(uid),
+            }
+        }
+        drop(enumeration);
 
-            emails.push(email);
+        let mut emails = Vec::new();
+
+        // Phase 2a: normal messages -- full bodies, in bounded UID-set batches.
+        for chunk in body_uids.chunks(batch_size) {
+            let set = join_uid_batch(chunk);
+            let items = {
+                let mut fetch_stream = session
+                    .uid_fetch(&set, build_fetch_command_query())
+                    .await
+                    .map_err(|e| {
+                    MailError::ImapError(format!(
+                        "UID FETCH failed for folder '{}': {}",
+                        folder_id, e
+                    ))
+                })?;
+                drive_fetch_stream(&mut fetch_stream, folder_id, emails.len()).await?
+            };
+            for item in &items {
+                emails.push(self.build_email_from_fetch(folder_id, server_uid_validity, item)?);
+            }
+        }
+
+        // Phase 2b: oversized messages -- headers only, recorded with an empty
+        // body. Also batched, so a run of oversized messages cannot itself
+        // buffer an unbounded number of header fetches at once.
+        for chunk in oversized_uids.chunks(batch_size) {
+            let set = join_uid_batch(chunk);
+            let items = {
+                let mut fetch_stream = session
+                    .uid_fetch(&set, build_headers_only_command_query())
+                    .await
+                    .map_err(|e| {
+                        MailError::ImapError(format!(
+                            "UID FETCH (headers) failed for folder '{}': {}",
+                            folder_id, e
+                        ))
+                    })?;
+                drive_fetch_stream(&mut fetch_stream, folder_id, emails.len()).await?
+            };
+            for item in &items {
+                emails.push(self.build_headers_only_email(folder_id, server_uid_validity, item));
+            }
         }
 
         // Derive the next checkpoint from real server state as
@@ -758,6 +858,137 @@ impl ImapEngine {
         };
 
         Ok((emails, new_checkpoint))
+    }
+
+    /// Build an [`Email`] from a full-body (or envelope-only) FETCH item. When
+    /// the item carries a `BODY[]` it is parsed as a full MIME message; when it
+    /// does not (a server that returned only the ENVELOPE), a minimal record is
+    /// synthesised from the envelope so the message is still surfaced honestly.
+    fn build_email_from_fetch(
+        &self,
+        folder_id: &str,
+        server_uid_validity: Option<u32>,
+        fetch_data: &async_imap::types::Fetch,
+    ) -> Result<Email, MailError> {
+        let uid_num = fetch_data.uid.unwrap_or(0);
+        // The message is addressed on the wire by its UID within the folder's
+        // UIDVALIDITY scope; the persisted id is an opaque surrogate hashed over
+        // both plus the account and folder, so the same UID in another
+        // folder/account can never collide.
+        let remote_id = uid_num.to_string();
+        let uid_validity = server_uid_validity
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let email_id = Email::surrogate_id(&self.account_id, folder_id, &uid_validity, &remote_id);
+
+        let is_read = fetch_data
+            .flags()
+            .any(|flag| matches!(flag, async_imap::types::Flag::Seen));
+
+        if let Some(raw_bytes) = fetch_data.body() {
+            let mut email =
+                MimeParserAdapter::parse_mime(&email_id, &self.account_id, folder_id, raw_bytes)?;
+            email.remote_id = remote_id;
+            email.uid_validity = uid_validity;
+            email.read = is_read;
+            return Ok(email);
+        }
+
+        let subject = fetch_data
+            .envelope()
+            .and_then(|env| env.subject.as_ref())
+            .map_or("No Subject".to_string(), |s| {
+                String::from_utf8_lossy(s).to_string()
+            });
+
+        let sender = fetch_data
+            .envelope()
+            .and_then(|env| env.from.as_ref())
+            .and_then(|froms| froms.first())
+            .map_or("unknown@nuncio.mx".to_string(), format_envelope_address);
+
+        let recipient = fetch_data
+            .envelope()
+            .and_then(|env| env.to.as_ref())
+            .and_then(|tos| tos.first())
+            .map_or("me@nuncio.mx".to_string(), format_envelope_address);
+
+        let received_at = fetch_data.internal_date().map_or(0, |dt| dt.timestamp());
+
+        Ok(Email {
+            id: email_id,
+            account_id: self.account_id.clone(),
+            folder_id: folder_id.to_string(),
+            remote_id,
+            uid_validity,
+            subject,
+            sender,
+            recipient,
+            received_at,
+            read: is_read,
+            body_plain: None,
+            body_html: None,
+            attachments: Vec::new(),
+        })
+    }
+
+    /// Build an [`Email`] for a message whose body exceeded
+    /// [`MAX_MESSAGE_BODY_BYTES`]: its headers (`BODY[HEADER]`) are parsed for
+    /// honest metadata (subject/sender/date) but the oversized body is left
+    /// unfetched, so the record carries an EMPTY body rather than a fabricated
+    /// one. If the server returned no header section, this falls back to the
+    /// envelope-only record; either way the message is surfaced, never dropped.
+    fn build_headers_only_email(
+        &self,
+        folder_id: &str,
+        server_uid_validity: Option<u32>,
+        fetch_data: &async_imap::types::Fetch,
+    ) -> Email {
+        let uid_num = fetch_data.uid.unwrap_or(0);
+        let remote_id = uid_num.to_string();
+        let uid_validity = server_uid_validity
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let email_id = Email::surrogate_id(&self.account_id, folder_id, &uid_validity, &remote_id);
+        let is_read = fetch_data
+            .flags()
+            .any(|flag| matches!(flag, async_imap::types::Flag::Seen));
+
+        if let Some(header_bytes) = fetch_data.header() {
+            if let Ok(mut email) =
+                MimeParserAdapter::parse_mime(&email_id, &self.account_id, folder_id, header_bytes)
+            {
+                // A headers-only parse yields no body, but be explicit that the
+                // oversized body was intentionally not fetched.
+                email.remote_id = remote_id;
+                email.uid_validity = uid_validity;
+                email.read = is_read;
+                email.body_plain = None;
+                email.body_html = None;
+                email.attachments = Vec::new();
+                return email;
+            }
+        }
+
+        // No usable header section: fall back to whatever the envelope offers.
+        // `build_email_from_fetch` cannot error on this path (no body to parse),
+        // but if it ever did, surface a minimal honest record rather than panic.
+        self.build_email_from_fetch(folder_id, server_uid_validity, fetch_data)
+            .unwrap_or_else(|_| Email {
+                id: email_id,
+                account_id: self.account_id.clone(),
+                folder_id: folder_id.to_string(),
+                remote_id,
+                uid_validity,
+                subject: "No Subject".to_string(),
+                sender: "unknown@nuncio.mx".to_string(),
+                recipient: "me@nuncio.mx".to_string(),
+                received_at: 0,
+                read: is_read,
+                body_plain: None,
+                body_html: None,
+                attachments: Vec::new(),
+            })
     }
 
     /// Fetch a folder's messages over a freshly authenticated session,
@@ -1423,6 +1654,279 @@ mod tests {
             !ranges[1].contains("1:*"),
             "second sync must NOT re-fetch full history, got: {}",
             ranges[1]
+        );
+    }
+
+    /// The RFC822 body of a scripted fixture message.
+    fn fixture_body(uid: u32) -> String {
+        format!(
+            "Subject: Message {uid}\r\nFrom: sender{uid}@example.test\r\n\
+             To: me@example.test\r\n\r\nBody of message {uid}.\r\n"
+        )
+    }
+
+    /// The header block (no body) of a scripted fixture message.
+    fn fixture_header(uid: u32) -> String {
+        format!(
+            "Subject: Message {uid}\r\nFrom: sender{uid}@example.test\r\n\
+             To: me@example.test\r\n\r\n"
+        )
+    }
+
+    /// Resolve which fixture UIDs a `UID FETCH` sequence-set token addresses. A
+    /// range `lo:*` selects every fixture UID `>= lo`; an explicit comma list
+    /// selects exactly those UIDs. Mirrors just enough server-side sequence-set
+    /// handling for the batched-fetch tests.
+    fn requested_uids(set: &str, all: &[(u32, u32)]) -> Vec<u32> {
+        if set.contains(':') {
+            let lo: u32 = set
+                .split(':')
+                .next()
+                .unwrap_or("1")
+                .trim()
+                .parse()
+                .unwrap_or(1);
+            all.iter().map(|(u, _)| *u).filter(|u| *u >= lo).collect()
+        } else {
+            set.split(',')
+                .filter_map(|s| s.trim().parse::<u32>().ok())
+                .filter(|u| all.iter().any(|(fu, _)| fu == u))
+                .collect()
+        }
+    }
+
+    /// Drive `sync_folder_messages_batched` over a scripted, in-memory IMAP
+    /// server that serves a fixed set of `(uid, size)` messages. The server
+    /// answers the enumeration pass (UID + RFC822.SIZE), full-body batches
+    /// (`BODY[]`), and headers-only batches (`BODY[HEADER]`) from the fixture,
+    /// and records every `UID FETCH` command line the client issued so a test
+    /// can assert on the exact batching. Returns the synced emails, the new
+    /// checkpoint, and the captured `UID FETCH` command lines.
+    async fn run_batched_sync(
+        messages: Vec<(u32, u32)>,
+        uidvalidity: u32,
+        uidnext: u32,
+        since_state: Option<String>,
+        batch_size: usize,
+    ) -> (Vec<Email>, String, Vec<String>) {
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let fetch_cmds = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server_cmds = fetch_cmds.clone();
+        let exists = messages.len() as u32;
+
+        let server = tokio::spawn(async move {
+            let mut io = server_io;
+            while let Some(line) = read_scripted_line(&mut io).await {
+                let tag = line.split_whitespace().next().unwrap_or("").to_string();
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("UID FETCH") {
+                    if let Ok(mut g) = server_cmds.lock() {
+                        g.push(line.clone());
+                    }
+                    let set = line.split_whitespace().nth(3).unwrap_or("").to_string();
+                    let uids = requested_uids(&set, &messages);
+                    let mut resp = String::new();
+                    for uid in uids {
+                        let size = messages
+                            .iter()
+                            .find(|(u, _)| *u == uid)
+                            .map_or(0, |(_, s)| *s);
+                        if upper.contains("BODY.PEEK[HEADER]") {
+                            let hdr = fixture_header(uid);
+                            resp.push_str(&format!(
+                                "* {uid} FETCH (UID {uid} RFC822.SIZE {size} FLAGS (\\Seen) \
+                                 BODY[HEADER] {{{}}}\r\n{hdr})\r\n",
+                                hdr.len()
+                            ));
+                        } else if upper.contains("BODY.PEEK[]") {
+                            let body = fixture_body(uid);
+                            resp.push_str(&format!(
+                                "* {uid} FETCH (UID {uid} RFC822.SIZE {size} FLAGS (\\Seen) \
+                                 BODY[] {{{}}}\r\n{body})\r\n",
+                                body.len()
+                            ));
+                        } else {
+                            // Enumeration pass: UID + size only, no body.
+                            resp.push_str(&format!(
+                                "* {uid} FETCH (UID {uid} RFC822.SIZE {size})\r\n"
+                            ));
+                        }
+                    }
+                    resp.push_str(&format!("{tag} OK FETCH completed\r\n"));
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("LOGIN") {
+                    let _ = io
+                        .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("SELECT") {
+                    let resp = format!(
+                        "* FLAGS (\\Seen)\r\n* {exists} EXISTS\r\n* 0 RECENT\r\n\
+                         * OK [UIDVALIDITY {uidvalidity}] ok\r\n* OK [UIDNEXT {uidnext}] ok\r\n\
+                         {tag} OK [READ-WRITE] SELECT done\r\n"
+                    );
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("LOGOUT") {
+                    let _ = io
+                        .write_all(format!("* BYE\r\n{tag} OK LOGOUT\r\n").as_bytes())
+                        .await;
+                    break;
+                }
+            }
+        });
+
+        let client = async_imap::Client::new(client_io);
+        let mut session = client
+            .login("user", "pass")
+            .await
+            .map_err(|(e, _)| e)
+            .expect("scripted login succeeds");
+        let engine = ImapEngine::new("acct-1", "example.test", 993);
+        let (emails, checkpoint) = engine
+            .sync_folder_messages_batched("INBOX", since_state.as_deref(), &mut session, batch_size)
+            .await
+            .expect("batched sync succeeds");
+        drop(session);
+        let _ = server.await;
+
+        let cmds = fetch_cmds.lock().expect("lock captured commands").clone();
+        (emails, checkpoint, cmds)
+    }
+
+    /// The captured `UID FETCH` command lines that pulled FULL bodies (a
+    /// `BODY.PEEK[]`, not the headers-only `BODY.PEEK[HEADER]` nor the
+    /// bodyless enumeration).
+    fn body_fetch_commands(cmds: &[String]) -> Vec<&String> {
+        cmds.iter()
+            .filter(|c| {
+                let u = c.to_ascii_uppercase();
+                u.contains("BODY.PEEK[]") && !u.contains("BODY.PEEK[HEADER]")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_large_folder_is_fetched_across_multiple_bounded_batches() {
+        // Five messages with a batch window of two must be pulled across
+        // multiple bounded `UID FETCH` batches -- never a single unbounded
+        // `1:*` body fetch. The enumeration discovers the UIDs; the bodies are
+        // then fetched in explicit UID-set chunks of at most the batch size.
+        let messages: Vec<(u32, u32)> = (1..=5).map(|u| (u, 100)).collect();
+        let (emails, checkpoint, cmds) = run_batched_sync(messages, 1, 6, None, 2).await;
+
+        assert_eq!(emails.len(), 5, "every message must be synced");
+        assert_eq!(checkpoint, "1:6");
+
+        let body_cmds = body_fetch_commands(&cmds);
+        assert_eq!(
+            body_cmds.len(),
+            3,
+            "5 messages / batch of 2 => 3 bounded body fetches, got: {cmds:?}"
+        );
+        for cmd in &body_cmds {
+            assert!(
+                !cmd.contains("1:*") && !cmd.contains(":*"),
+                "a body fetch must be a bounded UID set, never an open range: {cmd}"
+            );
+            let set = cmd.split_whitespace().nth(3).unwrap_or("");
+            let count = set.split(',').count();
+            assert!(
+                count <= 2,
+                "each body fetch must carry at most the batch size (2) UIDs, got: {cmd}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oversized_message_is_fetched_headers_only_not_buffered_whole() {
+        // Three messages where the middle one reports an RFC822.SIZE above the
+        // per-message cap. Its full body MUST NOT be requested; instead it is
+        // fetched headers-only and recorded with an empty body, while the two
+        // normal messages get full bodies.
+        let huge = MAX_MESSAGE_BODY_BYTES + 1;
+        let messages: Vec<(u32, u32)> = vec![(1, 100), (2, huge), (3, 100)];
+        let (emails, _checkpoint, cmds) = run_batched_sync(messages, 1, 4, None, 200).await;
+
+        assert_eq!(emails.len(), 3, "no message may be silently dropped");
+
+        // The oversized UID (2) must NEVER appear in a full-body fetch.
+        for cmd in body_fetch_commands(&cmds) {
+            let set = cmd.split_whitespace().nth(3).unwrap_or("");
+            assert!(
+                !set.split(',').any(|u| u.trim() == "2"),
+                "the oversized message's full body must never be fetched, got: {cmd}"
+            );
+        }
+        // It MUST be fetched headers-only.
+        assert!(
+            cmds.iter().any(|c| {
+                let u = c.to_ascii_uppercase();
+                u.contains("BODY.PEEK[HEADER]") && c.split_whitespace().nth(3).unwrap_or("") == "2"
+            }),
+            "the oversized message must be fetched headers-only, got: {cmds:?}"
+        );
+
+        // The oversized message is recorded with honest metadata and an EMPTY
+        // body -- never a fabricated one.
+        let oversized = emails
+            .iter()
+            .find(|e| e.remote_id == "2")
+            .expect("oversized message must be present");
+        assert!(
+            oversized.body_plain.is_none() && oversized.body_html.is_none(),
+            "oversized message must carry no body, got: {oversized:?}"
+        );
+        assert!(
+            oversized.subject.contains('2'),
+            "oversized message must keep honest header metadata, got: {oversized:?}"
+        );
+
+        // The normal messages DID get full bodies.
+        for uid in ["1", "3"] {
+            let email = emails
+                .iter()
+                .find(|e| e.remote_id == uid)
+                .expect("normal message present");
+            assert!(
+                email.body_plain.is_some(),
+                "normal message {uid} must have a body, got: {email:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn batched_sync_preserves_incremental_checkpointing() {
+        // Batching must not break the incremental checkpoint: a first sync
+        // records "{uidvalidity}:{uidnext}", and a second sync fed that
+        // checkpoint enumerates only the narrowed `{uidnext}:*` range (so a
+        // fire-once-per-new-message consumer never re-sees old mail).
+        let messages: Vec<(u32, u32)> = (1..=3).map(|u| (u, 100)).collect();
+        let (first, checkpoint, first_cmds) =
+            run_batched_sync(messages.clone(), 1, 4, None, 2).await;
+        assert_eq!(first.len(), 3);
+        assert_eq!(checkpoint, "1:4");
+        assert!(
+            first_cmds.iter().any(|c| c.contains("1:*")),
+            "first sync enumerates the full range, got: {first_cmds:?}"
+        );
+
+        let (second, checkpoint2, second_cmds) =
+            run_batched_sync(messages, 1, 4, Some(checkpoint.clone()), 2).await;
+        assert_eq!(
+            second.len(),
+            0,
+            "no new mail arrived, so an incremental sync returns nothing"
+        );
+        assert_eq!(
+            checkpoint2, "1:4",
+            "checkpoint stays stable across an empty pass"
+        );
+        assert!(
+            second_cmds.iter().any(|c| c.contains("4:*")),
+            "second sync must enumerate the narrowed range, got: {second_cmds:?}"
+        );
+        assert!(
+            !second_cmds.iter().any(|c| c.contains("1:*")),
+            "second sync must NOT re-enumerate the full range, got: {second_cmds:?}"
         );
     }
 
