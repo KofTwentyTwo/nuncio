@@ -226,7 +226,8 @@ async fn full_mail_spine_round_trips_over_authenticated_grpc_with_mocked_protoco
     let list_messages_response = mail_client
         .list_messages(ListMessagesRequest {
             folder_id: "inbox".to_string(),
-            limit: 0,
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list_messages succeeds")

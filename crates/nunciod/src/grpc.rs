@@ -5,6 +5,7 @@
 //!
 //! This is the daemon's sole client-facing transport.
 
+use crate::pagination::{self, CursorField};
 use nuncio_cal::CalendarBackend;
 use nuncio_contacts::ContactsBackend;
 use nuncio_core::{CoreCommand, CoreEvent, EventBus};
@@ -745,10 +746,6 @@ impl Accounts for AccountsGrpcService {
     }
 }
 
-/// Default cap on messages returned by `ListMessages` when the caller
-/// supplies `limit: 0` ("use the server default").
-const DEFAULT_LIST_MESSAGES_LIMIT: usize = 50;
-
 /// Maps a `nuncio_core::model::Attachment` onto its wire-format
 /// `nuncio.v1.Attachment` representation.
 fn map_attachment_to_proto(attachment: nuncio_core::model::Attachment) -> AttachmentProto {
@@ -1083,6 +1080,11 @@ impl Calendar for CalendarGrpcService {
         }
         let start_window = require_window_bound(req.start_window, "start_window")?;
         let end_window = require_window_bound(req.end_window, "end_window")?;
+        let page_size = pagination::clamp_page_size(req.page_size);
+        let after = pagination::parse_token(&req.page_token, |f| match f {
+            [CursorField::I(ts), CursorField::S(id)] => Some((*ts, id.clone())),
+            _ => None,
+        })?;
 
         let all_in_window = self
             .db
@@ -1101,12 +1103,45 @@ impl Calendar for CalendarGrpcService {
 
         events.retain(|e| req.calendar_id.is_empty() || e.calendar_id == req.calendar_id);
 
+        // Recurrence expansion materializes the result set in memory, so keyset
+        // pagination is applied to the sorted expanded list here rather than at
+        // the store. Each occurrence has a distinct `(start_time, id)` (an
+        // occurrence shares its master's id but never its start time), so the
+        // pair is a stable, unique keyset over the whole set.
+        events.sort_by(|a, b| {
+            a.start_time
+                .cmp(&b.start_time)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        if let Some((ts, id)) = &after {
+            events.retain(|e| e.start_time > *ts || (e.start_time == *ts && e.id > *id));
+        }
+
+        let has_more = events.len() > page_size;
+        events.truncate(page_size);
+        let next_page_token = if has_more {
+            events
+                .last()
+                .map(|e| {
+                    pagination::encode_cursor(&[
+                        CursorField::I(e.start_time),
+                        CursorField::S(e.id.clone()),
+                    ])
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         let events = events
             .into_iter()
             .map(map_calendar_event_to_proto)
             .collect();
 
-        Ok(Response::new(ListEventsResponse { events }))
+        Ok(Response::new(ListEventsResponse {
+            events,
+            next_page_token,
+        }))
     }
 
     async fn get_event(
@@ -1212,17 +1247,35 @@ impl Contacts for ContactsGrpcService {
         if req.account_id.is_empty() {
             return Err(Status::invalid_argument("account_id is required"));
         }
+        let page_size = pagination::clamp_page_size(req.page_size);
+        let after = pagination::parse_token(&req.page_token, |f| match f {
+            [CursorField::I(ic), CursorField::S(dn), CursorField::S(id)] => {
+                Some((*ic, dn.clone(), id.clone()))
+            }
+            _ => None,
+        })?;
 
-        let contacts = self
+        let (contacts, next) = self
             .db
-            .list_contacts(&req.account_id)
+            .list_contacts_page(&req.account_id, after, page_size)
             .await
-            .map_err(|e| Status::internal(format!("failed to list contacts: {e}")))?
-            .into_iter()
-            .map(map_contact_to_proto)
-            .collect();
+            .map_err(|e| Status::internal(format!("failed to list contacts: {e}")))?;
 
-        Ok(Response::new(ListContactsResponse { contacts }))
+        let next_page_token = next
+            .map(|(ic, dn, id)| {
+                pagination::encode_cursor(&[
+                    CursorField::I(ic),
+                    CursorField::S(dn),
+                    CursorField::S(id),
+                ])
+            })
+            .unwrap_or_default();
+        let contacts = contacts.into_iter().map(map_contact_to_proto).collect();
+
+        Ok(Response::new(ListContactsResponse {
+            contacts,
+            next_page_token,
+        }))
     }
 
     async fn get_contact(
@@ -1364,18 +1417,30 @@ struct MailGrpcService {
 impl Mail for MailGrpcService {
     async fn list_folders(
         &self,
-        _request: Request<ListFoldersRequest>,
+        request: Request<ListFoldersRequest>,
     ) -> Result<Response<ListFoldersResponse>, Status> {
-        let folders = self
-            .db
-            .list_folders()
-            .await
-            .map_err(|e| Status::internal(format!("failed to list folders: {e}")))?
-            .into_iter()
-            .map(map_folder_to_proto)
-            .collect();
+        let req = request.into_inner();
+        let page_size = pagination::clamp_page_size(req.page_size);
+        let after = pagination::parse_token(&req.page_token, |f| match f {
+            [CursorField::S(id)] => Some(id.clone()),
+            _ => None,
+        })?;
 
-        Ok(Response::new(ListFoldersResponse { folders }))
+        let (folders, next) = self
+            .db
+            .list_folders_page(after, page_size)
+            .await
+            .map_err(|e| Status::internal(format!("failed to list folders: {e}")))?;
+
+        let next_page_token = next
+            .map(|id| pagination::encode_cursor(&[CursorField::S(id)]))
+            .unwrap_or_default();
+        let folders = folders.into_iter().map(map_folder_to_proto).collect();
+
+        Ok(Response::new(ListFoldersResponse {
+            folders,
+            next_page_token,
+        }))
     }
 
     async fn list_messages(
@@ -1386,22 +1451,27 @@ impl Mail for MailGrpcService {
         if req.folder_id.is_empty() {
             return Err(Status::invalid_argument("folder_id is required"));
         }
-        let limit = if req.limit == 0 {
-            DEFAULT_LIST_MESSAGES_LIMIT
-        } else {
-            req.limit as usize
-        };
+        let page_size = pagination::clamp_page_size(req.page_size);
+        let after = pagination::parse_token(&req.page_token, |f| match f {
+            [CursorField::I(ts), CursorField::S(id)] => Some((*ts, id.clone())),
+            _ => None,
+        })?;
 
-        let messages = self
+        let (messages, next) = self
             .db
-            .list_messages(&req.folder_id, limit)
+            .list_messages_page(&req.folder_id, after, page_size)
             .await
-            .map_err(|e| Status::internal(format!("failed to list messages: {e}")))?
-            .into_iter()
-            .map(map_email_to_proto)
-            .collect();
+            .map_err(|e| Status::internal(format!("failed to list messages: {e}")))?;
 
-        Ok(Response::new(ListMessagesResponse { messages }))
+        let next_page_token = next
+            .map(|(ts, id)| pagination::encode_cursor(&[CursorField::I(ts), CursorField::S(id)]))
+            .unwrap_or_default();
+        let messages = messages.into_iter().map(map_email_to_proto).collect();
+
+        Ok(Response::new(ListMessagesResponse {
+            messages,
+            next_page_token,
+        }))
     }
 
     async fn get_message(
@@ -1467,11 +1537,24 @@ impl Mail for MailGrpcService {
         request: Request<SearchMessagesRequest>,
     ) -> Result<Response<SearchMessagesResponse>, Status> {
         let req = request.into_inner();
+        let page_size = pagination::clamp_page_size(req.page_size);
+        let after = pagination::parse_token(&req.page_token, |f| match f {
+            [CursorField::F(rank), CursorField::S(id)] => Some((*rank, id.clone())),
+            _ => None,
+        })?;
+
         let search = SearchEngine::new(&self.db);
-        let hits = search
-            .search_messages(&req.query)
+        let (hits, next) = search
+            .search_messages_page(&req.query, after, page_size)
             .await
-            .map_err(|e| Status::internal(format!("search failed: {e}")))?
+            .map_err(|e| Status::internal(format!("search failed: {e}")))?;
+
+        let next_page_token = next
+            .map(|(rank, id)| {
+                pagination::encode_cursor(&[CursorField::F(rank), CursorField::S(id)])
+            })
+            .unwrap_or_default();
+        let hits = hits
             .into_iter()
             .map(|hit| MessageSearchHit {
                 id: hit.id,
@@ -1480,7 +1563,10 @@ impl Mail for MailGrpcService {
             })
             .collect();
 
-        Ok(Response::new(SearchMessagesResponse { hits }))
+        Ok(Response::new(SearchMessagesResponse {
+            hits,
+            next_page_token,
+        }))
     }
 
     /// SendMessage composes and sends a real outbound email over SMTP via
@@ -1753,18 +1839,32 @@ impl Filters for FiltersGrpcService {
 
     async fn list_rules(
         &self,
-        _request: Request<ListRulesRequest>,
+        request: Request<ListRulesRequest>,
     ) -> Result<Response<ListRulesResponse>, Status> {
-        let rules = self
-            .db
-            .list_filter_rules()
-            .await
-            .map_err(|e| Status::internal(format!("failed to list filter rules: {e}")))?
-            .into_iter()
-            .map(map_filter_rule_to_proto)
-            .collect();
+        let req = request.into_inner();
+        let page_size = pagination::clamp_page_size(req.page_size);
+        let after = pagination::parse_token(&req.page_token, |f| match f {
+            [CursorField::I(priority), CursorField::S(id)] => Some((*priority as i32, id.clone())),
+            _ => None,
+        })?;
 
-        Ok(Response::new(ListRulesResponse { rules }))
+        let (rules, next) = self
+            .db
+            .list_filter_rules_page(after, page_size)
+            .await
+            .map_err(|e| Status::internal(format!("failed to list filter rules: {e}")))?;
+
+        let next_page_token = next
+            .map(|(priority, id)| {
+                pagination::encode_cursor(&[CursorField::I(priority as i64), CursorField::S(id)])
+            })
+            .unwrap_or_default();
+        let rules = rules.into_iter().map(map_filter_rule_to_proto).collect();
+
+        Ok(Response::new(ListRulesResponse {
+            rules,
+            next_page_token,
+        }))
     }
 
     async fn delete_rule(
@@ -2178,8 +2278,6 @@ impl Export for ExportGrpcService {
 
 /// Default cap on records returned by `Audit/ListRecords` when the caller
 /// supplies `limit: 0` ("use the server default").
-const DEFAULT_LIST_RECORDS_LIMIT: u32 = 100;
-
 /// Maps a `nuncio_core::WormAuditRecord` onto its wire-format
 /// `nuncio.v1.AuditRecord` representation. `record_hmac` is a verification
 /// MAC output, never the WORM HMAC signing key itself -- see the message's
@@ -2214,22 +2312,27 @@ impl Audit for AuditGrpcService {
         request: Request<ListRecordsRequest>,
     ) -> Result<Response<ListRecordsResponse>, Status> {
         let req = request.into_inner();
-        let limit = if req.limit == 0 {
-            DEFAULT_LIST_RECORDS_LIMIT
-        } else {
-            req.limit
-        };
+        let page_size = pagination::clamp_page_size(req.page_size);
+        let after = pagination::parse_token(&req.page_token, |f| match f {
+            [CursorField::U(seq)] => Some(*seq),
+            _ => None,
+        })?;
 
-        let records = self
+        let (records, next) = self
             .db
-            .list_worm_audit_records(limit, req.offset)
+            .list_worm_audit_records_page(after, page_size)
             .await
-            .map_err(|e| Status::internal(format!("failed to list audit records: {e}")))?
-            .into_iter()
-            .map(map_audit_record_to_proto)
-            .collect();
+            .map_err(|e| Status::internal(format!("failed to list audit records: {e}")))?;
 
-        Ok(Response::new(ListRecordsResponse { records }))
+        let next_page_token = next
+            .map(|seq| pagination::encode_cursor(&[CursorField::U(seq)]))
+            .unwrap_or_default();
+        let records = records.into_iter().map(map_audit_record_to_proto).collect();
+
+        Ok(Response::new(ListRecordsResponse {
+            records,
+            next_page_token,
+        }))
     }
 
     /// Re-verifies the ENTIRE persisted WORM audit ledger via
@@ -3721,6 +3824,110 @@ mod tests {
         }
     }
 
+    /// Paging a folder larger than `page_size` across multiple pages via
+    /// `next_page_token` must return every message EXACTLY ONCE, with no
+    /// duplicates and no gaps, and in the stable newest-first keyset order
+    /// (`received_at DESC, id DESC`). Some messages deliberately share a
+    /// `received_at` so the `(received_at, id)` tiebreaker is exercised across
+    /// a page boundary.
+    #[tokio::test]
+    async fn list_messages_keyset_pagination_returns_every_message_once_no_gaps() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let seed = [
+            ("m1", 1_700_000_000_i64),
+            ("m2", 1_700_000_000),
+            ("m3", 1_700_000_010),
+            ("m4", 1_700_000_010),
+            ("m5", 1_700_000_020),
+            ("m6", 1_700_000_030),
+            ("m7", 1_700_000_030),
+        ];
+        for (id, ts) in seed {
+            let mut email = sample_email(id, "inbox", "subject", "body");
+            email.received_at = ts;
+            db.save_email(&email).await.expect("seed message");
+        }
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let mut seen = Vec::new();
+        let mut page_token = String::new();
+        let mut pages = 0;
+        loop {
+            let resp = client
+                .list_messages(authed_bearer_request(ListMessagesRequest {
+                    folder_id: "inbox".to_string(),
+                    page_size: 2,
+                    page_token: page_token.clone(),
+                }))
+                .await
+                .expect("list_messages page succeeds")
+                .into_inner();
+            pages += 1;
+            assert!(
+                resp.messages.len() <= 2,
+                "a page must never exceed the requested page_size"
+            );
+            seen.extend(resp.messages.iter().map(|m| m.id.clone()));
+            if resp.next_page_token.is_empty() {
+                break;
+            }
+            page_token = resp.next_page_token;
+            assert!(pages < 100, "pagination must terminate");
+        }
+
+        // Every seeded message appears exactly once (no dupes, no gaps), in
+        // the stable newest-first order including the id tiebreaker.
+        assert_eq!(
+            seen,
+            vec!["m7", "m6", "m5", "m4", "m3", "m2", "m1"],
+            "keyset paging must yield the full set once, newest-first"
+        );
+        assert!(pages >= 4, "a 7-item set at page_size 2 must span >1 page");
+    }
+
+    /// A `page_token` the server cannot decode is rejected with a typed
+    /// `VALIDATION_FAILED` `ErrorInfo` mapped to `InvalidArgument` -- never a
+    /// panic and never a silently-empty first page.
+    #[tokio::test]
+    async fn list_messages_rejects_malformed_page_token() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+        let mut client = MailClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let err = client
+            .list_messages(authed_bearer_request(ListMessagesRequest {
+                folder_id: "inbox".to_string(),
+                page_size: 2,
+                page_token: "not-a-valid-cursor".to_string(),
+            }))
+            .await
+            .expect_err("a malformed page_token must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(
+            nuncio_proto::errors::error_reason(&err),
+            Some(ErrorReason::ValidationFailed),
+            "malformed page_token must carry a typed VALIDATION_FAILED reason"
+        );
+    }
+
     #[tokio::test]
     async fn mail_rpcs_reject_missing_bearer_token() {
         // Confirms `Mail` is mounted behind its own `BearerAuthInterceptor`
@@ -3733,7 +3940,10 @@ mod tests {
             .expect("client connects");
 
         let err = client
-            .list_folders(ListFoldersRequest {})
+            .list_folders(ListFoldersRequest {
+                page_size: 0,
+                page_token: String::new(),
+            })
             .await
             .expect_err("missing bearer token must be rejected");
         assert_eq!(err.code(), Code::Unauthenticated);
@@ -3741,7 +3951,8 @@ mod tests {
         let err = client
             .list_messages(ListMessagesRequest {
                 folder_id: "inbox".to_string(),
-                limit: 10,
+                page_size: 10,
+                page_token: String::new(),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -3767,6 +3978,8 @@ mod tests {
         let err = client
             .search_messages(SearchMessagesRequest {
                 query: "hello".to_string(),
+                page_size: 0,
+                page_token: String::new(),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -3814,6 +4027,8 @@ mod tests {
                 calendar_id: "cal-1".to_string(),
                 start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
                 end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
+                page_size: 0,
+                page_token: String::new(),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -3885,7 +4100,8 @@ mod tests {
         let err = client
             .list_messages(authed_bearer_request(ListMessagesRequest {
                 folder_id: String::new(),
-                limit: 10,
+                page_size: 10,
+                page_token: String::new(),
             }))
             .await
             .expect_err("empty folder_id must be rejected");
@@ -3942,7 +4158,10 @@ mod tests {
 
         // ListFolders reports the seeded folder with the right counts.
         let folders = client
-            .list_folders(authed_bearer_request(ListFoldersRequest {}))
+            .list_folders(authed_bearer_request(ListFoldersRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_folders succeeds")
             .into_inner()
@@ -3956,7 +4175,8 @@ mod tests {
         let messages = client
             .list_messages(authed_bearer_request(ListMessagesRequest {
                 folder_id: "inbox".to_string(),
-                limit: 10,
+                page_size: 10,
+                page_token: String::new(),
             }))
             .await
             .expect("list_messages succeeds")
@@ -3988,6 +4208,8 @@ mod tests {
         let hits = client
             .search_messages(authed_bearer_request(SearchMessagesRequest {
                 query: "revenue".to_string(),
+                page_size: 0,
+                page_token: String::new(),
             }))
             .await
             .expect("search_messages succeeds")
@@ -4513,7 +4735,10 @@ mod tests {
         assert_eq!(err.code(), Code::Unauthenticated);
 
         let err = client
-            .list_rules(ListRulesRequest {})
+            .list_rules(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            })
             .await
             .expect_err("missing bearer token must be rejected");
         assert_eq!(err.code(), Code::Unauthenticated);
@@ -4639,7 +4864,10 @@ mod tests {
 
         // ListRules reflects the persisted rule.
         let list_response = client
-            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .list_rules(authed_bearer_request(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_rules succeeds")
             .into_inner();
@@ -4655,7 +4883,10 @@ mod tests {
             .expect("delete_rule succeeds");
 
         let list_after_delete = client
-            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .list_rules(authed_bearer_request(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_rules succeeds")
             .into_inner();
@@ -4685,7 +4916,10 @@ mod tests {
         assert_eq!(err.code(), Code::InvalidArgument);
 
         let list_response = client
-            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .list_rules(authed_bearer_request(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_rules succeeds")
             .into_inner();
@@ -4756,7 +4990,10 @@ mod tests {
         );
 
         let list_response = client
-            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .list_rules(authed_bearer_request(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_rules succeeds")
             .into_inner();
@@ -4821,7 +5058,10 @@ mod tests {
 
         // Nothing was persisted by either validation call.
         let list_response = client
-            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .list_rules(authed_bearer_request(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_rules succeeds")
             .into_inner();
@@ -4889,7 +5129,10 @@ mod tests {
 
         // Previewing must never persist the rule.
         let list_response = client
-            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .list_rules(authed_bearer_request(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_rules succeeds")
             .into_inner();
@@ -4998,7 +5241,10 @@ mod tests {
         );
 
         let list_response = client
-            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .list_rules(authed_bearer_request(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_rules succeeds")
             .into_inner();
@@ -5077,7 +5323,10 @@ mod tests {
         assert_eq!(err.code(), Code::InvalidArgument);
 
         let list_response = client
-            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .list_rules(authed_bearer_request(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_rules succeeds")
             .into_inner();
@@ -5154,7 +5403,10 @@ mod tests {
         assert_eq!(response.errors.len(), 1);
 
         let list_response = client
-            .list_rules(authed_bearer_request(ListRulesRequest {}))
+            .list_rules(authed_bearer_request(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            }))
             .await
             .expect("list_rules succeeds")
             .into_inner();
@@ -5406,8 +5658,8 @@ mod tests {
 
         let err = client
             .list_records(ListRecordsRequest {
-                limit: 10,
-                offset: 0,
+                page_size: 10,
+                page_token: String::new(),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -5455,8 +5707,8 @@ mod tests {
 
         let response = client
             .list_records(authed_bearer_request(ListRecordsRequest {
-                limit: 0,
-                offset: 0,
+                page_size: 0,
+                page_token: String::new(),
             }))
             .await
             .expect("list_records succeeds")
@@ -5469,6 +5721,81 @@ mod tests {
         assert!(!response.records[0].record_hmac.is_empty());
         assert_eq!(response.records[1].sequence, 2);
         assert_eq!(response.records[1].action, "test.action.two");
+    }
+
+    /// Keyset paging the WORM ledger across multiple pages must return every
+    /// record EXACTLY ONCE, in ascending sequence, with no dupes or gaps.
+    #[tokio::test]
+    async fn list_records_keyset_pagination_returns_every_record_once_no_gaps() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        for i in 0..7 {
+            db.append_worm_audit_record(
+                "system.test",
+                &format!("test.action.{i}"),
+                format!("payload-{i}").as_bytes(),
+            )
+            .await
+            .expect("append audit record");
+        }
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            Arc::new(db),
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+        let mut client = AuditClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+
+        let mut seen = Vec::new();
+        let mut page_token = String::new();
+        let mut pages = 0;
+        loop {
+            let resp = client
+                .list_records(authed_bearer_request(ListRecordsRequest {
+                    page_size: 2,
+                    page_token: page_token.clone(),
+                }))
+                .await
+                .expect("list_records page succeeds")
+                .into_inner();
+            pages += 1;
+            assert!(resp.records.len() <= 2, "page must not exceed page_size");
+            seen.extend(resp.records.iter().map(|r| r.sequence));
+            if resp.next_page_token.is_empty() {
+                break;
+            }
+            page_token = resp.next_page_token;
+            assert!(pages < 100, "pagination must terminate");
+        }
+
+        assert_eq!(
+            seen,
+            vec![1, 2, 3, 4, 5, 6, 7],
+            "keyset paging must yield every sequence once, ascending"
+        );
+
+        // A malformed page_token is a typed VALIDATION_FAILED error.
+        let err = client
+            .list_records(authed_bearer_request(ListRecordsRequest {
+                page_size: 2,
+                page_token: "garbage".to_string(),
+            }))
+            .await
+            .expect_err("malformed page_token must be rejected");
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(
+            nuncio_proto::errors::error_reason(&err),
+            Some(ErrorReason::ValidationFailed)
+        );
     }
 
     /// Proves `Audit/VerifyChain` reports `valid: true` and the real
@@ -5645,6 +5972,8 @@ mod tests {
                 calendar_id: "cal-work".to_string(),
                 start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_699_999_000)),
                 end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_004_000)),
+                page_size: 0,
+                page_token: String::new(),
             }))
             .await
             .expect("list_events succeeds")
@@ -5704,6 +6033,8 @@ mod tests {
                 calendar_id: "cal-work".to_string(),
                 start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_699_999_000)),
                 end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_004_000)),
+                page_size: 0,
+                page_token: String::new(),
             }))
             .await
             .expect("list_events succeeds")
@@ -5730,6 +6061,8 @@ mod tests {
                 calendar_id: "cal-work".to_string(),
                 start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
                 end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
+                page_size: 0,
+                page_token: String::new(),
             }))
             .await
             .expect_err("empty account_id must be rejected");
@@ -5894,6 +6227,8 @@ mod tests {
                 calendar_id: "cal-work".to_string(),
                 start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_699_999_000)),
                 end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_004_000)),
+                page_size: 0,
+                page_token: String::new(),
             }))
             .await
             .expect("list_events succeeds")
@@ -6068,6 +6403,8 @@ mod tests {
         let err = client
             .list_contacts(ListContactsRequest {
                 account_id: "acct-1".to_string(),
+                page_size: 0,
+                page_token: String::new(),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -6126,6 +6463,8 @@ mod tests {
         let response = client
             .list_contacts(authed_bearer_request(ListContactsRequest {
                 account_id: "acct-contacts-list".to_string(),
+                page_size: 0,
+                page_token: String::new(),
             }))
             .await
             .expect("list_contacts succeeds")
@@ -6239,6 +6578,8 @@ mod tests {
         let list_response = client
             .list_contacts(authed_bearer_request(ListContactsRequest {
                 account_id: "acct-contacts-injected".to_string(),
+                page_size: 0,
+                page_token: String::new(),
             }))
             .await
             .expect("list_contacts succeeds")
@@ -6350,7 +6691,10 @@ mod tests {
             .await
             .expect("Mail client connects");
         let err = client
-            .list_folders(ListFoldersRequest {})
+            .list_folders(ListFoldersRequest {
+                page_size: 0,
+                page_token: String::new(),
+            })
             .await
             .expect_err("Mail must reject an unauthenticated call");
         assert_eq!(err.code(), Code::Unauthenticated);
@@ -6360,7 +6704,10 @@ mod tests {
             .await
             .expect("Filters client connects");
         let err = client
-            .list_rules(ListRulesRequest {})
+            .list_rules(ListRulesRequest {
+                page_size: 0,
+                page_token: String::new(),
+            })
             .await
             .expect_err("Filters must reject an unauthenticated call");
         assert_eq!(err.code(), Code::Unauthenticated);
@@ -6385,8 +6732,8 @@ mod tests {
             .expect("Audit client connects");
         let err = client
             .list_records(ListRecordsRequest {
-                limit: 10,
-                offset: 0,
+                page_size: 10,
+                page_token: String::new(),
             })
             .await
             .expect_err("Audit must reject an unauthenticated call");
@@ -6402,6 +6749,8 @@ mod tests {
                 calendar_id: "cal-1".to_string(),
                 start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
                 end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
+                page_size: 0,
+                page_token: String::new(),
             })
             .await
             .expect_err("Calendar must reject an unauthenticated call");
@@ -6414,6 +6763,8 @@ mod tests {
         let err = client
             .list_contacts(ListContactsRequest {
                 account_id: "acct-1".to_string(),
+                page_size: 0,
+                page_token: String::new(),
             })
             .await
             .expect_err("Contacts must reject an unauthenticated call");

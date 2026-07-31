@@ -154,6 +154,8 @@ async fn calendar_sync_then_list_and_get_round_trip_over_authenticated_grpc() {
             calendar_id: CALENDAR_ID.to_string(),
             start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_699_999_000)),
             end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_020_000)),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list_events succeeds")
@@ -189,6 +191,8 @@ async fn calendar_sync_then_list_and_get_round_trip_over_authenticated_grpc() {
             calendar_id: CALENDAR_ID.to_string(),
             start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
             end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect_err("missing bearer token must be rejected");

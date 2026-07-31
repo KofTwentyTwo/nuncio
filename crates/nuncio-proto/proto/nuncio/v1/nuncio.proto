@@ -375,11 +375,11 @@ message TestAccountConnectionResponse {
 // carved out for "just one more" unauthenticated service. See
 // `nunciod::grpc::serve_on_listener`.
 service Mail {
-  // ListFolders returns every mailbox folder known to the store, with
-  // total/unread message counts.
+  // ListFolders returns a keyset-paginated page of mailbox folders known to
+  // the store, folder id ascending, each with total/unread message counts.
   rpc ListFolders(ListFoldersRequest) returns (ListFoldersResponse);
-  // ListMessages returns messages in a single folder, newest first, capped
-  // at `limit`.
+  // ListMessages returns a keyset-paginated page of messages in a single
+  // folder, newest first.
   rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
   // GetMessage returns a single message by ID, including its (decrypted)
   // body.
@@ -387,7 +387,8 @@ service Mail {
   // MarkRead updates a message's read/unread flag.
   rpc MarkRead(MarkReadRequest) returns (MarkReadResponse);
   // SearchMessages runs a full-text (FTS5) search over cached message
-  // subjects, senders, and bodies.
+  // subjects, senders, and bodies, returning a keyset-paginated page of hits
+  // ordered by relevance rank.
   rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
   // SendMessage composes and sends a real outbound email over SMTP, built
   // from the configured account's SMTP endpoint
@@ -462,26 +463,53 @@ message Folder {
   uint64 unread_messages = 4;
 }
 
-// ListFoldersRequest currently carries no parameters.
-message ListFoldersRequest {}
+// ListFoldersRequest pages the folder listing (folder id ascending) using
+// the shared keyset convention: `page_size` bounds a page and `page_token`
+// is the opaque cursor returned as the previous page's `next_page_token`.
+// See `ListMessagesRequest` for the full semantics.
+message ListFoldersRequest {
+  // Maximum folders to return in this page; 0 means "server default". The
+  // server clamps this to its documented maximum.
+  uint32 page_size = 1;
+  // Opaque keyset cursor from a prior response's `next_page_token`; empty
+  // starts from the first page. Not an offset -- resumes strictly after the
+  // last folder of the previous page.
+  string page_token = 2;
+}
 
 // ListFoldersResponse.
 message ListFoldersResponse {
   repeated Folder folders = 1;
+  // Opaque cursor for the next page, or empty when this is the last page.
+  string next_page_token = 2;
 }
 
-// ListMessagesRequest. `limit` caps the number of messages returned
-// (newest first); a value of 0 means "use the server's default limit".
+// ListMessagesRequest pages a folder's messages, newest first, using the
+// shared keyset pagination convention used by every list/search RPC:
+//   - `page_size` bounds one page; 0 selects the server default and the
+//     server clamps any value to its documented maximum.
+//   - `page_token` is an OPAQUE cursor, NOT a numeric offset. It encodes the
+//     stable sort key (here `(received_at, id)`) of the last row of the
+//     previous page, so paging resumes strictly AFTER that row and stays
+//     correct under concurrent inserts (no skipped or duplicated rows).
+//     Leave empty to fetch the first page; otherwise pass a prior response's
+//     `next_page_token` verbatim. A token the server cannot decode is
+//     rejected with a `VALIDATION_FAILED` error, never silently ignored.
 message ListMessagesRequest {
   // Mailbox folder identifier (e.g. "inbox").
   string folder_id = 1;
   // Maximum number of messages to return; 0 means "server default".
-  uint32 limit = 2;
+  uint32 page_size = 2;
+  // Opaque keyset cursor from a prior response's `next_page_token`; empty
+  // starts from the newest message.
+  string page_token = 3;
 }
 
 // ListMessagesResponse.
 message ListMessagesResponse {
   repeated Message messages = 1;
+  // Opaque cursor for the next page, or empty when this is the last page.
+  string next_page_token = 2;
 }
 
 // GetMessageRequest.
@@ -507,10 +535,19 @@ message MarkReadRequest {
 // response (as opposed to a `Status` error) is confirmation enough.
 message MarkReadResponse {}
 
-// SearchMessagesRequest.
+// SearchMessagesRequest. Pages hits using the shared keyset convention (see
+// `ListMessagesRequest`); the cursor here encodes `(rank, id)` so paging
+// preserves the relevance ordering while resuming strictly after the last
+// hit of the previous page.
 message SearchMessagesRequest {
   // Full-text search query string.
   string query = 1;
+  // Maximum hits to return in this page; 0 means "server default". Clamped
+  // to the server's documented maximum.
+  uint32 page_size = 2;
+  // Opaque keyset cursor from a prior response's `next_page_token`; empty
+  // starts from the highest-ranked hit.
+  string page_token = 3;
 }
 
 // Mirrors `nuncio_store::search::SearchHit`.
@@ -526,6 +563,8 @@ message MessageSearchHit {
 // SearchMessagesResponse.
 message SearchMessagesResponse {
   repeated MessageSearchHit hits = 1;
+  // Opaque cursor for the next page, or empty when this is the last page.
+  string next_page_token = 2;
 }
 
 // SendMessageRequest carries a composed outbound email. The sending
@@ -595,7 +634,8 @@ service Filters {
   // Rejects a syntactically or semantically invalid rule with
   // `Status::invalid_argument` -- nothing is ever persisted on failure.
   rpc CreateRule(CreateRuleRequest) returns (CreateRuleResponse);
-  // ListRules returns every persisted filter rule, priority ascending.
+  // ListRules returns a keyset-paginated page of persisted filter rules,
+  // priority ascending.
   rpc ListRules(ListRulesRequest) returns (ListRulesResponse);
   // DeleteRule removes a persisted filter rule by ID and reloads the
   // daemon's live `FilterEngine` rule set so the removal takes effect
@@ -690,12 +730,23 @@ message CreateRuleResponse {
   FilterRule rule = 1;
 }
 
-// ListRulesRequest currently carries no parameters.
-message ListRulesRequest {}
+// ListRulesRequest pages rules (priority ascending, id as tiebreaker) using
+// the shared keyset convention; the cursor encodes `(priority, id)`. See
+// `ListMessagesRequest` for the full semantics.
+message ListRulesRequest {
+  // Maximum rules to return in this page; 0 means "server default". Clamped
+  // to the server's documented maximum.
+  uint32 page_size = 1;
+  // Opaque keyset cursor from a prior response's `next_page_token`; empty
+  // starts from the highest-priority rule.
+  string page_token = 2;
+}
 
 // ListRulesResponse.
 message ListRulesResponse {
   repeated FilterRule rules = 1;
+  // Opaque cursor for the next page, or empty when this is the last page.
+  string next_page_token = 2;
 }
 
 // DeleteRuleRequest.
@@ -956,9 +1007,9 @@ service Calendar {
   // returns `Status::internal` describing that gap unless a test double has
   // been injected -- never a fabricated `synced_count`.
   rpc Sync(CalendarSyncRequest) returns (CalendarSyncResponse);
-  // ListEvents returns persisted events for `account_id` whose window
-  // overlaps `[start_window, end_window]`, ordered by start time -- always
-  // genuinely persisted data, never fabricated.
+  // ListEvents returns a keyset-paginated page of persisted events for
+  // `account_id` whose window overlaps `[start_window, end_window]`, ordered
+  // by start time -- always genuinely persisted data, never fabricated.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
   // GetEvent returns a single persisted event by ID.
   rpc GetEvent(GetEventRequest) returns (GetEventResponse);
@@ -1001,17 +1052,29 @@ message CalendarSyncResponse {
   uint64 synced_count = 1;
 }
 
-// ListEventsRequest.
+// ListEventsRequest pages events (start time ascending, id as tiebreaker)
+// using the shared keyset convention; the cursor encodes `(start_time, id)`.
+// Recurrence expansion happens server-side before paging, so an expanded
+// occurrence's `(start_time, id)` is what the cursor tracks. See
+// `ListMessagesRequest` for the full semantics.
 message ListEventsRequest {
   string account_id = 1;
   string calendar_id = 2;
   google.protobuf.Timestamp start_window = 3;
   google.protobuf.Timestamp end_window = 4;
+  // Maximum events to return in this page; 0 means "server default". Clamped
+  // to the server's documented maximum.
+  uint32 page_size = 5;
+  // Opaque keyset cursor from a prior response's `next_page_token`; empty
+  // starts from the earliest event in the window.
+  string page_token = 6;
 }
 
 // ListEventsResponse.
 message ListEventsResponse {
   repeated CalendarEvent events = 1;
+  // Opaque cursor for the next page, or empty when this is the last page.
+  string next_page_token = 2;
 }
 
 // GetEventRequest.
@@ -1052,9 +1115,9 @@ service Contacts {
   // describing that gap unless a test double has been injected -- never a
   // fabricated `synced_count`.
   rpc Sync(ContactsSyncRequest) returns (ContactsSyncResponse);
-  // ListContacts returns persisted contacts for `account_id`, ordered by
-  // interaction count then display name -- always genuinely persisted data,
-  // never fabricated.
+  // ListContacts returns a keyset-paginated page of persisted contacts for
+  // `account_id`, ordered by interaction count (descending) then display
+  // name -- always genuinely persisted data, never fabricated.
   rpc ListContacts(ListContactsRequest) returns (ListContactsResponse);
   // GetContact returns a single persisted contact by ID.
   rpc GetContact(GetContactRequest) returns (GetContactResponse);
@@ -1132,14 +1195,24 @@ message ContactsSyncResponse {
 
 // ListContactsRequest. Contacts are always scoped to the account whose
 // address book they belong to, mirroring the store's `list_contacts`
-// signature.
+// signature. Pages using the shared keyset convention; the cursor encodes
+// `(interaction_count, display_name, id)` to match the sort order. See
+// `ListMessagesRequest` for the full semantics.
 message ListContactsRequest {
   string account_id = 1;
+  // Maximum contacts to return in this page; 0 means "server default".
+  // Clamped to the server's documented maximum.
+  uint32 page_size = 2;
+  // Opaque keyset cursor from a prior response's `next_page_token`; empty
+  // starts from the most-interacted contact.
+  string page_token = 3;
 }
 
 // ListContactsResponse.
 message ListContactsResponse {
   repeated Contact contacts = 1;
+  // Opaque cursor for the next page, or empty when this is the last page.
+  string next_page_token = 2;
 }
 
 // GetContactRequest.
@@ -1183,8 +1256,8 @@ message CreateContactResponse {
 // `BearerAuthInterceptor` that guards every other service `nunciod`
 // exposes -- see `nunciod::grpc::serve_on_listener`.
 service Audit {
-  // ListRecords returns a page of the real, persisted WORM audit ledger,
-  // sequence ascending.
+  // ListRecords returns a keyset-paginated page of the real, persisted WORM
+  // audit ledger, sequence ascending.
   rpc ListRecords(ListRecordsRequest) returns (ListRecordsResponse);
   // VerifyChain re-verifies the ENTIRE persisted WORM audit ledger's
   // HMAC hash-chain integrity, using the ledger's real WORM HMAC key
@@ -1215,17 +1288,25 @@ message AuditRecord {
   string record_hmac = 7;
 }
 
-// ListRecordsRequest. `limit` caps the number of records returned
-// (sequence ascending); a value of 0 means "use the server's default
-// limit".
+// ListRecordsRequest pages the WORM audit ledger, sequence ascending, using
+// the shared keyset convention that every list/search RPC uses -- replacing
+// the previous limit/offset paging, whose offset was unstable under
+// concurrent appends. The cursor encodes the last record's `sequence`. See
+// `ListMessagesRequest` for the full semantics.
 message ListRecordsRequest {
-  uint32 limit = 1;
-  uint32 offset = 2;
+  // Maximum records to return in this page; 0 means "server default".
+  // Clamped to the server's documented maximum.
+  uint32 page_size = 1;
+  // Opaque keyset cursor from a prior response's `next_page_token`; empty
+  // starts from the lowest sequence.
+  string page_token = 2;
 }
 
 // ListRecordsResponse.
 message ListRecordsResponse {
   repeated AuditRecord records = 1;
+  // Opaque cursor for the next page, or empty when this is the last page.
+  string next_page_token = 2;
 }
 
 // VerifyChainRequest currently carries no parameters.

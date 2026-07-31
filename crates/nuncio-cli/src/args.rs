@@ -449,14 +449,13 @@ pub enum SystemSubcommand {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuditSubcommand {
-    /// List persisted WORM audit ledger records, sequence ascending.
+    /// List persisted WORM audit ledger records, sequence ascending. Follows
+    /// keyset pagination to the end, fetching `page_size` records per request.
     List {
-        /// Max records to fetch (0 = server default).
-        #[arg(short, long, default_value_t = 50, help = "Max records to fetch")]
-        limit: u32,
-        /// Pagination offset.
-        #[arg(short, long, default_value_t = 0, help = "Pagination offset")]
-        offset: u32,
+        /// Records fetched per page (0 = server default). All pages are
+        /// followed via the keyset cursor and printed together.
+        #[arg(short, long, default_value_t = 50, help = "Records fetched per page")]
+        page_size: u32,
     },
     /// Verify the WORM audit ledger's cryptographic HMAC hash-chain
     /// integrity.
@@ -716,25 +715,18 @@ mod tests {
             cli_list.command,
             Commands::System {
                 action: SystemSubcommand::Audit {
-                    action: AuditSubcommand::List {
-                        limit: 50,
-                        offset: 0,
-                    }
+                    action: AuditSubcommand::List { page_size: 50 }
                 }
             }
         );
 
-        let cli_list_paged = Cli::parse_from([
-            "nuncio", "system", "audit", "list", "--limit", "10", "--offset", "5",
-        ]);
+        let cli_list_paged =
+            Cli::parse_from(["nuncio", "system", "audit", "list", "--page-size", "10"]);
         assert_eq!(
             cli_list_paged.command,
             Commands::System {
                 action: SystemSubcommand::Audit {
-                    action: AuditSubcommand::List {
-                        limit: 10,
-                        offset: 5,
-                    }
+                    action: AuditSubcommand::List { page_size: 10 }
                 }
             }
         );

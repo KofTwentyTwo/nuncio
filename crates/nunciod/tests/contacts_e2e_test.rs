@@ -146,6 +146,8 @@ async fn contacts_sync_create_and_list_round_trip_over_authenticated_grpc() {
     let list_response = contacts_client
         .list_contacts(ListContactsRequest {
             account_id: ACCOUNT_ID.to_string(),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list_contacts succeeds")
@@ -201,6 +203,8 @@ async fn contacts_sync_create_and_list_round_trip_over_authenticated_grpc() {
     let second_list = second_client
         .list_contacts(ListContactsRequest {
             account_id: ACCOUNT_ID.to_string(),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect("list_contacts succeeds on second connection")
@@ -231,6 +235,8 @@ async fn contacts_sync_create_and_list_round_trip_over_authenticated_grpc() {
     let err = unauthenticated_client
         .list_contacts(ListContactsRequest {
             account_id: ACCOUNT_ID.to_string(),
+            page_size: 0,
+            page_token: String::new(),
         })
         .await
         .expect_err("missing bearer token must be rejected");
