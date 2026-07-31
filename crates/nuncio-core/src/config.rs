@@ -61,6 +61,17 @@ pub enum ConfigError {
     /// A DAV-protocol account's collection URL is not a valid http(s) URL.
     #[error("collection_url must be a valid http(s) URL")]
     InvalidCollectionUrl,
+    /// Cleartext `TlsMode::Plain` was requested against a non-loopback host,
+    /// which would send credentials over the network unencrypted.
+    #[error(
+        "{endpoint} host '{host}' is not loopback; refusing cleartext Plain TLS mode to a remote host"
+    )]
+    CleartextToRemoteHost {
+        /// Which endpoint the rejected setting applies to (e.g. "imap", "smtp").
+        endpoint: &'static str,
+        /// The offending non-loopback host.
+        host: String,
+    },
 }
 
 /// Complete configuration schema for a mail & calendar account.
@@ -102,6 +113,35 @@ pub struct AccountConfig {
     pub collection_url: String,
 }
 
+/// Whether `host` refers to the local loopback interface, either as a
+/// literal IP address (`127.0.0.1`, `::1`, ...) or the conventional
+/// `localhost` name. Used to allow cleartext `TlsMode::Plain` only against
+/// local test servers, never against a remote host.
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Extract the host portion of an `http://`/`https://` URL, without pulling
+/// in a full URL-parsing dependency for this one field. Handles a bracketed
+/// IPv6 literal (`[::1]`) as well as a plain hostname/IPv4 literal, and
+/// stops at the first `:` (port), `/` (path), `?`, or `#` that follows.
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    if let Some(bracketed) = rest.strip_prefix('[') {
+        let end = bracketed.find(']')?;
+        return Some(&bracketed[..end]);
+    }
+    let end = rest.find(['/', ':', '?', '#']).unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
 impl AccountConfig {
     /// Minimum allowed background sync interval (10 seconds).
     pub const MIN_SYNC_INTERVAL_SECS: u64 = 10;
@@ -140,6 +180,18 @@ impl AccountConfig {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return Err(ConfigError::InvalidCollectionUrl);
             }
+            // Plain `http://` is only tolerated against a loopback host (a
+            // local test server); any remote host must use `https://` to
+            // avoid sending the account's Basic-auth credentials in cleartext.
+            if url.starts_with("http://") {
+                let host = url_host(url).unwrap_or_default();
+                if !is_loopback_host(host) {
+                    return Err(ConfigError::CleartextToRemoteHost {
+                        endpoint: "caldav",
+                        host: host.to_string(),
+                    });
+                }
+            }
         } else {
             if self.server_host.trim().is_empty() {
                 return Err(ConfigError::EmptyField {
@@ -154,6 +206,18 @@ impl AccountConfig {
             }
             if self.smtp_port == 0 {
                 return Err(ConfigError::InvalidPort);
+            }
+            if self.imap_tls_mode == TlsMode::Plain && !is_loopback_host(&self.server_host) {
+                return Err(ConfigError::CleartextToRemoteHost {
+                    endpoint: "imap",
+                    host: self.server_host.clone(),
+                });
+            }
+            if self.smtp_tls_mode == TlsMode::Plain && !is_loopback_host(&self.smtp_host) {
+                return Err(ConfigError::CleartextToRemoteHost {
+                    endpoint: "smtp",
+                    host: self.smtp_host.clone(),
+                });
             }
         }
         if self.keyring_secret_key.trim().is_empty() {
@@ -237,6 +301,35 @@ mod tests {
             config.validate().unwrap_err(),
             ConfigError::InvalidCollectionUrl
         );
+    }
+
+    #[test]
+    fn caldav_account_rejects_cleartext_http_to_remote_host() {
+        let mut config = valid_caldav_account();
+        config.collection_url = "http://remote/dav/".to_string();
+        assert_eq!(
+            config.validate().unwrap_err(),
+            ConfigError::CleartextToRemoteHost {
+                endpoint: "caldav",
+                host: "remote".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn caldav_account_accepts_https_to_remote_host() {
+        let mut config = valid_caldav_account();
+        config.collection_url = "https://remote/dav/".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn caldav_account_accepts_cleartext_http_to_loopback_host() {
+        for url in ["http://127.0.0.1/dav/", "http://localhost/dav/"] {
+            let mut config = valid_caldav_account();
+            config.collection_url = url.to_string();
+            assert!(config.validate().is_ok(), "url {url} should be allowed");
+        }
     }
 
     #[test]
@@ -359,6 +452,52 @@ mod tests {
     }
 
     #[test]
+    fn plain_imap_to_remote_host_fails_validation() {
+        let mut config = valid_account();
+        config.imap_tls_mode = TlsMode::Plain;
+        assert_eq!(
+            config.validate().unwrap_err(),
+            ConfigError::CleartextToRemoteHost {
+                endpoint: "imap",
+                host: "jmap.nuncio.mx".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plain_smtp_to_remote_host_fails_validation() {
+        let mut config = valid_account();
+        config.smtp_tls_mode = TlsMode::Plain;
+        assert_eq!(
+            config.validate().unwrap_err(),
+            ConfigError::CleartextToRemoteHost {
+                endpoint: "smtp",
+                host: "smtp.nuncio.mx".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn plain_imap_and_smtp_to_loopback_hosts_pass_validation() {
+        for host in ["127.0.0.1", "localhost", "::1", "LOCALHOST"] {
+            let mut config = valid_account();
+            config.server_host = host.to_string();
+            config.smtp_host = host.to_string();
+            config.imap_tls_mode = TlsMode::Plain;
+            config.smtp_tls_mode = TlsMode::Plain;
+            assert!(config.validate().is_ok(), "host {host} should be allowed");
+        }
+    }
+
+    #[test]
+    fn implicit_tls_and_starttls_to_remote_host_pass_validation() {
+        let mut config = valid_account();
+        config.imap_tls_mode = TlsMode::ImplicitTls;
+        config.smtp_tls_mode = TlsMode::StartTls;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn account_protocol_serde_roundtrip() {
         let jmap_json = serde_json::to_string(&AccountProtocol::Jmap).unwrap();
         assert_eq!(jmap_json, "\"jmap\"");
@@ -414,6 +553,14 @@ mod tests {
         assert_eq!(
             ConfigError::SyncIntervalTooShort.to_string(),
             "sync interval must be at least 10 seconds"
+        );
+        assert_eq!(
+            ConfigError::CleartextToRemoteHost {
+                endpoint: "imap",
+                host: "mail.example.com".to_string(),
+            }
+            .to_string(),
+            "imap host 'mail.example.com' is not loopback; refusing cleartext Plain TLS mode to a remote host"
         );
     }
 }
