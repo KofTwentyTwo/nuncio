@@ -2,9 +2,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use nuncio_mail::{JmapEngine, MailBackend};
+use nuncio_mail::{JmapEngine, MailBackend, RemoteMutationKind, RemoteMutationSpec};
 use serde_json::json;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -236,4 +236,145 @@ async fn jmap_engine_sync_folders_surfaces_session_discovery_failure() {
         .await
         .expect_err("session discovery failure must not fall back to canned folders");
     assert!(err.to_string().contains("network I/O error"));
+}
+
+/// Mount JMAP session discovery so `apply_mutation` can reach the mock `/jmap/api`.
+async fn mount_session(mock_server: &MockServer) {
+    let session_body = json!({
+        "username": "james.maes@kof22.com",
+        "primaryAccounts": { "urn:ietf:params:jmap:mail": "acct-100" },
+        "apiUrl": format!("{}/jmap/api", mock_server.uri()),
+        "state": "session-state-1"
+    });
+    Mock::given(method("GET"))
+        .and(path("/.well-known/jmap"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&session_body))
+        .mount(mock_server)
+        .await;
+}
+
+fn jmap_engine(mock_server: &MockServer) -> JmapEngine {
+    JmapEngine::with_credentials(
+        "acct-100",
+        &mock_server.uri(),
+        "james.maes@kof22.com",
+        "wiremock-password",
+    )
+}
+
+fn spec(kind: RemoteMutationKind) -> RemoteMutationSpec {
+    RemoteMutationSpec {
+        message_id: "jmap-msg-1".to_string(),
+        folder_id: "mb-inbox".to_string(),
+        folder_checkpoint: None,
+        kind,
+    }
+}
+
+#[tokio::test]
+async fn jmap_apply_mutation_flag_issues_keywords_patch_and_confirms_success() {
+    let mock_server = MockServer::start().await;
+    mount_session(&mock_server).await;
+
+    // Assert the exact Email/set update patch reaches the server: a $flagged
+    // keyword set to true on the target id.
+    Mock::given(method("POST"))
+        .and(path("/jmap/api"))
+        .and(body_partial_json(json!({
+            "methodCalls": [[
+                "Email/set",
+                { "update": { "jmap-msg-1": { "keywords/$flagged": true } } },
+                "c1"
+            ]]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/set", {"updated": {"jmap-msg-1": null}}, "c1"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let engine = jmap_engine(&mock_server);
+    engine
+        .apply_mutation(&spec(RemoteMutationKind::SetFlagged { value: true }))
+        .await
+        .expect("flag mutation applied");
+}
+
+#[tokio::test]
+async fn jmap_apply_mutation_move_replaces_mailbox_ids() {
+    let mock_server = MockServer::start().await;
+    mount_session(&mock_server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/jmap/api"))
+        .and(body_partial_json(json!({
+            "methodCalls": [[
+                "Email/set",
+                { "update": { "jmap-msg-1": { "mailboxIds": { "mb-archive": true } } } },
+                "c1"
+            ]]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/set", {"updated": {"jmap-msg-1": null}}, "c1"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let engine = jmap_engine(&mock_server);
+    engine
+        .apply_mutation(&spec(RemoteMutationKind::Move {
+            to_folder: "mb-archive".to_string(),
+        }))
+        .await
+        .expect("move mutation applied");
+}
+
+#[tokio::test]
+async fn jmap_apply_mutation_delete_issues_destroy_and_confirms_success() {
+    let mock_server = MockServer::start().await;
+    mount_session(&mock_server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/jmap/api"))
+        .and(body_partial_json(json!({
+            "methodCalls": [["Email/set", { "destroy": ["jmap-msg-1"] }, "c1"]]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/set", {"destroyed": ["jmap-msg-1"]}, "c1"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let engine = jmap_engine(&mock_server);
+    engine
+        .apply_mutation(&spec(RemoteMutationKind::Delete))
+        .await
+        .expect("delete mutation applied");
+}
+
+/// A server that reports the id under `notUpdated` genuinely rejected the
+/// mutation; `apply_mutation` MUST surface that as an error so the outbox never
+/// marks a rejected op completed.
+#[tokio::test]
+async fn jmap_apply_mutation_surfaces_server_rejection_as_error() {
+    let mock_server = MockServer::start().await;
+    mount_session(&mock_server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/jmap/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/set", {
+                "updated": {},
+                "notUpdated": { "jmap-msg-1": { "type": "notFound" } }
+            }, "c1"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let engine = jmap_engine(&mock_server);
+    let err = engine
+        .apply_mutation(&spec(RemoteMutationKind::SetFlagged { value: false }))
+        .await
+        .expect_err("a server-rejected mutation must not be reported as success");
+    assert!(err.to_string().contains("jmap-msg-1"));
 }

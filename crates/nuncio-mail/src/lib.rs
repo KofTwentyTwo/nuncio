@@ -10,7 +10,9 @@ pub mod mock;
 pub mod parser;
 pub mod smtp;
 
-pub use backend::{MailBackend, MessageSender, OutboundMessage};
+pub use backend::{
+    MailBackend, MessageSender, OutboundMessage, RemoteMutationKind, RemoteMutationSpec,
+};
 pub use imap::{IdleSocketState, ImapDualSocketManager, ImapEngine};
 pub use jmap::JmapEngine;
 pub use mock::{MockMailBackend, MockMessageSender};

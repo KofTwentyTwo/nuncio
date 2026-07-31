@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use nuncio_core::model::{Email, Folder};
 use std::sync::{Arc, Mutex};
 
-use crate::backend::{MailBackend, MessageSender, OutboundMessage};
+use crate::backend::{MailBackend, MessageSender, OutboundMessage, RemoteMutationSpec};
 use crate::parser::MailError;
 
 /// Thread-safe mock mail backend for offline testing.
@@ -19,6 +19,10 @@ pub struct MockMailBackend {
     since_state_calls: Arc<Mutex<Vec<Option<String>>>>,
     /// The checkpoint token this mock returns from `sync_messages`.
     returned_state: Arc<Mutex<String>>,
+    /// Every [`RemoteMutationSpec`] passed to `apply_mutation`, in call order,
+    /// so a daemon E2E can prove the outbox executor genuinely invoked the
+    /// backend op (not a fabricated completion).
+    applied_mutations: Arc<Mutex<Vec<RemoteMutationSpec>>>,
 }
 
 impl MockMailBackend {
@@ -69,6 +73,17 @@ impl MockMailBackend {
         if let Ok(mut guard) = self.messages.lock() {
             guard.push(email);
         }
+    }
+
+    /// Every [`RemoteMutationSpec`] this mock's `apply_mutation` was called
+    /// with, in call order. A failing configuration (`set_should_fail(true)`)
+    /// records nothing, so a test can prove a failed op is never counted as
+    /// applied.
+    pub fn applied_mutations(&self) -> Vec<RemoteMutationSpec> {
+        self.applied_mutations
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -134,6 +149,26 @@ impl MailBackend for MockMailBackend {
             .cloned()
             .collect();
         Ok((matches, returned_state))
+    }
+
+    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+        let should_fail = self
+            .should_fail
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        if *should_fail {
+            return Err(MailError::ImapError(
+                "simulated remote mutation failure".to_string(),
+            ));
+        }
+        // Record only genuinely-applied mutations, so a test can distinguish a
+        // real op from a fabricated completion.
+        let mut applied = self
+            .applied_mutations
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
+        applied.push(spec.clone());
+        Ok(())
     }
 }
 

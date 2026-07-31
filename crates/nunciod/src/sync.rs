@@ -339,7 +339,7 @@ async fn find_account(
 /// keyring by the caller). This is the ONLY place a concrete protocol engine
 /// is chosen; every other function in this module only ever sees `&dyn
 /// MailBackend`.
-fn build_mail_backend(config: &AccountConfig, password: &str) -> Box<dyn MailBackend> {
+pub(crate) fn build_mail_backend(config: &AccountConfig, password: &str) -> Box<dyn MailBackend> {
     match config.protocol {
         AccountProtocol::ImapSmtp => Box::new(ImapEngine::with_credentials(
             &config.id,
