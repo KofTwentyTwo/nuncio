@@ -10,7 +10,19 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::net::lookup_host;
+use tracing::{debug, warn, Instrument};
 use zeroize::Zeroizing;
+
+/// Extract just the host for logging (never the path/query, which may carry
+/// caller-supplied tokens), falling back to a placeholder when the URL itself
+/// cannot be parsed.
+fn webhook_host_for_log(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .map(|h| h.trim_start_matches('[').trim_end_matches(']').to_string())
+        .unwrap_or_else(|| "unparsable-url".to_string())
+}
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -97,75 +109,111 @@ impl WebhookDispatcher {
         sender: &str,
         opts: &ValidationOptions,
     ) -> Result<u16, WebhookError> {
-        let action = RuleAction::CallWebhook(url.to_string());
-        NsqlValidator::pass6_action_security(&[action], opts)
-            .map_err(|e| WebhookError::SecurityViolation(e.to_string()))?;
+        let host_for_log = webhook_host_for_log(url);
+        let span =
+            tracing::info_span!("webhook_dispatch", host = %host_for_log, rule_id = %rule_id);
 
-        // Pass 6 only sees literal-IP hosts. Resolve the target here and,
-        // when the policy is enabled, reject it if it points into a blocked
-        // range - closing the DNS-rebind class of SSRF bypass that a
-        // substring/literal check on the URL cannot catch. The resolved
-        // address is then pinned below for the actual connection, so the
-        // dispatch cannot re-resolve the hostname and land on a different,
-        // unchecked address: the address that was checked is the only one
-        // `reqwest` is permitted to connect to.
-        let parsed = reqwest::Url::parse(url)
-            .map_err(|e| WebhookError::SecurityViolation(format!("invalid webhook URL: {e}")))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| WebhookError::SecurityViolation("webhook URL has no host".to_string()))?
-            // `host_str` brackets IPv6 literals (`[::1]`); strip them so the
-            // pair passes to the resolver cleanly.
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_string();
-        let port = parsed.port_or_known_default().unwrap_or(0);
+        async move {
+            let action = RuleAction::CallWebhook(url.to_string());
+            if let Err(e) = NsqlValidator::pass6_action_security(&[action], opts) {
+                warn!(
+                    host = %host_for_log,
+                    reason = %e,
+                    "webhook egress blocked by SSRF/security policy"
+                );
+                return Err(WebhookError::SecurityViolation(e.to_string()));
+            }
 
-        let resolved = resolve_host(&host, port).await?;
-        if opts.block_private_webhooks {
-            if let Some(blocked) = first_blocked_address(&resolved) {
-                return Err(WebhookError::SecurityViolation(format!(
-                    "webhook host '{host}' resolves to blocked address {blocked}"
-                )));
+            // Pass 6 only sees literal-IP hosts. Resolve the target here and,
+            // when the policy is enabled, reject it if it points into a blocked
+            // range - closing the DNS-rebind class of SSRF bypass that a
+            // substring/literal check on the URL cannot catch. The resolved
+            // address is then pinned below for the actual connection, so the
+            // dispatch cannot re-resolve the hostname and land on a different,
+            // unchecked address: the address that was checked is the only one
+            // `reqwest` is permitted to connect to.
+            let parsed = reqwest::Url::parse(url).map_err(|e| {
+                WebhookError::SecurityViolation(format!("invalid webhook URL: {e}"))
+            })?;
+            let host = parsed
+                .host_str()
+                .ok_or_else(|| {
+                    WebhookError::SecurityViolation("webhook URL has no host".to_string())
+                })?
+                // `host_str` brackets IPv6 literals (`[::1]`); strip them so the
+                // pair passes to the resolver cleanly.
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string();
+            let port = parsed.port_or_known_default().unwrap_or(0);
+
+            let resolved = resolve_host(&host, port).await?;
+            if opts.block_private_webhooks {
+                if let Some(blocked) = first_blocked_address(&resolved) {
+                    warn!(
+                        host = %host,
+                        blocked_ip = %blocked,
+                        "webhook egress blocked: resolved address is in a disallowed range (DNS-rebind guard)"
+                    );
+                    return Err(WebhookError::SecurityViolation(format!(
+                        "webhook host '{host}' resolves to blocked address {blocked}"
+                    )));
+                }
+            }
+            let pinned_addr = resolved[0];
+            debug!(
+                host = %host,
+                resolved_ip = %pinned_addr,
+                "webhook egress allowed by SSRF/security policy"
+            );
+            let client = pinned_client(&host, pinned_addr, port)?;
+
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let payload = json!({
+                "event": "nuncio.filter.matched",
+                "timestamp": timestamp,
+                "rule_id": rule_id,
+                "message_id": message_id,
+                "subject": subject,
+                "sender": sender,
+            });
+
+            let payload_str = payload.to_string();
+
+            let mut mac = HmacSha256::new_from_slice(self.secret_key.as_bytes())
+                .map_err(|e| WebhookError::SigningError(e.to_string()))?;
+            mac.update(format!("{timestamp}.{payload_str}").as_bytes());
+            let signature = hex::encode(mac.finalize().into_bytes());
+
+            let send_result = client
+                .post(url)
+                .header("Content-Type", "application/json")
+                .header(
+                    "X-Nuncio-Signature",
+                    format!("t={timestamp},v1={signature}"),
+                )
+                .body(payload_str)
+                .send()
+                .await;
+
+            match send_result {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    debug!(host = %host, status, "webhook dispatched");
+                    Ok(status)
+                }
+                Err(e) => {
+                    warn!(host = %host, error = %e, "webhook dispatch network error");
+                    Err(WebhookError::NetworkError(e.to_string()))
+                }
             }
         }
-        let pinned_addr = resolved[0];
-        let client = pinned_client(&host, pinned_addr, port)?;
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let payload = json!({
-            "event": "nuncio.filter.matched",
-            "timestamp": timestamp,
-            "rule_id": rule_id,
-            "message_id": message_id,
-            "subject": subject,
-            "sender": sender,
-        });
-
-        let payload_str = payload.to_string();
-
-        let mut mac = HmacSha256::new_from_slice(self.secret_key.as_bytes())
-            .map_err(|e| WebhookError::SigningError(e.to_string()))?;
-        mac.update(format!("{timestamp}.{payload_str}").as_bytes());
-        let signature = hex::encode(mac.finalize().into_bytes());
-
-        let response = client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .header(
-                "X-Nuncio-Signature",
-                format!("t={timestamp},v1={signature}"),
-            )
-            .body(payload_str)
-            .send()
-            .await
-            .map_err(|e| WebhookError::NetworkError(e.to_string()))?;
-
-        Ok(response.status().as_u16())
+        .instrument(span)
+        .await
     }
 
     /// Dispatch a `CALL WEBHOOK` action with default production security options.
@@ -192,8 +240,53 @@ impl WebhookDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing::span;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Minimal `tracing::Subscriber` that records a formatted line per event
+    /// so tests can assert on emitted level + fields without pulling in
+    /// `tracing-subscriber`'s registry machinery.
+    struct CapturingSubscriber {
+        events: std::sync::Arc<Mutex<Vec<String>>>,
+    }
+
+    struct LineVisitor<'a>(&'a mut String);
+
+    impl Visit for LineVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!(" {}={:?}", field.name(), value));
+        }
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut line = format!("{}", event.metadata().level());
+            let mut visitor = LineVisitor(&mut line);
+            event.record(&mut visitor);
+            if let Ok(mut events) = self.events.lock() {
+                events.push(line);
+            }
+        }
+
+        fn enter(&self, _span: &span::Id) {}
+
+        fn exit(&self, _span: &span::Id) {}
+    }
 
     #[tokio::test]
     async fn test_pinned_client_connects_to_checked_ip_not_dns() {
@@ -296,5 +389,82 @@ mod tests {
             "172.32.0.1".parse().unwrap(),
         ];
         assert_eq!(first_blocked_address(&addrs), None);
+    }
+
+    #[tokio::test]
+    async fn test_blocked_webhook_logs_warn_with_host_and_reason() {
+        let events: std::sync::Arc<Mutex<Vec<String>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: events.clone(),
+        };
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let dispatcher = WebhookDispatcher::new("secret_key_123");
+        let result = dispatcher
+            .dispatch(
+                "http://169.254.169.254/latest/meta-data",
+                "rule_1",
+                "msg_1",
+                "Test",
+                "a@b.com",
+            )
+            .await;
+
+        assert!(matches!(result, Err(WebhookError::SecurityViolation(_))));
+
+        let captured = events.lock().unwrap();
+        assert!(
+            captured.iter().any(|line| line.contains("WARN")
+                && line.contains("blocked")
+                && line.contains("169.254.169.254")),
+            "expected a WARN log carrying the blocked host and reason, got: {captured:?}"
+        );
+        assert!(
+            !captured.iter().any(|line| line.contains("secret_key_123")),
+            "the webhook HMAC secret must never appear in a log line"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowed_webhook_logs_debug_not_warn() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        let events: std::sync::Arc<Mutex<Vec<String>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: events.clone(),
+        };
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let dispatcher = WebhookDispatcher::new("secret_key_123");
+        let opts = ValidationOptions {
+            available_folders: None,
+            allowed_forward_domains: None,
+            block_private_webhooks: false,
+        };
+        let url = format!("{}/hook", mock_server.uri());
+        let status = dispatcher
+            .dispatch_with_options(&url, "rule_1", "msg_1", "Test", "a@b.com", &opts)
+            .await
+            .expect("dispatch to the mock server must succeed");
+        assert_eq!(status, 200);
+
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|line| line.contains("DEBUG") && line.contains("allowed")),
+            "expected a DEBUG log for the allowed egress decision, got: {captured:?}"
+        );
+        assert!(
+            !captured.iter().any(|line| line.contains("WARN")),
+            "an allowed dispatch must not emit a WARN, got: {captured:?}"
+        );
     }
 }
