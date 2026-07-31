@@ -2544,6 +2544,7 @@ dependencies = [
 name = "nuncio-filter"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "arc-swap",
  "async-trait",
  "chrono",
