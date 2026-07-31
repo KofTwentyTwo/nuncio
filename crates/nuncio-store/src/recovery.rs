@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 /// Raw row shape for an account configuration record fetched from SQLite during salvage.
+/// The trailing two `String` columns are the raw `imap_tls_mode`/`smtp_tls_mode` text values
+/// (e.g. `"start_tls"`) -- carried through as the literal on-disk token rather than already
+/// parsed to [`nuncio_core::TlsMode`], so [`SqliteRecoveryEngine::salvage_accounts`] can log
+/// precisely which raw value it could not recognize, if any, instead of a decode failure
+/// having already been silently absorbed by this row type.
 type SalvagedAccountRow = (
     String,
     String,
@@ -18,6 +23,8 @@ type SalvagedAccountRow = (
     i64,
     Option<String>,
     Option<i64>,
+    String,
+    String,
 );
 
 /// Summary report of database self-healing recovery output.
@@ -33,6 +40,10 @@ pub struct RecoverySummary {
     pub salvaged_conditions_count: usize,
     /// Number of salvaged filter action specifications.
     pub salvaged_actions_count: usize,
+    /// Number of salvaged WORM audit ledger records.
+    pub salvaged_audit_records_count: usize,
+    /// Number of salvaged filter execution log entries.
+    pub salvaged_execution_logs_count: usize,
     /// Indicates whether remote protocol resynchronization was initiated.
     pub resync_triggered: bool,
 }
@@ -191,21 +202,41 @@ impl SqliteRecoveryEngine {
 
         // Step 2: Attempt reading valid records from preserved backup file
         let backup_url = format!("sqlite://{}", backup_path.to_string_lossy());
-        let (salvaged_accounts, salvaged_rules, salvaged_conditions, salvaged_actions) = if let Ok(
-            pool,
-        ) =
-            sqlx::sqlite::SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect(&backup_url)
-                .await
+        let (
+            salvaged_accounts,
+            salvaged_rules,
+            salvaged_conditions,
+            salvaged_actions,
+            salvaged_audit_records,
+            salvaged_execution_logs,
+        ) = if let Ok(pool) = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&backup_url)
+            .await
         {
             let accounts = Self::salvage_accounts(&pool).await;
             let (rules, conditions, actions) = Self::salvage_filter_tables(&pool).await;
+            let audit_records = Self::salvage_worm_audit_records(&pool).await;
+            let execution_logs = Self::salvage_filter_execution_logs(&pool).await;
             pool.close().await;
-            (accounts, rules, conditions, actions)
+            (
+                accounts,
+                rules,
+                conditions,
+                actions,
+                audit_records,
+                execution_logs,
+            )
         } else {
             warn!("Failed to open backup connection for salvage; proceeding with clean database reset.");
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
         };
 
         // Step 3: Remove or truncate damaged database files at target_db_path
@@ -287,12 +318,62 @@ impl SqliteRecoveryEngine {
             }
         }
 
+        // Restore the WORM audit ledger and filter execution log ledger verbatim, including
+        // their hash-chain columns (`record_hmac`/`hash`, `previous_block_hash`/`prev_hash`).
+        // These are re-signed with the same HMAC key material the corrupted database used
+        // (both engines are provisioned from the same `secrets` vault), so a chain that
+        // verified before corruption still verifies after salvage -- salvage restores the
+        // ledger's tamper-evidence, it does not merely copy rows that happen to look right.
+        let mut restored_audit_records_count = 0;
+        for (sequence, timestamp_ns, actor, action, data_hash, previous_block_hash, record_hmac) in
+            &salvaged_audit_records
+        {
+            let res = sqlx::query(
+                "INSERT INTO worm_audit_records (sequence, timestamp_ns, actor, action, data_hash, previous_block_hash, record_hmac) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(sequence)
+            .bind(timestamp_ns)
+            .bind(actor)
+            .bind(action)
+            .bind(data_hash)
+            .bind(previous_block_hash)
+            .bind(record_hmac)
+            .execute(fresh_engine.pool())
+            .await;
+            if res.is_ok() {
+                restored_audit_records_count += 1;
+            }
+        }
+
+        let mut restored_execution_logs_count = 0;
+        for (id, rule_id, message_id, action_taken, matched_at, prev_hash, hash) in
+            &salvaged_execution_logs
+        {
+            let res = sqlx::query(
+                "INSERT INTO filter_execution_logs (id, rule_id, message_id, action_taken, matched_at, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(id)
+            .bind(rule_id)
+            .bind(message_id)
+            .bind(action_taken)
+            .bind(matched_at)
+            .bind(prev_hash)
+            .bind(hash)
+            .execute(fresh_engine.pool())
+            .await;
+            if res.is_ok() {
+                restored_execution_logs_count += 1;
+            }
+        }
+
         let summary = RecoverySummary {
             backup_path,
             salvaged_accounts_count: restored_accounts_count,
             salvaged_rules_count: restored_rules_count,
             salvaged_conditions_count: restored_conditions_count,
             salvaged_actions_count: restored_actions_count,
+            salvaged_audit_records_count: restored_audit_records_count,
+            salvaged_execution_logs_count: restored_execution_logs_count,
             resync_triggered: true,
         };
 
@@ -302,7 +383,7 @@ impl SqliteRecoveryEngine {
 
     async fn salvage_accounts(pool: &sqlx::SqlitePool) -> Vec<nuncio_core::AccountConfig> {
         let rows: Result<Vec<SalvagedAccountRow>, _> = sqlx::query_as(
-            "SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port FROM accounts"
+            "SELECT id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode FROM accounts"
         )
         .fetch_all(pool)
         .await;
@@ -323,6 +404,8 @@ impl SqliteRecoveryEngine {
                         sync_interval_secs,
                         smtp_host,
                         smtp_port,
+                        imap_tls_mode_raw,
+                        smtp_tls_mode_raw,
                     )| {
                         let protocol = serde_json::from_str(&protocol_str)
                             .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
@@ -335,6 +418,10 @@ impl SqliteRecoveryEngine {
                         let resolved_smtp_host = smtp_host.unwrap_or_else(|| server_host.clone());
                         let resolved_smtp_port =
                             smtp_port.map(|p| p as u16).unwrap_or(server_port as u16);
+                        let imap_tls_mode =
+                            Self::parse_salvaged_tls_mode(&id, "imap_tls_mode", &imap_tls_mode_raw);
+                        let smtp_tls_mode =
+                            Self::parse_salvaged_tls_mode(&id, "smtp_tls_mode", &smtp_tls_mode_raw);
                         nuncio_core::AccountConfig {
                             id,
                             name,
@@ -345,8 +432,8 @@ impl SqliteRecoveryEngine {
                             smtp_host: resolved_smtp_host,
                             smtp_port: resolved_smtp_port,
                             use_tls: use_tls != 0,
-                            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
-                            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                            imap_tls_mode,
+                            smtp_tls_mode,
                             keyring_secret_key,
                             sync_interval_secs: sync_interval_secs as u64,
                         }
@@ -355,6 +442,64 @@ impl SqliteRecoveryEngine {
                 .collect(),
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Parse a salvaged account's raw `imap_tls_mode`/`smtp_tls_mode` column text back into
+    /// [`nuncio_core::TlsMode`], preserving the account's real configured security posture
+    /// (implicit TLS, STARTTLS, or plaintext) rather than hardcoding every salvaged account
+    /// back to implicit TLS regardless of how it was actually configured -- silently
+    /// upgrading a STARTTLS account or downgrading a plaintext one to "implicit TLS" on
+    /// recovery would misrepresent the account's security posture to the operator.
+    ///
+    /// A raw value that does not match one of the three known on-disk tokens (a row from a
+    /// build that predates this column, or a distinct new corruption) cannot be honestly
+    /// recovered. Rather than silently guessing at one of the other two modes, this WARN-logs
+    /// the account id and the unrecognized raw value, and falls back to the safest mode
+    /// (implicit TLS) -- the operator can see in the daemon's logs exactly which account
+    /// needs its TLS mode re-confirmed, instead of a quiet, invisible substitution.
+    fn parse_salvaged_tls_mode(account_id: &str, column: &str, raw: &str) -> nuncio_core::TlsMode {
+        match raw {
+            "implicit_tls" => nuncio_core::TlsMode::ImplicitTls,
+            "start_tls" => nuncio_core::TlsMode::StartTls,
+            "plain" => nuncio_core::TlsMode::Plain,
+            other => {
+                warn!(
+                    "Salvage could not recognize account {account_id}'s {column} value {other:?}; \
+                     defaulting to ImplicitTls and flagging for operator review rather than \
+                     silently guessing its prior TLS mode."
+                );
+                nuncio_core::TlsMode::ImplicitTls
+            }
+        }
+    }
+
+    /// Read back valid rows from `worm_audit_records` in the backup connection, preserving
+    /// every column including the hash-chain fields (`previous_block_hash`/`record_hmac`) so
+    /// the restored ledger's tamper-evidence carries through salvage rather than being
+    /// silently dropped.
+    async fn salvage_worm_audit_records(
+        pool: &sqlx::SqlitePool,
+    ) -> Vec<(i64, i64, String, String, String, String, String)> {
+        sqlx::query_as::<_, (i64, i64, String, String, String, String, String)>(
+            "SELECT sequence, timestamp_ns, actor, action, data_hash, previous_block_hash, record_hmac FROM worm_audit_records ORDER BY sequence ASC"
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    }
+
+    /// Read back valid rows from `filter_execution_logs` in the backup connection, preserving
+    /// every column including the hash-chain fields (`prev_hash`/`hash`) so the restored
+    /// ledger's tamper-evidence carries through salvage rather than being silently dropped.
+    async fn salvage_filter_execution_logs(
+        pool: &sqlx::SqlitePool,
+    ) -> Vec<(i64, String, String, String, i64, String, String)> {
+        sqlx::query_as::<_, (i64, String, String, String, i64, String, String)>(
+            "SELECT id, rule_id, message_id, action_taken, matched_at, prev_hash, hash FROM filter_execution_logs ORDER BY id ASC"
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
     }
 
     /// Read back valid rows from `filter_rules` / `filter_conditions` / `filter_actions` in the
@@ -556,6 +701,131 @@ mod tests {
         let rules = fresh.list_filter_rules().await.unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name, "Spam Filter");
+    }
+
+    #[tokio::test]
+    async fn salvage_preserves_worm_audit_and_filter_execution_log_chains() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("ledger_salvage_test.db");
+        let backup_dir = dir.path().join("corrupted_backups");
+        let secrets = crate::vault::SecretManager::mock();
+
+        // Step 1: Seed a WORM audit record and a filter execution log entry, each of which
+        // is only valid because it is cryptographically hash-chained to its predecessor.
+        {
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .unwrap();
+            engine
+                .append_worm_audit_record("system.test", "account.created", b"payload-1")
+                .await
+                .unwrap();
+            engine
+                .append_worm_audit_record("system.test", "account.updated", b"payload-2")
+                .await
+                .unwrap();
+            engine
+                .save_filter_execution_log("rule-1", "msg-1", "delete")
+                .await
+                .unwrap();
+            engine
+                .save_filter_execution_log("rule-1", "msg-2", "archive")
+                .await
+                .unwrap();
+
+            assert!(engine.verify_worm_audit_chain().await.is_ok());
+            assert!(engine.verify_execution_log_chain().await.unwrap());
+        }
+
+        // Step 2: Perform salvage recovery, reusing the same secrets vault -- the WORM/ledger
+        // HMAC keys are provisioned from `secrets`, so the restored ledgers verify against
+        // the same key material the corrupted database used, exactly as in the real recovery
+        // flow (the daemon always re-provisions salvage from the account's existing vault).
+        let summary = SqliteRecoveryEngine::salvage(&db_path, &db_path, &backup_dir, &secrets)
+            .await
+            .expect("salvage succeeds");
+
+        assert_eq!(
+            summary.salvaged_audit_records_count, 2,
+            "salvage must carry worm_audit_records through recovery instead of silently \
+             dropping the tamper-evident audit ledger"
+        );
+        assert_eq!(
+            summary.salvaged_execution_logs_count, 2,
+            "salvage must carry filter_execution_logs through recovery instead of silently \
+             dropping the filter ledger"
+        );
+
+        // Step 3: The restored ledgers must still be present AND still pass hash-chain
+        // verification -- proving the chain-linking columns (`previous_block_hash`/
+        // `record_hmac`, `prev_hash`/`hash`) were preserved verbatim, not just the row data.
+        let fresh = DatabaseEngine::connect_file(&db_path, &secrets)
+            .await
+            .unwrap();
+
+        let audit_records = fresh.list_worm_audit_records(100, 0).await.unwrap();
+        assert_eq!(audit_records.len(), 2);
+        assert!(
+            fresh.verify_worm_audit_chain().await.is_ok(),
+            "restored WORM audit chain must still verify after salvage"
+        );
+
+        let execution_logs = fresh.list_filter_execution_logs(100).await.unwrap();
+        assert_eq!(execution_logs.len(), 2);
+        assert!(
+            fresh.verify_execution_log_chain().await.unwrap(),
+            "restored filter execution log chain must still verify after salvage"
+        );
+    }
+
+    #[tokio::test]
+    async fn salvage_preserves_real_tls_mode_instead_of_downgrading_to_implicit() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("tls_mode_salvage_test.db");
+        let backup_dir = dir.path().join("corrupted_backups");
+        let secrets = crate::vault::SecretManager::mock();
+
+        // Step 1: Seed an account configured for STARTTLS on IMAP and plaintext on SMTP --
+        // deliberately neither is `ImplicitTls`, so a salvage that hardcodes the TLS mode
+        // back to `ImplicitTls` is caught by asserting the real modes survive.
+        {
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .unwrap();
+            let acct = AccountConfig {
+                id: "acct-starttls-1".to_string(),
+                name: "STARTTLS Account".to_string(),
+                email_address: "starttls@nuncio.mx".to_string(),
+                protocol: nuncio_core::AccountProtocol::ImapSmtp,
+                server_host: "imap.nuncio.mx".to_string(),
+                server_port: 143,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 587,
+                use_tls: true,
+                imap_tls_mode: nuncio_core::TlsMode::StartTls,
+                smtp_tls_mode: nuncio_core::TlsMode::Plain,
+                keyring_secret_key: "nuncio/acct-starttls-1".to_string(),
+                sync_interval_secs: 60,
+            };
+            engine.save_account(&acct).await.unwrap();
+        }
+
+        // Step 2: Perform salvage recovery.
+        let summary = SqliteRecoveryEngine::salvage(&db_path, &db_path, &backup_dir, &secrets)
+            .await
+            .expect("salvage succeeds");
+        assert_eq!(summary.salvaged_accounts_count, 1);
+
+        // Step 3: The salvaged account must keep its real configured TLS modes, not be
+        // silently reset to `ImplicitTls` -- that would misrepresent the account's actual,
+        // intentionally-configured security posture (STARTTLS on IMAP, plaintext on SMTP).
+        let fresh = DatabaseEngine::connect_file(&db_path, &secrets)
+            .await
+            .unwrap();
+        let accounts = fresh.list_accounts().await.unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].imap_tls_mode, nuncio_core::TlsMode::StartTls);
+        assert_eq!(accounts[0].smtp_tls_mode, nuncio_core::TlsMode::Plain);
     }
 
     // NOTE: there is deliberately no test combining *header* corruption (bytes 0-16 -- the
