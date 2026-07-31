@@ -408,44 +408,26 @@ impl JmapEngine {
 #[async_trait]
 impl MailBackend for JmapEngine {
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError> {
-        if self.has_credentials() {
-            let session = self.discover_session().await?;
-            let account_id = self.resolve_account_id(&session);
-            let request = Self::build_mailbox_get_request(&account_id);
-            let raw = self.post_jmap(&session.api_url, &request).await?;
-            let mailboxes = Self::parse_mailbox_get_response(&raw)?;
-
-            return Ok(mailboxes
-                .into_iter()
-                .map(|mb| Folder {
-                    id: mb.id,
-                    name: mb.name,
-                    total_messages: mb.total_emails as usize,
-                    unread_messages: mb.unread_emails as usize,
-                })
-                .collect());
+        if !self.has_credentials() {
+            return Err(MailError::AuthError(
+                "JMAP folder sync requires credentials".to_string(),
+            ));
         }
+        let session = self.discover_session().await?;
+        let account_id = self.resolve_account_id(&session);
+        let request = Self::build_mailbox_get_request(&account_id);
+        let raw = self.post_jmap(&session.api_url, &request).await?;
+        let mailboxes = Self::parse_mailbox_get_response(&raw)?;
 
-        Ok(vec![
-            Folder {
-                id: "inbox".to_string(),
-                name: "Inbox".to_string(),
-                total_messages: 1,
-                unread_messages: 1,
-            },
-            Folder {
-                id: "sent".to_string(),
-                name: "Sent".to_string(),
-                total_messages: 0,
-                unread_messages: 0,
-            },
-            Folder {
-                id: "archive".to_string(),
-                name: "Archive".to_string(),
-                total_messages: 0,
-                unread_messages: 0,
-            },
-        ])
+        Ok(mailboxes
+            .into_iter()
+            .map(|mb| Folder {
+                id: mb.id,
+                name: mb.name,
+                total_messages: mb.total_emails as usize,
+                unread_messages: mb.unread_emails as usize,
+            })
+            .collect())
     }
 
     async fn sync_messages(
@@ -453,46 +435,21 @@ impl MailBackend for JmapEngine {
         folder_id: &str,
         _since_state: Option<&str>,
     ) -> Result<(Vec<Email>, String), MailError> {
-        if self.has_credentials() {
-            let session = self.discover_session().await?;
-            let account_id = self.resolve_account_id(&session);
-
-            let query_request = Self::build_email_query_request(&account_id, folder_id);
-            let query_raw = self.post_jmap(&session.api_url, &query_request).await?;
-            let ids = Self::parse_email_query_response(&query_raw)?;
-
-            let get_request = Self::build_email_get_request(&account_id, Some(ids));
-            let get_raw = self.post_jmap(&session.api_url, &get_request).await?;
-            return self.parse_email_get_response(&get_raw);
-        }
-
-        let sample_jmap = json!({
-            "state": "s-100",
-            "list": [
-                {
-                    "id": "jmap-msg-1",
-                    "subject": "Welcome to JMAP Sync",
-                    "from": [{ "email": "support@nuncio.mx" }],
-                    "to": [{ "email": "user@nuncio.mx" }],
-                    "receivedAt": 1700000000i64,
-                    "isUnread": true,
-                    "bodySnippet": "RFC 8620 / 8621 JMAP Sync Engine active."
-                }
-            ]
-        })
-        .to_string();
-
-        let (emails, state) = self.parse_email_get_response(&sample_jmap)?;
-        Ok((emails, state))
-    }
-
-    async fn send_email(&self, email: &Email) -> Result<(), MailError> {
-        if email.recipient.is_empty() {
-            return Err(MailError::TransportFailed(
-                "missing recipient address".to_string(),
+        if !self.has_credentials() {
+            return Err(MailError::AuthError(
+                "JMAP message sync requires credentials".to_string(),
             ));
         }
-        Ok(())
+        let session = self.discover_session().await?;
+        let account_id = self.resolve_account_id(&session);
+
+        let query_request = Self::build_email_query_request(&account_id, folder_id);
+        let query_raw = self.post_jmap(&session.api_url, &query_request).await?;
+        let ids = Self::parse_email_query_response(&query_raw)?;
+
+        let get_request = Self::build_email_get_request(&account_id, Some(ids));
+        let get_raw = self.post_jmap(&session.api_url, &get_request).await?;
+        self.parse_email_get_response(&get_raw)
     }
 }
 
@@ -622,20 +579,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uncredentialed_engine_keeps_static_fallback_behaviour() {
+    async fn uncredentialed_engine_requires_credentials_to_sync() {
+        // Without credentials there is no server to discover a session from;
+        // both methods must surface an honest auth error rather than
+        // fabricating folders or messages.
         let engine = JmapEngine::new("acct-1");
         assert!(!engine.has_credentials());
 
-        let folders = engine.sync_folders().await.expect("sync folders");
-        assert_eq!(folders.len(), 3);
-        assert_eq!(folders[0].id, "inbox");
+        let err = engine
+            .sync_folders()
+            .await
+            .expect_err("credential-less sync_folders must fail");
+        assert!(matches!(err, MailError::AuthError(_)));
 
-        let (emails, state) = engine
+        let err = engine
             .sync_messages("inbox", None)
             .await
-            .expect("sync messages");
-        assert_eq!(state, "s-100");
-        assert_eq!(emails.len(), 1);
-        assert_eq!(emails[0].id, "jmap-msg-1");
+            .expect_err("credential-less sync_messages must fail");
+        assert!(matches!(err, MailError::AuthError(_)));
     }
 }

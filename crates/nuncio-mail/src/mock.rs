@@ -12,7 +12,6 @@ use crate::parser::MailError;
 pub struct MockMailBackend {
     folders: Arc<Mutex<Vec<Folder>>>,
     messages: Arc<Mutex<Vec<Email>>>,
-    sent_messages: Arc<Mutex<Vec<Email>>>,
     should_fail: Arc<Mutex<bool>>,
     /// Every `since_state` argument this mock's `sync_messages` was called
     /// with, in call order, so tests can prove a caller threads the returned
@@ -70,14 +69,6 @@ impl MockMailBackend {
         if let Ok(mut guard) = self.messages.lock() {
             guard.push(email);
         }
-    }
-
-    /// Retrieve sent messages recorded by the mock.
-    pub fn sent_messages(&self) -> Vec<Email> {
-        self.sent_messages
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
     }
 }
 
@@ -143,24 +134,6 @@ impl MailBackend for MockMailBackend {
             .cloned()
             .collect();
         Ok((matches, returned_state))
-    }
-
-    async fn send_email(&self, email: &Email) -> Result<(), MailError> {
-        let should_fail = self
-            .should_fail
-            .lock()
-            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
-        if *should_fail {
-            return Err(MailError::ParseFailed(
-                "simulated network failure".to_string(),
-            ));
-        }
-        let mut sent = self
-            .sent_messages
-            .lock()
-            .map_err(|e| MailError::ParseFailed(e.to_string()))?;
-        sent.push(email.clone());
-        Ok(())
     }
 }
 
@@ -257,14 +230,10 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(state, "mock-state-token-100");
 
-        mock.send_email(&email).await.expect("send succeeds");
-        assert_eq!(mock.sent_messages().len(), 1);
-
         // Test error simulation
         mock.set_should_fail(true);
         assert!(mock.sync_folders().await.is_err());
         assert!(mock.sync_messages("inbox", None).await.is_err());
-        assert!(mock.send_email(&email).await.is_err());
     }
 
     fn sample_outbound_message() -> OutboundMessage {

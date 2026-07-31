@@ -5,7 +5,6 @@
 
 pub mod backend;
 pub mod caldav;
-pub mod carddav;
 pub mod mock;
 pub mod nlp;
 pub mod parser;
@@ -14,7 +13,6 @@ pub mod scheduling;
 
 pub use backend::CalendarBackend;
 pub use caldav::{CalDavAccountConfig, CalDavClient};
-pub use carddav::{CardDavClient, Contact};
 pub use mock::MockCalendarBackend;
 pub use nlp::{NaturalLanguageScheduler, NlpError, ParsedSchedulingIntent};
 pub use parser::{CalendarError, IcalParserAdapter};
