@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package nuncio.v1;
 
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
 // ErrorReason is the stable, machine-readable taxonomy of failure conditions
 // the daemon reports to clients. It is carried inside an `ErrorInfo` in a
 // failed RPC's gRPC status-details trailer so a client can branch on a
@@ -272,8 +275,8 @@ message AccountConfig {
   TlsMode smtp_tls_mode = 9;
   // Keyring entry key used to retrieve OS vault credentials.
   string keyring_secret_key = 10;
-  // Background sync polling interval in seconds (minimum 10s).
-  uint64 sync_interval_secs = 11;
+  // Background sync polling interval (minimum 10s).
+  google.protobuf.Duration sync_interval = 11;
   // SMTP server hostname or IP address, used for outbound mail. Distinct
   // from `server_host` because a mail provider's inbound (IMAP/JMAP) and
   // outbound (SMTP) endpoints commonly differ.
@@ -435,8 +438,8 @@ message Message {
   string sender = 5;
   // Recipient address.
   string recipient = 6;
-  // Unix timestamp of message arrival.
-  int64 received_at = 7;
+  // Timestamp of message arrival.
+  google.protobuf.Timestamp received_at = 7;
   // Read/unread flag status.
   bool read = 8;
   // Plaintext message body (already decrypted by the store).
@@ -663,10 +666,10 @@ message FilterRule {
   // Rendered NSQL action clauses (e.g. "MOVE TO 'Archive'"), derived from
   // the parsed AST.
   repeated string actions = 7;
-  // Creation timestamp (unix seconds).
-  int64 created_at = 8;
-  // Last update timestamp (unix seconds).
-  int64 updated_at = 9;
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 8;
+  // Last update timestamp.
+  google.protobuf.Timestamp updated_at = 9;
 }
 
 // CreateRuleRequest carries a new rule's display name, full NSQL source
@@ -750,8 +753,8 @@ message PreviewRuleResponse {
   optional string matched_rule_name = 4;
   // NSQL-rendered actions that would be executed on a real match.
   repeated string actions_evaluated = 5;
-  // Evaluation duration in microseconds.
-  uint64 execution_time_us = 6;
+  // Evaluation duration.
+  google.protobuf.Duration execution_time = 6;
   // Human-readable step-by-step match traces.
   repeated string condition_traces = 7;
 }
@@ -825,8 +828,8 @@ message FilterExecutionLog {
   string message_id = 3;
   // Action description string.
   string action_taken = 4;
-  // Timestamp of execution (unix seconds).
-  int64 matched_at = 5;
+  // Timestamp of execution.
+  google.protobuf.Timestamp matched_at = 5;
   // Hash of the preceding log record in the hash-chain ledger.
   string prev_hash = 6;
   // HMAC-SHA256 hash of this record.
@@ -973,10 +976,10 @@ message CalendarEvent {
   string calendar_id = 3;
   // Event title or summary.
   string summary = 4;
-  // Unix timestamp for event start.
-  int64 start_time = 5;
-  // Unix timestamp for event end.
-  int64 end_time = 6;
+  // Timestamp for event start.
+  google.protobuf.Timestamp start_time = 5;
+  // Timestamp for event end.
+  google.protobuf.Timestamp end_time = 6;
   // Recurrence rule string (RFC 5545 RRULE format).
   optional string rrule = 7;
   // Location text.
@@ -989,8 +992,8 @@ message CalendarEvent {
 message CalendarSyncRequest {
   string account_id = 1;
   string calendar_id = 2;
-  int64 start_window = 3;
-  int64 end_window = 4;
+  google.protobuf.Timestamp start_window = 3;
+  google.protobuf.Timestamp end_window = 4;
 }
 
 // CalendarSyncResponse reports how many events were synchronized.
@@ -1002,8 +1005,8 @@ message CalendarSyncResponse {
 message ListEventsRequest {
   string account_id = 1;
   string calendar_id = 2;
-  int64 start_window = 3;
-  int64 end_window = 4;
+  google.protobuf.Timestamp start_window = 3;
+  google.protobuf.Timestamp end_window = 4;
 }
 
 // ListEventsResponse.
@@ -1197,8 +1200,9 @@ service Audit {
 message AuditRecord {
   // Monotonically increasing sequence index.
   uint64 sequence = 1;
-  // UTC timestamp in nanoseconds since Unix epoch.
-  int64 timestamp_ns = 2;
+  // UTC timestamp, preserving the audit ledger's nanosecond precision in
+  // the `nanos` field.
+  google.protobuf.Timestamp timestamp = 2;
   // Subsystem or actor that performed the audited action.
   string actor = 3;
   // Action identifier (e.g. "data.export").

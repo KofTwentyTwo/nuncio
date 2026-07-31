@@ -285,7 +285,9 @@ fn map_account_config_to_proto(config: nuncio_core::AccountConfig) -> AccountCon
         imap_tls_mode: map_tls_mode_to_proto(config.imap_tls_mode).into(),
         smtp_tls_mode: map_tls_mode_to_proto(config.smtp_tls_mode).into(),
         keyring_secret_key: config.keyring_secret_key,
-        sync_interval_secs: config.sync_interval_secs,
+        sync_interval: Some(nuncio_proto::time::duration_from_secs(
+            config.sync_interval_secs,
+        )),
         smtp_host: config.smtp_host,
         smtp_port: u32::from(config.smtp_port),
         collection_url: config.collection_url,
@@ -305,6 +307,9 @@ fn map_account_config_from_proto(
         .map_err(|_| Status::invalid_argument("server_port must be in range 1..=65535"))?;
     let smtp_port = u16::try_from(config.smtp_port)
         .map_err(|_| Status::invalid_argument("smtp_port must be in range 1..=65535"))?;
+    let sync_interval = config
+        .sync_interval
+        .ok_or_else(|| Status::invalid_argument("sync_interval is required"))?;
 
     Ok(nuncio_core::AccountConfig {
         id: config.id,
@@ -319,7 +324,7 @@ fn map_account_config_from_proto(
         imap_tls_mode,
         smtp_tls_mode,
         keyring_secret_key: config.keyring_secret_key,
-        sync_interval_secs: config.sync_interval_secs,
+        sync_interval_secs: nuncio_proto::time::duration_to_secs(&sync_interval),
         collection_url: config.collection_url,
     })
 }
@@ -777,7 +782,9 @@ fn map_email_to_proto(email: nuncio_core::model::Email) -> MessageProto {
         subject: email.subject,
         sender: email.sender,
         recipient: email.recipient,
-        received_at: email.received_at,
+        received_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+            email.received_at,
+        )),
         read: email.read,
         body_plain: email.body_plain,
         body_html: email.body_html,
@@ -812,8 +819,10 @@ fn map_calendar_event_to_proto(event: nuncio_core::model::CalendarEvent) -> Cale
         account_id: event.account_id,
         calendar_id: event.calendar_id,
         summary: event.summary,
-        start_time: event.start_time,
-        end_time: event.end_time,
+        start_time: Some(nuncio_proto::time::timestamp_from_unix_secs(
+            event.start_time,
+        )),
+        end_time: Some(nuncio_proto::time::timestamp_from_unix_secs(event.end_time)),
         rrule: event.rrule,
         location: event.location,
     }
@@ -856,6 +865,17 @@ fn map_contact_to_proto(contact: nuncio_contacts::Contact) -> ContactProto {
         is_favorite: contact.is_favorite,
         interaction_count: contact.interaction_count,
     }
+}
+
+/// Extracts a required window bound (`start_window`/`end_window`) from its
+/// wire-format `Timestamp`, rejecting an absent field with
+/// `Status::invalid_argument` rather than silently defaulting to the epoch.
+fn require_window_bound(
+    ts: Option<nuncio_proto::time::Timestamp>,
+    field: &str,
+) -> Result<i64, Status> {
+    let ts = ts.ok_or_else(|| Status::invalid_argument(format!("{field} is required")))?;
+    Ok(nuncio_proto::time::timestamp_to_unix_secs(&ts))
 }
 
 /// Combines an account's in-window events with its recurring masters into the final event
@@ -956,6 +976,8 @@ impl CalendarGrpcService {
     async fn sync_configured_caldav_accounts(
         &self,
         req: &CalendarSyncRequest,
+        start_window: i64,
+        end_window: i64,
     ) -> Result<usize, Status> {
         let caldav_accounts: Vec<nuncio_core::AccountConfig> = self
             .db
@@ -1004,8 +1026,8 @@ impl CalendarGrpcService {
                 &account,
                 &password,
                 &req.calendar_id,
-                req.start_window,
-                req.end_window,
+                start_window,
+                end_window,
             )
             .await
             .map_err(|e| {
@@ -1027,18 +1049,23 @@ impl Calendar for CalendarGrpcService {
         request: Request<CalendarSyncRequest>,
     ) -> Result<Response<CalendarSyncResponse>, Status> {
         let req = request.into_inner();
+        let start_window = require_window_bound(req.start_window, "start_window")?;
+        let end_window = require_window_bound(req.end_window, "end_window")?;
 
         let synced = match &self.overrides.calendar_backend {
             Some(backend) => crate::calendar_sync::sync_with_backend(
                 &self.db,
                 backend.as_ref(),
                 &req.calendar_id,
-                req.start_window,
-                req.end_window,
+                start_window,
+                end_window,
             )
             .await
             .map_err(|e| Status::internal(format!("calendar sync failed: {e}")))?,
-            None => self.sync_configured_caldav_accounts(&req).await?,
+            None => {
+                self.sync_configured_caldav_accounts(&req, start_window, end_window)
+                    .await?
+            }
         };
 
         Ok(Response::new(CalendarSyncResponse {
@@ -1054,10 +1081,12 @@ impl Calendar for CalendarGrpcService {
         if req.account_id.is_empty() {
             return Err(Status::invalid_argument("account_id is required"));
         }
+        let start_window = require_window_bound(req.start_window, "start_window")?;
+        let end_window = require_window_bound(req.end_window, "end_window")?;
 
         let all_in_window = self
             .db
-            .list_calendar_events(&req.account_id, req.start_window, req.end_window)
+            .list_calendar_events(&req.account_id, start_window, end_window)
             .await
             .map_err(|e| Status::internal(format!("failed to list calendar events: {e}")))?;
 
@@ -1068,7 +1097,7 @@ impl Calendar for CalendarGrpcService {
             .map_err(|e| Status::internal(format!("failed to list recurring events: {e}")))?;
 
         let mut events =
-            expand_events_for_window(all_in_window, recurring, req.start_window, req.end_window);
+            expand_events_for_window(all_in_window, recurring, start_window, end_window);
 
         events.retain(|e| req.calendar_id.is_empty() || e.calendar_id == req.calendar_id);
 
@@ -1574,8 +1603,12 @@ fn map_filter_rule_to_proto(rule: nuncio_filter::FilterRule) -> FilterRuleProto 
         enabled: rule.enabled,
         nsql_text: rule.nsql_text,
         actions: rule.actions.iter().map(|a| a.to_nsql()).collect(),
-        created_at: rule.created_at,
-        updated_at: rule.updated_at,
+        created_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+            rule.created_at,
+        )),
+        updated_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+            rule.updated_at,
+        )),
     }
 }
 
@@ -1589,7 +1622,7 @@ fn map_filter_execution_log_to_proto(
         rule_id: log.rule_id,
         message_id: log.message_id,
         action_taken: log.action_taken,
-        matched_at: log.matched_at,
+        matched_at: Some(nuncio_proto::time::timestamp_from_unix_secs(log.matched_at)),
         prev_hash: log.prev_hash,
         hash: log.hash,
     }
@@ -1608,7 +1641,9 @@ fn map_preview_result_to_proto(preview: nuncio_filter::FilterPreviewResult) -> P
             .iter()
             .map(|a| a.to_nsql())
             .collect(),
-        execution_time_us: preview.execution_time_us,
+        execution_time: Some(nuncio_proto::time::duration_from_micros(
+            preview.execution_time_us,
+        )),
         condition_traces: preview.condition_traces,
     }
 }
@@ -2152,7 +2187,9 @@ const DEFAULT_LIST_RECORDS_LIMIT: u32 = 100;
 fn map_audit_record_to_proto(record: nuncio_core::WormAuditRecord) -> AuditRecordProto {
     AuditRecordProto {
         sequence: record.sequence,
-        timestamp_ns: record.timestamp_ns,
+        timestamp: Some(nuncio_proto::time::timestamp_from_unix_nanos(
+            record.timestamp_ns,
+        )),
         actor: record.actor,
         action: record.action,
         data_hash: record.data_hash,
@@ -2574,6 +2611,73 @@ mod tests {
     use nuncio_proto::v1::accounts_client::AccountsClient;
     use nuncio_proto::v1::system_client::SystemClient;
     use tonic::Code;
+
+    /// Proves a stored second-granularity instant survives the proto
+    /// boundary exactly: `map_email_to_proto`'s `received_at` decodes back
+    /// to the identical unix-seconds value via `timestamp_to_unix_secs`.
+    #[test]
+    fn map_email_to_proto_round_trips_received_at_exactly() {
+        let original_secs = 1_700_000_123_i64;
+        let email = nuncio_core::model::Email {
+            id: "msg-1".to_string(),
+            account_id: "acct-1".to_string(),
+            folder_id: "inbox".to_string(),
+            subject: "s".to_string(),
+            sender: "a@b.com".to_string(),
+            recipient: "c@d.com".to_string(),
+            received_at: original_secs,
+            read: false,
+            body_plain: None,
+            body_html: None,
+            attachments: Vec::new(),
+            remote_id: "remote-1".to_string(),
+            uid_validity: "1".to_string(),
+        };
+
+        let proto = map_email_to_proto(email);
+        let ts = proto.received_at.expect("received_at is always populated");
+        assert_eq!(
+            nuncio_proto::time::timestamp_to_unix_secs(&ts),
+            original_secs
+        );
+    }
+
+    /// Proves the WORM audit ledger's sub-second precision survives the
+    /// proto boundary losslessly: `map_audit_record_to_proto`'s `timestamp`
+    /// decodes back to the exact original `timestamp_ns`, not just the
+    /// truncated seconds component.
+    #[test]
+    fn map_audit_record_to_proto_preserves_nanosecond_precision() {
+        let original_ns = 1_700_000_123_987_654_321_i64;
+        let record = nuncio_core::WormAuditRecord {
+            sequence: 1,
+            timestamp_ns: original_ns,
+            actor: "system".to_string(),
+            action: "test.action".to_string(),
+            data_hash: "hash".to_string(),
+            previous_block_hash: "GENESIS".to_string(),
+            record_hmac: "mac".to_string(),
+        };
+
+        let proto = map_audit_record_to_proto(record);
+        let ts = proto.timestamp.expect("timestamp is always populated");
+        assert_eq!(
+            nuncio_proto::time::timestamp_to_unix_nanos(&ts),
+            original_ns
+        );
+    }
+
+    /// Proves an account's sync interval survives the proto `Duration`
+    /// boundary in both directions: to-proto then from-proto reconstructs
+    /// the exact original whole-second value.
+    #[test]
+    fn account_sync_interval_round_trips_through_duration() {
+        let mut config = sample_account_config_proto("acct-rt", "nuncio/acct-rt");
+        config.sync_interval = Some(nuncio_proto::time::duration_from_secs(600));
+
+        let core_config = map_account_config_from_proto(config).expect("valid config maps back");
+        assert_eq!(core_config.sync_interval_secs, 600);
+    }
 
     /// Spawns a test server backed by a fresh ephemeral database, a fresh
     /// empty [`FilterEngine`], and a fresh [`SecretManager::mock`] vault --
@@ -3137,7 +3241,7 @@ mod tests {
             imap_tls_mode: TlsModeProto::ImplicitTls.into(),
             smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
             keyring_secret_key: keyring_secret_key.to_string(),
-            sync_interval_secs: 60,
+            sync_interval: Some(nuncio_proto::time::duration_from_secs(60)),
             collection_url: String::new(),
             smtp_host: "smtp.nuncio.mx".to_string(),
             smtp_port: 465,
@@ -3708,8 +3812,8 @@ mod tests {
             .list_events(ListEventsRequest {
                 account_id: "acct-1".to_string(),
                 calendar_id: "cal-1".to_string(),
-                start_window: 0,
-                end_window: i64::MAX,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -3727,8 +3831,8 @@ mod tests {
             .sync(CalendarSyncRequest {
                 account_id: "acct-1".to_string(),
                 calendar_id: "cal-1".to_string(),
-                start_window: 0,
-                end_window: i64::MAX,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
             })
             .await
             .expect_err("missing bearer token must be rejected");
@@ -5539,8 +5643,8 @@ mod tests {
             .list_events(authed_bearer_request(ListEventsRequest {
                 account_id: "acct-cal-1".to_string(),
                 calendar_id: "cal-work".to_string(),
-                start_window: 1_699_999_000,
-                end_window: 1_700_004_000,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_699_999_000)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_004_000)),
             }))
             .await
             .expect("list_events succeeds")
@@ -5598,8 +5702,8 @@ mod tests {
             .list_events(authed_bearer_request(ListEventsRequest {
                 account_id: "acct-cal-1".to_string(),
                 calendar_id: "cal-work".to_string(),
-                start_window: 1_699_999_000,
-                end_window: 1_700_004_000,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_699_999_000)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_004_000)),
             }))
             .await
             .expect("list_events succeeds")
@@ -5624,8 +5728,8 @@ mod tests {
             .list_events(authed_bearer_request(ListEventsRequest {
                 account_id: String::new(),
                 calendar_id: "cal-work".to_string(),
-                start_window: 0,
-                end_window: i64::MAX,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
             }))
             .await
             .expect_err("empty account_id must be rejected");
@@ -5717,8 +5821,8 @@ mod tests {
             .sync(authed_bearer_request(CalendarSyncRequest {
                 account_id: "acct-cal-no-config".to_string(),
                 calendar_id: "cal-work".to_string(),
-                start_window: 0,
-                end_window: i64::MAX,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
             }))
             .await
             .expect_err("sync with no injected backend and no CalDAV config must fail");
@@ -5775,8 +5879,8 @@ mod tests {
             .sync(authed_bearer_request(CalendarSyncRequest {
                 account_id: "acct-cal-injected".to_string(),
                 calendar_id: "cal-work".to_string(),
-                start_window: 1_699_999_000,
-                end_window: 1_700_004_000,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_699_999_000)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_004_000)),
             }))
             .await
             .expect("sync succeeds")
@@ -5788,8 +5892,8 @@ mod tests {
             .list_events(authed_bearer_request(ListEventsRequest {
                 account_id: "acct-cal-injected".to_string(),
                 calendar_id: "cal-work".to_string(),
-                start_window: 1_699_999_000,
-                end_window: 1_700_004_000,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_699_999_000)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_004_000)),
             }))
             .await
             .expect("list_events succeeds")
@@ -6296,8 +6400,8 @@ mod tests {
             .list_events(ListEventsRequest {
                 account_id: "acct-1".to_string(),
                 calendar_id: "cal-1".to_string(),
-                start_window: 0,
-                end_window: i64::MAX,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX)),
             })
             .await
             .expect_err("Calendar must reject an unauthenticated call");

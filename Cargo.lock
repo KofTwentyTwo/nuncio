@@ -2606,6 +2606,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "prost",
+ "prost-types",
  "protoc-bin-vendored",
  "thiserror 1.0.69",
  "tokio",

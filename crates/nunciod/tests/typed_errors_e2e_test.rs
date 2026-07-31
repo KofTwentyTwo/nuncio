@@ -140,8 +140,8 @@ async fn typed_error_reasons_decode_from_status_details_over_the_wire() {
         .sync(CalendarSyncRequest {
             account_id: String::new(),
             calendar_id: "personal".to_string(),
-            start_window: 0,
-            end_window: 0,
+            start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
+            end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(0)),
         })
         .await
         .expect_err("syncing with no CalDAV account configured must fail");

@@ -53,6 +53,48 @@ fn parse_account_protocol(protocol: &str) -> Result<nuncio_proto::v1::AccountPro
     }
 }
 
+/// Renders a wire-format `google.protobuf.Timestamp` as an RFC 3339 UTC
+/// string for human-readable and `--json` output. `nanos` outside
+/// `0..1_000_000_000` (never produced by the daemon's own mappers) and an
+/// absent field both render as `"unknown"` rather than fabricating a time.
+fn format_timestamp(ts: &Option<nuncio_proto::time::Timestamp>) -> String {
+    ts.as_ref()
+        .and_then(|ts| {
+            u32::try_from(ts.nanos)
+                .ok()
+                .map(|nanos| (ts.seconds, nanos))
+        })
+        .and_then(|(seconds, nanos)| chrono::DateTime::from_timestamp(seconds, nanos))
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Extracts the exact unix-nanosecond instant a wire-format `Timestamp`
+/// carries, for callers that need the audit ledger's full sub-second
+/// precision rather than the RFC 3339 rendering.
+fn timestamp_unix_nanos(ts: &Option<nuncio_proto::time::Timestamp>) -> i64 {
+    ts.as_ref()
+        .map(nuncio_proto::time::timestamp_to_unix_nanos)
+        .unwrap_or(0)
+}
+
+/// Renders a wire-format `google.protobuf.Duration` as whole seconds for
+/// human-readable and `--json` output (e.g. `AccountConfig.sync_interval`).
+fn duration_secs(d: &Option<nuncio_proto::time::Duration>) -> u64 {
+    d.as_ref()
+        .map(nuncio_proto::time::duration_to_secs)
+        .unwrap_or(0)
+}
+
+/// Renders a wire-format `google.protobuf.Duration` as whole microseconds
+/// for human-readable and `--json` output (e.g.
+/// `PreviewRuleResponse.execution_time`).
+fn duration_micros(d: &Option<nuncio_proto::time::Duration>) -> u64 {
+    d.as_ref()
+        .map(nuncio_proto::time::duration_to_micros)
+        .unwrap_or(0)
+}
+
 /// Renders a `nuncio.v1.Message` (as returned by the daemon's `Mail` gRPC
 /// service) into the JSON shape used by `mail list`/`mail read`'s
 /// `--json` output.
@@ -64,7 +106,7 @@ fn message_proto_to_json(message: &nuncio_proto::v1::Message) -> serde_json::Val
         "subject": message.subject,
         "sender": message.sender,
         "recipient": message.recipient,
-        "received_at": message.received_at,
+        "received_at": format_timestamp(&message.received_at),
         "read": message.read,
         "body_plain": message.body_plain,
         "body_html": message.body_html,
@@ -80,8 +122,8 @@ fn calendar_event_proto_to_json(event: &nuncio_proto::v1::CalendarEvent) -> serd
         "account_id": event.account_id,
         "calendar_id": event.calendar_id,
         "summary": event.summary,
-        "start_time": event.start_time,
-        "end_time": event.end_time,
+        "start_time": format_timestamp(&event.start_time),
+        "end_time": format_timestamp(&event.end_time),
         "rrule": event.rrule,
         "location": event.location,
     })
@@ -150,7 +192,8 @@ fn map_export_format_to_proto(format: nuncio_core::ExportFormat) -> nuncio_proto
 fn audit_record_proto_to_json(record: &nuncio_proto::v1::AuditRecord) -> serde_json::Value {
     json!({
         "sequence": record.sequence,
-        "timestamp_ns": record.timestamp_ns,
+        "timestamp": format_timestamp(&record.timestamp),
+        "timestamp_ns": timestamp_unix_nanos(&record.timestamp),
         "actor": record.actor,
         "action": record.action,
         "data_hash": record.data_hash,
@@ -171,8 +214,8 @@ fn filter_rule_proto_to_json(rule: &nuncio_proto::v1::FilterRule) -> serde_json:
         "enabled": rule.enabled,
         "nsql_text": rule.nsql_text,
         "actions": rule.actions,
-        "created_at": rule.created_at,
-        "updated_at": rule.updated_at,
+        "created_at": format_timestamp(&rule.created_at),
+        "updated_at": format_timestamp(&rule.updated_at),
     })
 }
 
@@ -184,7 +227,7 @@ fn filter_execution_log_proto_to_json(
         "rule_id": log.rule_id,
         "message_id": log.message_id,
         "action_taken": log.action_taken,
-        "matched_at": log.matched_at,
+        "matched_at": format_timestamp(&log.matched_at),
         "prev_hash": log.prev_hash,
         "hash": log.hash,
     })
@@ -882,7 +925,10 @@ impl HeadlessRunner {
                     } else {
                         format!(
                             "Message {}: Subject: '{}', From: {}, Date: {}",
-                            msg.id, msg.subject, msg.sender, msg.received_at
+                            msg.id,
+                            msg.subject,
+                            msg.sender,
+                            format_timestamp(&msg.received_at)
                         )
                     }
                 }
@@ -1066,13 +1112,15 @@ impl HeadlessRunner {
                 } else if records.is_empty() {
                     "No audit records recorded.".to_string()
                 } else {
-                    let mut out = String::from(
-                        "SEQ  ACTOR                ACTION               TIMESTAMP_NS\n",
-                    );
+                    let mut out =
+                        String::from("SEQ  ACTOR                ACTION               TIMESTAMP\n");
                     for r in records {
                         out.push_str(&format!(
                             "{:<4} {:<20} {:<20} {}\n",
-                            r.sequence, r.actor, r.action, r.timestamp_ns
+                            r.sequence,
+                            r.actor,
+                            r.action,
+                            format_timestamp(&r.timestamp)
                         ));
                     }
                     out
@@ -1348,13 +1396,15 @@ impl HeadlessRunner {
                         "matched_rule_id": preview.matched_rule_id,
                         "matched_rule_name": preview.matched_rule_name,
                         "actions_evaluated": preview.actions_evaluated,
-                        "execution_time_us": preview.execution_time_us,
+                        "execution_time_us": duration_micros(&preview.execution_time),
                         "condition_traces": preview.condition_traces,
                     }))
                 } else {
                     format!(
                         "Dry-run evaluation result: matched={}, actions={:?}, elapsed={}us",
-                        preview.matched, preview.actions_evaluated, preview.execution_time_us
+                        preview.matched,
+                        preview.actions_evaluated,
+                        duration_micros(&preview.execution_time)
                     )
                 }
             }
@@ -1545,7 +1595,11 @@ impl HeadlessRunner {
                     for l in logs {
                         out.push_str(&format!(
                             "{:<4} {:<10} {:<10} {:<12} {}\n",
-                            l.id, l.rule_id, l.message_id, l.action_taken, l.matched_at
+                            l.id,
+                            l.rule_id,
+                            l.message_id,
+                            l.action_taken,
+                            format_timestamp(&l.matched_at)
                         ));
                     }
                     out
@@ -1733,7 +1787,7 @@ impl HeadlessRunner {
             imap_tls_mode: map_tls_mode_to_proto(imap_tls_mode).into(),
             smtp_tls_mode: map_tls_mode_to_proto(smtp_tls_mode).into(),
             keyring_secret_key: keyring_key.clone(),
-            sync_interval_secs: 300,
+            sync_interval: Some(nuncio_proto::time::duration_from_secs(300)),
             smtp_host: if is_caldav {
                 String::new()
             } else {
@@ -1837,7 +1891,7 @@ impl HeadlessRunner {
                                 "imap_tls_mode": a.imap_tls_mode().as_str_name(),
                                 "smtp_tls_mode": a.smtp_tls_mode().as_str_name(),
                                 "keyring_secret_key": a.keyring_secret_key,
-                                "sync_interval_secs": a.sync_interval_secs,
+                                "sync_interval_secs": duration_secs(&a.sync_interval),
                                 "collection_url": a.collection_url,
                             })
                         })
@@ -1932,7 +1986,7 @@ impl HeadlessRunner {
                 "imap_tls_mode": account.imap_tls_mode().as_str_name(),
                 "smtp_tls_mode": account.smtp_tls_mode().as_str_name(),
                 "keyring_secret_key": account.keyring_secret_key,
-                "sync_interval_secs": account.sync_interval_secs,
+                "sync_interval_secs": duration_secs(&account.sync_interval),
             }))
         } else {
             format!(
@@ -2190,8 +2244,8 @@ impl HeadlessRunner {
             .list_events(nuncio_proto::v1::ListEventsRequest {
                 account_id: account.to_string(),
                 calendar_id: calendar.to_string(),
-                start_window: start,
-                end_window: end,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(start)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(end)),
             })
             .await
         {
@@ -2241,8 +2295,8 @@ impl HeadlessRunner {
             .sync(nuncio_proto::v1::CalendarSyncRequest {
                 account_id: account.to_string(),
                 calendar_id: calendar.to_string(),
-                start_window: start,
-                end_window: end,
+                start_window: Some(nuncio_proto::time::timestamp_from_unix_secs(start)),
+                end_window: Some(nuncio_proto::time::timestamp_from_unix_secs(end)),
             })
             .await
         {
@@ -2933,7 +2987,7 @@ mod tests {
                         imap_tls_mode: TlsModeProto::ImplicitTls.into(),
                         smtp_tls_mode: TlsModeProto::ImplicitTls.into(),
                         keyring_secret_key: "nuncio/acct-stub-1".to_string(),
-                        sync_interval_secs: 300,
+                        sync_interval: Some(nuncio_proto::time::duration_from_secs(300)),
                         smtp_host: "smtp.nuncio.mx".to_string(),
                         smtp_port: 465,
                         collection_url: String::new(),
@@ -3145,7 +3199,7 @@ mod tests {
                 subject: "Stub Subject".to_string(),
                 sender: "alice@nuncio.mx".to_string(),
                 recipient: "bob@nuncio.mx".to_string(),
-                received_at: 1_700_000_000,
+                received_at: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_000_000)),
                 read: false,
                 body_plain: Some("Stub body text".to_string()),
                 body_html: None,
@@ -3598,8 +3652,8 @@ mod tests {
                 account_id: "acct-stub-1".to_string(),
                 calendar_id: "cal-stub".to_string(),
                 summary: "Stub Meeting".to_string(),
-                start_time: 1_700_000_000,
-                end_time: 1_700_003_600,
+                start_time: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_000_000)),
+                end_time: Some(nuncio_proto::time::timestamp_from_unix_secs(1_700_003_600)),
                 rrule: None,
                 location: Some("Room 1".to_string()),
             }
@@ -3707,8 +3761,14 @@ mod tests {
             .expect("stub daemon received a list_events request");
         assert_eq!(recorded_list.account_id, "acct-stub-1");
         assert_eq!(recorded_list.calendar_id, "cal-stub");
-        assert_eq!(recorded_list.start_window, 0);
-        assert_eq!(recorded_list.end_window, i64::MAX);
+        assert_eq!(
+            recorded_list.start_window,
+            Some(nuncio_proto::time::timestamp_from_unix_secs(0))
+        );
+        assert_eq!(
+            recorded_list.end_window,
+            Some(nuncio_proto::time::timestamp_from_unix_secs(i64::MAX))
+        );
 
         // `cal sync`: proves the CLI is a real gRPC client of
         // `Calendar/Sync` and reports the daemon's real `synced_count`,
@@ -4024,8 +4084,12 @@ mod tests {
                         enabled: true,
                         nsql_text: req.nsql,
                         actions: vec!["MARK READ".to_string()],
-                        created_at: 1_700_000_000,
-                        updated_at: 1_700_000_000,
+                        created_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+                            1_700_000_000,
+                        )),
+                        updated_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+                            1_700_000_000,
+                        )),
                     }),
                 }))
             }
@@ -4043,8 +4107,12 @@ mod tests {
                         enabled: true,
                         nsql_text: "WHERE subject CONTAINS 'Urgent' ACTION MARK READ".to_string(),
                         actions: vec!["MARK READ".to_string()],
-                        created_at: 1_700_000_000,
-                        updated_at: 1_700_000_000,
+                        created_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+                            1_700_000_000,
+                        )),
+                        updated_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+                            1_700_000_000,
+                        )),
                     }],
                 }))
             }
@@ -4086,7 +4154,7 @@ mod tests {
                     matched_rule_id: Some("rule-stub-1".to_string()),
                     matched_rule_name: Some("Stub Rule".to_string()),
                     actions_evaluated: vec!["MARK READ".to_string()],
-                    execution_time_us: 42,
+                    execution_time: Some(nuncio_proto::time::duration_from_micros(42)),
                     condition_traces: vec!["Rule 'Stub Rule': MATCH".to_string()],
                 }))
             }
@@ -4111,8 +4179,12 @@ mod tests {
                             .nsql
                             .unwrap_or_else(|| "WHERE subject CONTAINS 'Urgent'".to_string()),
                         actions: vec!["MARK READ".to_string()],
-                        created_at: 1_700_000_000,
-                        updated_at: 1_700_000_001,
+                        created_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+                            1_700_000_000,
+                        )),
+                        updated_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+                            1_700_000_001,
+                        )),
                     }),
                 }))
             }
@@ -4153,7 +4225,9 @@ mod tests {
                         rule_id: "rule-stub-1".to_string(),
                         message_id: "msg-stub-1".to_string(),
                         action_taken: "MARK READ".to_string(),
-                        matched_at: 1_700_000_002,
+                        matched_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+                            1_700_000_002,
+                        )),
                         prev_hash: "prev-hash".to_string(),
                         hash: "hash".to_string(),
                     }],
@@ -4640,7 +4714,9 @@ mod tests {
                 Ok(tonic::Response::new(ListRecordsResponse {
                     records: vec![AuditRecord {
                         sequence: 1,
-                        timestamp_ns: 1_700_000_000_000_000_000,
+                        timestamp: Some(nuncio_proto::time::timestamp_from_unix_nanos(
+                            1_700_000_000_000_000_000,
+                        )),
                         actor: "system.test".to_string(),
                         action: "data.export".to_string(),
                         data_hash: "deadbeef".to_string(),
