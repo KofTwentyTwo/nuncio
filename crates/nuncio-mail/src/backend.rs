@@ -5,6 +5,60 @@ use nuncio_core::model::{Attachment, Email, Folder};
 
 use crate::parser::MailError;
 
+/// The remote change a [`RemoteMutationSpec`] applies to one addressed message.
+///
+/// This is the closed vocabulary of genuinely-remote filter actions that the
+/// outbox drains against a real server. `MARK READ`/`MARK UNREAD` are applied
+/// locally to the store when a filter matches, so they are deliberately NOT
+/// represented here -- only actions that mutate server-side state are.
+/// `FORWARD` and `CALL WEBHOOK` are also excluded: they are not backend
+/// mutations (one composes an outbound message, the other calls an HTTP
+/// endpoint), so they are executed through the send/webhook seams instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteMutationKind {
+    /// Add (`value == true`) or remove (`value == false`) the "flagged"/
+    /// starred keyword: IMAP `\Flagged`, JMAP `$flagged`. Covers `FLAG`/`UNFLAG`.
+    SetFlagged {
+        /// Whether the message should end up flagged.
+        value: bool,
+    },
+    /// Move the message from its source folder to `to_folder`.
+    Move {
+        /// Destination folder (IMAP mailbox name / JMAP mailbox id).
+        to_folder: String,
+    },
+    /// Copy the message into `to_folder`, leaving the source copy in place.
+    Copy {
+        /// Destination folder (IMAP mailbox name / JMAP mailbox id).
+        to_folder: String,
+    },
+    /// Delete the message (IMAP `\Deleted` + `EXPUNGE`; JMAP `destroy`).
+    Delete,
+}
+
+/// A fully-addressed remote mutation for a single message: which message
+/// (protocol-native id), the folder it currently lives in, that folder's
+/// stored sync checkpoint (carrying IMAP UIDVALIDITY), and the change to
+/// apply.
+///
+/// `folder_checkpoint` is the value persisted by a prior sync
+/// (`"{uidvalidity}:{uidnext}"` for IMAP). The IMAP backend uses it to refuse
+/// to act when the mailbox's current UIDVALIDITY no longer matches -- a
+/// renumbered mailbox reassigns UIDs, so the stored UID would otherwise
+/// address the wrong message. Protocols that do not use UIDVALIDITY (JMAP)
+/// ignore it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteMutationSpec {
+    /// Protocol-native message id (IMAP `imap-uid-{uid}`, JMAP object id).
+    pub message_id: String,
+    /// Folder the message currently lives in.
+    pub folder_id: String,
+    /// The source folder's stored sync checkpoint, if any.
+    pub folder_checkpoint: Option<String>,
+    /// The change to apply.
+    pub kind: RemoteMutationKind,
+}
+
 /// Protocol-agnostic mail backend engine trait implemented by JMAP and IMAP engines.
 #[async_trait]
 pub trait MailBackend: Send + Sync {
@@ -18,6 +72,13 @@ pub trait MailBackend: Send + Sync {
         folder_id: &str,
         since_state: Option<&str>,
     ) -> Result<(Vec<Email>, String), MailError>;
+
+    /// Apply a remote mutation (move/copy/flag/delete) to a single message
+    /// against the real server. MUST return `Ok(())` only when the server
+    /// genuinely applied the change -- implementations must never fabricate
+    /// success, and must refuse to act (returning an error) when the target
+    /// message cannot be safely identified (e.g. an IMAP UIDVALIDITY mismatch).
+    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError>;
 }
 
 /// A composed outbound email message ready to send over SMTP. Deliberately

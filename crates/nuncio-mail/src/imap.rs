@@ -31,8 +31,35 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// honest timeout rather than hanging the sync indefinitely.
 const FETCH_ITEM_TIMEOUT: Duration = Duration::from_secs(60);
 
-use crate::backend::MailBackend;
+use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
 use crate::parser::{MailError, MimeParserAdapter};
+
+/// Prefix an IMAP [`Email::id`] carries in front of its raw numeric UID (see
+/// [`ImapEngine::sync_folder_messages_with_session`], which formats every id as
+/// `"imap-uid-{uid}"`). A remote mutation must recover the UID from the id to
+/// address the message, so the prefix is defined once here.
+const IMAP_UID_ID_PREFIX: &str = "imap-uid-";
+
+/// Recover the raw IMAP UID from an [`Email::id`] of the form
+/// `"imap-uid-{uid}"`. Returns `None` for any id that does not carry the
+/// expected prefix and a valid non-zero `u32` UID, so a mutation against a
+/// malformed/foreign id fails honestly rather than addressing UID 0.
+fn parse_imap_uid(message_id: &str) -> Option<u32> {
+    let raw = message_id.strip_prefix(IMAP_UID_ID_PREFIX)?;
+    let uid = raw.trim().parse::<u32>().ok()?;
+    (uid >= 1).then_some(uid)
+}
+
+/// Extract the UIDVALIDITY component of a stored folder checkpoint
+/// (`"{uidvalidity}:{uidnext}"`). Returns `None` for a missing, malformed, or
+/// legacy bare-number checkpoint -- the caller treats an absent stored
+/// UIDVALIDITY as "cannot prove the mailbox has not been renumbered" and
+/// refuses to act.
+fn checkpoint_uid_validity(checkpoint: Option<&str>) -> Option<u32> {
+    let raw = checkpoint?;
+    let (validity, _uid) = raw.split_once(CHECKPOINT_DELIM)?;
+    validity.trim().parse::<u32>().ok()
+}
 
 /// Delimiter between the two components of a folder sync checkpoint. The
 /// checkpoint state string is `"{uidvalidity}{DELIM}{uidnext}"` (e.g.
@@ -759,6 +786,191 @@ impl ImapEngine {
         result
     }
 
+    /// Apply a remote mutation over an active IMAP session, selecting the
+    /// source folder and verifying its UIDVALIDITY against the stored
+    /// checkpoint BEFORE issuing any command that could touch the wrong
+    /// message.
+    ///
+    /// The UIDVALIDITY guard (RFC 3501 s2.3.1.1) is the safety-critical step: a
+    /// stored IMAP UID is only meaningful under the UIDVALIDITY it was captured
+    /// with. If the mailbox was recreated its UIDVALIDITY changes and UIDs are
+    /// reassigned, so acting on the old UID would mutate a different message. A
+    /// mismatch -- or a stored checkpoint that carries no UIDVALIDITY to
+    /// compare against, or a server that reports none -- is refused with an
+    /// honest [`MailError::ImapError`]; the mutation is never applied blind.
+    ///
+    /// `MOVE` uses `UID MOVE` (RFC 6851) when the server advertises the `MOVE`
+    /// capability, else falls back to the equivalent `UID COPY` + `UID STORE
+    /// +FLAGS (\Deleted)` + `EXPUNGE`. `DELETE` is `UID STORE +FLAGS
+    /// (\Deleted)` + `EXPUNGE`. Each command's tagged result is checked, so
+    /// only a genuine server success returns `Ok(())`.
+    pub async fn apply_mutation_with_session<S>(
+        &self,
+        spec: &RemoteMutationSpec,
+        session: &mut async_imap::Session<S>,
+    ) -> Result<(), MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
+        let uid = parse_imap_uid(&spec.message_id).ok_or_else(|| {
+            MailError::ImapError(format!(
+                "cannot parse an IMAP UID from message id '{}'",
+                spec.message_id
+            ))
+        })?;
+
+        let mailbox = session.select(&spec.folder_id).await.map_err(|e| {
+            MailError::ImapError(format!(
+                "failed to select folder '{}': {}",
+                spec.folder_id, e
+            ))
+        })?;
+
+        // Refuse to act unless the mailbox's current UIDVALIDITY provably
+        // matches the one the stored UID was captured under.
+        let stored_validity = checkpoint_uid_validity(spec.folder_checkpoint.as_deref());
+        match (stored_validity, mailbox.uid_validity) {
+            (Some(stored), Some(current)) if stored == current => {}
+            (stored, current) => {
+                return Err(MailError::ImapError(format!(
+                    "refusing to mutate message '{}' in folder '{}': UIDVALIDITY guard failed \
+                     (stored {stored:?}, current {current:?}); the stored UID may no longer \
+                     address the intended message",
+                    spec.message_id, spec.folder_id
+                )));
+            }
+        }
+
+        let uid_set = uid.to_string();
+        match &spec.kind {
+            RemoteMutationKind::SetFlagged { value } => {
+                let op = if *value { "+FLAGS" } else { "-FLAGS" };
+                self.uid_store_flags(session, &uid_set, op, "\\Flagged")
+                    .await
+            }
+            RemoteMutationKind::Copy { to_folder } => {
+                session.uid_copy(&uid_set, to_folder).await.map_err(|e| {
+                    MailError::ImapError(format!(
+                        "UID COPY of '{}' to '{}' failed: {}",
+                        spec.message_id, to_folder, e
+                    ))
+                })
+            }
+            RemoteMutationKind::Move { to_folder } => {
+                self.uid_move(session, &uid_set, to_folder, &spec.message_id)
+                    .await
+            }
+            RemoteMutationKind::Delete => {
+                self.uid_store_flags(session, &uid_set, "+FLAGS", "\\Deleted")
+                    .await?;
+                self.expunge_all(session).await
+            }
+        }
+    }
+
+    /// Issue a `UID STORE {uid} {op} ({flag})` and drain its untagged `FETCH`
+    /// responses, surfacing any protocol error. `op` is `+FLAGS`/`-FLAGS`.
+    async fn uid_store_flags<S>(
+        &self,
+        session: &mut async_imap::Session<S>,
+        uid_set: &str,
+        op: &str,
+        flag: &str,
+    ) -> Result<(), MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
+        let query = format!("{op} ({flag})");
+        let updates = session.uid_store(uid_set, &query).await.map_err(|e| {
+            MailError::ImapError(format!("UID STORE {query} for uid {uid_set} failed: {e}"))
+        })?;
+        tokio::pin!(updates);
+        while let Some(item) = updates.next().await {
+            item.map_err(|e| {
+                MailError::ImapError(format!("reading UID STORE response failed: {e}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Permanently remove `\Deleted`-flagged messages from the selected folder,
+    /// draining the untagged `EXPUNGE` responses.
+    async fn expunge_all<S>(&self, session: &mut async_imap::Session<S>) -> Result<(), MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
+        let expunged = session
+            .expunge()
+            .await
+            .map_err(|e| MailError::ImapError(format!("EXPUNGE failed: {e}")))?;
+        tokio::pin!(expunged);
+        while let Some(item) = expunged.next().await {
+            item.map_err(|e| {
+                MailError::ImapError(format!("reading EXPUNGE response failed: {e}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Move a message by UID, preferring RFC 6851 `UID MOVE` and falling back
+    /// to `UID COPY` + `UID STORE +FLAGS (\Deleted)` + `EXPUNGE` when the
+    /// server does not advertise the `MOVE` capability.
+    async fn uid_move<S>(
+        &self,
+        session: &mut async_imap::Session<S>,
+        uid_set: &str,
+        to_folder: &str,
+        message_id: &str,
+    ) -> Result<(), MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
+        let caps = session
+            .capabilities()
+            .await
+            .map_err(|e| MailError::ImapError(format!("CAPABILITY query failed: {e}")))?;
+        let has_move = caps.has_str("MOVE");
+        drop(caps);
+
+        if has_move {
+            return session.uid_mv(uid_set, to_folder).await.map_err(|e| {
+                MailError::ImapError(format!(
+                    "UID MOVE of '{message_id}' to '{to_folder}' failed: {e}"
+                ))
+            });
+        }
+
+        session.uid_copy(uid_set, to_folder).await.map_err(|e| {
+            MailError::ImapError(format!(
+                "UID COPY (move fallback) of '{message_id}' to '{to_folder}' failed: {e}"
+            ))
+        })?;
+        self.uid_store_flags(session, uid_set, "+FLAGS", "\\Deleted")
+            .await?;
+        self.expunge_all(session).await
+    }
+
+    /// Apply a remote mutation over a freshly authenticated session. See
+    /// [`Self::apply_mutation_with_session`] for the UIDVALIDITY guard and the
+    /// per-action protocol commands.
+    pub async fn apply_remote_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+        let (username, password) = match (&self.username, &self.password) {
+            (Some(u), Some(p)) => (u.as_str(), p.as_str()),
+            _ => {
+                return Err(MailError::AuthError(
+                    "IMAP remote mutation requires credentials".to_string(),
+                ))
+            }
+        };
+        let mut session = self
+            .socket_manager
+            .connect_session(username, password)
+            .await?;
+        let result = self.apply_mutation_with_session(spec, &mut session).await;
+        let _ = session.logout().await;
+        result
+    }
+
     /// Listen for real-time IMAP IDLE notification events on an active IMAP session.
     pub async fn listen_idle_session<S, F>(
         &self,
@@ -899,6 +1111,10 @@ impl MailBackend for ImapEngine {
         since_state: Option<&str>,
     ) -> Result<(Vec<Email>, String), MailError> {
         self.sync_folder_messages(folder_id, since_state).await
+    }
+
+    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+        self.apply_remote_mutation(spec).await
     }
 }
 
@@ -1325,6 +1541,251 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[test]
+    fn parse_imap_uid_recovers_uid_and_rejects_malformed_ids() {
+        assert_eq!(parse_imap_uid("imap-uid-42"), Some(42));
+        assert_eq!(parse_imap_uid("imap-uid-1"), Some(1));
+        // UID 0 is not a valid IMAP UID; a bare/foreign id yields nothing.
+        assert_eq!(parse_imap_uid("imap-uid-0"), None);
+        assert_eq!(parse_imap_uid("42"), None);
+        assert_eq!(parse_imap_uid("jmap-object-id"), None);
+    }
+
+    #[test]
+    fn checkpoint_uid_validity_extracts_only_a_well_formed_validity() {
+        assert_eq!(checkpoint_uid_validity(Some("7:105")), Some(7));
+        assert_eq!(checkpoint_uid_validity(Some(" 7 : 105 ")), Some(7));
+        assert_eq!(checkpoint_uid_validity(None), None);
+        // A legacy bare-number checkpoint carries no validity to compare.
+        assert_eq!(checkpoint_uid_validity(Some("105")), None);
+        assert_eq!(checkpoint_uid_validity(Some("x:105")), None);
+    }
+
+    /// Drive a mutation over a scripted IMAP server (in-memory duplex),
+    /// capturing every command line the client issued so the test can assert
+    /// on the exact protocol commands. `advertise_move` controls whether the
+    /// scripted `CAPABILITY` response includes `MOVE`; `select_uid_validity` is
+    /// the UIDVALIDITY the scripted `SELECT` reports.
+    async fn run_scripted_mutation(
+        spec: &RemoteMutationSpec,
+        advertise_move: bool,
+        select_uid_validity: u32,
+    ) -> (Result<(), MailError>, Vec<String>) {
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server_commands = commands.clone();
+
+        let server = tokio::spawn(async move {
+            let mut io = server_io;
+            while let Some(line) = read_scripted_line(&mut io).await {
+                if let Ok(mut g) = server_commands.lock() {
+                    g.push(line.clone());
+                }
+                let tag = line.split_whitespace().next().unwrap_or("").to_string();
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("LOGIN") {
+                    let _ = io
+                        .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("SELECT") {
+                    let resp = format!(
+                        "* FLAGS (\\Seen \\Flagged \\Deleted)\r\n* 3 EXISTS\r\n* 0 RECENT\r\n\
+                         * OK [UIDVALIDITY {select_uid_validity}] ok\r\n* OK [UIDNEXT 105] ok\r\n\
+                         {tag} OK [READ-WRITE] SELECT done\r\n"
+                    );
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("CAPABILITY") {
+                    let caps = if advertise_move {
+                        "IMAP4rev1 MOVE UIDPLUS"
+                    } else {
+                        "IMAP4rev1 UIDPLUS"
+                    };
+                    let _ = io
+                        .write_all(
+                            format!("* CAPABILITY {caps}\r\n{tag} OK CAPABILITY done\r\n")
+                                .as_bytes(),
+                        )
+                        .await;
+                } else if upper.contains("UID STORE") {
+                    let _ = io
+                        .write_all(format!("{tag} OK STORE completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("UID COPY") {
+                    let _ = io
+                        .write_all(format!("{tag} OK COPY completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("UID MOVE") {
+                    let _ = io
+                        .write_all(format!("{tag} OK MOVE completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("EXPUNGE") {
+                    let _ = io
+                        .write_all(format!("{tag} OK EXPUNGE completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("LOGOUT") {
+                    let _ = io
+                        .write_all(format!("* BYE\r\n{tag} OK LOGOUT\r\n").as_bytes())
+                        .await;
+                    break;
+                }
+            }
+        });
+
+        let client = async_imap::Client::new(client_io);
+        let mut session = client
+            .login("user", "pass")
+            .await
+            .map_err(|(e, _)| e)
+            .expect("scripted login succeeds");
+        let engine = ImapEngine::new("acct-1", "example.test", 993);
+        let result = engine.apply_mutation_with_session(spec, &mut session).await;
+        drop(session);
+        let _ = server.await;
+
+        let captured = commands.lock().expect("lock captured commands").clone();
+        (result, captured)
+    }
+
+    fn imap_spec(kind: RemoteMutationKind, checkpoint: Option<&str>) -> RemoteMutationSpec {
+        RemoteMutationSpec {
+            message_id: "imap-uid-42".to_string(),
+            folder_id: "INBOX".to_string(),
+            folder_checkpoint: checkpoint.map(str::to_string),
+            kind,
+        }
+    }
+
+    #[tokio::test]
+    async fn imap_apply_mutation_flag_issues_uid_store_add_flags() {
+        let (result, commands) = run_scripted_mutation(
+            &imap_spec(
+                RemoteMutationKind::SetFlagged { value: true },
+                Some("1:105"),
+            ),
+            false,
+            1,
+        )
+        .await;
+        result.expect("flag mutation succeeds");
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.contains("UID STORE 42 +FLAGS (\\Flagged)")),
+            "expected a UID STORE +FLAGS (\\Flagged), got: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn imap_apply_mutation_move_uses_uid_move_when_server_advertises_move() {
+        let (result, commands) = run_scripted_mutation(
+            &imap_spec(
+                RemoteMutationKind::Move {
+                    to_folder: "Archive".to_string(),
+                },
+                Some("1:105"),
+            ),
+            true,
+            1,
+        )
+        .await;
+        result.expect("move mutation succeeds");
+        assert!(
+            commands.iter().any(|c| c.contains("UID MOVE 42")),
+            "expected a UID MOVE, got: {commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|c| c.contains("UID COPY")),
+            "must not fall back to COPY when MOVE is advertised: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn imap_apply_mutation_move_falls_back_to_copy_store_expunge_without_move_capability() {
+        let (result, commands) = run_scripted_mutation(
+            &imap_spec(
+                RemoteMutationKind::Move {
+                    to_folder: "Archive".to_string(),
+                },
+                Some("1:105"),
+            ),
+            false,
+            1,
+        )
+        .await;
+        result.expect("move fallback succeeds");
+        assert!(commands.iter().any(|c| c.contains("UID COPY 42")));
+        assert!(commands
+            .iter()
+            .any(|c| c.contains("UID STORE 42 +FLAGS (\\Deleted)")));
+        assert!(commands.iter().any(|c| c.contains("EXPUNGE")));
+        assert!(
+            !commands.iter().any(|c| c.contains("UID MOVE")),
+            "must not issue UID MOVE without the capability: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn imap_apply_mutation_delete_stores_deleted_and_expunges() {
+        let (result, commands) = run_scripted_mutation(
+            &imap_spec(RemoteMutationKind::Delete, Some("1:105")),
+            false,
+            1,
+        )
+        .await;
+        result.expect("delete mutation succeeds");
+        assert!(commands
+            .iter()
+            .any(|c| c.contains("UID STORE 42 +FLAGS (\\Deleted)")));
+        assert!(commands.iter().any(|c| c.contains("EXPUNGE")));
+    }
+
+    #[tokio::test]
+    async fn imap_apply_mutation_refuses_to_act_on_a_uidvalidity_mismatch() {
+        // The stored checkpoint captured the UID under UIDVALIDITY 1, but the
+        // mailbox now reports 2 (renumbered). The mutation MUST be refused and
+        // NO mutating command (STORE/COPY/MOVE/EXPUNGE) may be issued.
+        let (result, commands) = run_scripted_mutation(
+            &imap_spec(RemoteMutationKind::Delete, Some("1:105")),
+            false,
+            2,
+        )
+        .await;
+        let err = result.expect_err("a UIDVALIDITY mismatch must be refused");
+        assert!(matches!(err, MailError::ImapError(_)));
+        assert!(
+            !commands.iter().any(|c| {
+                let u = c.to_ascii_uppercase();
+                u.contains("UID STORE")
+                    || u.contains("UID COPY")
+                    || u.contains("UID MOVE")
+                    || u.contains("EXPUNGE")
+            }),
+            "no mutating command may be issued on a UIDVALIDITY mismatch, got: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn imap_apply_mutation_refuses_when_no_checkpoint_proves_uidvalidity() {
+        // With no stored checkpoint there is no UIDVALIDITY to prove the UID
+        // still addresses the intended message, so the op is refused.
+        let (result, _commands) =
+            run_scripted_mutation(&imap_spec(RemoteMutationKind::Delete, None), false, 1).await;
+        assert!(matches!(
+            result.expect_err("missing checkpoint must be refused"),
+            MailError::ImapError(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn imap_apply_remote_mutation_requires_credentials() {
+        let engine = ImapEngine::new("acct-1", "example.test", 993);
+        let err = engine
+            .apply_remote_mutation(&imap_spec(RemoteMutationKind::Delete, Some("1:105")))
+            .await
+            .expect_err("credential-less mutation must fail");
+        assert!(matches!(err, MailError::AuthError(_)));
     }
 
     #[tokio::test]

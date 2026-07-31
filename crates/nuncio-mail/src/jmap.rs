@@ -5,7 +5,7 @@ use nuncio_core::model::{Email, Folder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::backend::MailBackend;
+use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
 use crate::parser::MailError;
 
 /// JMAP Session Object (RFC 8620 Section 2).
@@ -201,6 +201,100 @@ impl JmapEngine {
                 ]
             ]
         })
+    }
+
+    /// Build a JSON-RPC `Email/set` request applying `spec` to a single
+    /// message (RFC 8621 s4.6). A `Move`/`Copy`/`SetFlagged` becomes an
+    /// `update` patch keyed by the JMAP object id; a `Delete` becomes a
+    /// `destroy`.
+    ///
+    /// `Move` replaces the message's mailbox set with the destination (removing
+    /// the source), whereas `Copy` adds the destination via a `mailboxIds/{id}`
+    /// patch, leaving the existing membership intact. Flag toggles patch the
+    /// `$flagged` keyword (`true` to set, `null` to clear), the JMAP equivalent
+    /// of IMAP `\Flagged`.
+    pub fn build_email_set_request(account_id: &str, spec: &RemoteMutationSpec) -> Value {
+        let id = &spec.message_id;
+        let (update, destroy) = match &spec.kind {
+            RemoteMutationKind::SetFlagged { value } => {
+                let keyword = if *value { json!(true) } else { Value::Null };
+                (json!({ id: { "keywords/$flagged": keyword } }), json!([]))
+            }
+            RemoteMutationKind::Move { to_folder } => (
+                json!({ id: { "mailboxIds": { to_folder: true } } }),
+                json!([]),
+            ),
+            RemoteMutationKind::Copy { to_folder } => (
+                json!({ id: { format!("mailboxIds/{to_folder}"): true } }),
+                json!([]),
+            ),
+            RemoteMutationKind::Delete => (json!({}), json!([id])),
+        };
+
+        json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [
+                [
+                    "Email/set",
+                    {
+                        "accountId": account_id,
+                        "update": update,
+                        "destroy": destroy
+                    },
+                    "c1"
+                ]
+            ]
+        })
+    }
+
+    /// Confirm a JMAP `Email/set` response genuinely applied the mutation to
+    /// `message_id`: the id must appear in `updated`/`destroyed` and must NOT
+    /// appear in `notUpdated`/`notDestroyed`. Anything else -- a server-side
+    /// rejection, or an id the server silently ignored -- surfaces as an honest
+    /// error so the outbox never marks a rejected mutation completed.
+    pub fn confirm_email_set_applied(
+        raw_json: &str,
+        message_id: &str,
+        expect_destroy: bool,
+    ) -> Result<(), MailError> {
+        let val: Value = serde_json::from_str(raw_json)
+            .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
+        let payload = Self::extract_method_response_payload(&val)?;
+
+        // A rejection is reported in notUpdated/notDestroyed keyed by id; treat
+        // its presence as the authoritative failure signal.
+        let rejected = payload
+            .get(if expect_destroy {
+                "notDestroyed"
+            } else {
+                "notUpdated"
+            })
+            .and_then(|v| v.as_object())
+            .is_some_and(|m| m.contains_key(message_id));
+        if rejected {
+            return Err(MailError::OperationFailed(format!(
+                "JMAP Email/set rejected mutation for message '{message_id}'"
+            )));
+        }
+
+        let applied = if expect_destroy {
+            payload
+                .get("destroyed")
+                .and_then(|v| v.as_array())
+                .is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(message_id)))
+        } else {
+            payload
+                .get("updated")
+                .and_then(|v| v.as_object())
+                .is_some_and(|m| m.contains_key(message_id))
+        };
+        if applied {
+            Ok(())
+        } else {
+            Err(MailError::OperationFailed(format!(
+                "JMAP Email/set did not confirm the mutation for message '{message_id}'"
+            )))
+        }
     }
 
     /// Build JSON-RPC request invocation for `Email/changes` (differential sync).
@@ -451,6 +545,21 @@ impl MailBackend for JmapEngine {
         let get_raw = self.post_jmap(&session.api_url, &get_request).await?;
         self.parse_email_get_response(&get_raw)
     }
+
+    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+        if !self.has_credentials() {
+            return Err(MailError::AuthError(
+                "JMAP remote mutation requires credentials".to_string(),
+            ));
+        }
+        let session = self.discover_session().await?;
+        let account_id = self.resolve_account_id(&session);
+
+        let request = Self::build_email_set_request(&account_id, spec);
+        let raw = self.post_jmap(&session.api_url, &request).await?;
+        let expect_destroy = matches!(spec.kind, RemoteMutationKind::Delete);
+        Self::confirm_email_set_applied(&raw, &spec.message_id, expect_destroy)
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +687,49 @@ mod tests {
         assert_eq!(email.body_snippet, Some("hello world".to_string()));
     }
 
+    fn spec(kind: RemoteMutationKind) -> RemoteMutationSpec {
+        RemoteMutationSpec {
+            message_id: "m-1".to_string(),
+            folder_id: "mb-inbox".to_string(),
+            folder_checkpoint: None,
+            kind,
+        }
+    }
+
+    #[test]
+    fn build_email_set_request_copy_adds_target_without_removing_source() {
+        let req = JmapEngine::build_email_set_request(
+            "acct-1",
+            &spec(RemoteMutationKind::Copy {
+                to_folder: "mb-archive".to_string(),
+            }),
+        );
+        let call = &req["methodCalls"][0];
+        assert_eq!(call[0], "Email/set");
+        // A copy patches a single mailboxIds/{id} pointer to true, leaving the
+        // rest of the message's mailbox membership untouched.
+        assert_eq!(call[1]["update"]["m-1"]["mailboxIds/mb-archive"], true);
+    }
+
+    #[test]
+    fn build_email_set_request_unflag_clears_keyword_with_null() {
+        let req = JmapEngine::build_email_set_request(
+            "acct-1",
+            &spec(RemoteMutationKind::SetFlagged { value: false }),
+        );
+        assert!(req["methodCalls"][0][1]["update"]["m-1"]["keywords/$flagged"].is_null());
+    }
+
+    #[test]
+    fn confirm_email_set_applied_requires_the_id_in_the_updated_map() {
+        let ok = r#"{"methodResponses":[["Email/set",{"updated":{"m-1":null}},"c1"]]}"#;
+        assert!(JmapEngine::confirm_email_set_applied(ok, "m-1", false).is_ok());
+
+        // An empty updated map is NOT success -- the server silently ignored it.
+        let ignored = r#"{"methodResponses":[["Email/set",{"updated":{}},"c1"]]}"#;
+        assert!(JmapEngine::confirm_email_set_applied(ignored, "m-1", false).is_err());
+    }
+
     #[tokio::test]
     async fn uncredentialed_engine_requires_credentials_to_sync() {
         // Without credentials there is no server to discover a session from;
@@ -596,6 +748,12 @@ mod tests {
             .sync_messages("inbox", None)
             .await
             .expect_err("credential-less sync_messages must fail");
+        assert!(matches!(err, MailError::AuthError(_)));
+
+        let err = engine
+            .apply_mutation(&spec(RemoteMutationKind::Delete))
+            .await
+            .expect_err("credential-less apply_mutation must fail");
         assert!(matches!(err, MailError::AuthError(_)));
     }
 }
