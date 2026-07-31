@@ -116,6 +116,8 @@ async fn account_add_and_list_report_honest_errors_when_daemon_unreachable() {
             &Commands::Account {
                 action: AccountSubcommand::Add {
                     email: "test@nuncio.mx".to_string(),
+                    protocol: "imap-smtp".to_string(),
+                    collection_url: None,
                     imap_host: "mail.nuncio.mx".to_string(),
                     imap_port: 993,
                     smtp_host: "mail.nuncio.mx".to_string(),
