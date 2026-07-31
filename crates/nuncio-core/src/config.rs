@@ -126,6 +126,22 @@ fn is_loopback_host(host: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// Extract the host portion of an `http://`/`https://` URL, without pulling
+/// in a full URL-parsing dependency for this one field. Handles a bracketed
+/// IPv6 literal (`[::1]`) as well as a plain hostname/IPv4 literal, and
+/// stops at the first `:` (port), `/` (path), `?`, or `#` that follows.
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    if let Some(bracketed) = rest.strip_prefix('[') {
+        let end = bracketed.find(']')?;
+        return Some(&bracketed[..end]);
+    }
+    let end = rest.find(['/', ':', '?', '#']).unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
 impl AccountConfig {
     /// Minimum allowed background sync interval (10 seconds).
     pub const MIN_SYNC_INTERVAL_SECS: u64 = 10;
@@ -163,6 +179,18 @@ impl AccountConfig {
             }
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return Err(ConfigError::InvalidCollectionUrl);
+            }
+            // Plain `http://` is only tolerated against a loopback host (a
+            // local test server); any remote host must use `https://` to
+            // avoid sending the account's Basic-auth credentials in cleartext.
+            if url.starts_with("http://") {
+                let host = url_host(url).unwrap_or_default();
+                if !is_loopback_host(host) {
+                    return Err(ConfigError::CleartextToRemoteHost {
+                        endpoint: "caldav",
+                        host: host.to_string(),
+                    });
+                }
             }
         } else {
             if self.server_host.trim().is_empty() {
@@ -273,6 +301,35 @@ mod tests {
             config.validate().unwrap_err(),
             ConfigError::InvalidCollectionUrl
         );
+    }
+
+    #[test]
+    fn caldav_account_rejects_cleartext_http_to_remote_host() {
+        let mut config = valid_caldav_account();
+        config.collection_url = "http://remote/dav/".to_string();
+        assert_eq!(
+            config.validate().unwrap_err(),
+            ConfigError::CleartextToRemoteHost {
+                endpoint: "caldav",
+                host: "remote".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn caldav_account_accepts_https_to_remote_host() {
+        let mut config = valid_caldav_account();
+        config.collection_url = "https://remote/dav/".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn caldav_account_accepts_cleartext_http_to_loopback_host() {
+        for url in ["http://127.0.0.1/dav/", "http://localhost/dav/"] {
+            let mut config = valid_caldav_account();
+            config.collection_url = url.to_string();
+            assert!(config.validate().is_ok(), "url {url} should be allowed");
+        }
     }
 
     #[test]
