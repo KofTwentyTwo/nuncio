@@ -70,6 +70,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let initial_rules = nunciod::load_initial_filter_rules(&db).await?;
     let filter_engine = Arc::new(FilterEngine::new(initial_rules)?);
 
+    // Single bounded-concurrency sync dispatcher shared by BOTH the
+    // client-facing `Mail/Sync` RPC (via the gRPC server below) and this
+    // process's `CoreCommand` sync consumer, so account syncs from either
+    // origin queue against one concurrency cap, coalesce per account, and
+    // observe one per-account timeout -- instead of each entry point launching
+    // syncs independently and head-of-line-blocking one another. It races
+    // in-flight syncs against the SAME shutdown signal every other subsystem
+    // shares.
+    let sync_dispatcher = {
+        let syncer = Arc::new(nunciod::sync_dispatcher::ProductionAccountSyncer::new(
+            db.clone(),
+            account_secrets.clone(),
+            event_bus.clone(),
+            filter_engine.clone(),
+        ));
+        Arc::new(nunciod::sync_dispatcher::SyncDispatcher::from_env(
+            syncer,
+            shutdown_signal.clone(),
+        ))
+    };
+
     // Real inbound-sync `CoreCommand` consumer. This is the ONE place that
     // claims `EventBus`'s command receiver, so it is what finally makes
     // `CoreCommand::SyncAll` /
@@ -82,9 +103,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // trigger was inert.
     let sync_command_task = if let Some(mut command_rx) = command_rx {
         let db_sync = db.clone();
-        let secrets_sync = account_secrets.clone();
         let event_bus_sync = event_bus.clone();
-        let filter_engine_sync = filter_engine.clone();
+        let dispatcher_sync = sync_dispatcher.clone();
         let mut shutdown = shutdown_signal.clone();
         Some(tokio::spawn(async move {
             loop {
@@ -100,25 +120,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 };
                 match cmd {
                     CoreCommand::SyncAll => {
-                        let synced = nunciod::sync::run_all_accounts_sync(
+                        let synced = nunciod::sync_dispatcher::sync_all_configured(
+                            &dispatcher_sync,
                             &db_sync,
-                            &secrets_sync,
                             &event_bus_sync,
-                            &filter_engine_sync,
                         )
                         .await;
                         tracing::info!("SyncAll completed: {} message(s) synced", synced);
                     }
                     CoreCommand::SyncAccount { account_id } => {
-                        match nunciod::sync::run_account_sync(
-                            &db_sync,
-                            &secrets_sync,
-                            &event_bus_sync,
-                            &filter_engine_sync,
-                            &account_id,
-                        )
-                        .await
-                        {
+                        match dispatcher_sync.sync_account(&account_id).await {
                             Ok(count) => tracing::info!(
                                 "SyncAccount({}) completed: {} message(s) synced",
                                 account_id,
@@ -274,6 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             filter_engine,
             grpc_secrets,
             grpc_token,
+            sync_dispatcher,
             async move { grpc_shutdown_future.wait().await },
         ) => result,
         _ = async move {

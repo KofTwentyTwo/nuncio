@@ -12,6 +12,7 @@ pub mod outbox;
 pub mod pagination;
 pub mod send;
 pub mod sync;
+pub mod sync_dispatcher;
 pub use orchestrator::SelfHealingSyncOrchestrator;
 
 /// Default PERSISTENT database path for `nunciod`: `~/.nuncio/nuncio.db`

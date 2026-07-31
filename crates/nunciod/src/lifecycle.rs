@@ -20,9 +20,26 @@ use tokio::sync::watch;
 #[derive(Clone)]
 pub struct ShutdownSignal {
     rx: watch::Receiver<bool>,
+    // Keeps the watch channel open for signals minted by [`ShutdownSignal::never`],
+    // which have no live [`ShutdownController`] owning the sender. A closed
+    // channel makes `wait` resolve (readers interpret that as "shutdown
+    // requested"), so a `never` signal must hold its sender alive; a real
+    // signal leaves this `None` because its controller owns the sender.
+    _keepalive: Option<Arc<watch::Sender<bool>>>,
 }
 
 impl ShutdownSignal {
+    /// A signal that never fires, for call paths with no shutdown wiring of
+    /// their own (e.g. the non-graceful `serve_on_listener` entry point used
+    /// by tests). Holds its own sender alive so the channel never closes.
+    pub fn never() -> Self {
+        let (tx, rx) = watch::channel(false);
+        ShutdownSignal {
+            rx,
+            _keepalive: Some(Arc::new(tx)),
+        }
+    }
+
     /// Resolves once shutdown has been requested. Safe to call from
     /// `tokio::select!` on every loop iteration: a task that observes
     /// shutdown mid-iteration finishes its current unit of work (the other
@@ -59,7 +76,13 @@ impl ShutdownController {
     /// instead of that path staying reachable only from tests.
     pub fn new(event_bus: Arc<EventBus>) -> (Self, ShutdownSignal) {
         let (tx, rx) = watch::channel(false);
-        (Self { tx, event_bus }, ShutdownSignal { rx })
+        (
+            Self { tx, event_bus },
+            ShutdownSignal {
+                rx,
+                _keepalive: None,
+            },
+        )
     }
 
     /// Initiates shutdown. Idempotent: calling it more than once (e.g. a
