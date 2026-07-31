@@ -2458,25 +2458,41 @@ impl BearerAuthInterceptor {
 
 impl tonic::service::Interceptor for BearerAuthInterceptor {
     fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+        // Only ever log the peer and a fixed reason string. The token value,
+        // the raw `authorization` header, and anything derived from either
+        // (length, prefix, substring) are NEVER logged -- doing so would leak
+        // the bearer credential into the logs. This runs inside the per-RPC
+        // span (see `rpc_trace`), so these events carry the request_id.
+        let peer = request
+            .remote_addr()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let reject = |reason: &'static str| {
+            tracing::warn!(peer = %peer, reason, "gRPC auth rejected");
+            Status::unauthenticated(reason)
+        };
+
         let header = request
             .metadata()
             .get("authorization")
-            .ok_or_else(|| Status::unauthenticated("missing authorization metadata"))?;
+            .ok_or_else(|| reject("missing authorization metadata"))?;
         let header_str = header
             .to_str()
-            .map_err(|_| Status::unauthenticated("authorization metadata is not valid ASCII"))?;
-        let provided = header_str.strip_prefix("Bearer ").ok_or_else(|| {
-            Status::unauthenticated("expected 'Bearer <token>' authorization scheme")
-        })?;
+            .map_err(|_| reject("authorization metadata is not valid ASCII"))?;
+        let provided = header_str
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| reject("expected 'Bearer <token>' authorization scheme"))?;
 
         let matches: bool = provided
             .as_bytes()
             .ct_eq(self.expected_token.as_bytes())
             .into();
         if matches {
+            tracing::debug!(peer = %peer, "gRPC auth accepted");
             Ok(request)
         } else {
-            Err(Status::unauthenticated("invalid bearer token"))
+            Err(reject("invalid bearer token"))
         }
     }
 }
@@ -2861,6 +2877,12 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
     );
 
     Server::builder()
+        // Wrap every RPC in a correlation span (request_id + method + peer)
+        // before the resource-limit tuning below, so the span brackets the
+        // whole request -- routing, the per-service `BearerAuthInterceptor`,
+        // and the handler -- and its request_id is inherited by every event
+        // emitted while the request is handled.
+        .layer(crate::rpc_trace::RpcTraceLayer)
         .concurrency_limit_per_connection(GRPC_CONCURRENCY_LIMIT_PER_CONNECTION)
         .timeout(GRPC_REQUEST_TIMEOUT)
         .max_concurrent_streams(GRPC_MAX_CONCURRENT_STREAMS)
@@ -2887,6 +2909,104 @@ mod tests {
     use nuncio_proto::v1::accounts_client::AccountsClient;
     use nuncio_proto::v1::system_client::SystemClient;
     use tonic::Code;
+
+    use crate::test_tracing::with_recorder;
+    use tonic::service::Interceptor;
+    use tracing::Level;
+
+    /// The bearer token used by the auth-logging tests. A test asserts this
+    /// exact value never appears in any captured log field.
+    const TEST_BEARER_TOKEN: &str = "s3cr3t-bearer-token-value";
+
+    fn bearer_request(header: Option<&str>) -> Request<()> {
+        let mut request = Request::new(());
+        if let Some(value) = header {
+            request.metadata_mut().insert(
+                "authorization",
+                value.parse().expect("valid ASCII metadata value"),
+            );
+        }
+        request
+    }
+
+    #[test]
+    fn auth_accept_logs_debug_without_leaking_the_token() {
+        let (recorder, result) = with_recorder(|| {
+            let mut interceptor = BearerAuthInterceptor::new(TEST_BEARER_TOKEN);
+            interceptor.call(bearer_request(Some(&format!("Bearer {TEST_BEARER_TOKEN}"))))
+        });
+        assert!(result.is_ok(), "a valid bearer token is accepted");
+
+        let events = recorder.events();
+        let accept = events
+            .iter()
+            .find(|e| e.message() == "gRPC auth accepted")
+            .expect("an accept must be logged");
+        assert_eq!(accept.level, Level::DEBUG, "accept is logged at DEBUG");
+
+        assert!(
+            recorder
+                .all_field_values()
+                .iter()
+                .all(|v| !v.contains(TEST_BEARER_TOKEN)),
+            "the bearer token must never appear in any log field"
+        );
+    }
+
+    #[test]
+    fn auth_reject_bad_token_logs_warn_without_leaking_the_token() {
+        let presented = "attacker-guess-token";
+        let (recorder, result) = with_recorder(|| {
+            let mut interceptor = BearerAuthInterceptor::new(TEST_BEARER_TOKEN);
+            interceptor.call(bearer_request(Some(&format!("Bearer {presented}"))))
+        });
+        let status = result.expect_err("a mismatched token is rejected");
+        assert_eq!(status.code(), Code::Unauthenticated);
+
+        let events = recorder.events();
+        let reject = events
+            .iter()
+            .find(|e| e.message() == "gRPC auth rejected")
+            .expect("a reject must be logged");
+        assert_eq!(reject.level, Level::WARN, "reject is logged at WARN");
+        assert_eq!(
+            reject.fields.get("reason").map(String::as_str),
+            Some("invalid bearer token"),
+            "the reject must carry a fixed reason string"
+        );
+
+        // Neither the real token nor the presented guess may appear anywhere.
+        assert!(
+            recorder
+                .all_field_values()
+                .iter()
+                .all(|v| !v.contains(TEST_BEARER_TOKEN) && !v.contains(presented)),
+            "no token material may appear in any log field"
+        );
+    }
+
+    #[test]
+    fn auth_reject_missing_header_logs_warn_reason() {
+        let (recorder, result) = with_recorder(|| {
+            let mut interceptor = BearerAuthInterceptor::new(TEST_BEARER_TOKEN);
+            interceptor.call(bearer_request(None))
+        });
+        assert!(
+            result.is_err(),
+            "a missing authorization header is rejected"
+        );
+
+        let events = recorder.events();
+        let reject = events
+            .iter()
+            .find(|e| e.message() == "gRPC auth rejected")
+            .expect("a reject must be logged");
+        assert_eq!(reject.level, Level::WARN);
+        assert_eq!(
+            reject.fields.get("reason").map(String::as_str),
+            Some("missing authorization metadata")
+        );
+    }
 
     /// Proves a stored second-granularity instant survives the proto
     /// boundary exactly: `map_email_to_proto`'s `received_at` decodes back

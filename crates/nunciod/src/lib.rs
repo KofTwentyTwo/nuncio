@@ -11,9 +11,12 @@ pub mod logging;
 pub mod orchestrator;
 pub mod outbox;
 pub mod pagination;
+pub mod rpc_trace;
 pub mod send;
 pub mod sync;
 pub mod sync_dispatcher;
+#[cfg(test)]
+pub(crate) mod test_tracing;
 pub use orchestrator::SelfHealingSyncOrchestrator;
 
 /// Default PERSISTENT database path for `nunciod`: `~/.nuncio/nuncio.db`

@@ -30,6 +30,9 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 tempfile.workspace = true
 tonic.workspace = true
+tower.workspace = true
+http.workspace = true
+http-body.workspace = true
 async-trait.workspace = true
 subtle.workspace = true
 hex.workspace = true
@@ -41,4 +44,5 @@ fs4.workspace = true
 nuncio-cli = { path = "../nuncio-cli" }
 sqlx.workspace = true
 wiremock.workspace = true
+http-body-util.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
