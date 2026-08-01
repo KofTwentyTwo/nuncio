@@ -12,7 +12,7 @@ use crate::args::{
     FilterSubcommand, FolderSubcommand, MailSubcommand, SystemSubcommand, UpdateSubcommand,
 };
 
-use crate::output::{format_json, format_json_error};
+use crate::output::{format_json, format_json_error, format_json_error_with_info};
 
 /// Parses a `--imap-mode`/`--smtp-mode` CLI string into `nuncio_core::TlsMode`.
 /// Rejects anything else rather than silently defaulting, since silently
@@ -777,13 +777,7 @@ impl HeadlessRunner {
                     format!("Synchronization complete: {synced_count} message(s) synced")
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected sync: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("sync", &status, json_mode),
         }
     }
 
@@ -820,13 +814,7 @@ impl HeadlessRunner {
                     page_token = page.next_page_token;
                 }
                 Err(status) => {
-                    return Self::render_error(
-                        &format!(
-                            "nunciod daemon rejected list_messages: {}",
-                            Self::clean_status_message(&status)
-                        ),
-                        json_mode,
-                    );
+                    return Self::render_status_error("list_messages", &status, json_mode);
                 }
             }
         }
@@ -892,13 +880,7 @@ impl HeadlessRunner {
                     )
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected send_message: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("send_message", &status, json_mode),
         }
     }
 
@@ -932,13 +914,7 @@ impl HeadlessRunner {
                     page_token = page.next_page_token;
                 }
                 Err(status) => {
-                    return Self::render_error(
-                        &format!(
-                            "nunciod daemon rejected search_messages: {}",
-                            Self::clean_status_message(&status)
-                        ),
-                        json_mode,
-                    );
+                    return Self::render_status_error("search_messages", &status, json_mode);
                 }
             }
         }
@@ -991,13 +967,7 @@ impl HeadlessRunner {
                     page_token = page.next_page_token;
                 }
                 Err(status) => {
-                    return Self::render_error(
-                        &format!(
-                            "nunciod daemon rejected list_folders: {}",
-                            Self::clean_status_message(&status)
-                        ),
-                        json_mode,
-                    );
+                    return Self::render_status_error("list_folders", &status, json_mode);
                 }
             }
         }
@@ -1055,13 +1025,7 @@ impl HeadlessRunner {
             Err(status) if status.code() == tonic::Code::NotFound => {
                 Self::render_error(&format!("message '{}' not found", id), json_mode)
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected get_message: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("get_message", &status, json_mode),
         }
     }
 
@@ -1111,13 +1075,7 @@ impl HeadlessRunner {
             Err(status) if status.code() == tonic::Code::NotFound => {
                 Self::render_error(&format!("message '{}' not found", id), json_mode)
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected mark_read: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("mark_read", &status, json_mode),
         }
     }
 
@@ -1181,13 +1139,7 @@ impl HeadlessRunner {
                     )
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected export_mailbox: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("export_mailbox", &status, json_mode),
         }
     }
 
@@ -1238,13 +1190,7 @@ impl HeadlessRunner {
                     page_token = page.next_page_token;
                 }
                 Err(status) => {
-                    return Self::render_error(
-                        &format!(
-                            "nunciod daemon rejected list_records: {}",
-                            Self::clean_status_message(&status)
-                        ),
-                        json_mode,
-                    );
+                    return Self::render_status_error("list_records", &status, json_mode);
                 }
             }
         }
@@ -1305,13 +1251,7 @@ impl HeadlessRunner {
                     )
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected verify_chain: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("verify_chain", &status, json_mode),
         }
     }
 
@@ -1363,13 +1303,7 @@ impl HeadlessRunner {
                     page_token = page.next_page_token;
                 }
                 Err(status) => {
-                    return Self::render_error(
-                        &format!(
-                            "nunciod daemon rejected list_rules: {}",
-                            Self::clean_status_message(&status)
-                        ),
-                        json_mode,
-                    );
+                    return Self::render_status_error("list_rules", &status, json_mode);
                 }
             }
         }
@@ -1431,16 +1365,7 @@ impl HeadlessRunner {
                     json_mode,
                 ),
             },
-            Err(status) if status.code() == tonic::Code::InvalidArgument => {
-                Self::render_error(status.message(), json_mode)
-            }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected create_rule: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("create_rule", &status, json_mode),
         }
     }
 
@@ -1467,13 +1392,7 @@ impl HeadlessRunner {
                     format!("✓ Filter rule '{}' deleted.", id)
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected delete_rule: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("delete_rule", &status, json_mode),
         }
     }
 
@@ -1505,13 +1424,7 @@ impl HeadlessRunner {
                     format!("Validation Error: {}", response.error)
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected validate_rule: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("validate_rule", &status, json_mode),
         }
     }
 
@@ -1560,16 +1473,7 @@ impl HeadlessRunner {
                     )
                 }
             }
-            Err(status) if status.code() == tonic::Code::InvalidArgument => {
-                Self::render_error(status.message(), json_mode)
-            }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected preview_rule: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("preview_rule", &status, json_mode),
         }
     }
 
@@ -1612,19 +1516,7 @@ impl HeadlessRunner {
                     json_mode,
                 ),
             },
-            Err(status)
-                if status.code() == tonic::Code::InvalidArgument
-                    || status.code() == tonic::Code::NotFound =>
-            {
-                Self::render_error(status.message(), json_mode)
-            }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected update_rule: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("update_rule", &status, json_mode),
         }
     }
 
@@ -1657,13 +1549,7 @@ impl HeadlessRunner {
                     content
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected export_rules: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("export_rules", &status, json_mode),
         }
     }
 
@@ -1711,13 +1597,7 @@ impl HeadlessRunner {
                     out
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected import_rules: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("import_rules", &status, json_mode),
         }
     }
 
@@ -1762,13 +1642,7 @@ impl HeadlessRunner {
                     out
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected get_execution_logs: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("get_execution_logs", &status, json_mode),
         }
     }
 
@@ -1796,15 +1670,7 @@ impl HeadlessRunner {
             .await
         {
             Ok(response) => response.into_inner(),
-            Err(status) => {
-                return Self::render_error(
-                    &format!(
-                        "nunciod daemon rejected triage: {}",
-                        Self::clean_status_message(&status)
-                    ),
-                    json_mode,
-                )
-            }
+            Err(status) => return Self::render_status_error("triage", &status, json_mode),
         };
 
         let mut updates = Vec::new();
@@ -1829,13 +1695,7 @@ impl HeadlessRunner {
                 }
                 Ok(None) => break,
                 Err(status) => {
-                    return Self::render_error(
-                        &format!(
-                            "nunciod daemon triage stream failed: {}",
-                            Self::clean_status_message(&status)
-                        ),
-                        json_mode,
-                    )
+                    return Self::render_status_error("triage stream", &status, json_mode)
                 }
             }
         }
@@ -2041,13 +1901,7 @@ impl HeadlessRunner {
                     )
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected add_account: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("add_account", &status, json_mode),
         }
     }
 
@@ -2101,13 +1955,7 @@ impl HeadlessRunner {
                     out
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected list_accounts: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("list_accounts", &status, json_mode),
         }
     }
 
@@ -2124,12 +1972,7 @@ impl HeadlessRunner {
         let accounts = client
             .list_accounts(nuncio_proto::v1::ListAccountsRequest {})
             .await
-            .map_err(|status| {
-                format!(
-                    "nunciod daemon rejected list_accounts: {}",
-                    Self::clean_status_message(&status)
-                )
-            })?
+            .map_err(|status| Self::describe_status_error("list_accounts", &status))?
             .into_inner()
             .accounts;
         accounts
@@ -2262,13 +2105,7 @@ impl HeadlessRunner {
                     format!("Account '{id}' updated via nunciod daemon.")
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected update_account: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("update_account", &status, json_mode),
         }
     }
 
@@ -2295,13 +2132,7 @@ impl HeadlessRunner {
                     format!("Account '{id}' removed via nunciod daemon.")
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected remove_account: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("remove_account", &status, json_mode),
         }
     }
 
@@ -2352,13 +2183,7 @@ impl HeadlessRunner {
                     format!("Connection test for '{id}'\n  {imap}\n  {smtp}")
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected test_account_connection: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("test_account_connection", &status, json_mode),
         }
     }
 
@@ -2455,13 +2280,7 @@ impl HeadlessRunner {
                     page_token = page.next_page_token;
                 }
                 Err(status) => {
-                    return Self::render_error(
-                        &format!(
-                            "nunciod daemon rejected list_events: {}",
-                            Self::clean_status_message(&status)
-                        ),
-                        json_mode,
-                    );
+                    return Self::render_status_error("list_events", &status, json_mode);
                 }
             }
         }
@@ -2517,13 +2336,7 @@ impl HeadlessRunner {
                     format!("Calendar synchronization complete: {synced_count} event(s) synced")
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected calendar sync: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("calendar sync", &status, json_mode),
         }
     }
 
@@ -2557,13 +2370,7 @@ impl HeadlessRunner {
         let contacts = match self.fetch_all_contacts(&mut client, account).await {
             Ok(contacts) => contacts,
             Err(status) => {
-                return Self::render_error(
-                    &format!(
-                        "nunciod daemon rejected list_contacts: {}",
-                        Self::clean_status_message(&status)
-                    ),
-                    json_mode,
-                );
+                return Self::render_status_error("list_contacts", &status, json_mode);
             }
         };
 
@@ -2620,13 +2427,7 @@ impl HeadlessRunner {
         let contacts = match self.fetch_all_contacts(&mut client, account).await {
             Ok(contacts) => contacts,
             Err(status) => {
-                return Self::render_error(
-                    &format!(
-                        "nunciod daemon rejected list_contacts: {}",
-                        Self::clean_status_message(&status)
-                    ),
-                    json_mode,
-                );
+                return Self::render_status_error("list_contacts", &status, json_mode);
             }
         };
 
@@ -2702,13 +2503,7 @@ impl HeadlessRunner {
                     json_mode,
                 ),
             },
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected create_contact: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("create_contact", &status, json_mode),
         }
     }
 
@@ -2739,13 +2534,7 @@ impl HeadlessRunner {
                     format!("Contacts synchronization complete: {synced_count} contact(s) synced")
                 }
             }
-            Err(status) => Self::render_error(
-                &format!(
-                    "nunciod daemon rejected contacts sync: {}",
-                    Self::clean_status_message(&status)
-                ),
-                json_mode,
-            ),
+            Err(status) => Self::render_status_error("contacts sync", &status, json_mode),
         }
     }
 
@@ -2772,6 +2561,64 @@ impl HeadlessRunner {
             format!("{:?} error", status.code())
         } else {
             message.to_string()
+        }
+    }
+
+    /// Strips the `ERROR_REASON_` prefix off a decoded [`v1::ErrorReason`]'s
+    /// generated `as_str_name()`, so the CLI renders the short, readable form
+    /// (`ACCOUNT_NOT_FOUND`) rather than the wire enum's full name.
+    fn reason_name(reason: nuncio_proto::v1::ErrorReason) -> String {
+        reason
+            .as_str_name()
+            .trim_start_matches("ERROR_REASON_")
+            .to_string()
+    }
+
+    /// Builds the full human-readable text for a failed daemon RPC: the
+    /// server-provided message, the gRPC status code, and -- when the daemon
+    /// attached a WS-A1 [`nuncio_proto::v1::ErrorInfo`] to the status details
+    /// -- the typed [`nuncio_proto::v1::ErrorReason`]. Falls back to just the
+    /// code when no typed details are present (e.g. a status raised by a
+    /// library this client talks to that predates `ErrorInfo`).
+    fn describe_status_error(context: &str, status: &tonic::Status) -> String {
+        let message = Self::clean_status_message(status);
+        let code = status.code();
+        match nuncio_proto::errors::error_reason(status) {
+            Some(reason) => format!(
+                "nunciod daemon rejected {context}: {message} (code: {code:?}, reason: {})",
+                Self::reason_name(reason)
+            ),
+            None => format!("nunciod daemon rejected {context}: {message} (code: {code:?})"),
+        }
+    }
+
+    /// Renders a failed daemon RPC for both text and `--json` output modes,
+    /// decoding the WS-A1 `ErrorInfo` from the status details when present.
+    ///
+    /// Text mode gets the human message, the gRPC code, and the typed reason
+    /// (see [`Self::describe_status_error`]). JSON mode gets a coherent
+    /// `{error, code, reason, metadata}` shape via
+    /// [`format_json_error_with_info`] -- `reason`/`metadata` are omitted
+    /// (rather than fabricated) when the status carried no typed
+    /// `ErrorInfo`, so a caller can tell "no reason given" apart from an
+    /// actual reason.
+    fn render_status_error(context: &str, status: &tonic::Status, json_mode: bool) -> String {
+        if json_mode {
+            let info = nuncio_proto::errors::error_info(status);
+            let message = format!(
+                "nunciod daemon rejected {context}: {}",
+                Self::clean_status_message(status)
+            );
+            let reason = info.as_ref().map(|i| Self::reason_name(i.reason()));
+            let metadata = info.map(|i| i.metadata).unwrap_or_default();
+            format_json_error_with_info(
+                &message,
+                Some(format!("{:?}", status.code())),
+                reason,
+                metadata.into_iter().collect(),
+            )
+        } else {
+            format!("Error: {}", Self::describe_status_error(context, status))
         }
     }
 
@@ -3851,6 +3698,132 @@ mod tests {
         assert!(!out.contains("metadata:"));
         assert!(!out.contains("MetadataMap"));
         assert!(!out.contains("status:"));
+    }
+
+    /// Proves the CLI decodes a WS-A1 `ErrorInfo` from a daemon RPC's status
+    /// details and renders the human message, the gRPC code, and the typed
+    /// reason -- in both text and `--json` mode -- instead of dropping the
+    /// code or the reason the daemon went to the trouble of attaching.
+    #[tokio::test]
+    async fn typed_error_info_renders_code_reason_and_metadata_in_text_and_json() {
+        use nuncio_proto::v1::mail_server::{Mail as MailService, MailServer};
+        use nuncio_proto::v1::ErrorReason;
+        use nuncio_proto::v1::{
+            GetMessageRequest, GetMessageResponse, ListFoldersRequest, ListFoldersResponse,
+            ListMessagesRequest, ListMessagesResponse, MarkReadRequest, MarkReadResponse,
+            SearchMessagesRequest, SearchMessagesResponse, SendMessageRequest, SendMessageResponse,
+            SyncRequest, SyncResponse,
+        };
+
+        /// Minimal test-only stub of `nuncio.v1.Mail` whose `ListFolders`
+        /// always fails with a typed `ErrorInfo` (account-not-found), so this
+        /// test can assert on exactly how the CLI decodes and renders it.
+        struct StubMailTypedError;
+
+        #[tonic::async_trait]
+        impl MailService for StubMailTypedError {
+            async fn list_folders(
+                &self,
+                _request: tonic::Request<ListFoldersRequest>,
+            ) -> Result<tonic::Response<ListFoldersResponse>, tonic::Status> {
+                Err(nuncio_proto::errors::status_with_metadata(
+                    ErrorReason::AccountNotFound,
+                    "account 'acct-missing' not found",
+                    [("account_id".to_string(), "acct-missing".to_string())],
+                ))
+            }
+
+            async fn list_messages(
+                &self,
+                _request: tonic::Request<ListMessagesRequest>,
+            ) -> Result<tonic::Response<ListMessagesResponse>, tonic::Status> {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+
+            async fn get_message(
+                &self,
+                _request: tonic::Request<GetMessageRequest>,
+            ) -> Result<tonic::Response<GetMessageResponse>, tonic::Status> {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+
+            async fn mark_read(
+                &self,
+                _request: tonic::Request<MarkReadRequest>,
+            ) -> Result<tonic::Response<MarkReadResponse>, tonic::Status> {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+
+            async fn search_messages(
+                &self,
+                _request: tonic::Request<SearchMessagesRequest>,
+            ) -> Result<tonic::Response<SearchMessagesResponse>, tonic::Status> {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+
+            async fn send_message(
+                &self,
+                _request: tonic::Request<SendMessageRequest>,
+            ) -> Result<tonic::Response<SendMessageResponse>, tonic::Status> {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+
+            async fn sync(
+                &self,
+                _request: tonic::Request<SyncRequest>,
+            ) -> Result<tonic::Response<SyncResponse>, tonic::Status> {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("listener has local addr");
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(MailServer::new(StubMailTypedError))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
+                .await
+                .expect("ephemeral runner initializes");
+
+        // Text mode: human message, gRPC code, and the typed reason -- not a
+        // raw status dump, and not silently dropping the code/reason.
+        let text_out = runner
+            .execute_command(
+                &Commands::Folder {
+                    action: FolderSubcommand::List,
+                },
+                false,
+            )
+            .await;
+        assert!(text_out.contains("account 'acct-missing' not found"));
+        assert!(text_out.contains("code: NotFound"));
+        assert!(text_out.contains("reason: ACCOUNT_NOT_FOUND"));
+
+        // JSON mode: a coherent {error, code, reason, metadata} shape.
+        let json_out = runner
+            .execute_command(
+                &Commands::Folder {
+                    action: FolderSubcommand::List,
+                },
+                true,
+            )
+            .await;
+        let parsed: serde_json::Value = serde_json::from_str(&json_out).expect("valid JSON output");
+        assert_eq!(parsed["status"], "error");
+        assert!(parsed["error"]
+            .as_str()
+            .expect("error is a string")
+            .contains("account 'acct-missing' not found"));
+        assert_eq!(parsed["code"], "NotFound");
+        assert_eq!(parsed["reason"], "ACCOUNT_NOT_FOUND");
+        assert_eq!(parsed["metadata"]["account_id"], "acct-missing");
     }
 
     /// Reference-client proof: boots a stub `nuncio.v1.Calendar` gRPC server

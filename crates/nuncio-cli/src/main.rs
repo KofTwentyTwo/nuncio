@@ -1,9 +1,15 @@
 use clap::Parser;
-use nuncio_cli::{args::Cli, AccountSubcommand, Commands, HeadlessRunner, PasswordArg};
+use nuncio_cli::{args::Cli, logging, AccountSubcommand, Commands, HeadlessRunner, PasswordArg};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cli = Cli::parse();
+
+    // Wire the CLI's own `-v`/`-vv`/`-vvv` flag (or `NUNCIO_LOG`/`RUST_LOG`)
+    // to a real stderr subscriber before anything else runs, so every RPC
+    // this process makes is followable. This is the CLI's own log stream --
+    // entirely separate from the daemon's file-based logging.
+    logging::init(cli.verbose);
 
     // `account add`'s password is deliberately never a Clap-parsed CLI
     // flag (see `PasswordArg`'s doc comment): read it here, interactively

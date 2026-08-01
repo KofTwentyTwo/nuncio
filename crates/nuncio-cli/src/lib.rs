@@ -3,6 +3,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod args;
+pub mod logging;
 pub mod output;
 pub mod runner;
 

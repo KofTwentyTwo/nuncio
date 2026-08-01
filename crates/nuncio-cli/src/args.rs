@@ -70,14 +70,18 @@ pub struct Cli {
     #[arg(long, global = true, help = "Target a specific configured account ID")]
     pub account: Option<String>,
 
-    /// Enable verbose log output to stderr.
+    /// Increase log verbosity on stderr. Repeatable: `-v` = info, `-vv` =
+    /// debug, `-vvv` = trace. Omitted entirely, the CLI logs only warnings.
+    /// `NUNCIO_LOG`/`RUST_LOG`, if set, override this (see
+    /// [`crate::logging`]).
     #[arg(
         short,
         long,
         global = true,
-        help = "Enable detailed verbose execution logs on stderr"
+        action = clap::ArgAction::Count,
+        help = "Increase log verbosity on stderr (-v info, -vv debug, -vvv trace)"
     )]
-    pub verbose: bool,
+    pub verbose: u8,
 
     /// Subcommand resource noun.
     #[command(subcommand)]
@@ -594,13 +598,18 @@ mod tests {
     fn parse_pure_noun_verb_mail_commands() {
         let cli_sync = Cli::parse_from(["nuncio", "--json", "--verbose", "mail", "sync"]);
         assert!(cli_sync.json);
-        assert!(cli_sync.verbose);
+        assert_eq!(cli_sync.verbose, 1);
         assert_eq!(
             cli_sync.command,
             Commands::Mail {
                 action: MailSubcommand::Sync
             }
         );
+
+        // `-v` is repeatable and counts occurrences, mapped to a log level by
+        // `nuncio_cli::logging::verbosity_directive`.
+        let cli_vv = Cli::parse_from(["nuncio", "-vv", "mail", "sync"]);
+        assert_eq!(cli_vv.verbose, 2);
 
         let cli_read = Cli::parse_from(["nuncio", "mail", "read", "--id", "msg-123"]);
         assert_eq!(
