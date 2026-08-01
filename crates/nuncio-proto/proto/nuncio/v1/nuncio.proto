@@ -89,13 +89,64 @@ service System {
 // here later (e.g. requested detail level).
 message GetStatusRequest {}
 
-// GetStatusResponse reports the current health and build identity of the
-// running nunciod engine.
+// Per-account synchronization phase, reported inside `AccountSyncState`.
+// Values are append-only: never renumber or repurpose an existing value.
+enum SyncState {
+  // Zero value; treated as IDLE by clients that do not recognize a value.
+  SYNC_STATE_UNSPECIFIED = 0;
+  // No sync is in flight for the account and its last attempt (if any)
+  // succeeded.
+  SYNC_STATE_IDLE = 1;
+  // A sync for the account is currently running.
+  SYNC_STATE_SYNCING = 2;
+  // No sync is in flight, but the account's most recent attempt failed;
+  // `last_error` carries the genuine failure detail.
+  SYNC_STATE_ERROR = 3;
+}
+
+// AccountSyncState reports the live sync phase of a single configured
+// account, plus the outcome of its most recent completed sync attempt. It is
+// derived from the daemon's in-flight sync map and last-result tracking --
+// never fabricated. An account that has never synced since daemon start
+// reports `IDLE` with no `last_synced`/`last_error`.
+message AccountSyncState {
+  // The account this state describes.
+  string account_id = 1;
+  // Current sync phase.
+  SyncState state = 2;
+  // When the account last synced SUCCESSFULLY, if it has since daemon start.
+  // Absent when the account has not completed a successful sync yet.
+  optional google.protobuf.Timestamp last_synced = 3;
+  // Present only when the most recent attempt failed (`state == ERROR`):
+  // the genuine failure detail.
+  optional string last_error = 4;
+}
+
+// GetStatusResponse reports the current health, readiness, and build identity
+// of the running nunciod engine. Every numeric/health field is backed by live
+// daemon state read when the RPC is served -- never a placeholder.
 message GetStatusResponse {
-  // Human-readable engine status (e.g. "ok", "degraded").
+  // Human-readable engine status (e.g. "Idle", "Syncing", "ShuttingDown").
   string engine_status = 1;
   // The nunciod build/crate version serving this response.
   string version = 2;
+  // How long the daemon process has been serving since startup.
+  google.protobuf.Duration uptime = 3;
+  // Number of configured accounts currently loaded from the store.
+  uint64 accounts_loaded = 4;
+  // Total unread messages across every synced folder.
+  uint64 unread_count = 5;
+  // Last engine-level error recorded on the event bus, if any.
+  optional string last_error = 6;
+  // Number of pending outbound mutations queued in the outbox.
+  uint64 outbox_depth = 7;
+  // Live per-account sync state, one entry per configured account.
+  repeated AccountSyncState account_sync_states = 8;
+  // Overall readiness: true when the daemon is serving normally (database
+  // healthy and not shutting down). A client can gate work on this.
+  bool ready = 9;
+  // Whether a cheap `SELECT 1` database liveness probe just succeeded.
+  bool db_healthy = 10;
 }
 
 // SubscribeRequest currently carries no parameters. Fields may be added

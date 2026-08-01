@@ -62,6 +62,17 @@ pub fn duration_from_secs(secs: u64) -> Duration {
     }
 }
 
+/// Converts a `std::time::Duration` (e.g. a process-uptime measurement taken
+/// with `Instant::elapsed`) into a wire `Duration`, preserving sub-second
+/// precision. Saturates rather than overflowing on an implausibly large span.
+#[must_use]
+pub fn duration_from_std(d: std::time::Duration) -> Duration {
+    Duration {
+        seconds: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        nanos: d.subsec_nanos() as i32,
+    }
+}
+
 /// Extracts a whole-second duration from a `Duration`, truncating any
 /// sub-second `nanos` component. A negative `seconds` (never produced by
 /// this crate's own mappers) reads back as zero rather than panicking.

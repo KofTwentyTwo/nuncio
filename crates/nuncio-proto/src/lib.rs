@@ -56,10 +56,23 @@ mod tests {
         let response = GetStatusResponse {
             engine_status: "ok".to_string(),
             version: "0.1.0".to_string(),
+            uptime: Some(super::time::duration_from_secs(42)),
+            accounts_loaded: 2,
+            unread_count: 7,
+            last_error: None,
+            outbox_depth: 1,
+            account_sync_states: Vec::new(),
+            ready: true,
+            db_healthy: true,
         };
 
         assert_eq!(response.engine_status, "ok");
         assert_eq!(response.version, "0.1.0");
+        assert_eq!(response.accounts_loaded, 2);
+        assert_eq!(response.unread_count, 7);
+        assert_eq!(response.outbox_depth, 1);
+        assert!(response.ready);
+        assert!(response.db_healthy);
     }
 
     #[test]

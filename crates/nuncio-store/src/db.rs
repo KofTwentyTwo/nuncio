@@ -438,6 +438,39 @@ impl DatabaseEngine {
         }
     }
 
+    /// Cheap liveness probe: runs `SELECT 1` against the pool and returns
+    /// `Ok(())` only if it genuinely round-trips. Unlike `check_integrity`
+    /// (a full `PRAGMA quick_check`), this is a constant-time readiness ping
+    /// suitable for a health endpoint served on every status request.
+    pub async fn ping(&self) -> Result<(), DatabaseError> {
+        let _: (i64,) = sqlx::query_as("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+        Ok(())
+    }
+
+    /// Total unread messages across every folder, read live from the store.
+    pub async fn count_unread_messages(&self) -> Result<u64, DatabaseError> {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages WHERE read_flag = 0")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+        Ok(count.max(0) as u64)
+    }
+
+    /// Number of outbound mutations still queued in the outbox (status
+    /// `pending`) -- the outbox depth reported by the daemon's health surface.
+    pub async fn count_pending_mutations(&self) -> Result<u64, DatabaseError> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pending_remote_mutations WHERE status = 'pending'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+        Ok(count.max(0) as u64)
+    }
+
     /// Cryptographic hash-chain audit ledger verification (`verify_chain_integrity()`)
     /// detecting log tampering or corrupted `filter_execution_logs`, using the ledger
     /// HMAC key provisioned for this engine.
