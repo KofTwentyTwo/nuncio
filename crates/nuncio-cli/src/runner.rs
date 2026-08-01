@@ -2786,17 +2786,80 @@ impl HeadlessRunner {
     /// NOT auto-spawn the daemon.
     async fn handle_system_status(&self, json_mode: bool) -> String {
         match self.query_daemon_status().await {
-            Ok((engine_status, version)) => {
+            Ok(status) => {
+                let uptime_secs = status
+                    .uptime
+                    .as_ref()
+                    .map(nuncio_proto::time::duration_to_secs)
+                    .unwrap_or(0);
                 if json_mode {
+                    let accounts: Vec<_> = status
+                        .account_sync_states
+                        .iter()
+                        .map(|a| {
+                            json!({
+                                "account_id": a.account_id,
+                                "state": sync_state_label(a.state),
+                                "last_synced": a
+                                    .last_synced
+                                    .as_ref()
+                                    .map(nuncio_proto::time::timestamp_to_unix_secs),
+                                "last_error": a.last_error,
+                            })
+                        })
+                        .collect();
                     format_json(&json!({
-                        "engine_status": engine_status,
-                        "version": version,
+                        "engine_status": status.engine_status,
+                        "version": status.version,
+                        "ready": status.ready,
+                        "db_healthy": status.db_healthy,
+                        "uptime_secs": uptime_secs,
+                        "accounts_loaded": status.accounts_loaded,
+                        "unread_count": status.unread_count,
+                        "outbox_depth": status.outbox_depth,
+                        "last_error": status.last_error,
+                        "accounts": accounts,
                     }))
                 } else {
-                    format!(
-                        "Nuncio daemon status: {engine_status} (nunciod v{version}, {})",
-                        self.grpc_addr
-                    )
+                    let mut out = format!(
+                        "Nuncio daemon status: {} (nunciod v{}, {})\n",
+                        status.engine_status, status.version, self.grpc_addr
+                    );
+                    out.push_str(&format!(
+                        "  ready: {}  db_healthy: {}\n",
+                        status.ready, status.db_healthy
+                    ));
+                    out.push_str(&format!("  uptime: {uptime_secs}s\n"));
+                    out.push_str(&format!(
+                        "  accounts_loaded: {}  unread: {}  outbox_depth: {}\n",
+                        status.accounts_loaded, status.unread_count, status.outbox_depth
+                    ));
+                    out.push_str(&format!(
+                        "  last_error: {}",
+                        status.last_error.as_deref().unwrap_or("<none>")
+                    ));
+                    if status.account_sync_states.is_empty() {
+                        out.push_str("\n  accounts: <none>");
+                    } else {
+                        out.push_str("\n  accounts:");
+                        for a in &status.account_sync_states {
+                            out.push_str(&format!(
+                                "\n    {}: {}",
+                                a.account_id,
+                                sync_state_label(a.state)
+                            ));
+                            if let Some(ts) = a.last_synced.as_ref() {
+                                out.push_str(&format!(
+                                    " (last synced: {})",
+                                    nuncio_proto::time::timestamp_to_unix_secs(ts)
+                                ));
+                            }
+                            if let Some(err) = a.last_error.as_deref() {
+                                out.push_str(&format!(" [error: {err}]"));
+                            }
+                        }
+                    }
+                    out
                 }
             }
             Err(e) => {
@@ -2810,10 +2873,10 @@ impl HeadlessRunner {
     }
 
     /// Reads the gRPC bearer token from the injected vault, connects to the
-    /// daemon over gRPC, and calls `GetStatus`. Returns `(engine_status,
-    /// version)` on success, or a human-readable error string describing
+    /// daemon over gRPC, and calls `GetStatus`. Returns the full live health
+    /// response on success, or a human-readable error string describing
     /// exactly what failed (vault, connection, or the RPC itself).
-    async fn query_daemon_status(&self) -> Result<(String, String), String> {
+    async fn query_daemon_status(&self) -> Result<nuncio_proto::v1::GetStatusResponse, String> {
         let token_bytes = self
             .secrets
             .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
@@ -2835,7 +2898,21 @@ impl HeadlessRunner {
             })?
             .into_inner();
 
-        Ok((response.engine_status, response.version))
+        Ok(response)
+    }
+}
+
+/// Maps a `nuncio.v1.SyncState` wire discriminant onto a short human label
+/// for the CLI's `system status` rendering. An unrecognized value renders as
+/// "unknown" rather than failing.
+fn sync_state_label(state: i32) -> &'static str {
+    match nuncio_proto::v1::SyncState::try_from(state)
+        .unwrap_or(nuncio_proto::v1::SyncState::Unspecified)
+    {
+        nuncio_proto::v1::SyncState::Idle => "idle",
+        nuncio_proto::v1::SyncState::Syncing => "syncing",
+        nuncio_proto::v1::SyncState::Error => "error",
+        nuncio_proto::v1::SyncState::Unspecified => "unknown",
     }
 }
 
@@ -3056,6 +3133,21 @@ mod tests {
                 Ok(tonic::Response::new(GetStatusResponse {
                     engine_status: "Ready".to_string(),
                     version: "9.9.9".to_string(),
+                    uptime: Some(nuncio_proto::time::duration_from_secs(5)),
+                    accounts_loaded: 2,
+                    unread_count: 3,
+                    last_error: None,
+                    outbox_depth: 1,
+                    account_sync_states: vec![nuncio_proto::v1::AccountSyncState {
+                        account_id: "acct-1".to_string(),
+                        state: nuncio_proto::v1::SyncState::Idle as i32,
+                        last_synced: Some(nuncio_proto::time::timestamp_from_unix_secs(
+                            1_700_000_000,
+                        )),
+                        last_error: None,
+                    }],
+                    ready: true,
+                    db_healthy: true,
                 }))
             }
 
@@ -3106,6 +3198,12 @@ mod tests {
         assert!(out.contains(r#""status":"ok""#));
         assert!(out.contains(r#""engine_status":"Ready""#));
         assert!(out.contains(r#""version":"9.9.9""#));
+        assert!(out.contains(r#""ready":true"#));
+        assert!(out.contains(r#""db_healthy":true"#));
+        assert!(out.contains(r#""accounts_loaded":2"#));
+        assert!(out.contains(r#""unread_count":3"#));
+        assert!(out.contains(r#""outbox_depth":1"#));
+        assert!(out.contains(r#""account_id":"acct-1""#));
 
         let text_out = runner
             .execute_command(

@@ -45,7 +45,7 @@ use nuncio_store::db::DatabaseEngine;
 use nuncio_store::vault::SecretManager;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::sync::{watch, Semaphore};
 use tracing::Instrument;
@@ -94,6 +94,42 @@ pub enum SyncDispatchError {
     /// a coalesced failure can be reported to every joined waiter.
     #[error(transparent)]
     Sync(Arc<SyncError>),
+}
+
+/// Live sync phase of a single account, derived from the dispatcher's
+/// in-flight map and last-result tracking for the daemon health surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSyncPhase {
+    /// No sync in flight; the last attempt (if any) succeeded.
+    Idle,
+    /// A sync for the account is currently running.
+    Syncing,
+    /// No sync in flight, but the most recent attempt failed.
+    Error,
+}
+
+/// A snapshot of one account's sync state, combining its current phase with
+/// the outcome of its most recent completed attempt. `last_success_at`
+/// survives a subsequent failure so a transient error does not erase the
+/// last known-good sync time.
+#[derive(Debug, Clone)]
+pub struct AccountSyncStatus {
+    /// Current phase.
+    pub phase: AccountSyncPhase,
+    /// When the account last completed a SUCCESSFUL sync, if ever since start.
+    pub last_success_at: Option<SystemTime>,
+    /// The most recent attempt's failure detail, present only when the last
+    /// attempt failed.
+    pub last_error: Option<String>,
+}
+
+/// The recorded outcome of an account's most recent completed sync attempt.
+/// A success clears `last_error` and stamps `last_success_at`; a failure sets
+/// `last_error` while leaving any earlier `last_success_at` intact.
+#[derive(Default, Clone)]
+struct AccountSyncRecord {
+    last_success_at: Option<SystemTime>,
+    last_error: Option<String>,
 }
 
 /// Injectable seam for the actual work of syncing one account. Production
@@ -179,6 +215,10 @@ struct Inner {
     /// that publishes the sync's outcome once. A second request for the same
     /// account clones the receiver and joins the in-flight sync.
     inflight: Mutex<HashMap<String, watch::Receiver<Option<SyncOutcome>>>>,
+    /// The most recent completed outcome per account, retained after the
+    /// in-flight entry is cleared so the health surface can report each
+    /// account's last sync time and last error.
+    last_results: Mutex<HashMap<String, AccountSyncRecord>>,
     per_account_timeout: Duration,
     shutdown: ShutdownSignal,
 }
@@ -246,6 +286,7 @@ impl SyncDispatcher {
                 syncer,
                 semaphore: Arc::new(Semaphore::new(concurrency)),
                 inflight: Mutex::new(HashMap::new()),
+                last_results: Mutex::new(HashMap::new()),
                 per_account_timeout,
                 shutdown,
             }),
@@ -298,6 +339,25 @@ impl SyncDispatcher {
                 tokio::spawn(
                     async move {
                         let outcome = inner.run_guarded(&id).await;
+                        // Record this attempt's outcome for the health surface
+                        // before clearing the in-flight entry: a success stamps
+                        // the last-synced time and clears any prior error; a
+                        // failure records the error while preserving the last
+                        // known-good sync time.
+                        {
+                            let mut results = inner
+                                .last_results
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            let record = results.entry(id.clone()).or_default();
+                            match &outcome {
+                                Ok(_) => {
+                                    record.last_success_at = Some(SystemTime::now());
+                                    record.last_error = None;
+                                }
+                                Err(e) => record.last_error = Some(e.to_string()),
+                            }
+                        }
                         // Remove the in-flight entry before publishing so a
                         // request arriving after completion starts a fresh sync
                         // rather than joining an already-finished one.
@@ -323,6 +383,41 @@ impl SyncDispatcher {
             Err(_) => None,
         };
         published.unwrap_or(Err(SyncDispatchError::Cancelled))
+    }
+
+    /// Report the live sync state of a single account for the daemon health
+    /// surface: `Syncing` while a sync is in flight, otherwise `Error` if the
+    /// most recent attempt failed, else `Idle`. `last_success_at`/`last_error`
+    /// carry the genuine outcome of the last completed attempt (never
+    /// fabricated); an account that has not synced since daemon start reports
+    /// `Idle` with neither set.
+    pub fn sync_status(&self, account_id: &str) -> AccountSyncStatus {
+        let syncing = self
+            .inner
+            .inflight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(account_id);
+        let record = self
+            .inner
+            .last_results
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(account_id)
+            .cloned()
+            .unwrap_or_default();
+        let phase = if syncing {
+            AccountSyncPhase::Syncing
+        } else if record.last_error.is_some() {
+            AccountSyncPhase::Error
+        } else {
+            AccountSyncPhase::Idle
+        };
+        AccountSyncStatus {
+            phase,
+            last_success_at: record.last_success_at,
+            last_error: record.last_error,
+        }
     }
 
     /// Dispatch syncs for several accounts concurrently, each through the same
@@ -596,6 +691,67 @@ mod tests {
             matches!(err, Err(SyncDispatchError::Sync(_))),
             "an underlying sync failure surfaces as SyncDispatchError::Sync, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn sync_status_reports_idle_for_an_unknown_account() {
+        let syncer = Arc::new(MockSyncer::new());
+        let dispatcher = dispatcher_with(syncer, 2, Duration::from_secs(30));
+
+        let status = dispatcher.sync_status("never-seen");
+        assert_eq!(status.phase, AccountSyncPhase::Idle);
+        assert!(status.last_success_at.is_none());
+        assert!(status.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_status_reports_syncing_while_a_sync_is_in_flight() {
+        let syncer = Arc::new(MockSyncer::new().blocking("acct-live"));
+        let dispatcher = dispatcher_with(syncer.clone(), 2, Duration::from_secs(30));
+
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.sync_account("acct-live").await });
+
+        // Wait until the mock has actually entered the sync (it blocks there).
+        while syncer.call_count() == 0 {
+            sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            dispatcher.sync_status("acct-live").phase,
+            AccountSyncPhase::Syncing
+        );
+
+        syncer.gate.notify_one();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn sync_status_reports_idle_with_last_synced_after_success() {
+        let syncer = Arc::new(MockSyncer::new());
+        let dispatcher = dispatcher_with(syncer, 2, Duration::from_secs(30));
+
+        assert!(matches!(dispatcher.sync_account("acct-ok").await, Ok(1)));
+
+        let status = dispatcher.sync_status("acct-ok");
+        assert_eq!(status.phase, AccountSyncPhase::Idle);
+        assert!(status.last_success_at.is_some());
+        assert!(status.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_status_reports_error_after_a_failed_attempt() {
+        let syncer = Arc::new(MockSyncer::new().failing("acct-bad"));
+        let dispatcher = dispatcher_with(syncer, 2, Duration::from_secs(30));
+
+        assert!(matches!(
+            dispatcher.sync_account("acct-bad").await,
+            Err(SyncDispatchError::Sync(_))
+        ));
+
+        let status = dispatcher.sync_status("acct-bad");
+        assert_eq!(status.phase, AccountSyncPhase::Error);
+        assert!(status.last_error.is_some());
+        assert!(status.last_success_at.is_none());
     }
 
     #[tokio::test]

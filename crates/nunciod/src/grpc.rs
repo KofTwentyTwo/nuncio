@@ -7,10 +7,12 @@
 
 use crate::lifecycle::ShutdownSignal;
 use crate::pagination::{self, CursorField};
-use crate::sync_dispatcher::{sync_all_configured, ProductionAccountSyncer, SyncDispatcher};
+use crate::sync_dispatcher::{
+    sync_all_configured, AccountSyncPhase, ProductionAccountSyncer, SyncDispatcher,
+};
 use nuncio_cal::CalendarBackend;
 use nuncio_contacts::ContactsBackend;
-use nuncio_core::{CoreCommand, CoreEvent, EventBus};
+use nuncio_core::{CoreCommand, CoreEvent, EngineStatus, EventBus};
 use nuncio_filter::{FilterEngine, NsqlParser, NsqlValidator, ValidationOptions};
 use nuncio_mail::{ImapEngine, MailBackend, MessageSender, SmtpTransportEngine};
 use nuncio_proto::errors;
@@ -26,14 +28,15 @@ use nuncio_proto::v1::mail_server::{Mail, MailServer};
 use nuncio_proto::v1::system_server::{System, SystemServer};
 use nuncio_proto::v1::ErrorReason;
 use nuncio_proto::v1::{
-    export_request, AccountConfig as AccountConfigProto, AddAccountRequest, AddAccountResponse,
-    Attachment as AttachmentProto, AuditRecord as AuditRecordProto, BatchFilterProgress,
-    CalendarEvent as CalendarEventProto, CalendarSyncRequest, CalendarSyncResponse,
-    Contact as ContactProto, ContactEmail as ContactEmailProto, ContactPhone as ContactPhoneProto,
-    ContactsSyncRequest, ContactsSyncResponse, CreateContactRequest, CreateContactResponse,
-    CreateRuleRequest, CreateRuleResponse, DatabaseRecovered, DavTransport as DavTransportProto,
-    DeleteRuleRequest, DeleteRuleResponse, Event, EventError, ExportFormat as ExportFormatProto,
-    ExportRequest, ExportResponse, ExportRulesRequest, ExportRulesResponse, FilterExecuted,
+    export_request, AccountConfig as AccountConfigProto, AccountSyncState as AccountSyncStateProto,
+    AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto,
+    AuditRecord as AuditRecordProto, BatchFilterProgress, CalendarEvent as CalendarEventProto,
+    CalendarSyncRequest, CalendarSyncResponse, Contact as ContactProto,
+    ContactEmail as ContactEmailProto, ContactPhone as ContactPhoneProto, ContactsSyncRequest,
+    ContactsSyncResponse, CreateContactRequest, CreateContactResponse, CreateRuleRequest,
+    CreateRuleResponse, DatabaseRecovered, DavTransport as DavTransportProto, DeleteRuleRequest,
+    DeleteRuleResponse, Event, EventError, ExportFormat as ExportFormatProto, ExportRequest,
+    ExportResponse, ExportRulesRequest, ExportRulesResponse, FilterExecuted,
     FilterExecutionLog as FilterExecutionLogProto, FilterRule as FilterRuleProto,
     Folder as FolderProto, GetContactRequest, GetContactResponse, GetEventRequest,
     GetEventResponse, GetExecutionLogsRequest, GetExecutionLogsResponse, GetMessageRequest,
@@ -47,18 +50,18 @@ use nuncio_proto::v1::{
     PreviewRuleRequest, PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse,
     RuleExportFormat as RuleExportFormatProto, SearchMessagesRequest, SearchMessagesResponse,
     SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
-    SyncRequest, SyncResponse, SyncStarted, TestAccountConnectionRequest,
-    TestAccountConnectionResponse, TlsMode as TlsModeProto, TriageProgress, TriageRequest,
-    UpdateAccountRequest, UpdateAccountResponse, UpdateAvailable, UpdateRuleRequest,
-    UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest,
-    VerifyChainResponse,
+    SyncRequest, SyncResponse, SyncStarted, SyncState as SyncStateProto,
+    TestAccountConnectionRequest, TestAccountConnectionResponse, TlsMode as TlsModeProto,
+    TriageProgress, TriageRequest, UpdateAccountRequest, UpdateAccountResponse, UpdateAvailable,
+    UpdateRuleRequest, UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
+    VerifyChainRequest, VerifyChainResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
 use nuncio_store::vault::SecretManager;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -216,10 +219,36 @@ fn map_core_event(event: CoreEvent) -> Option<Event> {
     Some(Event { kind: Some(kind) })
 }
 
+/// Maps a dispatcher [`AccountSyncPhase`] onto its wire `nuncio.v1.SyncState`.
+fn map_sync_phase_to_proto(phase: AccountSyncPhase) -> SyncStateProto {
+    match phase {
+        AccountSyncPhase::Idle => SyncStateProto::Idle,
+        AccountSyncPhase::Syncing => SyncStateProto::Syncing,
+        AccountSyncPhase::Error => SyncStateProto::Error,
+    }
+}
+
+/// Converts a wall-clock [`SystemTime`] (an account's last successful sync
+/// instant) into a wire `Timestamp` at second granularity. A pre-epoch time
+/// (never produced here) maps to `None` rather than a negative instant.
+fn system_time_to_timestamp(t: SystemTime) -> Option<nuncio_proto::time::Timestamp> {
+    t.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .map(nuncio_proto::time::timestamp_from_unix_secs)
+}
+
 /// `nuncio.v1.System` gRPC service implementation backed by the daemon's live
-/// [`EventBus`] state.
+/// [`EventBus`] state, message store, and sync dispatcher.
 struct SystemGrpcService {
     event_bus: Arc<EventBus>,
+    db: Arc<DatabaseEngine>,
+    sync_dispatcher: Arc<SyncDispatcher>,
+    /// Captured once when the service is constructed at daemon startup;
+    /// `GetStatus` reports the elapsed time since as process uptime. An
+    /// `Instant` (monotonic) rather than a wall clock, so a system time
+    /// adjustment can never make uptime jump or go negative.
+    started_at: Instant,
 }
 
 #[tonic::async_trait]
@@ -229,9 +258,68 @@ impl System for SystemGrpcService {
         _request: Request<GetStatusRequest>,
     ) -> Result<Response<GetStatusResponse>, Status> {
         let state = self.event_bus.current_state();
+
+        // Cheap `SELECT 1` liveness probe; the sole source of `db_healthy`.
+        let db_healthy = self.db.ping().await.is_ok();
+
+        // Enumerate configured accounts live from the store: their count is
+        // `accounts_loaded`, and each one's live sync phase comes from the
+        // shared dispatcher's in-flight/last-result tracking. A read failure
+        // degrades to an empty set (already reflected by `db_healthy`) rather
+        // than fabricating a count.
+        let accounts = match self.db.list_accounts().await {
+            Ok(accounts) => accounts,
+            Err(e) => {
+                tracing::warn!("GetStatus: failed to list accounts for health surface: {e}");
+                Vec::new()
+            }
+        };
+        let accounts_loaded = accounts.len() as u64;
+        let account_sync_states = accounts
+            .iter()
+            .map(|account| {
+                let status = self.sync_dispatcher.sync_status(&account.id);
+                AccountSyncStateProto {
+                    account_id: account.id.clone(),
+                    state: map_sync_phase_to_proto(status.phase) as i32,
+                    last_synced: status.last_success_at.and_then(system_time_to_timestamp),
+                    last_error: status.last_error,
+                }
+            })
+            .collect();
+
+        let unread_count = match self.db.count_unread_messages().await {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("GetStatus: failed to count unread messages: {e}");
+                0
+            }
+        };
+        let outbox_depth = match self.db.count_pending_mutations().await {
+            Ok(depth) => depth,
+            Err(e) => {
+                tracing::warn!("GetStatus: failed to count pending outbox mutations: {e}");
+                0
+            }
+        };
+
+        // Ready to serve normally: the database answered its liveness probe
+        // and the engine is not tearing down.
+        let ready = db_healthy && state.status != EngineStatus::ShuttingDown;
+
         Ok(Response::new(GetStatusResponse {
             engine_status: format!("{:?}", state.status),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime: Some(nuncio_proto::time::duration_from_std(
+                self.started_at.elapsed(),
+            )),
+            accounts_loaded,
+            unread_count,
+            last_error: state.last_error,
+            outbox_depth,
+            account_sync_states,
+            ready,
+            db_healthy,
         }))
     }
 
@@ -2890,6 +2978,9 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
 
     let system_service = SystemGrpcService {
         event_bus: event_bus.clone(),
+        db: db.clone(),
+        sync_dispatcher: sync_dispatcher.clone(),
+        started_at: Instant::now(),
     };
     let system_interceptor = BearerAuthInterceptor::new(token.clone());
     let system_svc = InterceptedService::new(
@@ -3521,6 +3612,91 @@ mod tests {
             .into_inner();
         assert_eq!(response.engine_status, "Syncing");
         assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
+        // Live health surface against a fresh in-memory daemon: the database
+        // answered its liveness probe, uptime is genuinely elapsing, and with
+        // no accounts configured the counts are honestly zero.
+        assert!(response.db_healthy, "ephemeral db must answer SELECT 1");
+        assert!(response.ready, "healthy, non-shutting-down daemon is ready");
+        let uptime = response.uptime.expect("uptime is always populated");
+        assert!(
+            uptime.seconds > 0 || uptime.nanos > 0,
+            "uptime must be strictly positive, got {uptime:?}"
+        );
+        assert_eq!(response.accounts_loaded, 0);
+        assert_eq!(response.unread_count, 0);
+        assert_eq!(response.outbox_depth, 0);
+        assert!(response.account_sync_states.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_status_reports_live_accounts_and_outbox_depth() {
+        // Back the health numbers with real persisted state: two configured
+        // accounts and one queued outbox mutation must be reflected exactly.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+
+        for id in ["acct-h1", "acct-h2"] {
+            let account = nuncio_core::AccountConfig {
+                id: id.to_string(),
+                name: "Health".to_string(),
+                email_address: format!("{id}@nuncio.mx"),
+                keyring_secret_key: format!("nuncio/{id}"),
+                sync_interval_secs: 60,
+                transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+                    endpoint_host: "jmap.nuncio.mx".to_string(),
+                }),
+            };
+            db.save_account(&account).await.expect("save account");
+        }
+
+        db.save_pending_mutation(&nuncio_filter::PendingRemoteMutation {
+            id: "mut-1".to_string(),
+            rule_id: "rule-1".to_string(),
+            message_id: "msg-1".to_string(),
+            mutation_type: "MOVE".to_string(),
+            payload: "{}".to_string(),
+            status: "pending".to_string(),
+            retry_count: 0,
+            created_at: 0,
+        })
+        .await
+        .expect("queue an outbox mutation");
+
+        let event_bus = Arc::new(EventBus::new());
+        let secrets = Arc::new(SecretManager::mock());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let (addr, _handle) =
+            spawn_test_server_with(event_bus, db, filter_engine, secrets, "correct-token").await;
+
+        let mut client = SystemClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let mut request = Request::new(GetStatusRequest {});
+        request.metadata_mut().insert(
+            "authorization",
+            "Bearer correct-token"
+                .parse()
+                .expect("valid ascii metadata value"),
+        );
+        let response = client
+            .get_status(request)
+            .await
+            .expect("valid token is accepted")
+            .into_inner();
+
+        assert!(response.db_healthy);
+        assert_eq!(response.accounts_loaded, 2);
+        assert_eq!(response.outbox_depth, 1);
+        // Each configured account has a per-account sync state; with no sync
+        // run yet every one is IDLE with no last-synced/last-error.
+        assert_eq!(response.account_sync_states.len(), 2);
+        for state in &response.account_sync_states {
+            assert_eq!(state.state, SyncStateProto::Idle as i32);
+            assert!(state.last_synced.is_none());
+            assert!(state.last_error.is_none());
+        }
     }
 
     #[tokio::test]
