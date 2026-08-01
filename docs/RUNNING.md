@@ -69,6 +69,90 @@ nuncio-cli.exe folder list
 Add `--json` to any command for machine-readable output. `nuncio-cli.exe <noun> --help`
 lists every verb and flag.
 
+## Following & auditing the daemon
+
+`nunciod` runs a layered `tracing` subscriber (`crates/nunciod/src/logging.rs`);
+`nuncio-cli` runs its own, separate, stderr-only subscriber for its own logs.
+Neither ever writes a bearer token or an account password to a log line.
+
+### Daemon log levels
+
+`nunciod`'s console (stderr) and rotating file sinks share one filter,
+resolved once at startup with this precedence:
+
+1. **`NUNCIO_LOG`** — a `tracing-subscriber` `EnvFilter` directive (e.g.
+   `info`, `debug`, `nunciod=debug,tower=warn`). Wins over `RUST_LOG` if set
+   to a non-blank value.
+2. **`RUST_LOG`** — same directive syntax; used when `NUNCIO_LOG` is
+   unset/blank.
+3. Default: `info`.
+
+A malformed directive never crashes the daemon — it falls back to the
+default and logs a `warn!` once the subscriber is live.
+
+```
+:: run the daemon at debug level for one session
+set NUNCIO_LOG=debug
+target\release\nunciod.exe
+```
+
+### Log file location
+
+The rotating file sink writes daily-rotated files next to the database, under
+a `logs/` sibling directory: `<data_dir>\logs\nunciod.log.<date>` (e.g.
+`%USERPROFILE%\.nuncio\logs\nunciod.log.2026-07-30`). If the log directory
+cannot be created, the daemon degrades to stderr-only logging (with a
+`warn!`) rather than failing to start.
+
+### JSON log output
+
+Set `NUNCIO_LOG_FORMAT=json` to switch the **file** sink to one JSON object
+per line, for machine ingestion (e.g. shipping to a log aggregator). The
+console sink always stays human-readable, since it's for an operator watching
+a terminal. Any other value (or unset) keeps the file sink human-readable too.
+
+### Correlating one request's logs (`request_id`)
+
+Every gRPC call `nunciod` handles opens a root tracing span carrying a
+per-process `request_id` (`<process-start-tag>-<counter>`), the RPC method
+path, and the peer address; every log line emitted while that call is
+handled — auth accept/reject, handler-level events, the terminal
+`gRPC request completed` line with status + elapsed time — inherits it. To
+follow one request end-to-end, grep the daemon log for its `request_id`:
+
+```
+:: human-readable file sink
+findstr "a1b2c3d4e5f6-00000017" "%USERPROFILE%\.nuncio\logs\nunciod.log.2026-07-30"
+
+:: JSON file sink (NUNCIO_LOG_FORMAT=json), pick a request_id from the
+:: completion line's fields, then filter every line for it:
+findstr "\"request_id\":\"a1b2c3d4e5f6-00000017\"" "%USERPROFILE%\.nuncio\logs\nunciod.log.2026-07-30"
+```
+
+(On macOS/Linux, use `grep` in place of `findstr`.) There is currently no way
+to read a request's `request_id` back from the CLI's own output — it is
+visible only in the daemon's logs, since it is a server-side correlation
+identifier assigned when the RPC arrives.
+
+### CLI verbosity (`-v`/`-vv`/`-vvv`)
+
+`nuncio-cli` logs to stderr only — command output (including `--json`
+payloads) always goes to stdout, so redirecting or piping stdout is never
+polluted by log lines. By default the CLI logs only warnings. Repeat `-v` to
+raise the level:
+
+```
+nuncio-cli.exe mail sync              :: warn only (default)
+nuncio-cli.exe -v mail sync           :: info
+nuncio-cli.exe -vv mail sync          :: debug
+nuncio-cli.exe -vvv mail sync         :: trace
+```
+
+`NUNCIO_LOG`/`RUST_LOG`, if set (same precedence as the daemon: `NUNCIO_LOG`
+beats `RUST_LOG`), override the `-v` count entirely — useful for scoping a
+directive to a specific module (e.g. `NUNCIO_LOG=nuncio_cli=trace`) without
+turning on trace logging for every dependency `-vvv` would also enable.
+
 ## The dogfooding loop
 
 Use it for real; when something breaks or feels wrong, tell me (or I'll hit it
