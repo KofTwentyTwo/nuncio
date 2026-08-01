@@ -88,21 +88,49 @@ impl SmtpTransportEngine {
 
     /// Send a composed [`OutboundMessage`] using the inner transport client.
     /// Returns `Ok(())` only when the transport genuinely accepted the
-    /// message.
+    /// message. Logs the send attempt and outcome with the recipient COUNT
+    /// only (`to` plus `cc` when present) -- never the addresses themselves.
     pub async fn send_message(&self, message: &OutboundMessage) -> Result<(), MailError> {
+        let recipient_count =
+            1 + usize::from(message.cc.as_ref().is_some_and(|cc| !cc.trim().is_empty()));
+        tracing::info!(recipient_count, "smtp send attempt");
+
         let msg = Self::build_outbound_mime_message(message)?;
-        self.transport.send(msg).await.map_err(MailError::from)?;
-        Ok(())
+        match self.transport.send(msg).await {
+            Ok(_) => {
+                tracing::info!(recipient_count, "smtp send succeeded");
+                Ok(())
+            }
+            Err(e) => {
+                let err = MailError::from(e);
+                tracing::warn!(recipient_count, error = %err, "smtp send failed");
+                Err(err)
+            }
+        }
     }
 
-    /// Send an email message using a provided [`AsyncSmtpTransport`] client instance.
+    /// Send an email message using a provided [`AsyncSmtpTransport`] client
+    /// instance. Logs the send attempt and outcome with the recipient COUNT
+    /// only -- never the address itself.
     pub async fn send_email_with_transport(
         transport: &AsyncSmtpTransport<Tokio1Executor>,
         email: &Email,
     ) -> Result<(), MailError> {
+        let recipient_count = 1;
+        tracing::info!(recipient_count, "smtp send attempt");
+
         let msg = Self::build_mime_message(email)?;
-        transport.send(msg).await.map_err(MailError::from)?;
-        Ok(())
+        match transport.send(msg).await {
+            Ok(_) => {
+                tracing::info!(recipient_count, "smtp send succeeded");
+                Ok(())
+            }
+            Err(e) => {
+                let err = MailError::from(e);
+                tracing::warn!(recipient_count, error = %err, "smtp send failed");
+                Err(err)
+            }
+        }
     }
 
     /// Build an RFC 5322 [`lettre::Message`] from a Nuncio [`Email`] entity.
@@ -323,6 +351,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use nuncio_core::model::Attachment;
+    use tracing_test::traced_test;
 
     fn sample_email() -> Email {
         Email {
@@ -606,6 +635,28 @@ mod tests {
             err,
             MailError::TransportFailed(_) | MailError::SmtpFailed(_)
         ));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn send_message_logs_attempt_and_failure_with_recipient_count_never_addresses() {
+        let engine = SmtpTransportEngine::new("127.0.0.1", 1, TlsMode::ImplicitTls, "user", "pass")
+            .expect("valid config");
+        let mut message = sample_outbound_message();
+        message.cc = Some("carol@nuncio.mx".to_string());
+        let _ = engine
+            .send_message(&message)
+            .await
+            .expect_err("delivery to port 1 should fail");
+
+        assert!(logs_contain("smtp send attempt"));
+        assert!(logs_contain("recipient_count=2"));
+        assert!(logs_contain("smtp send failed"));
+
+        assert!(!logs_contain("alice@nuncio.mx"));
+        assert!(!logs_contain("bob@nuncio.mx"));
+        assert!(!logs_contain("carol@nuncio.mx"));
+        assert!(!logs_contain("Status Update"));
     }
 
     #[tokio::test]

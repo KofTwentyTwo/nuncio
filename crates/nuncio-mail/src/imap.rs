@@ -716,6 +716,11 @@ impl ImapEngine {
     /// 2. Each queue is drained in explicit UID-set batches of at most
     ///    `batch_size`, so the full bodies held in memory at once never exceed
     ///    one batch.
+    #[tracing::instrument(
+        skip(self, session),
+        fields(account_id = %self.account_id, folder_id = %folder_id),
+        err
+    )]
     async fn sync_folder_messages_batched<S>(
         &self,
         folder_id: &str,
@@ -770,10 +775,12 @@ impl ImapEngine {
         let mut max_uid_seen: u32 = 0;
         let mut body_uids: Vec<u32> = Vec::new();
         let mut oversized_uids: Vec<u32> = Vec::new();
+        let mut skipped_no_uid: usize = 0;
         for item in &enumeration {
             // A message with no UID cannot be addressed by a follow-up fetch,
             // so it is skipped rather than issued a UID-less request.
             let Some(uid) = item.uid.filter(|u| *u >= 1) else {
+                skipped_no_uid += 1;
                 continue;
             };
             max_uid_seen = max_uid_seen.max(uid);
@@ -856,6 +863,15 @@ impl ImapEngine {
                 .map(str::to_string)
                 .unwrap_or_else(|| "full-resync-required".to_string()),
         };
+
+        tracing::info!(
+            account_id = %self.account_id,
+            folder_id,
+            fetched = emails.len(),
+            oversized = oversized_uids.len(),
+            skipped = skipped_no_uid,
+            "imap folder sync complete"
+        );
 
         Ok((emails, new_checkpoint))
     }
@@ -1066,19 +1082,50 @@ impl ImapEngine {
         // Refuse to act unless the mailbox's current UIDVALIDITY provably
         // matches the one the stored UID was captured under.
         let stored_validity = parse_uid_validity(&spec.uid_validity);
-        match (stored_validity, mailbox.uid_validity) {
-            (Some(stored), Some(current)) if stored == current => {}
-            (stored, current) => {
-                return Err(MailError::ImapError(format!(
-                    "refusing to mutate message '{}' in folder '{}': UIDVALIDITY guard failed \
-                     (stored {stored:?}, current {current:?}); the stored UID may no longer \
-                     address the intended message",
-                    spec.message_id, spec.folder_id
-                )));
-            }
-        }
+        let guard_passed = matches!(
+            (stored_validity, mailbox.uid_validity),
+            (Some(stored), Some(current)) if stored == current
+        );
 
         let uid_set = uid.to_string();
+
+        // Every destructive op (MOVE, DELETE -- which issues STORE \Deleted
+        // followed by a UID-scoped EXPUNGE) is logged BEFORE any command is
+        // sent to the server, so an audit trail exists even when the
+        // UIDVALIDITY guard below then refuses to proceed.
+        match &spec.kind {
+            RemoteMutationKind::Move { to_folder } => {
+                tracing::info!(
+                    op = "MOVE",
+                    folder_id = %spec.folder_id,
+                    to_folder = %to_folder,
+                    uid_set = %uid_set,
+                    uidvalidity_guard_passed = guard_passed,
+                    "issuing destructive IMAP MOVE"
+                );
+            }
+            RemoteMutationKind::Delete => {
+                tracing::warn!(
+                    op = "DELETE",
+                    folder_id = %spec.folder_id,
+                    uid_set = %uid_set,
+                    uidvalidity_guard_passed = guard_passed,
+                    "issuing destructive IMAP DELETE (STORE \\Deleted + UID-scoped EXPUNGE)"
+                );
+            }
+            RemoteMutationKind::SetFlagged { .. } | RemoteMutationKind::Copy { .. } => {}
+        }
+
+        if !guard_passed {
+            let current_validity = mailbox.uid_validity;
+            return Err(MailError::ImapError(format!(
+                "refusing to mutate message '{}' in folder '{}': UIDVALIDITY guard failed \
+                 (stored {stored_validity:?}, current {current_validity:?}); the stored UID may \
+                 no longer address the intended message",
+                spec.message_id, spec.folder_id
+            )));
+        }
+
         match &spec.kind {
             RemoteMutationKind::SetFlagged { value } => {
                 let op = if *value { "+FLAGS" } else { "-FLAGS" };
@@ -1336,6 +1383,7 @@ impl ImapEngine {
 
 #[async_trait]
 impl MailBackend for ImapEngine {
+    #[tracing::instrument(skip(self), fields(account_id = %self.account_id), err)]
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError> {
         let (u, p) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
@@ -1365,6 +1413,11 @@ impl MailBackend for ImapEngine {
         }
         drop(mailboxes);
         let _ = session.logout().await;
+        tracing::info!(
+            account_id = %self.account_id,
+            folders = folders.len(),
+            "imap folder list sync complete"
+        );
         // An empty mailbox is a genuine result, not a signal to fall back to
         // placeholder folders -- the caller gets exactly what the server reported.
         Ok(folders)
@@ -1386,6 +1439,7 @@ impl MailBackend for ImapEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[tokio::test]
     async fn imap_dual_socket_manager_lifecycle() -> Result<(), MailError> {
@@ -2508,6 +2562,121 @@ mod tests {
         let connector = build_tls_connector()?;
         let _ = connector;
         Ok(())
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn imap_destructive_delete_logs_before_issuing_even_when_uidvalidity_guard_fails() {
+        // The stored checkpoint's UIDVALIDITY (1) does not match the scripted
+        // server's current UIDVALIDITY (2), so the UIDVALIDITY guard MUST
+        // refuse the mutation and no protocol command may reach the server
+        // (proven below via `commands`). A WARN log naming the op, the target
+        // UID set, and the failed guard result must still exist -- proving the
+        // pre-log fires before dispatch, not merely on a successful path.
+        let (result, commands) = run_scripted_mutation(
+            &imap_spec(RemoteMutationKind::Delete, Some("1:105")),
+            false,
+            true,
+            2,
+        )
+        .await;
+
+        let err = result.expect_err("a UIDVALIDITY mismatch must be refused");
+        assert!(matches!(err, MailError::ImapError(_)));
+        assert!(
+            !commands.iter().any(|c| {
+                let u = c.to_ascii_uppercase();
+                u.contains("STORE") || u.contains("EXPUNGE") || u.contains("COPY")
+            }),
+            "no mutating command may be issued on a guard failure, got: {commands:?}"
+        );
+
+        assert!(logs_contain("issuing destructive IMAP DELETE"));
+        assert!(logs_contain("uid_set=42"));
+        assert!(logs_contain("uidvalidity_guard_passed=false"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn imap_destructive_move_logs_before_issuing_with_uid_set_and_passing_guard() {
+        // A guard-passing MOVE still logs before the command is issued, at
+        // INFO (MOVE is reversible/non-permanent, unlike DELETE/EXPUNGE).
+        let (result, _commands) = run_scripted_mutation(
+            &imap_spec(
+                RemoteMutationKind::Move {
+                    to_folder: "Archive".to_string(),
+                },
+                Some("1:105"),
+            ),
+            true,
+            true,
+            1,
+        )
+        .await;
+        result.expect("move mutation succeeds");
+
+        assert!(logs_contain("issuing destructive IMAP MOVE"));
+        assert!(logs_contain("uid_set=42"));
+        assert!(logs_contain("uidvalidity_guard_passed=true"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn imap_folder_sync_logs_completion_counts() {
+        // A folder sync run must log its completion counts (fetched, and by
+        // extension the oversized/skipped counters this run does not
+        // exercise), so an operator can see sync outcomes without a debugger.
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let server = tokio::spawn(async move {
+            let mut io = server_io;
+            while let Some(line) = read_scripted_line(&mut io).await {
+                let tag = line.split_whitespace().next().unwrap_or("").to_string();
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("LOGIN") {
+                    let _ = io
+                        .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("SELECT") {
+                    let resp = format!(
+                        "* FLAGS (\\Seen)\r\n* 0 EXISTS\r\n* 0 RECENT\r\n\
+                         * OK [UIDVALIDITY 1] ok\r\n* OK [UIDNEXT 1] ok\r\n\
+                         {tag} OK [READ-WRITE] SELECT done\r\n"
+                    );
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("UID FETCH") {
+                    let _ = io
+                        .write_all(format!("{tag} OK FETCH completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("LOGOUT") {
+                    let _ = io
+                        .write_all(format!("* BYE\r\n{tag} OK LOGOUT\r\n").as_bytes())
+                        .await;
+                    break;
+                }
+            }
+        });
+
+        let client = async_imap::Client::new(client_io);
+        let mut session = client
+            .login("user", "pass")
+            .await
+            .map_err(|(e, _)| e)
+            .expect("scripted login succeeds");
+        let engine = ImapEngine::new("acct-completion", "example.test", 993);
+
+        let (emails, _checkpoint) = engine
+            .sync_folder_messages_with_session("INBOX", None, &mut session)
+            .await
+            .expect("sync succeeds");
+        assert!(emails.is_empty());
+
+        drop(session);
+        let _ = server.await;
+
+        assert!(logs_contain("imap folder sync complete"));
+        assert!(logs_contain("fetched=0"));
+        assert!(logs_contain("oversized=0"));
+        assert!(logs_contain("skipped=0"));
     }
 
     #[test]
