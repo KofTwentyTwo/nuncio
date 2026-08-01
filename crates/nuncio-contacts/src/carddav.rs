@@ -1,6 +1,7 @@
 //! CardDAV (RFC 6352) `REPORT` client and multistatus response parser.
 
 use async_trait::async_trait;
+use nuncio_core::redact::Redacted;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info, instrument};
@@ -28,7 +29,7 @@ pub enum CardDavError {
 /// `carddav_url` must already resolve to a specific address book collection (e.g.
 /// `https://carddav.example.com/dav/addressbooks/user/jmaes/contacts/`) -- PROPFIND-based
 /// `addressbook-home-set` auto-discovery is out of scope for this client.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CardDavAccountConfig {
     /// Nuncio account identifier this address book collection belongs to.
     pub account_id: String,
@@ -37,22 +38,10 @@ pub struct CardDavAccountConfig {
     /// Basic-auth username (or app-specific username, per provider).
     pub username: String,
     /// Basic-auth secret (password or app-specific token) resolved from the OS keyring by the
-    /// caller -- never stored anywhere else in plaintext.
-    pub auth_token: String,
-}
-
-impl std::fmt::Debug for CardDavAccountConfig {
-    /// Manual `Debug` impl that redacts `auth_token` -- a derived impl would print the raw
-    /// secret verbatim the moment anything (a `debug!` log, an assertion failure message,
-    /// a panic payload) formats this config with `{:?}`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CardDavAccountConfig")
-            .field("account_id", &self.account_id)
-            .field("carddav_url", &self.carddav_url)
-            .field("username", &self.username)
-            .field("auth_token", &"<redacted>")
-            .finish()
-    }
+    /// caller -- never stored anywhere else in plaintext. Wrapped in [`Redacted`] so a derived
+    /// `Debug`, a `Display`, or `serde` can never disclose it to a log; the raw value is
+    /// reachable only through an explicit `expose_secret` call.
+    pub auth_token: Redacted<String>,
 }
 
 /// CardDAV client protocol engine managing address book `REPORT` queries against a real server.
@@ -134,7 +123,10 @@ impl CardDavClient {
             .request(report_method, &self.config.carddav_url)
             .header("Content-Type", "application/xml; charset=utf-8")
             .header("Depth", "1")
-            .basic_auth(&self.config.username, Some(&self.config.auth_token))
+            .basic_auth(
+                &self.config.username,
+                Some(self.config.auth_token.expose_secret()),
+            )
             .body(body)
             .send()
             .await
@@ -186,7 +178,7 @@ mod tests {
             account_id: "acct-1".to_string(),
             carddav_url: "https://carddav.example.com/addressbooks/contacts/".to_string(),
             username: "jmaes".to_string(),
-            auth_token: "app-token-secret".to_string(),
+            auth_token: Redacted::new("app-token-secret".to_string()),
         }
     }
 

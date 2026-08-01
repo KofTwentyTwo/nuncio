@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use nuncio_core::model::CalendarEvent;
+use nuncio_core::redact::Redacted;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, instrument, warn};
 
@@ -14,7 +15,7 @@ use crate::parser::{CalendarError, IcalParserAdapter};
 /// `caldav_url` must already resolve to a specific calendar collection (e.g.
 /// `https://caldav.example.com/dav/calendars/user/jmaes/work/`) -- PROPFIND-based
 /// `calendar-home-set` auto-discovery is out of scope for this client.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CalDavAccountConfig {
     /// Nuncio account identifier this calendar collection belongs to.
     pub account_id: String,
@@ -23,22 +24,10 @@ pub struct CalDavAccountConfig {
     /// Basic-auth username (or app-specific username, per provider).
     pub username: String,
     /// Basic-auth secret (password or app-specific token) resolved from the OS keyring by the
-    /// caller -- never stored anywhere else in plaintext.
-    pub auth_token: String,
-}
-
-impl std::fmt::Debug for CalDavAccountConfig {
-    /// Manual `Debug` impl that redacts `auth_token` -- a derived impl would print the raw
-    /// secret verbatim the moment anything (a `debug!` log, an assertion failure message,
-    /// a panic payload) formats this config with `{:?}`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CalDavAccountConfig")
-            .field("account_id", &self.account_id)
-            .field("caldav_url", &self.caldav_url)
-            .field("username", &self.username)
-            .field("auth_token", &"<redacted>")
-            .finish()
-    }
+    /// caller -- never stored anywhere else in plaintext. Wrapped in [`Redacted`] so a derived
+    /// `Debug`, a `Display`, or `serde` can never disclose it to a log; the raw value is
+    /// reachable only through an explicit `expose_secret` call.
+    pub auth_token: Redacted<String>,
 }
 
 /// Best-effort extraction of the `UID` property from a raw (possibly malformed) VEVENT/
@@ -202,7 +191,10 @@ impl CalDavClient {
             .request(report_method, &self.config.caldav_url)
             .header("Content-Type", "application/xml; charset=utf-8")
             .header("Depth", "1")
-            .basic_auth(&self.config.username, Some(&self.config.auth_token))
+            .basic_auth(
+                &self.config.username,
+                Some(self.config.auth_token.expose_secret()),
+            )
             .body(body)
             .send()
             .await
@@ -258,7 +250,7 @@ mod tests {
             account_id: "acct-1".to_string(),
             caldav_url: "https://caldav.example.com/calendars/work/".to_string(),
             username: "jmaes".to_string(),
-            auth_token: "app-token-secret".to_string(),
+            auth_token: Redacted::new("app-token-secret".to_string()),
         }
     }
 
