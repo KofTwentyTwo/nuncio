@@ -524,6 +524,7 @@ impl JmapEngine {
 
 #[async_trait]
 impl MailBackend for JmapEngine {
+    #[tracing::instrument(skip(self), fields(account_id = %self.account_id), err)]
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError> {
         if !self.has_credentials() {
             return Err(MailError::AuthError(
@@ -536,7 +537,7 @@ impl MailBackend for JmapEngine {
         let raw = self.post_jmap(&session.api_url, &request).await?;
         let mailboxes = Self::parse_mailbox_get_response(&raw)?;
 
-        Ok(mailboxes
+        let folders: Vec<Folder> = mailboxes
             .into_iter()
             .map(|mb| Folder {
                 id: mb.id,
@@ -544,9 +545,22 @@ impl MailBackend for JmapEngine {
                 total_messages: mb.total_emails as usize,
                 unread_messages: mb.unread_emails as usize,
             })
-            .collect())
+            .collect();
+
+        tracing::info!(
+            account_id = %self.account_id,
+            folders = folders.len(),
+            "jmap folder list sync complete"
+        );
+
+        Ok(folders)
     }
 
+    #[tracing::instrument(
+        skip(self, _since_state),
+        fields(account_id = %self.account_id, folder_id = %folder_id),
+        err
+    )]
     async fn sync_messages(
         &self,
         folder_id: &str,
@@ -566,15 +580,50 @@ impl MailBackend for JmapEngine {
 
         let get_request = Self::build_email_get_request(&account_id, Some(ids));
         let get_raw = self.post_jmap(&session.api_url, &get_request).await?;
-        self.parse_email_get_response(&get_raw)
+        let (emails, state) = self.parse_email_get_response(&get_raw)?;
+
+        tracing::info!(
+            account_id = %self.account_id,
+            folder_id,
+            fetched = emails.len(),
+            "jmap message sync complete"
+        );
+
+        Ok((emails, state))
     }
 
+    #[tracing::instrument(skip(self), fields(account_id = %self.account_id), err)]
     async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
         if !self.has_credentials() {
             return Err(MailError::AuthError(
                 "JMAP remote mutation requires credentials".to_string(),
             ));
         }
+
+        // JMAP has no UIDVALIDITY-equivalent guard (an `Email/set` targets a
+        // stable object id per RFC 8621), but a destructive mutation is still
+        // logged BEFORE the request is issued, mirroring the IMAP audit trail.
+        match &spec.kind {
+            RemoteMutationKind::Move { to_folder } => {
+                tracing::info!(
+                    op = "MOVE",
+                    folder_id = %spec.folder_id,
+                    to_folder = %to_folder,
+                    remote_id = %spec.remote_id,
+                    "issuing destructive JMAP mailbox move (Email/set update)"
+                );
+            }
+            RemoteMutationKind::Delete => {
+                tracing::warn!(
+                    op = "DELETE",
+                    folder_id = %spec.folder_id,
+                    remote_id = %spec.remote_id,
+                    "issuing destructive JMAP delete (Email/set destroy)"
+                );
+            }
+            RemoteMutationKind::SetFlagged { .. } | RemoteMutationKind::Copy { .. } => {}
+        }
+
         let session = self.discover_session().await?;
         let account_id = self.resolve_account_id(&session);
 

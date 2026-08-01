@@ -31,6 +31,7 @@ reqwest.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 wiremock.workspace = true
+tracing-test = "0.2"
 # `test-util` (not in tokio's `full`) enables paused-clock tests so the
 # bounded per-item FETCH timeout can be asserted without a real-time wait.
 tokio = { workspace = true, features = ["test-util"] }
