@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use nuncio_core::model::CalendarEvent;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, instrument, warn};
 
 use crate::backend::CalendarBackend;
 use crate::parser::{CalendarError, IcalParserAdapter};
@@ -13,7 +14,7 @@ use crate::parser::{CalendarError, IcalParserAdapter};
 /// `caldav_url` must already resolve to a specific calendar collection (e.g.
 /// `https://caldav.example.com/dav/calendars/user/jmaes/work/`) -- PROPFIND-based
 /// `calendar-home-set` auto-discovery is out of scope for this client.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CalDavAccountConfig {
     /// Nuncio account identifier this calendar collection belongs to.
     pub account_id: String,
@@ -24,6 +25,36 @@ pub struct CalDavAccountConfig {
     /// Basic-auth secret (password or app-specific token) resolved from the OS keyring by the
     /// caller -- never stored anywhere else in plaintext.
     pub auth_token: String,
+}
+
+impl std::fmt::Debug for CalDavAccountConfig {
+    /// Manual `Debug` impl that redacts `auth_token` -- a derived impl would print the raw
+    /// secret verbatim the moment anything (a `debug!` log, an assertion failure message,
+    /// a panic payload) formats this config with `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CalDavAccountConfig")
+            .field("account_id", &self.account_id)
+            .field("caldav_url", &self.caldav_url)
+            .field("username", &self.username)
+            .field("auth_token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Best-effort extraction of the `UID` property from a raw (possibly malformed) VEVENT/
+/// VCALENDAR block, used only to correlate a dropped-VEVENT log line with the source event --
+/// never returns the summary, attendees, description, or any other calendar content.
+fn extract_vevent_uid(raw_ics: &str) -> Option<String> {
+    raw_ics.lines().find_map(|line| {
+        let line = line.trim();
+        let (name, value) = line.split_once(':')?;
+        let bare_name = name.split(';').next().unwrap_or(name);
+        if bare_name.eq_ignore_ascii_case("UID") {
+            Some(value.trim().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// CalDAV client protocol engine managing WebDAV REPORT queries against a real server.
@@ -66,32 +97,59 @@ impl CalDavClient {
     }
 
     /// Parse CalDAV WebDAV XML `<multistatus>` response containing embedded VEVENT data.
+    ///
+    /// A VEVENT block that fails to parse is dropped from the returned events but never
+    /// silently: it is logged at `warn` (with its UID, if extractable, and a short parse-error
+    /// reason -- never the raw VEVENT body) so a sync that quietly lost calendar data is
+    /// visible in telemetry instead of just showing up as a smaller-than-expected event count.
     pub fn parse_multistatus_response(
         &self,
         calendar_id: &str,
         raw_xml: &str,
     ) -> Result<Vec<CalendarEvent>, CalendarError> {
+        let (events, _dropped) = self.parse_multistatus_response_counted(calendar_id, raw_xml);
+        Ok(events)
+    }
+
+    /// Same parse as [`Self::parse_multistatus_response`], additionally reporting how many
+    /// VEVENT blocks were dropped as unparseable so callers can log round-trip counts.
+    fn parse_multistatus_response_counted(
+        &self,
+        calendar_id: &str,
+        raw_xml: &str,
+    ) -> (Vec<CalendarEvent>, usize) {
         let mut events = Vec::new();
+        let mut dropped = 0usize;
 
         // Extract <c:calendar-data> or <calendar-data> text blocks
         for block in raw_xml.split("<c:calendar-data>") {
             if let Some((ics_data, _)) = block.split_once("</c:calendar-data>") {
                 let clean_ics = ics_data.trim();
                 if !clean_ics.is_empty() {
-                    let event_id = format!("caldav-evt-{}", events.len() + 1);
-                    if let Ok(event) = IcalParserAdapter::parse_ical(
+                    let event_id = format!("caldav-evt-{}", events.len() + dropped + 1);
+                    match IcalParserAdapter::parse_ical(
                         &event_id,
                         &self.config.account_id,
                         calendar_id,
                         clean_ics,
                     ) {
-                        events.push(event);
+                        Ok(event) => events.push(event),
+                        Err(err) => {
+                            dropped += 1;
+                            warn!(
+                                account_id = %self.config.account_id,
+                                calendar_id = %calendar_id,
+                                uid = %extract_vevent_uid(clean_ics).unwrap_or_else(|| "unknown".to_string()),
+                                reason = %err,
+                                "dropped unparseable VEVENT"
+                            );
+                        }
                     }
                 }
             }
         }
 
-        Ok(events)
+        (events, dropped)
     }
 
     /// Format a unix timestamp as the `YYYYMMDDTHHMMSSZ` form RFC 4791's
@@ -113,6 +171,11 @@ impl CalDavClient {
     /// returned. A server or network failure surfaces as [`CalendarError::TransportFailed`];
     /// a malformed TZID inside a returned VEVENT surfaces as
     /// [`CalendarError::UnresolvableTimezone`] via [`IcalParserAdapter::parse_ical`].
+    #[instrument(
+        name = "caldav_sync",
+        skip(self),
+        fields(account_id = %self.config.account_id, calendar_id = %calendar_id)
+    )]
     pub async fn fetch_remote_events(
         &self,
         calendar_id: &str,
@@ -127,6 +190,12 @@ impl CalDavClient {
         // the error is still propagated rather than unwrapped so no code path here can panic.
         let report_method = reqwest::Method::from_bytes(b"REPORT")
             .map_err(|e| CalendarError::TransportFailed(format!("invalid HTTP method: {e}")))?;
+
+        debug!(
+            account_id = %self.config.account_id,
+            calendar_id = %calendar_id,
+            "issuing CalDAV REPORT calendar-query"
+        );
 
         let response = self
             .http
@@ -153,7 +222,17 @@ impl CalDavClient {
             .await
             .map_err(|e| CalendarError::TransportFailed(e.to_string()))?;
 
-        self.parse_multistatus_response(calendar_id, &raw_xml)
+        let (events, dropped) = self.parse_multistatus_response_counted(calendar_id, &raw_xml);
+        info!(
+            account_id = %self.config.account_id,
+            calendar_id = %calendar_id,
+            fetched = events.len() + dropped,
+            parsed = events.len(),
+            dropped,
+            "completed CalDAV sync"
+        );
+
+        Ok(events)
     }
 }
 
@@ -222,9 +301,164 @@ END:VCALENDAR</c:calendar-data>
     }
 
     #[test]
+    fn parse_multistatus_response_surfaces_a_warn_for_a_dropped_vevent_instead_of_silence() {
+        use crate::test_tracing::with_recorder;
+
+        let client = CalDavClient::new(test_config());
+        // A TZID that cannot be resolved to a real IANA zone; the VEVENT fails to parse but
+        // the one alongside it (plain UTC) must still come through.
+        let xml_response = r#"<?xml version="1.0" encoding="utf-8"?>
+        <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+            <d:response>
+                <d:propstat>
+                    <d:prop>
+                        <c:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:evt-unresolvable-tzid
+SUMMARY:Confidential Merger Talks
+DTSTART;TZID=Not/ARealZone:20240101T090000
+DTEND;TZID=Not/ARealZone:20240101T100000
+END:VEVENT
+END:VCALENDAR</c:calendar-data>
+                    </d:prop>
+                </d:propstat>
+            </d:response>
+            <d:response>
+                <d:propstat>
+                    <d:prop>
+                        <c:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Good Event
+DTSTART:20240301T120000Z
+DTEND:20240301T130000Z
+END:VEVENT
+END:VCALENDAR</c:calendar-data>
+                    </d:prop>
+                </d:propstat>
+            </d:response>
+        </d:multistatus>"#;
+
+        let (recorder, result) =
+            with_recorder(|| client.parse_multistatus_response("cal-work", xml_response));
+        let events = result.expect("the unparseable VEVENT is dropped, not fatal");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].summary, "Good Event");
+
+        let warnings: Vec<_> = recorder
+            .events()
+            .into_iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(warnings.len(), 1, "exactly one VEVENT should be dropped");
+        assert_eq!(
+            warnings[0].fields.get("uid").map(String::as_str),
+            Some("evt-unresolvable-tzid")
+        );
+        assert!(warnings[0].message().contains("dropped"));
+
+        // The dropped VEVENT's summary (potential PII) must never appear in telemetry.
+        for value in recorder.all_field_values() {
+            assert!(!value.contains("Confidential Merger Talks"));
+        }
+    }
+
+    #[test]
     fn format_query_timestamp_produces_ical_utc_form() {
         let formatted =
             CalDavClient::format_query_timestamp(1_704_067_200).expect("valid timestamp");
         assert_eq!(formatted, "20240101T000000Z");
+    }
+
+    #[test]
+    fn debug_impl_redacts_auth_token() {
+        let config = test_config();
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("app-token-secret"));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn fetch_remote_events_logs_completion_counts_including_a_drop() {
+        use crate::test_tracing::with_recorder;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+
+        let (recorder, result) = with_recorder(|| {
+            runtime.block_on(async {
+                let mock_server = MockServer::start().await;
+                let xml_response = r#"<?xml version="1.0" encoding="utf-8"?>
+        <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+            <d:response>
+                <d:propstat>
+                    <d:prop>
+                        <c:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:evt-bad
+DTSTART;TZID=Not/ARealZone:20240101T090000
+END:VEVENT
+END:VCALENDAR</c:calendar-data>
+                    </d:prop>
+                </d:propstat>
+            </d:response>
+            <d:response>
+                <d:propstat>
+                    <d:prop>
+                        <c:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Good Event
+DTSTART:20240301T120000Z
+DTEND:20240301T130000Z
+END:VEVENT
+END:VCALENDAR</c:calendar-data>
+                    </d:prop>
+                </d:propstat>
+            </d:response>
+        </d:multistatus>"#;
+
+                Mock::given(method("REPORT"))
+                    .and(path("/calendars/work/"))
+                    .respond_with(ResponseTemplate::new(207).set_body_string(xml_response))
+                    .mount(&mock_server)
+                    .await;
+
+                let mut config = test_config();
+                config.caldav_url = format!("{}/calendars/work/", mock_server.uri());
+                let client = CalDavClient::new(config);
+
+                client
+                    .fetch_remote_events("cal-work", 1_700_000_000, 1_800_000_000)
+                    .await
+            })
+        });
+
+        let events = result.expect("one good VEVENT still comes through");
+        assert_eq!(events.len(), 1);
+
+        let completion = recorder
+            .events()
+            .into_iter()
+            .find(|e| e.message().contains("completed CalDAV sync"))
+            .expect("a completion event is logged");
+        assert_eq!(
+            completion.fields.get("fetched").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            completion.fields.get("parsed").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            completion.fields.get("dropped").map(String::as_str),
+            Some("1")
+        );
     }
 }

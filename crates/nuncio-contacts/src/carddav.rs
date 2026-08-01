@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::{debug, info, instrument};
 
 use crate::backend::ContactsBackend;
 use crate::models::Contact;
@@ -27,7 +28,7 @@ pub enum CardDavError {
 /// `carddav_url` must already resolve to a specific address book collection (e.g.
 /// `https://carddav.example.com/dav/addressbooks/user/jmaes/contacts/`) -- PROPFIND-based
 /// `addressbook-home-set` auto-discovery is out of scope for this client.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CardDavAccountConfig {
     /// Nuncio account identifier this address book collection belongs to.
     pub account_id: String,
@@ -38,6 +39,20 @@ pub struct CardDavAccountConfig {
     /// Basic-auth secret (password or app-specific token) resolved from the OS keyring by the
     /// caller -- never stored anywhere else in plaintext.
     pub auth_token: String,
+}
+
+impl std::fmt::Debug for CardDavAccountConfig {
+    /// Manual `Debug` impl that redacts `auth_token` -- a derived impl would print the raw
+    /// secret verbatim the moment anything (a `debug!` log, an assertion failure message,
+    /// a panic payload) formats this config with `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CardDavAccountConfig")
+            .field("account_id", &self.account_id)
+            .field("carddav_url", &self.carddav_url)
+            .field("username", &self.username)
+            .field("auth_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// CardDAV client protocol engine managing address book `REPORT` queries against a real server.
@@ -100,6 +115,7 @@ impl CardDavClient {
     /// This performs a real network request -- no canned or fabricated data is ever
     /// returned. A server or network failure surfaces as [`CardDavError::TransportFailed`]; a
     /// malformed vCard inside a returned response surfaces as [`CardDavError::ParseFailed`].
+    #[instrument(name = "carddav_sync", skip(self), fields(account_id = %account_id))]
     pub async fn fetch_remote_vcards(
         &self,
         account_id: &str,
@@ -110,6 +126,8 @@ impl CardDavClient {
         // the error is still propagated rather than unwrapped so no code path here can panic.
         let report_method = reqwest::Method::from_bytes(b"REPORT")
             .map_err(|e| CardDavError::TransportFailed(format!("invalid HTTP method: {e}")))?;
+
+        debug!(account_id = %account_id, "issuing CardDAV REPORT addressbook-query");
 
         let response = self
             .http
@@ -136,7 +154,19 @@ impl CardDavClient {
             .await
             .map_err(|e| CardDavError::TransportFailed(e.to_string()))?;
 
-        self.parse_multistatus_response(account_id, &raw_xml)
+        // `parse_multistatus_response` fails fast on the first unparseable vCard (unlike the
+        // CalDAV client, which drops individual bad VEVENTs), so a successful return here means
+        // every card that was fetched parsed cleanly -- `dropped` is always 0 on this path.
+        let contacts = self.parse_multistatus_response(account_id, &raw_xml)?;
+        info!(
+            account_id = %account_id,
+            fetched = contacts.len(),
+            parsed = contacts.len(),
+            dropped = 0,
+            "completed CardDAV sync"
+        );
+
+        Ok(contacts)
     }
 }
 
@@ -206,5 +236,84 @@ END:VCARD</card:address-data>
             .parse_multistatus_response("acct-1", xml_response)
             .expect("parse succeeds");
         assert!(contacts.is_empty());
+    }
+
+    #[test]
+    fn debug_impl_redacts_auth_token() {
+        let config = test_config();
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("app-token-secret"));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn fetch_remote_vcards_logs_completion_counts() {
+        use crate::test_tracing::with_recorder;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+
+        let (recorder, result) = with_recorder(|| {
+            runtime.block_on(async {
+                let mock_server = MockServer::start().await;
+                let xml_response = r#"<?xml version="1.0" encoding="utf-8"?>
+        <d:multistatus xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+            <d:response>
+                <d:propstat>
+                    <d:prop>
+                        <card:address-data>BEGIN:VCARD
+VERSION:4.0
+FN:Alice Dev
+EMAIL:alice@nuncio.mx
+END:VCARD</card:address-data>
+                    </d:prop>
+                </d:propstat>
+            </d:response>
+        </d:multistatus>"#;
+
+                Mock::given(method("REPORT"))
+                    .and(path("/addressbooks/contacts/"))
+                    .respond_with(ResponseTemplate::new(207).set_body_string(xml_response))
+                    .mount(&mock_server)
+                    .await;
+
+                let mut config = test_config();
+                config.carddav_url = format!("{}/addressbooks/contacts/", mock_server.uri());
+                let client = CardDavClient::new(config);
+
+                client.fetch_remote_vcards("acct-1").await
+            })
+        });
+
+        let contacts = result.expect("fetch succeeds against the wiremock server");
+        assert_eq!(contacts.len(), 1);
+
+        let completion = recorder
+            .events()
+            .into_iter()
+            .find(|e| e.message().contains("completed CardDAV sync"))
+            .expect("a completion event is logged");
+        assert_eq!(
+            completion.fields.get("fetched").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            completion.fields.get("parsed").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            completion.fields.get("dropped").map(String::as_str),
+            Some("0")
+        );
+
+        // vCard PII must never appear in telemetry.
+        for value in recorder.all_field_values() {
+            assert!(!value.contains("Alice Dev"));
+            assert!(!value.contains("alice@nuncio.mx"));
+        }
     }
 }

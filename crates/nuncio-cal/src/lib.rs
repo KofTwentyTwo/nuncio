@@ -11,6 +11,8 @@ pub mod nlp;
 pub mod parser;
 pub mod rrule;
 pub mod scheduling;
+#[cfg(test)]
+mod test_tracing;
 
 pub use backend::CalendarBackend;
 pub use caldav::{CalDavAccountConfig, CalDavClient};

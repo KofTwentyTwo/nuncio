@@ -10,6 +10,8 @@ pub mod db;
 pub mod mock;
 pub mod models;
 pub mod parser;
+#[cfg(test)]
+mod test_tracing;
 
 pub use backend::ContactsBackend;
 pub use carddav::{CardDavAccountConfig, CardDavClient, CardDavError};
