@@ -764,12 +764,22 @@ impl DatabaseEngine {
                 .execute(&mut *tx)
                 .await
                 .map_err(DatabaseError::Query)?;
+            tracing::info!(
+                table = "messages",
+                column = "remote_id",
+                "applying schema migration"
+            );
         }
         if !existing_columns.iter().any(|c| c == "uid_validity") {
             sqlx::query("ALTER TABLE messages ADD COLUMN uid_validity TEXT NOT NULL DEFAULT ''")
                 .execute(&mut *tx)
                 .await
                 .map_err(DatabaseError::Query)?;
+            tracing::info!(
+                table = "messages",
+                column = "uid_validity",
+                "applying schema migration"
+            );
         }
 
         // Seed any legacy row still carrying the empty-string default with a
@@ -823,6 +833,11 @@ impl DatabaseEngine {
             .execute(&self.pool)
             .await
             .map_err(DatabaseError::Query)?;
+            tracing::info!(
+                table = "accounts",
+                column = "imap_tls_mode",
+                "applying schema migration"
+            );
         }
         if !existing_columns.iter().any(|c| c == "smtp_tls_mode") {
             sqlx::query(
@@ -831,6 +846,11 @@ impl DatabaseEngine {
             .execute(&self.pool)
             .await
             .map_err(DatabaseError::Query)?;
+            tracing::info!(
+                table = "accounts",
+                column = "smtp_tls_mode",
+                "applying schema migration"
+            );
         }
 
         Ok(())
@@ -865,12 +885,22 @@ impl DatabaseEngine {
                 .execute(&self.pool)
                 .await
                 .map_err(DatabaseError::Query)?;
+            tracing::info!(
+                table = "accounts",
+                column = "smtp_host",
+                "applying schema migration"
+            );
         }
         if !existing_columns.iter().any(|c| c == "smtp_port") {
             sqlx::query("ALTER TABLE accounts ADD COLUMN smtp_port INTEGER")
                 .execute(&self.pool)
                 .await
                 .map_err(DatabaseError::Query)?;
+            tracing::info!(
+                table = "accounts",
+                column = "smtp_port",
+                "applying schema migration"
+            );
         }
 
         Ok(())
@@ -902,6 +932,11 @@ impl DatabaseEngine {
                 .execute(&self.pool)
                 .await
                 .map_err(DatabaseError::Query)?;
+            tracing::info!(
+                table = "accounts",
+                column = "collection_url",
+                "applying schema migration"
+            );
         }
 
         Ok(())
@@ -3807,6 +3842,107 @@ mod tests {
         let post_t = post.imap_smtp().expect("imap-smtp transport");
         assert_eq!(post_t.smtp_host, "smtp.nuncio.mx");
         assert_eq!(post_t.smtp_port, 587);
+
+        engine.close().await;
+    }
+
+    /// Applying an additive column migration against a pre-existing (old-schema)
+    /// database must be visible in telemetry -- an `INFO` log naming the table and
+    /// column -- rather than only observable indirectly via the resulting schema.
+    #[tokio::test]
+    async fn migrate_logs_when_an_additive_column_migration_actually_runs() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for CapturedLogs {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("log buffer lock")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for CapturedLogs {
+            type Writer = CapturedLogs;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("pre_dav_migration.db");
+        let secrets = crate::vault::SecretManager::mock();
+
+        // An old-schema `accounts` table predating `collection_url`.
+        {
+            let url = format!("sqlite://{}", db_path.to_string_lossy());
+            let options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
+                .expect("valid sqlite url")
+                .create_if_missing(true);
+            let pool = sqlx::SqlitePool::connect_with(options)
+                .await
+                .expect("connect to fresh old-schema db");
+
+            sqlx::query(
+                r#"
+                CREATE TABLE accounts (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    email_address TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    server_host TEXT NOT NULL,
+                    server_port INTEGER NOT NULL,
+                    use_tls INTEGER NOT NULL,
+                    keyring_secret_key TEXT NOT NULL,
+                    sync_interval_secs INTEGER NOT NULL,
+                    smtp_host TEXT,
+                    smtp_port INTEGER,
+                    imap_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls',
+                    smtp_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls'
+                )
+                "#,
+            )
+            .execute(&pool)
+            .await
+            .expect("create old-schema accounts table");
+
+            pool.close().await;
+        }
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+
+        // `set_default` returns a guard that stays active across `.await`
+        // points as long as this test stays on the single `#[tokio::test]`
+        // current-thread executor, which is the default runtime flavor and
+        // exactly what is used here.
+        let guard = tracing::subscriber::set_default(subscriber);
+        let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+            .await
+            .expect("opening an old-schema database must never error");
+        drop(guard);
+
+        let captured = String::from_utf8(logs.0.lock().expect("log buffer lock").clone())
+            .expect("captured log is valid utf8");
+        assert!(
+            captured.contains("collection_url"),
+            "expected the migrated column to be named in the INFO log, got: {captured}"
+        );
+        assert!(
+            captured.to_ascii_uppercase().contains("INFO"),
+            "expected an INFO-level log for the applied migration, got: {captured}"
+        );
 
         engine.close().await;
     }
