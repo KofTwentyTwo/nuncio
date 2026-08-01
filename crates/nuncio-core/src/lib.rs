@@ -7,6 +7,7 @@ pub mod config;
 pub mod export;
 pub mod mcp_policy;
 pub mod model;
+pub mod redact;
 pub mod update;
 pub mod worm_audit;
 
@@ -17,6 +18,7 @@ pub use config::{
 pub use export::{ExportEngine, ExportError, ExportFormat, ExportSummary};
 pub use mcp_policy::{AgentPermissions, DataType, McpAgentPolicy};
 pub use model::{Attachment, CalendarEvent, Contact, DaemonTelemetry, Email, Folder};
+pub use redact::Redacted;
 pub use update::{ReleaseInfo, UpdateCheckResult, UpdateEngine, UpdateError};
 pub use worm_audit::{verify_worm_chain, WormAuditError, WormAuditRecord};
 

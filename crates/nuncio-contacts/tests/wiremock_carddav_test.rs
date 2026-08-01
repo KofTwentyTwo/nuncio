@@ -57,7 +57,7 @@ async fn wiremock_carddav_report_fetches_and_parses_vcards() {
         account_id: "acct-wm-1".to_string(),
         carddav_url: format!("{}/addressbooks/contacts/", mock_server.uri()),
         username: "james.maes".to_string(),
-        auth_token: "wiremock-app-token".to_string(),
+        auth_token: "wiremock-app-token".to_string().into(),
     };
     let client = CardDavClient::new(config);
 
@@ -102,7 +102,7 @@ async fn wiremock_carddav_report_server_error_surfaces_as_transport_failure() {
         account_id: "acct-wm-2".to_string(),
         carddav_url: format!("{}/addressbooks/broken/", mock_server.uri()),
         username: "james.maes".to_string(),
-        auth_token: "wiremock-app-token".to_string(),
+        auth_token: "wiremock-app-token".to_string().into(),
     };
     let client = CardDavClient::new(config);
 
@@ -143,7 +143,7 @@ END:VCARD</card:address-data>
         account_id: "acct-wm-3".to_string(),
         carddav_url: format!("{}/addressbooks/malformed/", mock_server.uri()),
         username: "james.maes".to_string(),
-        auth_token: "wiremock-app-token".to_string(),
+        auth_token: "wiremock-app-token".to_string().into(),
     };
     let client = CardDavClient::new(config);
 

@@ -60,7 +60,7 @@ async fn wiremock_caldav_report_fetches_and_resolves_tzid_events() {
         account_id: "acct-wm-1".to_string(),
         caldav_url: format!("{}/calendars/work/", mock_server.uri()),
         username: "james.maes".to_string(),
-        auth_token: "wiremock-app-token".to_string(),
+        auth_token: "wiremock-app-token".to_string().into(),
     };
     let client = CalDavClient::new(config);
 
@@ -106,7 +106,7 @@ async fn wiremock_caldav_report_server_error_surfaces_as_transport_failure() {
         account_id: "acct-wm-2".to_string(),
         caldav_url: format!("{}/calendars/broken/", mock_server.uri()),
         username: "james.maes".to_string(),
-        auth_token: "wiremock-app-token".to_string(),
+        auth_token: "wiremock-app-token".to_string().into(),
     };
     let client = CalDavClient::new(config);
 

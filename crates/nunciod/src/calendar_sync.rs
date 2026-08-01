@@ -100,7 +100,7 @@ pub async fn sync_caldav_account(
         account_id: account.id.clone(),
         caldav_url: account.dav_collection_url().unwrap_or_default().to_string(),
         username: account.email_address.clone(),
-        auth_token: password.to_string(),
+        auth_token: nuncio_core::redact::Redacted::new(password.to_string()),
     });
     sync_with_backend(db, &client, calendar_id, start_window, end_window).await
 }
