@@ -10,6 +10,7 @@ members = [
     "crates/nuncio-filter",
     "crates/nuncio-contacts",
     "crates/nuncio-proto",
+    "crates/nuncio-monitor",
 ]
 
 [workspace.package]
@@ -91,6 +92,10 @@ tonic-prost-build = "0.14"
 protoc-bin-vendored = "3.2"
 subtle = "2.6"
 fs4 = "0.13"
+eframe = "0.36.1"
+egui = "0.36.1"
+egui_extras = "0.36.1"
+tray-icon = "0.24.2"
 
 
 

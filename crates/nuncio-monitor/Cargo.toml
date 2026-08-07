@@ -1,0 +1,25 @@
+[package]
+name = "nuncio-monitor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nuncio-proto = { path = "../nuncio-proto" }
+nuncio-store = { path = "../nuncio-store" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_extras = { workspace = true }
+tray-icon = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
