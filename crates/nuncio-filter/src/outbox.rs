@@ -33,6 +33,7 @@ impl OutboxManager {
 
     /// Construct a new `PendingRemoteMutation` record.
     pub fn create_mutation(
+        account_id: impl Into<String>,
         rule_id: impl Into<String>,
         message_id: impl Into<String>,
         action_type: impl Into<String>,
@@ -48,6 +49,7 @@ impl OutboxManager {
 
         PendingRemoteMutation {
             id: format!("mut-{}", uuid_simple()),
+            account_id: account_id.into(),
             rule_id: rule_id.into(),
             message_id: message_id.into(),
             mutation_type: action_str,
@@ -88,11 +90,13 @@ mod tests {
     #[test]
     fn test_create_mutation() {
         let mut_item = OutboxManager::create_mutation(
+            "acct-1",
             "rule-1",
             "msg-100",
             "MOVE",
             Some("Archive".to_string()),
         );
+        assert_eq!(mut_item.account_id, "acct-1");
         assert_eq!(mut_item.rule_id, "rule-1");
         assert_eq!(mut_item.message_id, "msg-100");
         assert_eq!(mut_item.mutation_type, "MOVE");

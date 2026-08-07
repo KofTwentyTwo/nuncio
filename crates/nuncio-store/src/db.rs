@@ -9,7 +9,17 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 /// Raw row shape for a pending remote mutation record fetched from SQLite.
-type PendingMutationRow = (String, String, String, String, String, String, i64, i64);
+type PendingMutationRow = (
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+);
 
 /// Database errors emitted by `nuncio-store`.
 #[derive(Error, Debug)]
@@ -471,6 +481,38 @@ impl DatabaseEngine {
         Ok(count.max(0) as u64)
     }
 
+    /// Per-account outbox depth as `(account_id, pending, failed)`, ordered by
+    /// account id. Mutations whose `account_id` is `NULL` (their message row
+    /// was deleted before the backfill ran) are grouped under the empty string
+    /// rather than being dropped, so the reported totals always reconcile with
+    /// [`Self::count_pending_mutations`].
+    pub async fn count_pending_mutations_by_account(
+        &self,
+    ) -> Result<Vec<(String, u64, u64)>, DatabaseError> {
+        let rows: Vec<(Option<String>, i64, i64)> = sqlx::query_as(
+            "SELECT account_id,
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+             FROM pending_remote_mutations
+             GROUP BY account_id
+             ORDER BY account_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, pending, failed)| {
+                (
+                    id.unwrap_or_default(),
+                    pending.max(0) as u64,
+                    failed.max(0) as u64,
+                )
+            })
+            .collect())
+    }
+
     /// Cryptographic hash-chain audit ledger verification (`verify_chain_integrity()`)
     /// detecting log tampering or corrupted `filter_execution_logs`, using the ledger
     /// HMAC key provisioned for this engine.
@@ -574,6 +616,7 @@ impl DatabaseEngine {
 
             CREATE TABLE IF NOT EXISTS pending_remote_mutations (
                 id TEXT PRIMARY KEY NOT NULL,
+                account_id TEXT,
                 rule_id TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 mutation_type TEXT NOT NULL,
@@ -750,6 +793,7 @@ impl DatabaseEngine {
         self.ensure_accounts_smtp_columns().await?;
         self.ensure_accounts_tls_mode_columns().await?;
         self.ensure_accounts_dav_columns().await?;
+        self.ensure_pending_mutations_account_column().await?;
         self.ensure_messages_identity_columns().await?;
         self.backfill_message_fts().await?;
 
@@ -970,6 +1014,54 @@ impl DatabaseEngine {
                 column = "collection_url",
                 "applying schema migration"
             );
+        }
+
+        Ok(())
+    }
+
+    /// Additive, backfill-safe migration adding `account_id` to a pre-existing
+    /// `pending_remote_mutations` table.
+    ///
+    /// The outbox originally recorded only the message a mutation targets, so
+    /// queued work could not be attributed to an account. The column is added
+    /// as `NULL`-able and backfilled by joining `message_id` to
+    /// `messages.account_id`; a mutation whose message row is already gone
+    /// keeps a `NULL` account and is reported separately rather than being
+    /// silently dropped from the totals. SQLite has no `ADD COLUMN IF NOT
+    /// EXISTS`, so presence is checked via `PRAGMA table_info` first, making
+    /// this safe to run on every daemon startup.
+    async fn ensure_pending_mutations_account_column(&self) -> Result<(), DatabaseError> {
+        let existing_columns: Vec<String> =
+            sqlx::query("PRAGMA table_info(pending_remote_mutations)")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?
+                .iter()
+                .map(|row| row.get::<String, _>("name"))
+                .collect();
+
+        if !existing_columns.iter().any(|c| c == "account_id") {
+            sqlx::query("ALTER TABLE pending_remote_mutations ADD COLUMN account_id TEXT")
+                .execute(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+            tracing::info!(
+                table = "pending_remote_mutations",
+                column = "account_id",
+                "applying schema migration"
+            );
+
+            sqlx::query(
+                "UPDATE pending_remote_mutations
+                 SET account_id = (
+                     SELECT m.account_id FROM messages m
+                     WHERE m.id = pending_remote_mutations.message_id
+                 )
+                 WHERE account_id IS NULL",
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
         }
 
         Ok(())
@@ -2205,11 +2297,12 @@ impl DatabaseEngine {
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO pending_remote_mutations
-            (id, rule_id, message_id, mutation_type, payload, status, retry_count, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, account_id, rule_id, message_id, mutation_type, payload, status, retry_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&item.id)
+        .bind(&item.account_id)
         .bind(&item.rule_id)
         .bind(&item.message_id)
         .bind(&item.mutation_type)
@@ -2230,7 +2323,7 @@ impl DatabaseEngine {
     ) -> Result<Vec<nuncio_filter::PendingRemoteMutation>, DatabaseError> {
         let rows: Vec<PendingMutationRow> = sqlx::query_as(
             r#"
-            SELECT id, rule_id, message_id, mutation_type, payload, status, retry_count, created_at
+            SELECT id, account_id, rule_id, message_id, mutation_type, payload, status, retry_count, created_at
             FROM pending_remote_mutations
             WHERE status = 'pending'
             ORDER BY created_at ASC
@@ -2247,6 +2340,7 @@ impl DatabaseEngine {
             .map(
                 |(
                     id,
+                    account_id,
                     rule_id,
                     message_id,
                     mutation_type,
@@ -2257,6 +2351,7 @@ impl DatabaseEngine {
                 )| {
                     nuncio_filter::PendingRemoteMutation {
                         id,
+                        account_id: account_id.unwrap_or_default(),
                         rule_id,
                         message_id,
                         mutation_type,
@@ -3879,6 +3974,103 @@ mod tests {
         engine.close().await;
     }
 
+    /// An outbox table created before `account_id` existed must gain the
+    /// column on reopen and have every existing row attributed by joining
+    /// through `message_id` -- proving the backfill, not just the schema
+    /// change, actually runs.
+    #[tokio::test]
+    async fn migrate_backfills_account_id_on_a_pre_existing_outbox_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("pre_account_id.db");
+        let secrets = crate::vault::SecretManager::mock();
+
+        // OLD-schema outbox table: no account_id column.
+        {
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .expect("engine");
+            sqlx::query("DROP TABLE IF EXISTS pending_remote_mutations")
+                .execute(&engine.pool)
+                .await
+                .expect("drop");
+            sqlx::query(
+                "CREATE TABLE pending_remote_mutations (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    rule_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    mutation_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL
+                )",
+            )
+            .execute(&engine.pool)
+            .await
+            .expect("create old table");
+
+            sqlx::query(
+                "INSERT INTO messages
+                 (id, account_id, folder_id, remote_id, subject, sender, recipient, received_at)
+                 VALUES ('msg-1', 'acct-A', 'inbox', 'r1', 'Subject', 'a@nuncio.mx', 'b@nuncio.mx', 0)",
+            )
+            .execute(&engine.pool)
+            .await
+            .expect("seed message");
+
+            sqlx::query(
+                "INSERT INTO pending_remote_mutations
+                 (id, rule_id, message_id, mutation_type, payload, status, retry_count, created_at)
+                 VALUES ('mut-1', 'rule-1', 'msg-1', 'move', '{}', 'pending', 0, 0)",
+            )
+            .execute(&engine.pool)
+            .await
+            .expect("seed mutation");
+        }
+
+        // Reopening runs migrate(), which must add and backfill account_id.
+        let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+            .await
+            .expect("reopen");
+
+        let counts = engine
+            .count_pending_mutations_by_account()
+            .await
+            .expect("counts");
+
+        assert_eq!(counts, vec![("acct-A".to_string(), 1, 0)]);
+    }
+
+    /// A mutation saved through the real write path (`OutboxManager::create_mutation`
+    /// + `save_pending_mutation`) must be attributable to its account without any
+    /// migration backfill involved -- proving the write path itself, not just the
+    /// migration, carries `account_id` end to end.
+    #[tokio::test]
+    async fn a_newly_saved_mutation_is_attributed_to_its_account() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+
+        let mutation = nuncio_filter::OutboxManager::create_mutation(
+            "acct-B",
+            "rule-1",
+            "msg-9",
+            "MOVE",
+            Some("Archive".to_string()),
+        );
+        engine
+            .save_pending_mutation(&mutation)
+            .await
+            .expect("save mutation");
+
+        let counts = engine
+            .count_pending_mutations_by_account()
+            .await
+            .expect("counts");
+
+        assert_eq!(counts, vec![("acct-B".to_string(), 1, 0)]);
+    }
+
     /// Applying an additive column migration against a pre-existing (old-schema)
     /// database must be visible in telemetry -- an `INFO` log naming the table and
     /// column -- rather than only observable indirectly via the resulting schema.
@@ -4106,6 +4298,7 @@ mod tests {
         assert_eq!(chunk2[1].id, "msg-005");
 
         let mutation = nuncio_filter::OutboxManager::create_mutation(
+            "acct-1",
             "rule-1",
             "msg-001",
             "MOVE",

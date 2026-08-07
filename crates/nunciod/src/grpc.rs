@@ -3662,6 +3662,7 @@ mod tests {
 
         db.save_pending_mutation(&nuncio_filter::PendingRemoteMutation {
             id: "mut-1".to_string(),
+            account_id: "acct-h1".to_string(),
             rule_id: "rule-1".to_string(),
             message_id: "msg-1".to_string(),
             mutation_type: "MOVE".to_string(),

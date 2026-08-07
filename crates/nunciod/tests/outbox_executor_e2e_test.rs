@@ -375,6 +375,7 @@ async fn a_mutation_for_a_vanished_message_fails_permanently() {
 
     // Enqueue a mutation whose target message was never persisted.
     let mutation = nuncio_filter::OutboxManager::create_mutation(
+        ACCOUNT_ID,
         "rule-x",
         "imap-uid-999",
         "MOVE",

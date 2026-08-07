@@ -322,6 +322,11 @@ pub struct FilterExecutionLog {
 pub struct PendingRemoteMutation {
     /// Primary key UUID.
     pub id: String,
+    /// Account the mutation's target message belongs to; the unit health
+    /// and monitoring surfaces attribute outbox depth per account by this
+    /// field, so it must always carry the account a mutation was raised
+    /// for, never a placeholder.
+    pub account_id: String,
     /// Source filter rule ID.
     pub rule_id: String,
     /// Target email message ID.

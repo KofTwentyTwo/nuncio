@@ -162,7 +162,13 @@ pub async fn apply_filter_actions(
 
             let mut action_ok = true;
             if let Some((tag, target)) = remote_action_tag(&action) {
-                let mutation = OutboxManager::create_mutation(&rule.id, &email.id, tag, target);
+                let mutation = OutboxManager::create_mutation(
+                    &email.account_id,
+                    &rule.id,
+                    &email.id,
+                    tag,
+                    target,
+                );
                 if let Err(e) = db.save_pending_mutation(&mutation).await {
                     tracing::warn!(
                         "filter rule '{}' failed to enqueue outbox mutation for message '{}': {e}",

@@ -607,6 +607,7 @@ mod tests {
     fn flag_mutation() -> PendingRemoteMutation {
         PendingRemoteMutation {
             id: "mut-1".to_string(),
+            account_id: "acct-outbox-log".to_string(),
             rule_id: "rule-1".to_string(),
             message_id: "msg-outbox-log".to_string(),
             mutation_type: "FLAG".to_string(),
