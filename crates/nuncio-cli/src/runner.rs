@@ -2962,7 +2962,10 @@ mod tests {
     #[tokio::test]
     async fn system_status_reports_live_daemon_status_over_grpc_when_reachable() {
         use nuncio_proto::v1::system_server::{System as SystemService, SystemServer};
-        use nuncio_proto::v1::{Event, GetStatusRequest, GetStatusResponse, SubscribeRequest};
+        use nuncio_proto::v1::{
+            Event, GetStatusRequest, GetStatusResponse, ShutdownRequest, ShutdownResponse,
+            SubscribeRequest,
+        };
 
         /// Minimal test-only stub of the `nuncio.v1.System` service: no
         /// auth interceptor, just a fixed status. Bearer-token acceptance
@@ -3014,6 +3017,19 @@ mod tests {
             ) -> Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
                 Err(tonic::Status::unimplemented(
                     "subscribe is not exercised by this stub",
+                ))
+            }
+
+            // `Shutdown` is exercised by `nunciod`'s own `grpc::tests`; this
+            // stub only needs to satisfy the trait so the CLI's `GetStatus`
+            // happy path above can compile against the real `System` service
+            // definition.
+            async fn shutdown(
+                &self,
+                _request: tonic::Request<ShutdownRequest>,
+            ) -> Result<tonic::Response<ShutdownResponse>, tonic::Status> {
+                Err(tonic::Status::unimplemented(
+                    "shutdown is not exercised by this stub",
                 ))
             }
         }

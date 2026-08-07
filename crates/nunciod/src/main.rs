@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // previously wired but never triggered outside tests.
     let (shutdown_controller, shutdown_signal) = ShutdownController::new(event_bus.clone());
     let shutdown_controller = Arc::new(shutdown_controller);
+    let grpc_shutdown_controller = Arc::clone(&shutdown_controller);
     let signal_task = tokio::spawn(install_signal_handlers(shutdown_controller));
 
     // Exclusive single-instance lock on the database path, acquired BEFORE
@@ -293,6 +294,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             grpc_secrets,
             grpc_token,
             sync_dispatcher,
+            grpc_shutdown_controller,
             async move { grpc_shutdown_future.wait().await },
         ) => result,
         _ = async move {

@@ -5,7 +5,7 @@
 //!
 //! This is the daemon's sole client-facing transport.
 
-use crate::lifecycle::ShutdownSignal;
+use crate::lifecycle::{ShutdownController, ShutdownSignal};
 use crate::pagination::{self, CursorField};
 use crate::sync_dispatcher::{
     sync_all_configured, AccountSyncPhase, ProductionAccountSyncer, SyncDispatcher,
@@ -49,12 +49,12 @@ use nuncio_proto::v1::{
     MarkReadResponse, Message as MessageProto, MessageFlagsChanged, MessageSearchHit,
     PreviewRuleRequest, PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse,
     RuleExportFormat as RuleExportFormatProto, SearchMessagesRequest, SearchMessagesResponse,
-    SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
-    SyncRequest, SyncResponse, SyncStarted, SyncState as SyncStateProto,
-    TestAccountConnectionRequest, TestAccountConnectionResponse, TlsMode as TlsModeProto,
-    TriageProgress, TriageRequest, UpdateAccountRequest, UpdateAccountResponse, UpdateAvailable,
-    UpdateRuleRequest, UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
-    VerifyChainRequest, VerifyChainResponse,
+    SendMessageRequest, SendMessageResponse, ShutdownRequest, ShutdownResponse, ShuttingDown,
+    SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse, SyncStarted,
+    SyncState as SyncStateProto, TestAccountConnectionRequest, TestAccountConnectionResponse,
+    TlsMode as TlsModeProto, TriageProgress, TriageRequest, UpdateAccountRequest,
+    UpdateAccountResponse, UpdateAvailable, UpdateRuleRequest, UpdateRuleResponse,
+    ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -249,6 +249,11 @@ struct SystemGrpcService {
     /// `Instant` (monotonic) rather than a wall clock, so a system time
     /// adjustment can never make uptime jump or go negative.
     started_at: Instant,
+    /// Triggers graceful shutdown when `Shutdown` is called. Optional because
+    /// test servers are spawned without a real lifecycle controller; a `None`
+    /// here makes `Shutdown` return `Unavailable` rather than pretending to
+    /// succeed.
+    shutdown: Option<Arc<ShutdownController>>,
 }
 
 #[tonic::async_trait]
@@ -362,6 +367,22 @@ impl System for SystemGrpcService {
             }
         });
         Ok(Response::new(Box::pin(mapped)))
+    }
+
+    async fn shutdown(
+        &self,
+        _request: Request<ShutdownRequest>,
+    ) -> Result<Response<ShutdownResponse>, Status> {
+        match &self.shutdown {
+            Some(controller) => {
+                tracing::info!("shutdown requested over gRPC");
+                controller.trigger();
+                Ok(Response::new(ShutdownResponse {}))
+            }
+            None => Err(Status::unavailable(
+                "this daemon instance has no lifecycle controller wired",
+            )),
+        }
     }
 }
 
@@ -2824,6 +2845,7 @@ pub async fn serve_with_shutdown(
     secrets: Arc<SecretManager>,
     token: impl Into<Arc<str>>,
     sync_dispatcher: Arc<SyncDispatcher>,
+    shutdown_controller: Arc<ShutdownController>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), GrpcServeError> {
     let socket_addr = addr
@@ -2855,6 +2877,7 @@ pub async fn serve_with_shutdown(
         ContactsEngineOverrides::default(),
         AccountsEngineOverrides::default(),
         sync_dispatcher,
+        Some(shutdown_controller),
         shutdown,
     )
     .await
@@ -2863,6 +2886,7 @@ pub async fn serve_with_shutdown(
 /// Identical to [`serve_on_listener`], except the server stops accepting new
 /// connections and begins draining in-flight requests as soon as `shutdown`
 /// resolves.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_on_listener_with_shutdown(
     listener: TcpListener,
     event_bus: Arc<EventBus>,
@@ -2870,6 +2894,7 @@ pub async fn serve_on_listener_with_shutdown(
     filter_engine: Arc<FilterEngine>,
     secrets: Arc<SecretManager>,
     token: impl Into<Arc<str>>,
+    shutdown_controller: Arc<ShutdownController>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), GrpcServeError> {
     // This entry point receives an opaque shutdown future rather than a
@@ -2895,6 +2920,7 @@ pub async fn serve_on_listener_with_shutdown(
         ContactsEngineOverrides::default(),
         AccountsEngineOverrides::default(),
         sync_dispatcher,
+        Some(shutdown_controller),
         shutdown,
     )
     .await
@@ -2948,6 +2974,7 @@ pub async fn serve_on_listener_with_overrides(
         contacts_overrides,
         accounts_overrides,
         sync_dispatcher,
+        None,
         std::future::pending(),
     )
     .await
@@ -2972,6 +2999,7 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
     contacts_overrides: ContactsEngineOverrides,
     accounts_overrides: AccountsEngineOverrides,
     sync_dispatcher: Arc<SyncDispatcher>,
+    shutdown_controller: Option<Arc<ShutdownController>>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), GrpcServeError> {
     let token: Arc<str> = token.into();
@@ -2981,6 +3009,7 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
         db: db.clone(),
         sync_dispatcher: sync_dispatcher.clone(),
         started_at: Instant::now(),
+        shutdown: shutdown_controller,
     };
     let system_interceptor = BearerAuthInterceptor::new(token.clone());
     let system_svc = InterceptedService::new(
@@ -3549,6 +3578,21 @@ mod tests {
             .get_status(GetStatusRequest {})
             .await
             .expect_err("missing token must be rejected");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_missing_bearer_token() {
+        let event_bus = Arc::new(EventBus::new());
+        let (addr, _handle, _dir) = spawn_test_server(event_bus, "correct-token").await;
+
+        let mut client = SystemClient::connect(format!("http://{addr}"))
+            .await
+            .expect("client connects");
+        let err = client
+            .shutdown(ShutdownRequest {})
+            .await
+            .expect_err("must reject unauthenticated shutdown");
         assert_eq!(err.code(), Code::Unauthenticated);
     }
 

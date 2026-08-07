@@ -34,6 +34,7 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 async fn shutdown_signal_stops_grpc_server_exits_background_worker_and_closes_the_database() {
     let event_bus = Arc::new(EventBus::new());
     let (controller, shutdown_signal) = ShutdownController::new(event_bus.clone());
+    let controller = Arc::new(controller);
 
     let secrets = Arc::new(SecretManager::mock());
     let token = hex::encode(
@@ -63,6 +64,7 @@ async fn shutdown_signal_stops_grpc_server_exits_background_worker_and_closes_th
         filter_engine,
         secrets,
         token.clone(),
+        controller.clone(),
         async move { grpc_shutdown.wait().await },
     ));
 

@@ -83,11 +83,28 @@ service System {
   // stream ends when the client disconnects or the daemon's event bus is
   // shut down.
   rpc Subscribe(SubscribeRequest) returns (stream Event);
+  // Shutdown asks the daemon to begin a graceful shutdown: in-flight work is
+  // allowed to finish, then the process exits. Returns before the process is
+  // gone, so a caller that needs to observe the exit should poll the
+  // single-instance lock rather than assume completion on response.
+  //
+  // This is the only way to stop the daemon cleanly on platforms without a
+  // POSIX signal for it. It is guarded by the same bearer-auth interceptor as
+  // every other RPC.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
 // GetStatusRequest currently carries no parameters. Fields may be added
 // here later (e.g. requested detail level).
 message GetStatusRequest {}
+
+// ShutdownRequest carries no parameters. A future revision may add a drain
+// deadline.
+message ShutdownRequest {}
+
+// ShutdownResponse is returned once shutdown has been *requested*, not once it
+// has completed.
+message ShutdownResponse {}
 
 // Per-account synchronization phase, reported inside `AccountSyncState`.
 // Values are append-only: never renumber or repurpose an existing value.
