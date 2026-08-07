@@ -41,7 +41,7 @@ These are non-negotiable and apply to every item below:
 
 ---
 
-## Where we are today (2026-07-30)
+## Where we are today (2026-08-07)
 
 **Phases 0–2 are complete and on `dev`.** The daemon boots gRPC-only on loopback
 `127.0.0.1:9420` behind a keyring-minted bearer token, and serves **eight
@@ -85,18 +85,56 @@ next):
   wrong-account fallback), and `AddAccount` rolls back an orphaned keyring
   secret if persistence fails.
 
-**Next up: M6 — Security & release hardening** (fail-closed encryption,
-zeroized key material, WORM/ledger key-length validation, a rejection of
-non-loopback gRPC binds plus an auth-coverage canary, a fail-closed updater on
-missing `SHA256SUMS`, real CIDR/DNS SSRF checks for webhooks, inbound HTML
-email sanitization). Then M7 (API freeze / client-readiness).
+**M6 — Security & release hardening is nearly complete** (13 of 16 stories
+closed). Landed: fail-closed encryption, zeroized key material, WORM/ledger
+key-length validation, non-loopback gRPC bind rejection plus the auth-coverage
+canary, the fail-closed updater on missing `SHA256SUMS`, and real CIDR/DNS SSRF
+checks on webhook egress. Still open: inbound HTML email sanitization (#204),
+Rust static analysis in CodeQL (#250 — CodeQL currently scans JS and actions
+only), and removal of assertion-free test theater (#251).
+
+**Work reorganized after M5 into three tracks that now carry the bulk of the
+remaining effort.** These are GitHub milestones in their own right; they are not
+part of the original M1–M7 numbering:
+
+- **M6.5 — Feature completeness & de-fabrication** (3 closed / 8 open).
+  Eliminates the remaining fabricated or silently-wrong paths: production-wiring
+  Contacts sync with per-account CardDAV config (#255), namespace-aware DAV XML
+  parsing to replace substring splitting and silent drops (#257), the
+  `tls_mode_from_db` silent `ImplicitTls` fallback (#271), the
+  `NaturalLanguageScheduler` that returns wrong times (#258), plus CLI and audit
+  cleanups.
+- **WS-A … WS-F — the pre-freeze reshape** (22 closed / 44 open). Six tracks
+  that must land before `nuncio.v1` can be frozen: **WS-A** contract hardening
+  (typed errors, `Timestamp`/`Duration` unification, keyset pagination, id
+  conventions, enum hygiene, account transport `oneof`); **WS-B** mail model and
+  mutations; **WS-C** sync, push and lifecycle; **WS-D** security to 9/10
+  (whole-DB SQLCipher encryption, OS-permissioned UDS / named-pipe IPC replacing
+  loopback TCP, signed updates, HTML sanitization); **WS-E** calendar and
+  contacts write-back plus structured search; **WS-F** ops, usability and
+  maintainability, including the behavior-preserving `grpc.rs` (#333) and
+  `DatabaseEngine` (#334) decompositions.
+- **OBS-1 … OBS-9 — observability — COMPLETE.** All nine stories merged
+  (#357–#365; no milestone was assigned). Delivered: a layered `tracing`
+  subscriber with `EnvFilter`, rotating file and JSON output; per-RPC spans with
+  request-id correlation and auth accept/reject logging; domain and lifecycle
+  coverage across handlers, syncs, outbox and shutdown; protocol-sync
+  instrumentation for mail, calendar and contacts; a real `System.GetStatus`
+  health and readiness surface; CLI `-v`/`-vv` with typed `ErrorInfo` rendering;
+  and a redaction policy with a `Redacted<T>` newtype plus a no-secrets-in-logs
+  canary. Reference: [`docs/LOGGING.md`](LOGGING.md).
+
+**M7 (API freeze) has not started** — 5 stories open, 0 closed. It gates on WS-A
+finishing the contract reshape.
 
 A handful of follow-ups were filed during M1–M5 and remain open, tracked as
 their own backlog items rather than blocking completion: calendar
 windowing/predicate refinement (#216), contacts notes handling (#219), a
 `filter edit` bug where re-saving a rule silently re-enables it and resets
 `created_at` (#225), and further mail sync/SMTP robustness polish identified
-during M5 (#233).
+during M5 (#233). Also open and worth early attention: the ReDoS guard
+`evaluate_with_timeout` exists but no production caller uses it, so the live
+sync path still calls the unbounded `evaluate` (#370).
 
 **Explicitly deferred** (out of scope until the backend is client-ready and each
 is re-justified as a genuine engine capability): OpenPGP/S-MIME E2EE (#79),
@@ -106,12 +144,18 @@ WASM/QuickJS plugins (#80), local-LLM summarization (#81).
 
 ## The path to client-ready
 
-The remaining work is organized into seven milestones. M1–M5 complete the
-**feature surface**; M6 hardens **security**; M7 is the **API-freeze gate** that
-declares the backend ready for front-end repos. Milestones are ordered but
-M1–M4 are largely independent (they touch different engine crates); the only
-hard serialization is the shared `nuncio.proto` (and its golden), so proto
-additions land one at a time.
+The original plan was seven milestones: M1–M5 complete the **feature surface**;
+M6 hardens **security**; M7 is the **API-freeze gate** that declares the backend
+ready for front-end repos. Milestones are ordered but M1–M4 are largely
+independent (they touch different engine crates); the only hard serialization is
+the shared `nuncio.proto` (and its golden), so proto additions land one at a
+time.
+
+That structure still holds, with one amendment made after M5: the gap between
+"the feature surface exists" and "the contract can be frozen" turned out to be
+larger than M6 alone, so **M6.5**, the **WS-A … WS-F** workstreams, and the
+**OBS** observability epic were opened between M6 and M7. They are described
+under [M6.5, WS and OBS](#m65-ws-and-obs--the-work-between-m6-and-m7) below.
 
 ### M1 — Finish Calendar (closes #178)
 Complete the Calendar vertical behind the API.
@@ -181,6 +225,25 @@ The engine becomes production-solid.
 - **Exit:** a security review passes; no fail-open crypto, update, or egress
   path remains.
 
+### M6.5, WS and OBS — the work between M6 and M7
+
+Opened after M5, when the reshape needed before an honest `v1` freeze proved
+larger than M6. Status as of 2026-08-07:
+
+| Track | Closed / Open | Scope |
+| :--- | :---: | :--- |
+| **M6.5** Feature completeness & de-fabrication | 3 / 8 | Remove the remaining fabricated or silently-wrong paths (Contacts sync wiring #255, DAV XML namespaces #257, TLS-mode fallback #271, NL scheduler #258) |
+| **WS-A** Contract hardening (pre-freeze reshape) | 6 / 3 | Typed errors, `Timestamp`/`Duration`, keyset pagination, id conventions, enum hygiene, account transport `oneof` — **gates M7** |
+| **WS-B** Mail model & mutations | 1 / 9 | Message identity, drafts, folder management, attachments on receive |
+| **WS-C** Sync, push & lifecycle | 4 / 4 | Autonomous scheduler, IMAP IDLE, resumable event stream, graceful shutdown |
+| **WS-D** Security to 9/10 | 4 / 8 | Whole-DB SQLCipher (#299), UDS / named-pipe IPC (#305), signed updates (#300), HTML sanitization (#302) |
+| **WS-E** Calendar/Contacts write & Search | 2 / 10 | DAV write-back with conditional PUT/DELETE, recurrence editing, structured Search service |
+| **WS-F** Ops, usability & maintainability | 5 / 10 | CLI polish, `System.Backup`, and the `grpc.rs` (#333) / `DatabaseEngine` (#334) decompositions |
+| **OBS-1 … OBS-9** Observability | 9 / 0 | **COMPLETE.** Tracing subscriber, RPC spans + request-id, domain/lifecycle coverage, protocol instrumentation, `GetStatus`, CLI verbosity, redaction canary |
+
+The OBS stories (#357–#365) were merged without a milestone assignment; the
+epic is complete regardless, and `docs/LOGGING.md` is its reference.
+
 ### M7 — API freeze & client-readiness gate  ← **the goal line**
 Declare the backend ready for front-end repos.
 - **Freeze `nuncio.v1`:** every backend capability is represented; the
@@ -208,7 +271,9 @@ scheduled here or folded back into the engine as they earn their place.
 
 ## Tracking
 
-Each milestone maps to GitHub issues (numbers above). Every capability is built
+Each milestone maps to GitHub issues (numbers above); M6.5 and WS-A … WS-F are
+GitHub milestones too, so `gh issue list --milestone "<title>"` is the live
+status for any track in the table above. Every capability is built
 via one implementer + a spec/quality review gate + an offline E2E, committed only
 when the local gate (fmt + clippy `-D warnings` + tests) is green and the proto
 golden is consistent. Issues close only after the review step — never on a green

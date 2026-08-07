@@ -23,7 +23,7 @@ machine (or a new LLM) picks up the work cold.
   it to the definition of done, and open a PR. Do not merge your own work; do not
   start a second story until yours is merged or handed back.
 
-## Current state of the code (2026-07-30)
+## Current state of the code (2026-08-07)
 - **Phases 0–2 complete.** The daemon boots gRPC-only on loopback
   `127.0.0.1:9420` behind a keyring bearer token, serving eight services (System,
   Accounts, Mail, Filters, Calendar, Contacts, Export, Audit), each behind the
@@ -44,11 +44,29 @@ machine (or a new LLM) picks up the work cold.
   full re-fetch on UIDVALIDITY change and a per-item FETCH timeout, explicit
   `SendMessage` account selection, and keyring rollback on failed `AddAccount`)
   are all done.
-- **Next milestone: M6 — Security & release hardening** (fail-closed
+- **M6 — Security & release hardening is 13 of 16 stories closed.** Fail-closed
   encryption, zeroized key material, WORM/ledger key-length validation,
-  non-loopback gRPC bind rejection + an auth-coverage canary, a fail-closed
-  updater on missing `SHA256SUMS`, real CIDR/DNS SSRF checks for webhooks,
-  inbound HTML email sanitization). Then M7 (API freeze / client-readiness).
+  non-loopback gRPC bind rejection plus the auth-coverage canary, the
+  fail-closed updater on missing `SHA256SUMS`, and real CIDR/DNS SSRF checks for
+  webhooks have all landed. Open: inbound HTML sanitization (#204), Rust static
+  analysis in CodeQL (#250), assertion-free test theater (#251).
+- **Work reorganized after M5 into M6.5, WS-A … WS-F, and OBS.** M6.5
+  (de-fabrication, 3/11) and the six WS workstreams (22/66) are the pre-freeze
+  reshape and now carry most of the remaining effort; **WS-A gates M7**. The
+  **OBS observability epic is COMPLETE** (OBS-1 … OBS-9, #357–#365, merged
+  without a milestone): tracing subscriber, per-RPC spans with request-id
+  correlation, domain/lifecycle coverage, protocol instrumentation, a real
+  `System.GetStatus`, CLI `-v`/`-vv` with typed errors, and a `Redacted<T>`
+  redaction policy with a no-secrets-in-logs canary. See `docs/LOGGING.md`.
+- **M7 (API freeze) has not started** — 5 stories open, 0 closed.
+- **Gate verified green on 2026-08-07** under the pinned 1.97.1 toolchain:
+  `cargo fmt --all -- --check` clean, `cargo check-all` clean, `cargo test-all`
+  596 passed / 0 failed / 0 ignored across 37 suites.
+- **`dev` is a superset of `main` again.** `main` had drifted ahead by one real
+  commit, `157c7c2` (rustls 0.23.42 → 0.23.43), which was never back-merged;
+  back-merged 2026-08-07 and the gate re-verified green on the new lockfile.
+  Watch for this: a dependency bump merged straight onto `main` leaves `dev`
+  building on the older crate until someone merges back.
 - Full detail and the path to a client-ready API: `docs/ROADMAP.md`.
 
 ## Branches & preserved WIP
@@ -85,8 +103,10 @@ commit/push, review-before-close, honest-error over green-lie.**
 3. Run it: `cargo run -p nunciod` (daemon), then drive with
    `cargo run -p nuncio-cli -- system status`. See `docs/RUNNING.md` /
    `docs/DEVELOPING-IN-RUSTROVER.md`.
-4. Claim an open story issue (M1 first — M1–M5 build the feature surface, M6
-   hardens security, M7 freezes the API). Follow `docs/STORY-WORKFLOW.md`.
+4. Claim an open story issue. M1–M5 (feature surface) and OBS (observability)
+   are done; M6 is 13/16. The open work is **M6.5**, **WS-A … WS-F**, and the
+   M6 remainder — start with **WS-A**, since it gates the M7 freeze. Follow
+   `docs/STORY-WORKFLOW.md`.
 
 ## Coordination rules
 - **One proto-touching story in flight at a time** — several stories add to the
@@ -102,7 +122,10 @@ GitHub milestones **M1–M7** mirror `docs/ROADMAP.md`. Each milestone holds
 `story`-labelled issues with a full, self-contained spec. Order: M1 → M7 (M1–M5
 independent-ish feature work; M6 security; M7 the client-readiness gate).
 
-**M1–M5 are DELIVERED — all stories merged to `dev`.** M6 is next.
+**M1–M5 are DELIVERED — all stories merged to `dev`.** M6 is 13/16 closed. The
+live status for any track is `gh issue list --milestone "<title>"`; the
+per-story lists below are a point-in-time snapshot of M1–M7 only and do not
+cover M6.5, WS-A … WS-F, or OBS (see `docs/ROADMAP.md` for those).
 
 **M1 — Finish Calendar (CalDAV)** · milestone #23 · **DONE**
 - #185 — Add Calendar API vertical (proto, daemon, CLI, E2E)  · **[PROTO]** · merged
@@ -127,7 +150,7 @@ independent-ish feature work; M6 security; M7 the client-readiness gate).
 - #196 — SendMessage selects an explicit account instead of the first configured  · **[PROTO]** · merged
 - #197 — Roll back orphaned keyring secret when AddAccount fails to persist · merged
 
-**M6 — Security & release hardening** · milestone #28 ← **next**
+**M6 — Security & release hardening** · milestone #28 · **13/16 closed** (open: #204, #250, #251)
 - #198 — Fail closed on encryption failure in `PayloadCipher::encrypt_text_at_rest`
 - #199 — Zeroize long-lived engine key material on drop
 - #200 — Validate WORM/ledger key length from the vault, fail closed on mismatch

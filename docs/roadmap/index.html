@@ -133,17 +133,22 @@
 
   <hr class="rule">
 
-  <h2>Where we are · 2026-07-30</h2>
+  <h2>Where we are · 2026-08-07</h2>
   <div class="band">
-    <h3>Phases 0–2 complete, feature surface (Phase 3–M5) done — M1–M5 all merged</h3>
+    <h3>Phases 0–2 complete, feature surface (Phase 3–M5) done, M6 nearly done, OBS complete</h3>
     <p>The daemon boots gRPC-only on loopback <span class="chip">127.0.0.1:9420</span> behind a keyring-minted
       bearer token. <code>IMAP → store → read → SMTP send</code> runs end-to-end over gRPC, driven by the
       <span class="chip">nuncio-cli</span> reference client, tested fully offline. The legacy JSON-RPC IPC is gone,
       and <span class="chip">nuncio.v1</span> is published with a byte-deterministic contract-stability golden.
       Milestones M1–M5 are now complete on <span class="chip">dev</span> (M1–M4 already promoted to
       <span class="chip">main</span>): Calendar, Contacts, JMAP, live Filters, and mail lifecycle + incremental
-      sync are all real, wired, and API-complete. <b style="color:var(--ink)">Next up: M6</b> (security &amp;
-      release hardening).</p>
+      sync are all real, wired, and API-complete. <b style="color:var(--ink)">M6 (security &amp; release
+      hardening) is 13 of 16 stories closed</b>, and the <b style="color:var(--ink)">OBS observability epic
+      is complete</b> (tracing subscriber, per-RPC spans with request-id correlation, a real
+      <code>GetStatus</code> health surface, CLI verbosity, and a no-secrets-in-logs redaction canary).
+      Work after M5 reorganized into <b style="color:var(--ink)">M6.5</b> (de-fabrication) and the
+      <b style="color:var(--ink)">WS-A … WS-F</b> pre-freeze reshape, which now carry the bulk of the
+      remaining effort. <b style="color:var(--ink)">M7 has not started</b>; it gates on WS-A.</p>
     <div class="chips">
       <span class="chip svc">System</span><span class="chip svc">Accounts</span><span class="chip svc">Mail</span>
       <span class="chip svc">Filters</span><span class="chip svc">Calendar</span><span class="chip svc">Contacts</span>
@@ -160,12 +165,13 @@
       <span class="donetag">M3 · JMAP</span>
       <span class="donetag">M4 · Filters made live</span>
       <span class="donetag">M5 · Mail lifecycle + incremental sync</span>
+      <span class="donetag">OBS · Observability (OBS-1 … OBS-9)</span>
     </div>
   </div>
 
   <hr class="rule">
 
-  <h2>The path · seven milestones to the goal line</h2>
+  <h2>The path · the milestones to the goal line</h2>
   <div class="miles">
 
     <div class="m done">
@@ -252,13 +258,38 @@
       <div class="card">
         <div class="chead">
           <h3 class="ctitle"><span class="code">M6</span>Security &amp; release hardening</h3>
-          <span class="stat prog">Next</span>
+          <span class="stat prog">13 / 16 done</span>
         </div>
         <p class="cbody">Fail-<i>closed</i> everywhere: fix the silent empty-ciphertext data-loss path; a
           signature-verifying updater that refuses to apply without checksums; zeroize key material; validate vault
-          key lengths; gRPC bind hardening with an interceptor guard; real CIDR-based SSRF checks; sandboxed HTML rendering.</p>
+          key lengths; gRPC bind hardening with an interceptor guard; real CIDR-based SSRF checks; sandboxed HTML rendering.
+          <b>All of the above have landed except</b> inbound HTML sanitization (#204), Rust static analysis in CodeQL
+          (#250 — CodeQL scans JS and actions only today), and removal of assertion-free test theater (#251).</p>
         <div class="exit"><b>Exit:</b> a security review passes — no fail-open crypto, update, or egress path remains.</div>
-        <div class="issues"><a class="iss">#162</a><a class="iss">#163</a><a class="iss">#164</a><a class="iss">#165</a></div>
+        <div class="issues"><a class="iss">#162</a><a class="iss">#163</a><a class="iss">#164</a><a class="iss">#165</a><a class="iss">#204</a><a class="iss">#250</a><a class="iss">#251</a></div>
+      </div>
+    </div>
+
+    <div class="m prog">
+      <div class="node">WS</div>
+      <div class="card">
+        <div class="chead">
+          <h3 class="ctitle"><span class="code">M6.5 · WS · OBS</span>The work between M6 and M7</h3>
+          <span class="stat prog">In progress</span>
+        </div>
+        <p class="cbody">Opened after M5, when the reshape needed before an honest <code>v1</code> freeze proved larger
+          than M6 alone. <b>M6.5</b> de-fabrication (3/11) removes the remaining silently-wrong paths: Contacts sync
+          wiring (#255), namespace-aware DAV XML (#257), the TLS-mode fallback (#271), the NL scheduler (#258).
+          <b>WS-A … WS-F</b> (22/66) is the pre-freeze reshape: contract hardening (WS-A, <b>gates M7</b>), mail model
+          &amp; mutations (WS-B), sync/push/lifecycle (WS-C), security to 9/10 (WS-D — SQLCipher #299, UDS &amp;
+          named-pipe IPC #305, signed updates #300), calendar/contacts write-back &amp; search (WS-E), and ops,
+          usability &amp; maintainability (WS-F — including the <code>grpc.rs</code> #333 and <code>DatabaseEngine</code>
+          #334 decompositions). <b>OBS-1 … OBS-9 is complete</b> (9/9, #357–#365): layered tracing subscriber, per-RPC
+          spans with request-id correlation, domain and lifecycle coverage, protocol instrumentation, a real
+          <code>System.GetStatus</code>, CLI <code>-v</code>/<code>-vv</code> with typed errors, and a
+          <code>Redacted&lt;T&gt;</code> policy with a no-secrets-in-logs canary.</p>
+        <div class="exit"><b>Exit:</b> WS-A closes the contract reshape, unblocking the M7 freeze.</div>
+        <div class="issues"><a class="iss">M6.5</a><a class="iss">WS-A</a><a class="iss">WS-B</a><a class="iss">WS-C</a><a class="iss">WS-D</a><a class="iss">WS-E</a><a class="iss">WS-F</a><span class="iss">OBS — done</span></div>
       </div>
     </div>
 
@@ -273,7 +304,8 @@
           golden covers the full surface, and the additive-only versioning policy is enforced by test. Verify
           Swift / C# / TypeScript codegen with a “hello, daemon” per language. <b>The CLI reference client exercises
           every RPC in offline E2E</b> — the proof the contract is complete and usable. Replace the gamed coverage gate;
-          CI green; tag an honest pre-alpha backend release.</p>
+          CI green; tag an honest pre-alpha backend release. <b>Not started</b> — 5 stories open, 0 closed;
+          gates on WS-A completing the contract reshape.</p>
         <div class="exit"><b>Exit / client-ready:</b> the daemon publishes a <b>frozen, documented, contract-tested gRPC API</b>
           that the CLI fully exercises offline. <b>Front-end repos may now begin.</b></div>
         <div class="issues"><a class="iss">#143</a></div>
