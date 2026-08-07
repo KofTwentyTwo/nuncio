@@ -153,6 +153,41 @@ beats `RUST_LOG`), override the `-v` count entirely — useful for scoping a
 directive to a specific module (e.g. `NUNCIO_LOG=nuncio_cli=trace`) without
 turning on trace logging for every dependency `-vvv` would also enable.
 
+## Nuncio Monitor (Windows tray dev instrument)
+
+`nuncio-monitor` is a small Windows tray application for watching a
+`nunciod` you already have running -- it never starts one on its own unless
+you ask it to from the tray menu. It is a dev instrument, not a client: it
+never touches mail, calendar, or contact data beyond the daemon's own
+`System`/`Accounts` status surfaces.
+
+```
+cargo build -p nuncio-monitor
+target\debug\nuncio-monitor.exe
+```
+
+It attaches to whatever `nunciod` is already listening on
+`127.0.0.1:9420` for the same database path (`NUNCIO_DB_PATH`, same
+convention as the daemon) -- start `nunciod.exe` first, or use the tray
+menu's **Start Engine** item, which launches
+`nunciod.exe` from alongside the monitor binary.
+
+The tray icon's color encodes engine state (grey stopped, yellow starting,
+green running, red not responding to `GetStatus` despite holding its
+instance lock). The menu's **Start Engine**/**Stop Engine** items are
+disabled whenever they do not apply, rather than failing when clicked;
+**Stop Engine** requests a graceful `System/Shutdown`, never a kill.
+
+**Log filtering needs `NUNCIO_LOG_FORMAT=json`.** The monitor's log pane
+tails `nunciod`'s rotating log file and can only filter by level/
+`request_id` when the daemon is writing structured JSON lines (see
+"JSON log output" above). If the daemon is logging plain text, the monitor's
+log pane shows a banner saying so instead of silently failing to filter.
+
+Every numeric cell in the status header and accounts table renders an em
+dash (`—`), never `0`, when the poll cycle that would have supplied it
+failed -- a `0` there is always a genuine reading, not a guess.
+
 ## The dogfooding loop
 
 Use it for real; when something breaks or feels wrong, tell me (or I'll hit it

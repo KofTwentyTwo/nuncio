@@ -16,10 +16,10 @@
 
 use std::collections::VecDeque;
 
-use nuncio_proto::v1::{AccountConfig, GetHealthResponse, GetStatusResponse};
+use nuncio_proto::v1::{AccountConfig, AccountSyncState, GetHealthResponse, GetStatusResponse};
 
 use crate::engine::EngineState;
-use crate::log_tail::LogRecord;
+use crate::log_tail::{LogAvailability, LogRecord};
 use crate::status::StatusUpdate;
 
 /// Cap on how many parsed log lines [`AppState`] retains. A debug-level sync
@@ -49,6 +49,14 @@ pub struct AppState {
     pub log_filter: LogFilter,
     /// Whether the `Subscribe` push stream is currently known-good.
     pub stream_stale: bool,
+    /// Whether the background log tailer currently has a usable,
+    /// JSON-formatted log to read (mirrors
+    /// [`crate::log_tail::LogTailer::availability`]). The UI surfaces this
+    /// directly -- e.g. `NotJson` means the daemon needs
+    /// `NUNCIO_LOG_FORMAT=json` before log filtering can work at all -- so a
+    /// user is never left staring at a silently-empty log pane with no
+    /// explanation.
+    pub log_availability: LogAvailability,
 }
 
 impl AppState {
@@ -79,6 +87,63 @@ impl AppState {
             .collect()
     }
 
+    /// One row of the accounts pane, fully resolved from this snapshot of
+    /// `AppState` for a single configured account. Deliberately NOT a
+    /// reconstruction of the wire types: it is the join the UI needs
+    /// (account identity plus this cycle's sync state and queue depth)
+    /// pre-computed here so `ui.rs` never has to reason about which poll
+    /// cycle a field came from.
+    pub fn account_rows(&self) -> Vec<AccountRow<'_>> {
+        self.accounts.iter().map(|a| self.account_row(a)).collect()
+    }
+
+    /// Resolves one [`AccountRow`] for `account`.
+    ///
+    /// `sync_state` is `None` whenever the whole `GetStatus` poll cycle that
+    /// would carry it failed (`self.status` is `None`) -- never a stand-in
+    /// for a genuine "never synced" account, which is instead
+    /// `Some(&AccountSyncState)` with its own empty `last_synced`/
+    /// `last_error` fields (see `GetStatusResponse::account_sync_states`'s
+    /// contract: every configured account gets an entry).
+    ///
+    /// `pending`/`failed` are `None` together whenever the whole `GetHealth`
+    /// cycle failed (`self.health` is `None`). When health data IS present,
+    /// an account with no matching `AccountQueueDepth` entry gets an
+    /// explicit `Some(0)` for both -- the daemon's `GetHealth` always
+    /// reports one entry per configured account (see
+    /// `nunciod::grpc`'s `get_health`), so a genuinely reachable daemon
+    /// reporting nothing queued for this account is a real, known zero, not
+    /// an unknown. This is what lets an idle account still render a row of
+    /// explicit zeros rather than looking indistinguishable from one this
+    /// poll cycle never heard about.
+    fn account_row<'a>(&'a self, account: &'a AccountConfig) -> AccountRow<'a> {
+        let sync_state = self.status.as_ref().and_then(|status| {
+            status
+                .account_sync_states
+                .iter()
+                .find(|s| s.account_id == account.id)
+        });
+
+        let (pending, failed) = match &self.health {
+            None => (None, None),
+            Some(health) => match health
+                .account_queues
+                .iter()
+                .find(|q| q.account_id == account.id)
+            {
+                Some(queue) => (Some(queue.pending), Some(queue.failed)),
+                None => (Some(0), Some(0)),
+            },
+        };
+
+        AccountRow {
+            account,
+            sync_state,
+            pending,
+            failed,
+        }
+    }
+
     /// Applies one [`StatusUpdate`] cycle to this state. A plain field
     /// assignment -- the composite engine state, and the `status`/`health`
     /// options, are taken verbatim, never reinterpreted or defaulted here.
@@ -104,8 +169,27 @@ impl Default for AppState {
             // matches `status.rs`'s own rule that a never-connected stream
             // must never look like a quiet, healthy one.
             stream_stale: true,
+            // Matches `LogTailer::new`'s own initial value: no poll has run
+            // yet, so nothing is known about the log directory.
+            log_availability: LogAvailability::DirectoryMissing,
         }
     }
+}
+
+/// One resolved row of the accounts pane; see [`AppState::account_rows`].
+#[derive(Debug)]
+pub struct AccountRow<'a> {
+    /// The account this row describes.
+    pub account: &'a AccountConfig,
+    /// This cycle's live sync state, or `None` if the whole `GetStatus` poll
+    /// cycle that would carry it failed -- never a fabricated "idle".
+    pub sync_state: Option<&'a AccountSyncState>,
+    /// Pending outbox mutations for this account, or `None` if the whole
+    /// `GetHealth` poll cycle failed. `Some(0)` is a genuine, known zero.
+    pub pending: Option<u64>,
+    /// Failed outbox mutations for this account, or `None` if the whole
+    /// `GetHealth` poll cycle failed. `Some(0)` is a genuine, known zero.
+    pub failed: Option<u64>,
 }
 
 /// The log view filter applied by [`AppState::visible_logs`]. Each field is
@@ -237,5 +321,117 @@ mod tests {
         assert!(st.status.is_none());
         assert!(st.health.is_none());
         assert_eq!(st.engine, EngineState::NotResponding);
+    }
+
+    fn account(id: &str) -> AccountConfig {
+        AccountConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn account_row_has_no_sync_state_when_status_poll_failed() {
+        let st = AppState {
+            accounts: vec![account("acct-1")],
+            // `status` stays `None` (default): the whole poll cycle failed.
+            ..Default::default()
+        };
+        let rows = st.account_rows();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].sync_state.is_none());
+    }
+
+    #[test]
+    fn account_row_has_no_queue_depth_when_health_poll_failed() {
+        let st = AppState {
+            accounts: vec![account("acct-1")],
+            // `health` stays `None` (default): the whole poll cycle failed.
+            ..Default::default()
+        };
+        let rows = st.account_rows();
+        assert_eq!(rows[0].pending, None);
+        assert_eq!(rows[0].failed, None);
+    }
+
+    #[test]
+    fn account_row_reports_explicit_zero_when_health_present_but_account_has_no_queue_entry() {
+        let st = AppState {
+            accounts: vec![account("acct-1")],
+            health: Some(GetHealthResponse {
+                account_queues: Vec::new(),
+                wal_size_bytes: 0,
+                db_healthy: true,
+            }),
+            ..Default::default()
+        };
+        let rows = st.account_rows();
+        // Present health data with no matching entry is a genuine, known
+        // zero -- distinct from the `None`/`None` case above.
+        assert_eq!(rows[0].pending, Some(0));
+        assert_eq!(rows[0].failed, Some(0));
+    }
+
+    #[test]
+    fn account_row_reports_real_queue_depth_when_present() {
+        use nuncio_proto::v1::AccountQueueDepth;
+
+        let st = AppState {
+            accounts: vec![account("acct-1")],
+            health: Some(GetHealthResponse {
+                account_queues: vec![AccountQueueDepth {
+                    account_id: "acct-1".to_string(),
+                    pending: 7,
+                    failed: 2,
+                }],
+                wal_size_bytes: 0,
+                db_healthy: true,
+            }),
+            ..Default::default()
+        };
+        let rows = st.account_rows();
+        assert_eq!(rows[0].pending, Some(7));
+        assert_eq!(rows[0].failed, Some(2));
+    }
+
+    #[test]
+    fn account_row_finds_its_own_sync_state_among_several_accounts() {
+        let st = AppState {
+            accounts: vec![account("acct-1"), account("acct-2")],
+            status: Some(GetStatusResponse {
+                engine_status: "Ready".to_string(),
+                version: "9.9.9".to_string(),
+                uptime: None,
+                accounts_loaded: 2,
+                unread_count: 0,
+                last_error: None,
+                outbox_depth: 0,
+                account_sync_states: vec![AccountSyncState {
+                    account_id: "acct-2".to_string(),
+                    state: 2, // SYNC_STATE_SYNCING
+                    last_synced: None,
+                    last_error: None,
+                }],
+                ready: true,
+                db_healthy: true,
+            }),
+            ..Default::default()
+        };
+
+        let rows = st.account_rows();
+        assert!(rows[0].sync_state.is_none());
+        let acct2 = rows[1].sync_state.expect("acct-2 has a sync state entry");
+        assert_eq!(acct2.state, 2);
+    }
+
+    #[test]
+    fn every_configured_account_gets_a_row_even_with_no_poll_data_at_all() {
+        let st = AppState {
+            accounts: vec![account("acct-1"), account("acct-2")],
+            ..Default::default()
+        };
+        let rows = st.account_rows();
+        assert_eq!(rows.len(), 2);
     }
 }

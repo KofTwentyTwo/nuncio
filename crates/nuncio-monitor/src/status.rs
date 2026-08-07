@@ -253,7 +253,12 @@ async fn poll_once(
         };
     };
 
-    let mut system_client = connect_system(addr, &token).await.ok();
+    // `StatusPoller::connect` re-resolves the token itself; that duplicate
+    // resolution is cheap (a mocked or keyring-cached read) and keeps this
+    // call site sharing the exact same resolve-then-dial sequence
+    // [`StatusPoller::connect`]'s own tests pin down, rather than
+    // hand-rolling a second copy of it here.
+    let mut system_client = StatusPoller::connect(addr, secrets).await.ok();
 
     let status = match system_client.as_mut() {
         Some(client) => client

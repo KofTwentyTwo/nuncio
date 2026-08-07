@@ -20,8 +20,10 @@ use std::time::{Duration, Instant};
 use fs4::fs_std::FileExt;
 use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
 
-/// Default loopback address `nunciod` binds its gRPC API to.
-const DEFAULT_GRPC_ADDR: &str = "127.0.0.1:9420";
+/// Default loopback address `nunciod` binds its gRPC API to. Shared with
+/// `main`, which dials the same address for the status poller so the
+/// launcher and the poller never disagree about where `nunciod` lives.
+pub(crate) const DEFAULT_GRPC_ADDR: &str = "127.0.0.1:9420";
 
 /// How long [`EngineController::stop`] waits for the daemon to actually exit
 /// (the lock to be released) after `System/Shutdown` returns, before giving
@@ -63,6 +65,29 @@ pub enum EngineState {
     /// controller, the state such a probe reports when the lock is held but
     /// the daemon does not answer.
     NotResponding,
+}
+
+impl EngineState {
+    /// Whether a "Start Engine" control should be enabled for this state.
+    /// Only `Stopped` allows a start -- launching over an already-running
+    /// (or already-launching, or unprobeable) daemon would either do nothing
+    /// useful or race the existing process, so the UI must disable the
+    /// control rather than let a click fail.
+    #[must_use]
+    pub fn allows_start(self) -> bool {
+        matches!(self, EngineState::Stopped)
+    }
+
+    /// Whether a "Stop Engine" control should be enabled for this state.
+    /// `Running` is the ordinary case; `NotResponding` also allows it since
+    /// the lock is genuinely held there and a shutdown request is exactly
+    /// how a wedged daemon might be recovered. `Stopped` and `Starting` have
+    /// no live process to ask, so the control stays disabled rather than
+    /// issuing a shutdown request that can only fail.
+    #[must_use]
+    pub fn allows_stop(self) -> bool {
+        matches!(self, EngineState::Running | EngineState::NotResponding)
+    }
 }
 
 /// Failure modes for [`EngineController::start`] and [`EngineController::stop`].
@@ -115,7 +140,9 @@ pub struct Launcher(Box<dyn Launch>);
 
 impl Launcher {
     /// A launcher that does nothing and always succeeds -- for tests, so no
-    /// real `nunciod.exe` is ever spawned.
+    /// real `nunciod.exe` is ever spawned. Test-only: no production caller
+    /// should ever want a "start" that does not actually start anything.
+    #[cfg(test)]
     pub fn noop() -> Self {
         Launcher(Box::new(NoopLaunch))
     }
@@ -135,8 +162,10 @@ impl Launcher {
     }
 }
 
+#[cfg(test)]
 struct NoopLaunch;
 
+#[cfg(test)]
 impl Launch for NoopLaunch {
     fn spawn(&self) -> Result<(), EngineError> {
         Ok(())
@@ -369,6 +398,22 @@ mod tests {
 
         let _held = nunciod::lock::InstanceLock::acquire(&db).expect("acquire lock");
         assert_ne!(ctl.liveness(), EngineState::Starting);
+    }
+
+    #[test]
+    fn only_stopped_allows_start() {
+        assert!(EngineState::Stopped.allows_start());
+        assert!(!EngineState::Starting.allows_start());
+        assert!(!EngineState::Running.allows_start());
+        assert!(!EngineState::NotResponding.allows_start());
+    }
+
+    #[test]
+    fn running_and_not_responding_allow_stop() {
+        assert!(!EngineState::Stopped.allows_stop());
+        assert!(!EngineState::Starting.allows_stop());
+        assert!(EngineState::Running.allows_stop());
+        assert!(EngineState::NotResponding.allows_stop());
     }
 
     // `stop()` is intentionally not exercised here: it always resolves the
