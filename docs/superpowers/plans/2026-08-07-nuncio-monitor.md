@@ -134,13 +134,25 @@ git commit -m "test: use tracing-test for racy log assertions"
 
 `pending_remote_mutations` today is `id, rule_id, message_id, mutation_type, payload, status, retry_count, created_at` (`crates/nuncio-store/src/db.rs:575`). There is no account column, so per-account outbox counts are not derivable. `messages.account_id` exists (`crates/nuncio-store/src/db.rs:505`), so the backfill joins through `message_id`.
 
+**The migration alone is not sufficient.** Backfilling existing rows fixes history; new mutations would still write `NULL` because the write path has no account in it. All four of these must change together or per-account counts work once and then silently stop:
+
+- `PendingRemoteMutation` (`crates/nuncio-filter/src/ast.rs:322`) has 8 fields and no `account_id`.
+- `outbox::create_mutation` (`crates/nuncio-filter/src/outbox.rs:35`) takes `(rule_id, message_id, action_type, target)` — no account.
+- `DatabaseEngine::save_pending_mutation` (`crates/nuncio-store/src/db.rs:2201`) binds only those 8 columns.
+- Call sites: `crates/nunciod/src/grpc.rs:3654` and `crates/nunciod/src/outbox.rs:608` (both tests), plus the production caller in the filter-action path.
+
 **Files:**
-- Modify: `crates/nuncio-store/src/db.rs` (add method near `ensure_accounts_dav_columns` at line 954; call site at line 753; new query near `count_pending_mutations` at line 464)
-- Test: `crates/nuncio-store/src/db.rs` (inline `mod tests`, following `migrate_backfills_smtp_columns_for_a_pre_existing_accounts_table` at line 3771)
+- Modify: `crates/nuncio-filter/src/ast.rs:322` — add `pub account_id: String`.
+- Modify: `crates/nuncio-filter/src/outbox.rs:35` — add an `account_id` parameter to `create_mutation`, positioned first since it is the broadest scope.
+- Modify: `crates/nuncio-store/src/db.rs` — migration near `ensure_accounts_dav_columns:954`; call site at `:753`; `CREATE TABLE` at `:575`; bind `account_id` in `save_pending_mutation:2201`; new count query near `count_pending_mutations:464`.
+- Modify: call sites listed above.
+- Test: `crates/nuncio-store/src/db.rs` inline `mod tests`, following `migrate_backfills_smtp_columns_for_a_pre_existing_accounts_table:3771`.
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `DatabaseEngine::count_pending_mutations_by_account() -> Result<Vec<(String, u64, u64)>, DatabaseError>` returning `(account_id, pending, failed)`. Task 5 calls this.
+- Produces: `DatabaseEngine::count_pending_mutations_by_account() -> Result<Vec<(String, u64, u64)>, DatabaseError>` returning `(account_id, pending, failed)`, ordered by `account_id`. Task 4 calls this. Also `PendingRemoteMutation.account_id: String` and the new first parameter on `create_mutation`.
+
+**Where the account comes from.** The filter-action path knows the `Email` being acted on, and `Email` carries its account. Thread that value into `create_mutation` rather than re-deriving it from the message id. If the production call site genuinely has no account in scope, STOP and report it — do not pass an empty string, which would silently reproduce the bug this task exists to fix.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -313,20 +325,57 @@ After `count_pending_mutations` at line 464:
     }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 5: Close the write path**
 
-Run: `cargo test -p nuncio-store migrate_backfills_account_id_on_a_pre_existing_outbox_table`
+Add `pub account_id: String` to `PendingRemoteMutation`, add `account_id: impl Into<String>` as the first parameter of `create_mutation`, set the field in the struct literal there, bind it in `save_pending_mutation`'s `INSERT` (add `account_id` to both the column list and the `VALUES` placeholders, and add `.bind(&item.account_id)` in matching position), and update every call site.
+
+Add a test proving a freshly saved mutation is attributable:
+
+```rust
+#[tokio::test]
+async fn a_newly_saved_mutation_is_attributed_to_its_account() {
+    let (engine, _dir) = DatabaseEngine::connect_ephemeral()
+        .await
+        .expect("ephemeral db");
+
+    let mutation = nuncio_filter::outbox::OutboxBuilder::create_mutation(
+        "acct-B",
+        "rule-1",
+        "msg-9",
+        "MOVE",
+        Some("Archive".to_string()),
+    );
+    engine
+        .save_pending_mutation(&mutation)
+        .await
+        .expect("save mutation");
+
+    let counts = engine
+        .count_pending_mutations_by_account()
+        .await
+        .expect("counts");
+
+    assert_eq!(counts, vec![("acct-B".to_string(), 1, 0)]);
+}
+```
+
+Adjust the `create_mutation` path prefix to whatever type actually owns it in `crates/nuncio-filter/src/outbox.rs`.
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `cargo test -p nuncio-store migrate_backfills_account_id_on_a_pre_existing_outbox_table && cargo test -p nuncio-store a_newly_saved_mutation_is_attributed_to_its_account`
 Expected: PASS.
 
-- [ ] **Step 6: Run the full gate**
+- [ ] **Step 7: Run the full gate**
 
 Run: `cargo fmt --all -- --check && cargo check-all && cargo test-all`
-Expected: all green, 596+ tests passing.
+Expected: all green, 598+ tests passing (596 before this branch, plus your two new ones).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add crates/nuncio-store/src/db.rs
+git add crates/nuncio-filter/src/ast.rs crates/nuncio-filter/src/outbox.rs \
+        crates/nuncio-store/src/db.rs crates/nunciod/src
 git commit -m "feat(store): attribute outbox mutations to an account"
 ```
 
@@ -603,17 +652,97 @@ git commit -m "feat(cli): add system shutdown command"
 
 - [ ] **Step 1: Write the failing test**
 
+Mirror the seeding in the existing `get_status_reports_live_accounts_and_outbox_depth` (`crates/nunciod/src/grpc.rs:3640`); it already builds accounts and outbox rows the same way.
+
 ```rust
-#[tokio::test]
-async fn get_health_reports_per_account_queue_depth() {
-    // Seed two accounts, one with 2 pending and 1 failed mutation, one with none.
-    // Call GetHealth with a valid token.
-    // Assert both accounts appear, with exact pending/failed counts, and that
-    // an account with no queued work is present with zeros rather than absent.
-}
+    #[tokio::test]
+    async fn get_health_reports_per_account_queue_depth() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+
+        for id in ["acct-q1", "acct-q2"] {
+            let account = nuncio_core::AccountConfig {
+                id: id.to_string(),
+                name: "Queue".to_string(),
+                email_address: format!("{id}@nuncio.mx"),
+                keyring_secret_key: format!("nuncio/{id}"),
+                sync_interval_secs: 60,
+                transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+                    endpoint_host: "jmap.nuncio.mx".to_string(),
+                }),
+            };
+            db.save_account(&account).await.expect("save account");
+        }
+
+        // acct-q1: two pending, one failed. acct-q2: nothing queued.
+        for (id, status) in [
+            ("mut-p1", "pending"),
+            ("mut-p2", "pending"),
+            ("mut-f1", "failed"),
+        ] {
+            db.save_pending_mutation(&nuncio_filter::PendingRemoteMutation {
+                id: id.to_string(),
+                account_id: "acct-q1".to_string(),
+                rule_id: "rule-1".to_string(),
+                message_id: format!("msg-{id}"),
+                mutation_type: "MOVE".to_string(),
+                payload: "{}".to_string(),
+                status: status.to_string(),
+                retry_count: 0,
+                created_at: 0,
+            })
+            .await
+            .expect("save mutation");
+        }
+
+        let event_bus = Arc::new(EventBus::new());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let secrets = Arc::new(SecretManager::mock());
+        let (addr, _handle) = spawn_test_server_with(
+            event_bus,
+            db,
+            filter_engine,
+            secrets,
+            "correct-token",
+        )
+        .await;
+
+        let mut client = nuncio_proto::client::connect_system(
+            &format!("http://{addr}"),
+            "correct-token",
+        )
+        .await
+        .expect("connect");
+
+        let health = client
+            .get_health(GetHealthRequest {})
+            .await
+            .expect("get_health")
+            .into_inner();
+
+        let q1 = health
+            .account_queues
+            .iter()
+            .find(|q| q.account_id == "acct-q1")
+            .expect("acct-q1 must be reported");
+        assert_eq!(q1.pending, 2);
+        assert_eq!(q1.failed, 1);
+
+        // An account with nothing queued must be PRESENT with zeros, never
+        // omitted: absent and idle must not look the same to a client.
+        let q2 = health
+            .account_queues
+            .iter()
+            .find(|q| q.account_id == "acct-q2")
+            .expect("an idle account must still be reported");
+        assert_eq!(q2.pending, 0);
+        assert_eq!(q2.failed, 0);
+    }
 ```
 
-Fill the body using `spawn_test_server_with` (`crates/nunciod/src/grpc.rs:3392`) so you can inject a seeded `DatabaseEngine`.
+Note the assertion on `acct-q2`: `count_pending_mutations_by_account` only returns rows that exist in `pending_remote_mutations`, so the handler must join against the configured account list to emit zero rows for idle accounts. If you implement it as a straight pass-through of the store query, this test fails — that is intentional.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -677,7 +806,138 @@ git commit -m "feat(proto): add System.GetHealth operational surface"
 
 - [ ] **Step 1: Write the failing E2E**
 
-Create `crates/nunciod/tests/health_e2e_test.rs` asserting an authenticated `GetHealth` returns the seeded per-account depths, and that an unauthenticated call is rejected with `Unauthenticated`.
+Create `crates/nunciod/tests/health_e2e_test.rs`. Use `crates/nunciod/tests/graceful_shutdown_test.rs` as the harness reference for token minting and server startup.
+
+```rust
+//! Offline E2E for `System.GetHealth`: real gRPC over loopback, real store,
+//! mock keyring. No network beyond 127.0.0.1.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use nuncio_core::EventBus;
+use nuncio_filter::FilterEngine;
+use nuncio_proto::v1::GetHealthRequest;
+use nuncio_store::db::DatabaseEngine;
+use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
+use std::sync::Arc;
+use tokio::net::TcpListener;
+
+#[tokio::test]
+async fn authenticated_get_health_reports_seeded_queue_depth() {
+    let secrets = Arc::new(SecretManager::mock());
+    let token = hex::encode(
+        secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .expect("token provisioned from mock vault"),
+    );
+    let (db, _dir) = DatabaseEngine::connect_ephemeral()
+        .await
+        .expect("connect ephemeral test db");
+    let db = Arc::new(db);
+
+    let account = nuncio_core::AccountConfig {
+        id: "acct-e2e".to_string(),
+        name: "E2E".to_string(),
+        email_address: "e2e@nuncio.mx".to_string(),
+        keyring_secret_key: "nuncio/acct-e2e".to_string(),
+        sync_interval_secs: 60,
+        transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+            endpoint_host: "jmap.nuncio.mx".to_string(),
+        }),
+    };
+    db.save_account(&account).await.expect("save account");
+
+    db.save_pending_mutation(&nuncio_filter::PendingRemoteMutation {
+        id: "mut-e2e".to_string(),
+        account_id: "acct-e2e".to_string(),
+        rule_id: "rule-1".to_string(),
+        message_id: "msg-1".to_string(),
+        mutation_type: "MOVE".to_string(),
+        payload: "{}".to_string(),
+        status: "pending".to_string(),
+        retry_count: 0,
+        created_at: 0,
+    })
+    .await
+    .expect("save mutation");
+
+    let event_bus = Arc::new(EventBus::new());
+    let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral loopback port");
+    let addr = listener.local_addr().expect("listener has local addr");
+
+    tokio::spawn(nunciod::grpc::serve_on_listener(
+        listener,
+        event_bus,
+        db,
+        filter_engine,
+        secrets,
+        token.clone(),
+    ));
+
+    let mut client = nuncio_proto::client::connect_system(&format!("http://{addr}"), &token)
+        .await
+        .expect("connect");
+
+    let health = client
+        .get_health(GetHealthRequest {})
+        .await
+        .expect("get_health")
+        .into_inner();
+
+    let queue = health
+        .account_queues
+        .iter()
+        .find(|q| q.account_id == "acct-e2e")
+        .expect("seeded account must be reported");
+    assert_eq!(queue.pending, 1);
+    assert_eq!(queue.failed, 0);
+}
+
+#[tokio::test]
+async fn unauthenticated_get_health_is_rejected() {
+    let secrets = Arc::new(SecretManager::mock());
+    let token = hex::encode(
+        secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .expect("token provisioned from mock vault"),
+    );
+    let (db, _dir) = DatabaseEngine::connect_ephemeral()
+        .await
+        .expect("connect ephemeral test db");
+    let event_bus = Arc::new(EventBus::new());
+    let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral loopback port");
+    let addr = listener.local_addr().expect("listener has local addr");
+
+    tokio::spawn(nunciod::grpc::serve_on_listener(
+        listener,
+        event_bus,
+        Arc::new(db),
+        filter_engine,
+        secrets,
+        token,
+    ));
+
+    let mut client =
+        nuncio_proto::v1::system_client::SystemClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect");
+
+    let status = client
+        .get_health(GetHealthRequest {})
+        .await
+        .expect_err("must reject unauthenticated GetHealth");
+
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+}
+```
+
+If `serve_on_listener`'s argument list differs after Task 2's controller threading, match whatever signature exists then; `graceful_shutdown_test.rs` is the live reference.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -830,10 +1090,42 @@ Implement parsing with `serde_json::Value` so an unexpected shape degrades to `R
 ```rust
 #[test]
 fn rotating_to_a_new_dated_file_continues_the_tail() {
-    // Write nunciod.log.2026-08-07, poll, then write nunciod.log.2026-08-08
-    // and poll again; assert records from both files are returned in order.
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let day_one = dir.path().join("nunciod.log.2026-08-07");
+    let mut f1 = std::fs::File::create(&day_one).expect("create day one");
+    writeln!(f1, r#"{{"level":"INFO","fields":{{"message":"first"}}}}"#).expect("write");
+    f1.flush().expect("flush");
+
+    let mut tailer = LogTailer::new(dir.path().to_path_buf());
+
+    // First poll establishes the position; a tailer seeks to end on open, so
+    // pre-existing history is deliberately NOT replayed.
+    let _ = tailer.poll();
+
+    writeln!(f1, r#"{{"level":"WARN","fields":{{"message":"second"}}}}"#).expect("write");
+    f1.flush().expect("flush");
+    let batch = tailer.poll();
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].message, "second");
+
+    // Rotation: a newer dated file appears. The tailer must switch to it and
+    // read from its start, not stay pinned to the previous day.
+    let day_two = dir.path().join("nunciod.log.2026-08-08");
+    let mut f2 = std::fs::File::create(&day_two).expect("create day two");
+    writeln!(f2, r#"{{"level":"ERROR","fields":{{"message":"third"}}}}"#).expect("write");
+    f2.flush().expect("flush");
+
+    let batch = tailer.poll();
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].message, "third");
+    assert_eq!(batch[0].level, "ERROR");
 }
 ```
+
+`LogTailer` must therefore select the lexicographically greatest `nunciod.log.*` in the directory on each poll rather than caching one handle forever. Dates are ISO-8601, so lexicographic order is chronological order.
 
 - [ ] **Step 5: Handle a missing log directory honestly**
 
@@ -882,10 +1174,32 @@ fn no_lock_file_means_stopped() {
 
 #[test]
 fn a_held_lock_file_means_not_stopped() {
-    // Create <db>.lock and hold an exclusive OS lock on it, then assert
-    // liveness() is not Stopped.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("nuncio.db");
+
+    // Hold the lock exactly as the daemon does, via the same type, so this
+    // test breaks if the daemon's locking strategy ever changes.
+    let _held = nunciod::lock::InstanceLock::acquire(&db).expect("acquire lock");
+
+    let ctl = EngineController::new(db, Launcher::noop());
+    assert_ne!(ctl.liveness(), EngineState::Stopped);
+}
+
+#[test]
+fn a_released_lock_returns_to_stopped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("nuncio.db");
+
+    {
+        let _held = nunciod::lock::InstanceLock::acquire(&db).expect("acquire lock");
+    } // guard dropped: the OS releases the lock here
+
+    let ctl = EngineController::new(db, Launcher::noop());
+    assert_eq!(ctl.liveness(), EngineState::Stopped);
 }
 ```
+
+Using `nunciod::lock::InstanceLock` in the test means adding `nunciod` as a **dev-dependency** of `nuncio-monitor`, not a regular one. The monitor's production code must not depend on the daemon crate; it detects the lock by attempting its own advisory lock on `<db_path>.lock`. If pulling `nunciod` in as a dev-dependency creates a dependency cycle, STOP and report it rather than weakening the test to a file-existence check — a lock file can exist without being held, and the two states must not be conflated.
 
 - [ ] **Step 2: Run them to verify they fail**
 
