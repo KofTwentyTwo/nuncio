@@ -168,11 +168,11 @@ impl TrayController {
     /// (avoids rebuilding the icon image every frame for no reason).
     ///
     /// Returns `Some(message)` when the icon could not be rebuilt or applied
-    /// -- `tracing::warn!` alone is not enough here, since this crate's
-    /// `main.rs` never installs a `tracing-subscriber`-backed sink the user
-    /// would see; the caller is expected to surface the message into
-    /// [`crate::state::AppState::last_error`] so the failure is not silently
-    /// discarded.
+    /// -- `tracing::warn!` alone is not enough here, since the installed
+    /// `tracing-subscriber` sink writes to stderr, which this GUI app has no
+    /// visible console for; the caller is expected to surface the message
+    /// into [`crate::state::AppState::last_error`] so the failure is not
+    /// silently discarded.
     #[must_use]
     pub fn set_engine_state(&mut self, state: EngineState) -> Option<String> {
         self.start_item.set_enabled(state.allows_start());

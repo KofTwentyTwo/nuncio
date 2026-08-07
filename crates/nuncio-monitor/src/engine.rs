@@ -441,6 +441,7 @@ mod tests {
         assert!(!EngineState::Starting.allows_start());
         assert!(!EngineState::Running.allows_start());
         assert!(!EngineState::NotResponding.allows_start());
+        assert!(!EngineState::Unknown.allows_start());
     }
 
     #[test]
@@ -449,6 +450,7 @@ mod tests {
         assert!(!EngineState::Starting.allows_stop());
         assert!(EngineState::Running.allows_stop());
         assert!(EngineState::NotResponding.allows_stop());
+        assert!(!EngineState::Unknown.allows_stop());
     }
 
     // `stop()` is intentionally not exercised end-to-end here: it always
