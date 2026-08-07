@@ -569,6 +569,7 @@ impl HeadlessRunner {
             },
             Commands::System { action } => match action {
                 SystemSubcommand::Status => self.handle_system_status(json_mode).await,
+                SystemSubcommand::Shutdown => self.handle_system_shutdown(json_mode).await,
                 SystemSubcommand::Audit { action } => match action {
                     AuditSubcommand::List { page_size } => {
                         self.handle_audit_list(*page_size, json_mode).await
@@ -2747,6 +2748,45 @@ impl HeadlessRunner {
 
         Ok(response)
     }
+
+    /// `system shutdown`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.System` API. Resolves the bearer token from the
+    /// injected `SecretManager`, dials the configured gRPC daemon address via
+    /// `nuncio_proto::client::connect_system`, and calls `Shutdown`. If the
+    /// daemon is unreachable or rejects the call, this returns a clear,
+    /// honest error -- it never prints a success message for a failed call.
+    /// The RPC returning `Ok` only means shutdown was *requested*, not that
+    /// the daemon has exited yet.
+    async fn handle_system_shutdown(&self, json_mode: bool) -> String {
+        let token_bytes = match self
+            .secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))
+        {
+            Ok(bytes) => bytes,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+        let token = hex::encode(token_bytes);
+
+        let mut client = match nuncio_proto::client::connect_system(&self.grpc_addr, &token)
+            .await
+            .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
+        {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client.shutdown(nuncio_proto::v1::ShutdownRequest {}).await {
+            Ok(_) => {
+                if json_mode {
+                    format_json(&json!({ "requested": true }))
+                } else {
+                    "Shutdown requested.".to_string()
+                }
+            }
+            Err(status) => Self::render_status_error("shutdown", &status, json_mode),
+        }
+    }
 }
 
 /// Maps a `nuncio.v1.SyncState` wire discriminant onto a short human label
@@ -3020,17 +3060,15 @@ mod tests {
                 ))
             }
 
-            // `Shutdown` is exercised by `nunciod`'s own `grpc::tests`; this
-            // stub only needs to satisfy the trait so the CLI's `GetStatus`
-            // happy path above can compile against the real `System` service
-            // definition.
+            // Whether the daemon actually stops after `Shutdown` is proven by
+            // `nunciod`'s `shutdown_e2e_test`; this stub only needs to prove
+            // the CLI's connect + call + JSON-format happy path for the
+            // request/response round trip, so it just acknowledges the call.
             async fn shutdown(
                 &self,
                 _request: tonic::Request<ShutdownRequest>,
             ) -> Result<tonic::Response<ShutdownResponse>, tonic::Status> {
-                Err(tonic::Status::unimplemented(
-                    "shutdown is not exercised by this stub",
-                ))
+                Ok(tonic::Response::new(ShutdownResponse {}))
             }
         }
 
@@ -3078,6 +3116,61 @@ mod tests {
             .await;
         assert!(text_out.contains("Ready"));
         assert!(text_out.contains("9.9.9"));
+
+        // `system shutdown` against the same stub: proves the CLI's connect
+        // + call + response-format happy path. Whether a real daemon
+        // actually stops serving is proven by `nunciod`'s
+        // `shutdown_e2e_test`, not here.
+        let shutdown_json = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Shutdown,
+                },
+                true,
+            )
+            .await;
+        assert!(shutdown_json.contains(r#""status":"ok""#));
+        assert!(shutdown_json.contains(r#""requested":true"#));
+
+        let shutdown_text = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Shutdown,
+                },
+                false,
+            )
+            .await;
+        assert!(shutdown_text.contains("Shutdown requested"));
+    }
+
+    #[tokio::test]
+    async fn system_shutdown_reports_honest_error_when_daemon_unreachable() {
+        let addr = reserve_unreachable_addr().await;
+        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
+            .await
+            .expect("ephemeral runner initializes");
+
+        let json_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Shutdown,
+                },
+                true,
+            )
+            .await;
+        assert!(json_out.contains(r#""status":"error""#));
+        assert!(json_out.contains("unreachable"));
+
+        let text_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Shutdown,
+                },
+                false,
+            )
+            .await;
+        assert!(text_out.starts_with("Error: "));
+        assert!(text_out.contains("unreachable"));
     }
 
     /// Reference-client proof: boots a stub `nuncio.v1.Accounts` gRPC server (mirroring

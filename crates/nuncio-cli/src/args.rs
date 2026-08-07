@@ -441,6 +441,8 @@ pub enum CalSubcommand {
 pub enum SystemSubcommand {
     /// Display system, daemon, and event bus status.
     Status,
+    /// Request a graceful shutdown of the running daemon.
+    Shutdown,
     /// WORM (Write Once, Read Many) tamper-evident audit ledger operations
     /// (`nuncio system audit <verb>`).
     Audit {
@@ -715,6 +717,17 @@ mod tests {
             "inbox",
         ]);
         assert!(conflict.is_err());
+    }
+
+    #[test]
+    fn parse_pure_noun_verb_system_shutdown_command() {
+        let cli_shutdown = Cli::parse_from(["nuncio", "system", "shutdown"]);
+        assert_eq!(
+            cli_shutdown.command,
+            Commands::System {
+                action: SystemSubcommand::Shutdown
+            }
+        );
     }
 
     #[test]
