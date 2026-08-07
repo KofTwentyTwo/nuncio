@@ -441,6 +441,9 @@ pub enum CalSubcommand {
 pub enum SystemSubcommand {
     /// Display system, daemon, and event bus status.
     Status,
+    /// Display operational depth: per-account outbox backlog and database
+    /// size signals.
+    Health,
     /// Request a graceful shutdown of the running daemon.
     Shutdown,
     /// WORM (Write Once, Read Many) tamper-evident audit ledger operations
@@ -726,6 +729,17 @@ mod tests {
             cli_shutdown.command,
             Commands::System {
                 action: SystemSubcommand::Shutdown
+            }
+        );
+    }
+
+    #[test]
+    fn parse_pure_noun_verb_system_health_command() {
+        let cli_health = Cli::parse_from(["nuncio", "system", "health"]);
+        assert_eq!(
+            cli_health.command,
+            Commands::System {
+                action: SystemSubcommand::Health
             }
         );
     }

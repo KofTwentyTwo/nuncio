@@ -305,6 +305,27 @@ fn filter_execution_log_proto_to_json(
     })
 }
 
+/// Renders a `nuncio.v1.AccountQueueDepth` (as returned by the daemon's
+/// `nuncio.v1.System/GetHealth` RPC) into the JSON shape used by `system
+/// health --json`.
+///
+/// `pending` and `failed` are always emitted as separate fields, never
+/// summed: a merged total would hide a stuck queue behind a healthy-looking
+/// figure. An empty `account_id` is a known orphan bucket (mutations whose
+/// message row was deleted) rather than a real configured account, so it is
+/// rendered as `account_id: null` plus an explicit `orphaned: true` flag --
+/// never as a bare empty string, which could otherwise be mistaken for an
+/// oddly-named real account.
+fn account_queue_depth_to_json(queue: &nuncio_proto::v1::AccountQueueDepth) -> serde_json::Value {
+    let orphaned = queue.account_id.is_empty();
+    json!({
+        "account_id": if orphaned { serde_json::Value::Null } else { json!(queue.account_id) },
+        "orphaned": orphaned,
+        "pending": queue.pending,
+        "failed": queue.failed,
+    })
+}
+
 /// Errors emitted by the CLI headless runner.
 #[derive(Error, Debug)]
 pub enum RunnerError {
@@ -569,6 +590,7 @@ impl HeadlessRunner {
             },
             Commands::System { action } => match action {
                 SystemSubcommand::Status => self.handle_system_status(json_mode).await,
+                SystemSubcommand::Health => self.handle_system_health(json_mode).await,
                 SystemSubcommand::Shutdown => self.handle_system_shutdown(json_mode).await,
                 SystemSubcommand::Audit { action } => match action {
                     AuditSubcommand::List { page_size } => {
@@ -2787,6 +2809,87 @@ impl HeadlessRunner {
             Err(status) => Self::render_status_error("shutdown", &status, json_mode),
         }
     }
+
+    /// `system health`: a real thin gRPC client of the running `nunciod`
+    /// daemon's `nuncio.v1.System` API. Resolves the bearer token from the
+    /// injected `SecretManager`, dials the configured gRPC daemon address via
+    /// `nuncio_proto::client::connect_system`, and calls `GetHealth`. If the
+    /// daemon is unreachable or rejects the call, this returns a clear,
+    /// honest error -- it never fabricates queue depths or a healthy WAL.
+    ///
+    /// `pending` and `failed` are always rendered as separate figures per
+    /// account (see [`account_queue_depth_to_json`]), an account with an
+    /// empty outbox still appears with explicit zeros, and the daemon's
+    /// empty-string orphan bucket is rendered distinctly from a real
+    /// account.
+    async fn handle_system_health(&self, json_mode: bool) -> String {
+        let token_bytes = match self
+            .secrets
+            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))
+        {
+            Ok(bytes) => bytes,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+        let token = hex::encode(token_bytes);
+
+        let mut client = match nuncio_proto::client::connect_system(&self.grpc_addr, &token)
+            .await
+            .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
+        {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        match client
+            .get_health(nuncio_proto::v1::GetHealthRequest {})
+            .await
+        {
+            Ok(response) => {
+                let health = response.into_inner();
+                if json_mode {
+                    let queues: Vec<serde_json::Value> = health
+                        .account_queues
+                        .iter()
+                        .map(account_queue_depth_to_json)
+                        .collect();
+                    format_json(&json!({
+                        "account_queues": queues,
+                        "wal_size_bytes": health.wal_size_bytes,
+                        "db_healthy": health.db_healthy,
+                    }))
+                } else {
+                    let mut out = format!(
+                        "Database: {}  WAL size: {} bytes\n",
+                        if health.db_healthy {
+                            "healthy"
+                        } else {
+                            "UNHEALTHY"
+                        },
+                        health.wal_size_bytes
+                    );
+                    if health.account_queues.is_empty() {
+                        out.push_str("  outbox queues: <none>");
+                    } else {
+                        out.push_str("  outbox queues:");
+                        for q in &health.account_queues {
+                            let label = if q.account_id.is_empty() {
+                                "<orphaned mutations>".to_string()
+                            } else {
+                                q.account_id.clone()
+                            };
+                            out.push_str(&format!(
+                                "\n    {label}: pending={} failed={}",
+                                q.pending, q.failed
+                            ));
+                        }
+                    }
+                    out
+                }
+            }
+            Err(status) => Self::render_status_error("get_health", &status, json_mode),
+        }
+    }
 }
 
 /// Maps a `nuncio.v1.SyncState` wire discriminant onto a short human label
@@ -3060,19 +3163,41 @@ mod tests {
                 ))
             }
 
-            // `GetHealth` is exercised by `nunciod`'s own `grpc::tests`; this
-            // stub only needs to satisfy the trait so the CLI's `GetStatus`
-            // happy path above can compile against the real `System` service
-            // definition, so it deliberately returns `unimplemented` rather
-            // than fabricating health data no test here relies on.
+            // Real per-account queue depths, on the same fixed footing as
+            // `get_status` above: this proves the CLI's connect + call +
+            // render path for `system health`, including an account with
+            // nothing queued (must still render, with zeros -- absent and
+            // idle must not look the same) and the empty-string orphan
+            // bucket (mutations whose message row was deleted). Whether the
+            // daemon computes these numbers correctly against a real store
+            // is proven by `nunciod`'s own `grpc::tests` and
+            // `health_e2e_test`.
             async fn get_health(
                 &self,
                 _request: tonic::Request<nuncio_proto::v1::GetHealthRequest>,
             ) -> Result<tonic::Response<nuncio_proto::v1::GetHealthResponse>, tonic::Status>
             {
-                Err(tonic::Status::unimplemented(
-                    "get_health is not exercised by this stub",
-                ))
+                Ok(tonic::Response::new(nuncio_proto::v1::GetHealthResponse {
+                    account_queues: vec![
+                        nuncio_proto::v1::AccountQueueDepth {
+                            account_id: "acct-1".to_string(),
+                            pending: 3,
+                            failed: 1,
+                        },
+                        nuncio_proto::v1::AccountQueueDepth {
+                            account_id: "acct-idle".to_string(),
+                            pending: 0,
+                            failed: 0,
+                        },
+                        nuncio_proto::v1::AccountQueueDepth {
+                            account_id: String::new(),
+                            pending: 2,
+                            failed: 0,
+                        },
+                    ],
+                    wal_size_bytes: 4096,
+                    db_healthy: true,
+                }))
             }
 
             // Whether the daemon actually stops after `Shutdown` is proven by
@@ -3156,6 +3281,82 @@ mod tests {
             )
             .await;
         assert!(shutdown_text.contains("Shutdown requested"));
+
+        // `system health` against the same stub: proves the CLI's connect +
+        // call + render path, that `pending`/`failed` are rendered as
+        // SEPARATE values (never summed), that an account with nothing
+        // queued still appears with explicit zeros, and that the
+        // empty-string orphan bucket is rendered so it cannot be mistaken
+        // for a real configured account.
+        let health_json = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Health,
+                },
+                true,
+            )
+            .await;
+        assert!(health_json.contains(r#""status":"ok""#));
+        assert!(health_json.contains(r#""wal_size_bytes":4096"#));
+        assert!(health_json.contains(r#""db_healthy":true"#));
+        assert!(health_json.contains(r#""account_id":"acct-1""#));
+        assert!(health_json.contains(r#""pending":3"#));
+        assert!(health_json.contains(r#""failed":1"#));
+        assert!(health_json.contains(r#""account_id":"acct-idle""#));
+        assert!(health_json.contains(r#""pending":0"#));
+        assert!(health_json.contains(r#""failed":0"#));
+        // The orphan bucket's account_id is empty; it must be flagged, not
+        // rendered as a bare empty string indistinguishable from a real
+        // (if oddly-named) account.
+        assert!(health_json.contains(r#""orphaned":true"#));
+        assert!(health_json.contains(r#""account_id":null"#));
+
+        let health_text = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Health,
+                },
+                false,
+            )
+            .await;
+        assert!(health_text.contains("acct-1"));
+        assert!(health_text.contains("pending=3"));
+        assert!(health_text.contains("failed=1"));
+        assert!(health_text.contains("acct-idle"));
+        assert!(health_text.contains("pending=0"));
+        assert!(health_text.contains("failed=0"));
+        assert!(health_text.contains("<orphaned mutations>"));
+        assert!(!health_text.contains("\n    : "));
+    }
+
+    #[tokio::test]
+    async fn system_health_reports_honest_error_when_daemon_unreachable() {
+        let addr = reserve_unreachable_addr().await;
+        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
+            .await
+            .expect("ephemeral runner initializes");
+
+        let json_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Health,
+                },
+                true,
+            )
+            .await;
+        assert!(json_out.contains(r#""status":"error""#));
+        assert!(json_out.contains("unreachable"));
+
+        let text_out = runner
+            .execute_command(
+                &Commands::System {
+                    action: SystemSubcommand::Health,
+                },
+                false,
+            )
+            .await;
+        assert!(text_out.starts_with("Error: "));
+        assert!(text_out.contains("unreachable"));
     }
 
     #[tokio::test]
