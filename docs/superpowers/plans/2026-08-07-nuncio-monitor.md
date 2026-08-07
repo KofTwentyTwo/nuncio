@@ -516,7 +516,11 @@ Add the handler inside `impl System for SystemGrpcService`:
 | `serve_on_listener_with_overrides` | 2915 | No — pass `None` |
 | `serve_on_listener_with_overrides_and_shutdown` | 2963 | **Yes** |
 
-Thread `Option<Arc<ShutdownController>>` through the three shutdown-aware entry points; the other three pass `None`. That asymmetry is exactly why the field is an `Option` and why the handler returns `Unavailable` instead of fabricating success when unwired.
+**As implemented** (refined during Task 2 and accepted at review): the two outer shutdown-aware entry points, `serve_with_shutdown` and `serve_on_listener_with_shutdown`, take `shutdown_controller: Arc<ShutdownController>` **required**. Only the innermost `serve_on_listener_with_overrides_and_shutdown` carries `Option<Arc<ShutdownController>>`, and that Option is what reaches `SystemGrpcService`.
+
+This is stricter than the original design and deliberately so: a function named `..._with_shutdown` that could be handed no controller represents an invalid state — a shutdown-aware server with no way to shut down. Requiring the `Arc` makes that unrepresentable at compile time instead of deferring it to a runtime `Unavailable`. The three non-shutdown entry points still pass `None`, which is why the field on the service stays an `Option` and why the handler returns `Unavailable` rather than fabricating success when unwired.
+
+It is a breaking change to two `pub` signatures, accepted because the crate is pre-1.0 with no out-of-tree consumers and both in-tree callers were updated.
 
 **`serve_with_shutdown` is the one production uses** (`crates/nunciod/src/main.rs:288`). Wiring only `serve_on_listener_with_overrides` would leave the real daemon returning `Unavailable` while every test passed.
 
@@ -539,8 +543,11 @@ Expected: PASS, including the contract-stability golden.
 
 - [ ] **Step 8: Commit**
 
+Adding a required method to the `System` trait and changing two serve signatures forces two more files into the same commit: `crates/nuncio-cli/src/runner.rs` (its test-only `StubSystem` needs a `shutdown` stub, mirroring the existing `subscribe` stub) and `crates/nunciod/tests/graceful_shutdown_test.rs` (its controller must be wrapped in `Arc`). Both are compile-fallout, not scope.
+
 ```bash
-git add crates/nuncio-proto crates/nunciod/src/grpc.rs crates/nunciod/src/main.rs
+git add crates/nuncio-proto crates/nunciod/src/grpc.rs crates/nunciod/src/main.rs \
+        crates/nuncio-cli/src/runner.rs crates/nunciod/tests/graceful_shutdown_test.rs
 git commit -m "feat(proto): add System.Shutdown for graceful stop"
 ```
 
