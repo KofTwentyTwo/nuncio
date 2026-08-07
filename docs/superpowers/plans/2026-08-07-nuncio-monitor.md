@@ -1275,7 +1275,9 @@ git commit -m "feat(monitor): detect engine liveness and control lifecycle"
 
 **Interfaces:**
 - Consumes: `nuncio_proto::client::connect_system`, `connect_accounts`; `System/GetStatus`, `System/GetHealth`, `System/Subscribe`, `Accounts/ListAccounts`; `nuncio_store::vault::GRPC_TOKEN_ACCOUNT` (`"grpc-bearer-token"`).
-- Produces: `StatusPoller::spawn(addr, secrets) -> mpsc::Receiver<StatusUpdate>` where `StatusUpdate` carries `Option<GetStatusResponse>`, `Option<GetHealthResponse>`, `Vec<AccountConfig>`, and a `stream_stale: bool`.
+- Produces: `StatusPoller::spawn(addr, secrets, lock_state) -> mpsc::Receiver<StatusUpdate>` where `lock_state: impl Fn() -> EngineState` supplies the advisory-lock signal, and `StatusUpdate` carries `Option<GetStatusResponse>`, `Option<GetHealthResponse>`, `Vec<AccountConfig>`, a `stream_stale: bool`, and the composite engine state.
+
+**The third parameter is required, not optional.** Step 5 makes this component own the composite state, which needs both the lock signal and RPC reachability. A two-argument signature cannot see the lock at all, so `NotResponding` would stay unreachable. Passing it as a closure keeps the poller testable without a real lock file.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1349,10 +1351,38 @@ git commit -m "feat(monitor): poll daemon status and follow the event stream"
 - Create: `crates/nuncio-monitor/src/state.rs`
 
 **Interfaces:**
-- Consumes: `LogRecord` (Task 7), `EngineState` (Task 8), `StatusUpdate` (Task 9).
-- Produces: `AppState` with `engine: EngineState`, `status: Option<GetStatusResponse>`, `health: Option<GetHealthResponse>`, `accounts: Vec<AccountConfig>`, `logs: VecDeque<LogRecord>`, `log_filter: LogFilter`, `stream_stale: bool`; and `AppState::visible_logs(&self) -> Vec<&LogRecord>`.
+- Consumes: `LogRecord` (Task 7, in `log_tail.rs`), `EngineState` (Task 8, in `engine.rs`), `StatusUpdate` and the composite engine state (Task 9, in `status.rs`).
+- Produces: `AppState` with `engine: EngineState`, `status: Option<GetStatusResponse>`, `health: Option<GetHealthResponse>`, `accounts: Vec<AccountConfig>`, `logs: VecDeque<LogRecord>`, `log_filter: LogFilter`, `stream_stale: bool`; plus `AppState::MAX_LOG_LINES`, `AppState::push_log(&mut self, LogRecord)`, and `AppState::visible_logs(&self) -> Vec<&LogRecord>`.
+
+**Use Task 9's composite engine state, not `EngineController::liveness()` directly.** `liveness()` reports only what the advisory lock knows and can never yield `NotResponding` for a wedged daemon; Task 9 combines it with RPC reachability. Storing the raw lock signal here would make a hung daemon render as cleanly `Running`.
 
 - [ ] **Step 1: Write the failing filter tests**
+
+The tests below use two helpers that do not exist yet. Write them in the same `#[cfg(test)] mod tests`. `LogRecord`'s real shape, as implemented, is `{ timestamp: String, level: String, target: String, request_id: Option<String>, message: String, raw: String }`:
+
+```rust
+fn rec_with_request_id(id: &str) -> LogRecord {
+    LogRecord {
+        timestamp: "2026-08-07T12:00:00Z".to_string(),
+        level: "INFO".to_string(),
+        target: "nunciod".to_string(),
+        request_id: Some(id.to_string()),
+        message: "test".to_string(),
+        raw: String::new(),
+    }
+}
+
+fn rec_with_message(message: &str) -> LogRecord {
+    LogRecord {
+        timestamp: "2026-08-07T12:00:00Z".to_string(),
+        level: "INFO".to_string(),
+        target: "nunciod".to_string(),
+        request_id: None,
+        message: message.to_string(),
+        raw: String::new(),
+    }
+}
+```
 
 ```rust
 #[test]
@@ -1406,7 +1436,19 @@ git commit -m "feat(monitor): add bounded, filterable application state"
 
 Icon plus menu: Show, Start Engine, Stop Engine, Quit. Icon colour encodes `EngineState`. Start and Stop are disabled when not applicable rather than failing when clicked.
 
-**Event-loop hazard, read before writing code.** On Windows, `tray-icon` needs a Win32 message pump on the thread that created the icon, and `eframe`/`winit` owns the event loop. Create the tray **after** the event loop is running, on the event-loop thread, and route menu activations through winit's user-event proxy. Do **not** spawn a second event loop on a side thread: it appears to work, then drops menu events or deadlocks under load, presenting as "the window is fine but the tray menu is dead". If the resolved `tray-icon` version cannot cohabit with the resolved `eframe`, STOP and report rather than working around it with a second loop.
+**Event-loop constraints, quoted from `tray-icon`'s own docs** (`tray-icon-0.24/src/lib.rs:17-18`), not general advice:
+
+> "On Windows and Linux, an event loop must be running on the thread, on Windows, a win32 event loop... It doesn't need to be the main thread but **you have to create the tray icon on the same thread as the event loop**."
+
+> "On macOS, an event loop must be running on the main thread... You must make sure that the event loop is **already running and not just created** before creating a TrayIcon... In Winit for example the earliest you can create icons is on `StartCause::Init`."
+
+Consequences for this crate, where `eframe`/`winit` owns the loop:
+
+1. Create the `TrayIcon` on the event-loop thread, **after** the loop is running — not during setup, not on a spawned thread.
+2. Forward tray and menu events into the loop with an `EventLoopProxy` (the crate's own recommended pattern, `lib.rs:95-96`) so the loop wakes on each event rather than only on redraw.
+3. Do **not** spawn a second event loop on a side thread. It appears to work and then drops menu events or deadlocks under load, presenting as "the window is fine but the tray menu is dead" — a bug that reproduces only under real use.
+
+If `tray-icon` 0.24.2 cannot cohabit with `eframe` 0.36.1 this way, STOP and report rather than working around it with a second loop.
 
 - [ ] **Step 2: Implement the UI panes**
 
