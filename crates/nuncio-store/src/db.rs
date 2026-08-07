@@ -3883,33 +3883,8 @@ mod tests {
     /// database must be visible in telemetry -- an `INFO` log naming the table and
     /// column -- rather than only observable indirectly via the resulting schema.
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn migrate_logs_when_an_additive_column_migration_actually_runs() {
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt::MakeWriter;
-
-        #[derive(Clone, Default)]
-        struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-        impl std::io::Write for CapturedLogs {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0
-                    .lock()
-                    .expect("log buffer lock")
-                    .extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        impl<'a> MakeWriter<'a> for CapturedLogs {
-            type Writer = CapturedLogs;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("pre_dav_migration.db");
         let secrets = crate::vault::SecretManager::mock();
@@ -3950,31 +3925,17 @@ mod tests {
             pool.close().await;
         }
 
-        let logs = CapturedLogs::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(logs.clone())
-            .with_ansi(false)
-            .finish();
-
-        // `set_default` returns a guard that stays active across `.await`
-        // points as long as this test stays on the single `#[tokio::test]`
-        // current-thread executor, which is the default runtime flavor and
-        // exactly what is used here.
-        let guard = tracing::subscriber::set_default(subscriber);
         let engine = DatabaseEngine::connect_file(&db_path, &secrets)
             .await
             .expect("opening an old-schema database must never error");
-        drop(guard);
 
-        let captured = String::from_utf8(logs.0.lock().expect("log buffer lock").clone())
-            .expect("captured log is valid utf8");
         assert!(
-            captured.contains("collection_url"),
-            "expected the migrated column to be named in the INFO log, got: {captured}"
+            logs_contain("collection_url"),
+            "expected the migrated column to be named in the INFO log"
         );
         assert!(
-            captured.to_ascii_uppercase().contains("INFO"),
-            "expected an INFO-level log for the applied migration, got: {captured}"
+            logs_contain("INFO"),
+            "expected an INFO-level log for the applied migration"
         );
 
         engine.close().await;

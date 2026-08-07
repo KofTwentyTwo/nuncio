@@ -3146,64 +3146,73 @@ mod tests {
     /// fires and inherits the correlation id -- without duplicating the layer's
     /// bare entry/exit lines.
     #[test]
+    #[tracing_test::traced_test]
     fn create_rule_handler_logs_domain_event_under_request_scope() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
 
-        let (recorder, ()) = with_recorder(|| {
-            runtime.block_on(async {
-                let (db, _dir) = DatabaseEngine::connect_ephemeral()
-                    .await
-                    .expect("ephemeral db");
-                let db = Arc::new(db);
-                let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rules"));
-                let service = FiltersGrpcService { db, filter_engine };
+        runtime.block_on(async {
+            let (db, _dir) = DatabaseEngine::connect_ephemeral()
+                .await
+                .expect("ephemeral db");
+            let db = Arc::new(db);
+            let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rules"));
+            let service = FiltersGrpcService { db, filter_engine };
 
-                // Stand in for the RpcTraceLayer's per-RPC span so the handler's
-                // domain event inherits a request_id, exactly as in production.
-                let span = tracing::info_span!("grpc.request", request_id = "test-req-42");
-                async {
-                    service
-                        .create_rule(Request::new(CreateRuleRequest {
-                            name: "Domain Event Rule".to_string(),
-                            priority: 1,
-                            nsql: SAMPLE_RULE_NSQL.to_string(),
-                        }))
-                        .await
-                        .expect("rule creation succeeds");
-                }
-                .instrument(span)
-                .await;
-            });
+            // Stand in for the RpcTraceLayer's per-RPC span so the handler's
+            // domain event inherits a request_id, exactly as in production.
+            let span = tracing::info_span!("grpc.request", request_id = "test-req-42");
+            async {
+                service
+                    .create_rule(Request::new(CreateRuleRequest {
+                        name: "Domain Event Rule".to_string(),
+                        priority: 1,
+                        nsql: SAMPLE_RULE_NSQL.to_string(),
+                    }))
+                    .await
+                    .expect("rule creation succeeds");
+            }
+            .instrument(span)
+            .await;
         });
 
-        let events = recorder.events();
-        let created = events
-            .iter()
-            .find(|e| e.message() == "Filters: rule created")
-            .expect("the create_rule handler must emit its domain event");
-        assert_eq!(created.level, Level::INFO);
         assert!(
-            created.fields.contains_key("rule_id"),
+            logs_contain("Filters: rule created"),
+            "the create_rule handler must emit its domain event"
+        );
+        assert!(
+            logs_contain("rule_id"),
             "the domain event must carry the rule id"
         );
-
         // The domain event was emitted while the handler ran inside the stand-in
         // request span, so an operator can correlate it back to that request via
         // the span's `request_id` (the same mechanism the RpcTraceLayer provides
         // in production -- see `rpc_trace`'s own test).
-        let request_span = recorder
-            .spans()
-            .into_iter()
-            .find(|s| s.name == "grpc.request")
-            .expect("the request span must be recorded");
-        assert_eq!(
-            request_span.fields.get("request_id").map(String::as_str),
-            Some("test-req-42"),
+        assert!(
+            logs_contain("request_id=\"test-req-42\""),
             "the request span must carry the request-scoped correlation id"
         );
+
+        // Tie level, message, fields, and the request-scoped span together on a
+        // single log line, rather than only checking each substring in isolation.
+        logs_assert(|lines: &[&str]| {
+            if lines.iter().any(|line| {
+                line.contains("INFO")
+                    && line.contains("Filters: rule created")
+                    && line.contains("rule_id")
+                    && line.contains("request_id=\"test-req-42\"")
+            }) {
+                Ok(())
+            } else {
+                Err(
+                    "expected a single INFO log line carrying the domain event, its rule_id \
+                     field, and the request-scoped request_id"
+                        .to_string(),
+                )
+            }
+        });
     }
 
     #[test]

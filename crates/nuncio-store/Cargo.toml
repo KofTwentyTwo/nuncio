@@ -31,3 +31,4 @@ chrono.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+tracing-test = "0.2"

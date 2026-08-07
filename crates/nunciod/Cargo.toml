@@ -46,3 +46,4 @@ sqlx.workspace = true
 wiremock.workspace = true
 http-body-util.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing-test = "0.2"
