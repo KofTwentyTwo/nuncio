@@ -81,6 +81,16 @@ fn render_status_header(ui: &mut egui::Ui, state: &AppState) {
             ui.colored_label(egui::Color32::from_rgb(40, 180, 80), "STREAM LIVE");
         }
     });
+
+    // The monitor's OWN last error -- background-thread startup, tray
+    // creation/update, or a Start/Stop Engine command -- distinct from
+    // `status.last_error` above, which is the DAEMON's own last error.
+    // `tracing::error!`/`tracing::warn!` alone never reaches this window
+    // (there is no visible console), so this is the only place the user
+    // ever sees these failures.
+    if let Some(err) = &state.last_error {
+        ui.colored_label(egui::Color32::RED, format!("monitor error: {err}"));
+    }
 }
 
 fn render_accounts_table(ui: &mut egui::Ui, state: &AppState) {
@@ -193,11 +203,16 @@ fn render_log_controls(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn render_log_table(ui: &mut egui::Ui, state: &mut AppState) {
-    // Cloned out of `state` so the borrow ends before the click handler
-    // below needs `&mut state.log_filter` -- `visible_logs()` otherwise
-    // keeps the whole `AppState` borrowed immutably for as long as the
-    // returned references are alive.
-    let logs: Vec<LogRecord> = state.visible_logs().into_iter().cloned().collect();
+    // Borrowed, never cloned: `visible_logs()` already returns
+    // `Vec<&LogRecord>` for exactly this reason -- at the `MAX_LOG_LINES`
+    // cap with a repaint every `IDLE_REPAINT_INTERVAL` (plus every
+    // input-driven one), cloning all 5000 six-`String` records here would
+    // mean thousands of heap allocations per frame for no reason. The
+    // click handler below assigns into a local (`clicked_request_id`), not
+    // into `state`, so this borrow of `state` can end (at `logs`'s last
+    // use, inside the table closures) before `state.log_filter` is
+    // mutated afterward.
+    let logs: Vec<&LogRecord> = state.visible_logs();
     let mut clicked_request_id: Option<String> = None;
 
     TableBuilder::new(ui)
@@ -227,7 +242,7 @@ fn render_log_table(ui: &mut egui::Ui, state: &mut AppState) {
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, logs.len(), |mut row_ui| {
-                let record = &logs[row_ui.index()];
+                let record: &LogRecord = logs[row_ui.index()];
                 row_ui.col(|ui| {
                     ui.label(&record.timestamp);
                 });

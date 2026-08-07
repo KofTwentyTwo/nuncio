@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
-use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
+use nuncio_store::vault::{SecretManager, VaultError, GRPC_TOKEN_ACCOUNT};
 
 /// Default loopback address `nunciod` binds its gRPC API to. Shared with
 /// `main`, which dials the same address for the status poller so the
@@ -65,6 +65,13 @@ pub enum EngineState {
     /// controller, the state such a probe reports when the lock is held but
     /// the daemon does not answer.
     NotResponding,
+    /// The monitor itself could not determine any of the above -- e.g. its
+    /// own background polling thread failed to start. Deliberately distinct
+    /// from `Stopped`: `Stopped` is an affirmative "the lock is free", a
+    /// claim this state makes no attempt to back. Reporting `Stopped` here
+    /// instead would be fabricated success (a confident "daemon is down"
+    /// rendered by a monitor that never actually checked).
+    Unknown,
 }
 
 impl EngineState {
@@ -73,6 +80,9 @@ impl EngineState {
     /// (or already-launching, or unprobeable) daemon would either do nothing
     /// useful or race the existing process, so the UI must disable the
     /// control rather than let a click fail.
+    /// `Unknown` also disables it: without knowing whether a daemon is
+    /// already running, launching another could race an existing process
+    /// over the same database.
     #[must_use]
     pub fn allows_start(self) -> bool {
         matches!(self, EngineState::Stopped)
@@ -101,8 +111,15 @@ pub enum EngineError {
     #[error("failed to start async runtime: {0}")]
     Runtime(#[source] std::io::Error),
 
-    /// The gRPC bearer token could not be read or minted from the OS
-    /// keyring vault.
+    /// No gRPC bearer token exists in the vault yet. This means `nunciod`
+    /// has never run on this machine -- a state that must surface as an
+    /// honest, typed error, not a mystifying `ShutdownRejected` from an
+    /// endpoint the client never should have dialed with junk credentials.
+    #[error("no gRPC bearer token in vault; nunciod has never run on this machine")]
+    NoToken,
+
+    /// The vault could not be read at all, distinct from the key simply
+    /// being absent.
     #[error("failed to read gRPC bearer token from vault: {0}")]
     Token(String),
 
@@ -295,12 +312,17 @@ impl EngineController {
     /// actually invoked [`Self::stop`] against a real daemon -- never from
     /// [`Self::liveness`], which must stay free of any keyring or network
     /// access.
+    ///
+    /// Uses [`SecretManager::get_secret`], never `get_or_create_key_bytes`:
+    /// this module never mints token material, matching `status.rs`'s
+    /// crate-wide rule (see its module doc comment) that the monitor is a
+    /// consumer of the token `nunciod` already minted, not a second minter
+    /// of its own. Minting here on a missing token would both persist junk
+    /// key material into the user's OS keyring merely because "Stop Engine"
+    /// was clicked, and mask the real problem behind a mystifying
+    /// `ShutdownRejected: Unauthenticated` instead of an honest "no token".
     fn bearer_token(&self) -> Result<String, EngineError> {
-        let secrets = SecretManager::production();
-        let bytes = secrets
-            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-            .map_err(|err| EngineError::Token(err.to_string()))?;
-        Ok(hex::encode(bytes))
+        resolve_bearer_token(&SecretManager::production())
     }
 
     fn probe_lock(&self) -> LockProbe {
@@ -317,6 +339,19 @@ impl EngineController {
         }
         // `file` drops here, releasing whatever shared lock the `Ok(true)`
         // branch just took -- this is a point-in-time probe, never a hold.
+    }
+}
+
+/// Resolves the gRPC bearer token from `secrets`, mapping vault outcomes
+/// onto [`EngineError`] rather than ever minting a fresh token (see
+/// [`EngineController::bearer_token`]'s doc comment for why). `get_secret`
+/// already returns the hex-encoded token as stored, so it is passed straight
+/// through with no re-encoding.
+fn resolve_bearer_token(secrets: &SecretManager) -> Result<String, EngineError> {
+    match secrets.get_secret(GRPC_TOKEN_ACCOUNT) {
+        Ok(hex_token) => Ok(hex_token),
+        Err(VaultError::NotFound(_)) => Err(EngineError::NoToken),
+        Err(other) => Err(EngineError::Token(other.to_string())),
     }
 }
 
@@ -416,12 +451,44 @@ mod tests {
         assert!(EngineState::NotResponding.allows_stop());
     }
 
-    // `stop()` is intentionally not exercised here: it always resolves the
-    // gRPC bearer token from the real OS keyring vault before dialing the
-    // daemon's default loopback address, and this crate has no injected
-    // `SecretManager`/address override to redirect that at a mock. Covering
-    // it would mean either touching the real keyring from a unit test (this
-    // workspace mocks the keyring in every other crate's tests via
-    // `MockKeyring`) or dialing the real default gRPC port, which could
-    // reach an actual `nunciod` a developer happens to have running.
+    // `stop()` is intentionally not exercised end-to-end here: it always
+    // resolves the gRPC bearer token from the real OS keyring vault before
+    // dialing the daemon's default loopback address, and this crate has no
+    // injected `SecretManager`/address override to redirect that at a mock.
+    // Covering it would mean either touching the real keyring from a unit
+    // test (this workspace mocks the keyring in every other crate's tests
+    // via `MockKeyring`) or dialing the real default gRPC port, which could
+    // reach an actual `nunciod` a developer happens to have running. Token
+    // resolution itself, however, is extracted into `resolve_bearer_token`
+    // precisely so it CAN be tested against a mock vault, below.
+
+    #[test]
+    fn a_missing_token_is_an_honest_error_not_minted_key_material() {
+        let secrets = SecretManager::mock();
+        let err = resolve_bearer_token(&secrets).expect_err("must fail without a minted token");
+        assert!(matches!(err, EngineError::NoToken));
+
+        // The failure path must never have called `get_or_create_key_bytes`
+        // (or otherwise written) as a side effect of resolving the token --
+        // a second read must still see nothing in the vault.
+        assert!(matches!(
+            secrets.get_secret(GRPC_TOKEN_ACCOUNT),
+            Err(VaultError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_present_token_is_used_verbatim_not_re_encoded() {
+        // `get_secret` already returns the hex-encoded token as stored; if
+        // `resolve_bearer_token` re-encoded it (the `get_or_create_key_bytes`
+        // + `hex::encode` round trip this function replaced), a plain hex
+        // string stored directly here would come back altered.
+        let secrets = SecretManager::mock();
+        secrets
+            .set_secret(GRPC_TOKEN_ACCOUNT, "deadbeef")
+            .expect("mock vault write succeeds");
+
+        let token = resolve_bearer_token(&secrets).expect("token is present");
+        assert_eq!(token, "deadbeef");
+    }
 }

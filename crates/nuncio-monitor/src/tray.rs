@@ -12,13 +12,16 @@
 //!    It is never called from a spawned side thread.
 //! 2. Tray and menu click events must be forwarded into the running loop
 //!    with an event-loop-aware wakeup, not left to be picked up only on the
-//!    next scheduled repaint. `main.rs` registers
-//!    [`tray_icon::TrayIconEvent::set_event_handler`] and
-//!    [`tray_icon::menu::MenuEvent::set_event_handler`] handlers that push
-//!    into a shared queue AND call `egui::Context::request_repaint`, which
+//!    next scheduled repaint. `main.rs` registers a
+//!    [`tray_icon::menu::MenuEvent::set_event_handler`] handler that pushes
+//!    into a shared queue AND calls `egui::Context::request_repaint`, which
 //!    is `eframe`'s own documented thread-safe wakeup path (it forwards to
 //!    the same winit `EventLoopProxy` the crate's docs recommend using
-//!    directly). This module never spawns a second event loop.
+//!    directly). `main.rs` does NOT register a
+//!    [`tray_icon::TrayIconEvent::set_event_handler`] -- only the menu (the
+//!    Show/Start/Stop/Quit items) drives any action, so left-clicking the
+//!    icon itself does nothing beyond `tray-icon`'s own built-in
+//!    menu-open behavior. This module never spawns a second event loop.
 //!
 //! Everything else here -- picking a color for an [`EngineState`], building
 //! the tiny solid-color icon, and mapping a clicked menu item back to a
@@ -78,7 +81,9 @@ pub fn command_for_menu_event(event: &MenuEvent) -> Option<TrayCommand> {
 
 /// The solid RGBA color used to render the tray icon for `state`, chosen so
 /// each [`EngineState`] is visually distinct at a glance: grey (stopped),
-/// yellow (starting), green (running), red (not responding).
+/// yellow (starting), green (running), red (not responding), dark blue
+/// (unknown -- the monitor itself is broken, distinct from every daemon-side
+/// state above).
 #[must_use]
 pub fn rgba_for_state(state: EngineState) -> [u8; 4] {
     match state {
@@ -86,6 +91,7 @@ pub fn rgba_for_state(state: EngineState) -> [u8; 4] {
         EngineState::Starting => [230, 200, 40, 255],
         EngineState::Running => [40, 180, 80, 255],
         EngineState::NotResponding => [210, 50, 50, 255],
+        EngineState::Unknown => [60, 70, 160, 255],
     }
 }
 
@@ -160,22 +166,35 @@ impl TrayController {
     /// Updates the icon color and the Start/Stop items' enabled state for
     /// `state`, doing nothing if `state` matches what is already rendered
     /// (avoids rebuilding the icon image every frame for no reason).
-    pub fn set_engine_state(&mut self, state: EngineState) {
+    ///
+    /// Returns `Some(message)` when the icon could not be rebuilt or applied
+    /// -- `tracing::warn!` alone is not enough here, since this crate's
+    /// `main.rs` never installs a `tracing-subscriber`-backed sink the user
+    /// would see; the caller is expected to surface the message into
+    /// [`crate::state::AppState::last_error`] so the failure is not silently
+    /// discarded.
+    #[must_use]
+    pub fn set_engine_state(&mut self, state: EngineState) -> Option<String> {
         self.start_item.set_enabled(state.allows_start());
         self.stop_item.set_enabled(state.allows_stop());
 
         if state == self.last_rendered_state {
-            return;
+            return None;
         }
         self.last_rendered_state = state;
         match build_icon(state) {
             Ok(icon) => {
                 if let Err(err) = self.tray_icon.set_icon(Some(icon)) {
                     tracing::warn!(error = %err, "failed to update tray icon color");
+                    return Some(format!("failed to update tray icon color: {err}"));
                 }
+                None
             }
             Err(err) => {
                 tracing::warn!(error = %err, "failed to build tray icon for new engine state");
+                Some(format!(
+                    "failed to build tray icon for new engine state: {err}"
+                ))
             }
         }
     }
@@ -224,6 +243,7 @@ mod tests {
             rgba_for_state(EngineState::Starting),
             rgba_for_state(EngineState::Running),
             rgba_for_state(EngineState::NotResponding),
+            rgba_for_state(EngineState::Unknown),
         ];
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {

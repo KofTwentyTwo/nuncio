@@ -184,9 +184,22 @@ tails `nunciod`'s rotating log file and can only filter by level/
 "JSON log output" above). If the daemon is logging plain text, the monitor's
 log pane shows a banner saying so instead of silently failing to filter.
 
-Every numeric cell in the status header and accounts table renders an em
-dash (`—`), never `0`, when the poll cycle that would have supplied it
-failed -- a `0` there is always a genuine reading, not a guess.
+Every numeric cell in the **accounts table** renders an em dash (`—`),
+never `0`, when the poll cycle that would have supplied it failed -- a `0`
+there is always a genuine reading, not a guess. This is backed by
+`GetHealth`, which fails the whole RPC (rather than a per-field default)
+whenever any of its underlying queries fail, so the monitor always knows
+when to render "unknown" instead of a number.
+
+The **status header**'s `unread` and `outbox` counters do not currently
+carry this guarantee: `GetStatus` (unlike `GetHealth`) soft-degrades those
+two counts to `0` on a query error rather than failing the call, and the
+header renders them verbatim. If the daemon's unread- or outbox-count query
+fails on a given poll, the header can show `outbox: 0` in the same window
+where the accounts table below it correctly shows `—` for the same
+underlying failure. Treat a `0` in the status header as "no data" rather
+than "verified empty" until `GetStatus` gains the same fail-closed behavior
+as `GetHealth`.
 
 ## The dogfooding loop
 

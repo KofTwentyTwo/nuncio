@@ -119,6 +119,11 @@ pub fn composite_state(lock: EngineState, rpc_ready: Option<bool>) -> EngineStat
         EngineState::Stopped => EngineState::Stopped,
         EngineState::Starting => EngineState::Starting,
         EngineState::NotResponding => EngineState::NotResponding,
+        // Never produced by `EngineController::liveness` (the lock probe
+        // has no "unknown" outcome of its own), but this match must stay
+        // exhaustive over every `EngineState` variant -- passed through
+        // unchanged if some future caller ever does inject it.
+        EngineState::Unknown => EngineState::Unknown,
         // The lock is held: only here does whether the endpoint actually
         // answers change the displayed state.
         EngineState::Running => match rpc_ready {

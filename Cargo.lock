@@ -4270,7 +4270,6 @@ dependencies = [
  "egui",
  "egui_extras",
  "fs4",
- "hex",
  "nuncio-proto",
  "nuncio-store",
  "nunciod",
@@ -4282,6 +4281,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tracing",
+ "tracing-subscriber",
  "tray-icon",
 ]
 

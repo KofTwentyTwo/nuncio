@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use engine::{EngineController, Launcher};
+use engine::{EngineController, EngineState, Launcher};
 use log_tail::{LogAvailability, LogTailer};
 use nuncio_store::vault::SecretManager;
 use state::AppState;
@@ -54,6 +54,8 @@ const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(500);
 static EGUI_CTX: OnceLock<egui::Context> = OnceLock::new();
 
 fn main() -> eframe::Result {
+    install_tracing_subscriber();
+
     let db_path = resolve_db_path();
     let log_dir = log_dir_for(&db_path);
 
@@ -90,6 +92,7 @@ fn main() -> eframe::Result {
                 background.log_rx,
                 background.log_availability_rx,
                 menu_events,
+                background.startup_error,
             )))
         }),
     )
@@ -119,6 +122,12 @@ struct BackgroundChannels {
     status_rx: tokio::sync::mpsc::Receiver<status::StatusUpdate>,
     log_rx: std::sync::mpsc::Receiver<log_tail::LogRecord>,
     log_availability_rx: std::sync::mpsc::Receiver<LogAvailability>,
+    /// `Some(message)` when the background thread could not even start its
+    /// Tokio runtime, so `MonitorApp` can seed [`AppState::last_error`] and
+    /// [`AppState::engine`] (as [`EngineState::Unknown`], never `Stopped`)
+    /// instead of opening the GUI with a confident-looking "Stopped" that
+    /// nothing actually verified.
+    startup_error: Option<String>,
 }
 
 /// Starts the dedicated background thread that owns a Tokio runtime driving
@@ -134,6 +143,12 @@ fn spawn_background(
     log_dir: PathBuf,
 ) -> BackgroundChannels {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    // Shared with the spawned thread so the exact runtime-build error
+    // survives past that thread returning early -- `ready_rx.recv()`
+    // failing (sender dropped without ever sending) only tells the caller
+    // THAT startup failed, not why.
+    let startup_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let startup_error_for_thread = Arc::clone(&startup_error);
 
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -143,6 +158,11 @@ fn spawn_background(
             Ok(runtime) => runtime,
             Err(err) => {
                 tracing::error!(error = %err, "failed to start monitor's background tokio runtime");
+                if let Ok(mut guard) = startup_error_for_thread.lock() {
+                    *guard = Some(format!(
+                        "failed to start monitor's background tokio runtime: {err}"
+                    ));
+                }
                 return;
             }
         };
@@ -162,6 +182,7 @@ fn spawn_background(
                 status_rx,
                 log_rx,
                 log_availability_rx,
+                startup_error: None,
             })
             .is_err()
         {
@@ -174,15 +195,26 @@ fn spawn_background(
     // If the worker thread failed to even start its runtime, fall back to
     // a set of already-closed channels: the GUI still opens and renders
     // "unknown" everywhere (see `fmt.rs`) rather than the whole app failing
-    // to launch over a background setup problem.
+    // to launch over a background setup problem. `startup_error` (set by
+    // the thread above before it returned) rides along so the GUI can show
+    // it and start in `EngineState::Unknown` rather than a fabricated
+    // `Stopped`.
     ready_rx.recv().unwrap_or_else(|_| {
         let (_log_tx, log_rx) = std::sync::mpsc::channel();
         let (_log_availability_tx, log_availability_rx) = std::sync::mpsc::channel();
         let (_status_tx, status_rx) = tokio::sync::mpsc::channel(1);
+        let startup_error = startup_error
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .or_else(|| {
+                Some("monitor's background thread exited before completing startup".to_string())
+            });
         BackgroundChannels {
             status_rx,
             log_rx,
             log_availability_rx,
+            startup_error,
         }
     })
 }
@@ -210,6 +242,25 @@ fn run_log_tailer(
         }
         std::thread::sleep(LOG_POLL_INTERVAL);
     }
+}
+
+/// Installs a stderr `tracing-subscriber` so this crate's `tracing::warn!`/
+/// `tracing::error!` calls -- its ONLY error-reporting mechanism for
+/// failures that happen off the UI thread or before `AppState` exists (e.g.
+/// the background runtime failing to start) -- actually reach a developer
+/// instead of being silently discarded. `NUNCIO_MONITOR_LOG` (falling back
+/// to `RUST_LOG`, then `info`) sets the filter directive, mirroring
+/// `nunciod::logging`'s env-var convention without duplicating its
+/// file-rotation/JSON machinery, which this dev-only GUI has no need for.
+fn install_tracing_subscriber() {
+    let filter = std::env::var("NUNCIO_MONITOR_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_string());
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
 }
 
 /// Resolves the daemon's database path exactly as `nunciod`'s own `main`
@@ -266,6 +317,13 @@ struct MonitorApp {
     /// Set once tray creation fails, so a permanently unavailable tray
     /// (e.g. no desktop session) is not retried every single frame.
     tray_init_failed: bool,
+    /// Sending half of `error_rx`, cloned into anything (e.g. the `Stop`
+    /// command's spawned thread) that needs to surface a failure into
+    /// [`AppState::last_error`] from off the GUI thread. Code already
+    /// running ON the GUI thread sets `self.state.last_error` directly
+    /// instead of routing through this channel.
+    error_tx: std::sync::mpsc::Sender<String>,
+    error_rx: std::sync::mpsc::Receiver<String>,
 }
 
 impl MonitorApp {
@@ -275,9 +333,20 @@ impl MonitorApp {
         log_rx: std::sync::mpsc::Receiver<log_tail::LogRecord>,
         log_availability_rx: std::sync::mpsc::Receiver<LogAvailability>,
         menu_events: Arc<Mutex<VecDeque<tray_icon::menu::MenuEvent>>>,
+        startup_error: Option<String>,
     ) -> Self {
+        let (error_tx, error_rx) = std::sync::mpsc::channel();
+        let mut state = AppState::default();
+        if let Some(err) = startup_error {
+            // The background thread that would otherwise tell us anything
+            // failed before it could -- report that honestly as `Unknown`
+            // rather than the default `Stopped`, which would claim a fact
+            // (the daemon is not running) nothing has verified.
+            state.engine = EngineState::Unknown;
+            state.last_error = Some(err);
+        }
         Self {
-            state: AppState::default(),
+            state,
             controller,
             status_rx,
             log_rx,
@@ -285,6 +354,8 @@ impl MonitorApp {
             menu_events,
             tray: None,
             tray_init_failed: false,
+            error_tx,
+            error_rx,
         }
     }
 
@@ -302,6 +373,13 @@ impl MonitorApp {
         while let Ok(availability) = self.log_availability_rx.try_recv() {
             self.state.log_availability = availability;
         }
+        // Last, so a startup/tray/start/stop failure reported this frame
+        // wins over whatever `apply_status_update` may have cleared: a
+        // successful poll cycle does not mean the error the user just saw
+        // stopped being true.
+        while let Ok(message) = self.error_rx.try_recv() {
+            self.state.last_error = Some(message);
+        }
     }
 
     /// Creates the tray icon on the FIRST call made after `eframe`'s event
@@ -316,6 +394,7 @@ impl MonitorApp {
             Ok(tray) => self.tray = Some(tray),
             Err(err) => {
                 tracing::error!(error = %err, "failed to create tray icon");
+                self.state.last_error = Some(format!("failed to create tray icon: {err}"));
                 self.tray_init_failed = true;
             }
         }
@@ -325,7 +404,9 @@ impl MonitorApp {
     /// drains and acts on every menu click queued since the last frame.
     fn handle_tray_commands(&mut self, ctx: &egui::Context) {
         if let Some(tray) = self.tray.as_mut() {
-            tray.set_engine_state(self.state.engine);
+            if let Some(err) = tray.set_engine_state(self.state.engine) {
+                self.state.last_error = Some(err);
+            }
         }
 
         let commands: Vec<tray::TrayCommand> = match self.menu_events.lock() {
@@ -356,6 +437,7 @@ impl MonitorApp {
                 if self.state.engine.allows_start() {
                     if let Err(err) = self.controller.start() {
                         tracing::error!(error = %err, "failed to start nunciod");
+                        self.state.last_error = Some(format!("failed to start nunciod: {err}"));
                     }
                 }
             }
@@ -365,10 +447,15 @@ impl MonitorApp {
                     // timeout waiting on the daemon to exit; running it
                     // directly on the UI thread would freeze the window for
                     // that whole span, so it goes on its own thread instead.
+                    // That thread has no `&mut self`, so it reports failure
+                    // back through `error_tx` rather than touching
+                    // `self.state` directly.
                     let controller = Arc::clone(&self.controller);
+                    let error_tx = self.error_tx.clone();
                     std::thread::spawn(move || {
                         if let Err(err) = controller.stop() {
                             tracing::error!(error = %err, "failed to stop nunciod");
+                            let _ = error_tx.send(format!("failed to stop nunciod: {err}"));
                         }
                     });
                 }

@@ -57,6 +57,16 @@ pub struct AppState {
     /// user is never left staring at a silently-empty log pane with no
     /// explanation.
     pub log_availability: LogAvailability,
+    /// Most recent failure the monitor itself hit outside a poll cycle --
+    /// background-runtime startup, tray creation/update, or a Start/Stop
+    /// Engine command -- or `None` if nothing has failed. `tracing::error!`/
+    /// `tracing::warn!` alone is not a user-visible surface in a GUI with no
+    /// visible console, so every one of those call sites also routes its
+    /// message here. Sticky by design: it is only ever replaced by a NEWER
+    /// failure, never cleared by an unrelated successful poll cycle, so a
+    /// real problem cannot scroll off screen just because `GetStatus`
+    /// happened to succeed on the next tick.
+    pub last_error: Option<String>,
 }
 
 impl AppState {
@@ -172,6 +182,7 @@ impl Default for AppState {
             // Matches `LogTailer::new`'s own initial value: no poll has run
             // yet, so nothing is known about the log directory.
             log_availability: LogAvailability::DirectoryMissing,
+            last_error: None,
         }
     }
 }
@@ -423,6 +434,42 @@ mod tests {
         assert!(rows[0].sync_state.is_none());
         let acct2 = rows[1].sync_state.expect("acct-2 has a sync state entry");
         assert_eq!(acct2.state, 2);
+    }
+
+    #[test]
+    fn last_error_survives_a_later_successful_poll_cycle() {
+        let mut st = AppState {
+            last_error: Some("failed to stop nunciod: timed out".to_string()),
+            ..Default::default()
+        };
+
+        // A later, otherwise-successful poll cycle must not silently erase
+        // the error the user already saw: `apply_status_update` never
+        // touches `last_error`, since only a NEWER failure (or an explicit
+        // future "dismiss" action, not yet implemented) should replace it.
+        st.apply_status_update(StatusUpdate {
+            status: Some(GetStatusResponse {
+                engine_status: "Ready".to_string(),
+                version: "9.9.9".to_string(),
+                uptime: None,
+                accounts_loaded: 0,
+                unread_count: 0,
+                last_error: None,
+                outbox_depth: 0,
+                account_sync_states: Vec::new(),
+                ready: true,
+                db_healthy: true,
+            }),
+            health: None,
+            accounts: Vec::new(),
+            stream_stale: false,
+            engine_state: EngineState::Running,
+        });
+
+        assert_eq!(
+            st.last_error,
+            Some("failed to stop nunciod: timed out".to_string())
+        );
     }
 
     #[test]
