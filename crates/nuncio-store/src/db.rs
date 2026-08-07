@@ -513,6 +513,30 @@ impl DatabaseEngine {
             .collect())
     }
 
+    /// Current size of the write-ahead log, in bytes, read live via
+    /// `PRAGMA wal_checkpoint(PASSIVE)`. `PASSIVE` never blocks writers and
+    /// never forces a checkpoint -- it only reports the WAL's current frame
+    /// count, which this multiplies by the database's page size to get a
+    /// genuine byte figure. When the connection is not in WAL mode the
+    /// pragma reports `-1` for the frame count; that maps to `0` here, which
+    /// is the true WAL footprint (there is no WAL) rather than a fabricated
+    /// placeholder.
+    pub async fn wal_size_bytes(&self) -> Result<u64, DatabaseError> {
+        let (page_size,): (i64,) = sqlx::query_as("PRAGMA page_size;")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        let (_busy, log_frames, _checkpointed): (i64, i64, i64) =
+            sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE);")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+
+        let frames = log_frames.max(0) as u64;
+        Ok(frames.saturating_mul(page_size.max(0) as u64))
+    }
+
     /// Cryptographic hash-chain audit ledger verification (`verify_chain_integrity()`)
     /// detecting log tampering or corrupted `filter_execution_logs`, using the ledger
     /// HMAC key provisioned for this engine.

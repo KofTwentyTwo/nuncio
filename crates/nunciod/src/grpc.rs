@@ -28,7 +28,8 @@ use nuncio_proto::v1::mail_server::{Mail, MailServer};
 use nuncio_proto::v1::system_server::{System, SystemServer};
 use nuncio_proto::v1::ErrorReason;
 use nuncio_proto::v1::{
-    export_request, AccountConfig as AccountConfigProto, AccountSyncState as AccountSyncStateProto,
+    export_request, AccountConfig as AccountConfigProto,
+    AccountQueueDepth as AccountQueueDepthProto, AccountSyncState as AccountSyncStateProto,
     AddAccountRequest, AddAccountResponse, Attachment as AttachmentProto,
     AuditRecord as AuditRecordProto, BatchFilterProgress, CalendarEvent as CalendarEventProto,
     CalendarSyncRequest, CalendarSyncResponse, Contact as ContactProto,
@@ -39,8 +40,8 @@ use nuncio_proto::v1::{
     ExportResponse, ExportRulesRequest, ExportRulesResponse, FilterExecuted,
     FilterExecutionLog as FilterExecutionLogProto, FilterRule as FilterRuleProto,
     Folder as FolderProto, GetContactRequest, GetContactResponse, GetEventRequest,
-    GetEventResponse, GetExecutionLogsRequest, GetExecutionLogsResponse, GetMessageRequest,
-    GetMessageResponse, GetStatusRequest, GetStatusResponse,
+    GetEventResponse, GetExecutionLogsRequest, GetExecutionLogsResponse, GetHealthRequest,
+    GetHealthResponse, GetMessageRequest, GetMessageResponse, GetStatusRequest, GetStatusResponse,
     ImapSmtpTransport as ImapSmtpTransportProto, ImportRulesRequest, ImportRulesResponse,
     JmapTransport as JmapTransportProto, ListAccountsRequest, ListAccountsResponse,
     ListContactsRequest, ListContactsResponse, ListEventsRequest, ListEventsResponse,
@@ -324,6 +325,86 @@ impl System for SystemGrpcService {
             outbox_depth,
             account_sync_states,
             ready,
+            db_healthy,
+        }))
+    }
+
+    /// Reports operational depth rather than mere liveness: per-account
+    /// outbox backlog and database size signals, read live on every call.
+    ///
+    /// Per-account queue depth is a JOIN of the configured account list
+    /// against the store's outbox counts, not a pass-through of the store
+    /// query: `count_pending_mutations_by_account` only returns accounts
+    /// that have rows in the outbox, so an account with nothing queued
+    /// would otherwise be omitted entirely. Omission and "zero backlog"
+    /// must not look the same to a caller, so every configured account gets
+    /// an entry, zero-filled when idle.
+    ///
+    /// Mutations whose `account_id` could not be resolved (see
+    /// `count_pending_mutations_by_account`) are folded by the store into
+    /// the empty-string bucket. That bucket is real queued work, just not
+    /// attributable to a configured account, so it is reported under the
+    /// empty-string `account_id` rather than being attached to some
+    /// unrelated account or silently dropped -- a caller that only cares
+    /// about configured accounts can filter it out by id.
+    async fn get_health(
+        &self,
+        _request: Request<GetHealthRequest>,
+    ) -> Result<Response<GetHealthResponse>, Status> {
+        let db_healthy = self.db.ping().await.is_ok();
+
+        let accounts = self.db.list_accounts().await.map_err(|e| {
+            Status::unavailable(format!("failed to list accounts for health surface: {e}"))
+        })?;
+
+        let queue_counts = self
+            .db
+            .count_pending_mutations_by_account()
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!(
+                    "failed to read outbox depth for health surface: {e}"
+                ))
+            })?;
+
+        let mut account_queues: Vec<AccountQueueDepthProto> = accounts
+            .iter()
+            .map(|account| {
+                let (pending, failed) = queue_counts
+                    .iter()
+                    .find(|(id, _, _)| id == &account.id)
+                    .map(|(_, pending, failed)| (*pending, *failed))
+                    .unwrap_or((0, 0));
+                AccountQueueDepthProto {
+                    account_id: account.id.clone(),
+                    pending,
+                    failed,
+                }
+            })
+            .collect();
+
+        // The empty-string bucket is orphaned outbox work (its message row
+        // was deleted before the account-id backfill ran); it does not
+        // belong to any configured account, so it is not folded into the
+        // join above. Surface it anyway, under its genuine empty id, so it
+        // is neither presented as a real account's backlog nor silently
+        // lost from the reported total.
+        if let Some((_, pending, failed)) = queue_counts.iter().find(|(id, _, _)| id.is_empty()) {
+            account_queues.push(AccountQueueDepthProto {
+                account_id: String::new(),
+                pending: *pending,
+                failed: *failed,
+            });
+        }
+
+        let wal_size_bytes = self.db.wal_size_bytes().await.unwrap_or_else(|e| {
+            tracing::warn!("GetHealth: failed to read WAL size: {e}");
+            0
+        });
+
+        Ok(Response::new(GetHealthResponse {
+            account_queues,
+            wal_size_bytes,
             db_healthy,
         }))
     }
@@ -3751,6 +3832,83 @@ mod tests {
             assert!(state.last_synced.is_none());
             assert!(state.last_error.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn get_health_reports_per_account_queue_depth() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+
+        for id in ["acct-q1", "acct-q2"] {
+            let account = nuncio_core::AccountConfig {
+                id: id.to_string(),
+                name: "Queue".to_string(),
+                email_address: format!("{id}@nuncio.mx"),
+                keyring_secret_key: format!("nuncio/{id}"),
+                sync_interval_secs: 60,
+                transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+                    endpoint_host: "jmap.nuncio.mx".to_string(),
+                }),
+            };
+            db.save_account(&account).await.expect("save account");
+        }
+
+        // acct-q1: two pending, one failed. acct-q2: nothing queued.
+        for (id, status) in [
+            ("mut-p1", "pending"),
+            ("mut-p2", "pending"),
+            ("mut-f1", "failed"),
+        ] {
+            db.save_pending_mutation(&nuncio_filter::PendingRemoteMutation {
+                id: id.to_string(),
+                account_id: "acct-q1".to_string(),
+                rule_id: "rule-1".to_string(),
+                message_id: format!("msg-{id}"),
+                mutation_type: "MOVE".to_string(),
+                payload: "{}".to_string(),
+                status: status.to_string(),
+                retry_count: 0,
+                created_at: 0,
+            })
+            .await
+            .expect("save mutation");
+        }
+
+        let event_bus = Arc::new(EventBus::new());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let secrets = Arc::new(SecretManager::mock());
+        let (addr, _handle) =
+            spawn_test_server_with(event_bus, db, filter_engine, secrets, "correct-token").await;
+
+        let mut client = nuncio_proto::client::connect_system(&addr.to_string(), "correct-token")
+            .await
+            .expect("connect");
+
+        let health = client
+            .get_health(GetHealthRequest {})
+            .await
+            .expect("get_health")
+            .into_inner();
+
+        let q1 = health
+            .account_queues
+            .iter()
+            .find(|q| q.account_id == "acct-q1")
+            .expect("acct-q1 must be reported");
+        assert_eq!(q1.pending, 2);
+        assert_eq!(q1.failed, 1);
+
+        // An account with nothing queued must be PRESENT with zeros, never
+        // omitted: absent and idle must not look the same to a client.
+        let q2 = health
+            .account_queues
+            .iter()
+            .find(|q| q.account_id == "acct-q2")
+            .expect("an idle account must still be reported");
+        assert_eq!(q2.pending, 0);
+        assert_eq!(q2.failed, 0);
     }
 
     #[tokio::test]

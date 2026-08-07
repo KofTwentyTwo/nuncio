@@ -3060,6 +3060,21 @@ mod tests {
                 ))
             }
 
+            // `GetHealth` is exercised by `nunciod`'s own `grpc::tests`; this
+            // stub only needs to satisfy the trait so the CLI's `GetStatus`
+            // happy path above can compile against the real `System` service
+            // definition, so it deliberately returns `unimplemented` rather
+            // than fabricating health data no test here relies on.
+            async fn get_health(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::GetHealthRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::GetHealthResponse>, tonic::Status>
+            {
+                Err(tonic::Status::unimplemented(
+                    "get_health is not exercised by this stub",
+                ))
+            }
+
             // Whether the daemon actually stops after `Shutdown` is proven by
             // `nunciod`'s `shutdown_e2e_test`; this stub only needs to prove
             // the CLI's connect + call + JSON-format happy path for the
