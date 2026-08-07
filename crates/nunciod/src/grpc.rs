@@ -342,11 +342,19 @@ impl System for SystemGrpcService {
     ///
     /// Mutations whose `account_id` could not be resolved (see
     /// `count_pending_mutations_by_account`) are folded by the store into
-    /// the empty-string bucket. That bucket is real queued work, just not
-    /// attributable to a configured account, so it is reported under the
-    /// empty-string `account_id` rather than being attached to some
-    /// unrelated account or silently dropped -- a caller that only cares
-    /// about configured accounts can filter it out by id.
+    /// the empty-string bucket. Mutations whose `account_id` names an
+    /// account that has since been deleted (`delete_account` only removes
+    /// the `accounts` row; it does not touch the outbox) land in
+    /// `queue_counts` under that now-unconfigured id, matching no entry in
+    /// `accounts` -- the join below would otherwise drop them outright.
+    /// Both cases are real queued work, just not attributable to a
+    /// configured account, so ALL of it -- the genuine empty-string
+    /// orphans and any leftover non-configured id -- is summed into one
+    /// orphan bucket reported under the empty-string `account_id`, rather
+    /// than being attached to some unrelated account or silently dropped.
+    /// A caller that only cares about configured accounts can filter it out
+    /// by id. This keeps the reported totals reconciled with
+    /// `count_pending_mutations`.
     async fn get_health(
         &self,
         _request: Request<GetHealthRequest>,
@@ -367,6 +375,9 @@ impl System for SystemGrpcService {
                 ))
             })?;
 
+        let configured_ids: std::collections::HashSet<&str> =
+            accounts.iter().map(|a| a.id.as_str()).collect();
+
         let mut account_queues: Vec<AccountQueueDepthProto> = accounts
             .iter()
             .map(|account| {
@@ -383,17 +394,28 @@ impl System for SystemGrpcService {
             })
             .collect();
 
-        // The empty-string bucket is orphaned outbox work (its message row
-        // was deleted before the account-id backfill ran); it does not
-        // belong to any configured account, so it is not folded into the
-        // join above. Surface it anyway, under its genuine empty id, so it
-        // is neither presented as a real account's backlog nor silently
-        // lost from the reported total.
-        if let Some((_, pending, failed)) = queue_counts.iter().find(|(id, _, _)| id.is_empty()) {
+        // Fold every queue_counts entry that does not match a configured
+        // account -- the genuine empty-string orphans (message row deleted
+        // before the account-id backfill ran) AND any non-empty id left
+        // behind by a since-deleted account -- into one orphan bucket under
+        // the empty-string `account_id`. Surfacing it, rather than only the
+        // `is_empty()` case, is what keeps this total reconciled with
+        // `count_pending_mutations`.
+        let (orphan_pending, orphan_failed) = queue_counts
+            .iter()
+            .filter(|(id, _, _)| !configured_ids.contains(id.as_str()))
+            .fold(
+                (0u64, 0u64),
+                |(pending_acc, failed_acc), (_, pending, failed)| {
+                    (pending_acc + pending, failed_acc + failed)
+                },
+            );
+
+        if orphan_pending > 0 || orphan_failed > 0 {
             account_queues.push(AccountQueueDepthProto {
                 account_id: String::new(),
-                pending: *pending,
-                failed: *failed,
+                pending: orphan_pending,
+                failed: orphan_failed,
             });
         }
 
@@ -3913,6 +3935,126 @@ mod tests {
             .expect("an idle account must still be reported");
         assert_eq!(q2.pending, 0);
         assert_eq!(q2.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn get_health_reports_outbox_backlog_left_by_a_deleted_account() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        let db = Arc::new(db);
+
+        let account = nuncio_core::AccountConfig {
+            id: "acct-live".to_string(),
+            name: "Live".to_string(),
+            email_address: "acct-live@nuncio.mx".to_string(),
+            keyring_secret_key: "nuncio/acct-live".to_string(),
+            sync_interval_secs: 60,
+            transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+                endpoint_host: "jmap.nuncio.mx".to_string(),
+            }),
+        };
+        db.save_account(&account).await.expect("save account");
+
+        let deleted_account = nuncio_core::AccountConfig {
+            id: "acct-deleted".to_string(),
+            name: "Deleted".to_string(),
+            email_address: "acct-deleted@nuncio.mx".to_string(),
+            keyring_secret_key: "nuncio/acct-deleted".to_string(),
+            sync_interval_secs: 60,
+            transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+                endpoint_host: "jmap.nuncio.mx".to_string(),
+            }),
+        };
+        db.save_account(&deleted_account)
+            .await
+            .expect("save account to be deleted");
+
+        // Queue mutations for the account that is about to be deleted, plus
+        // one genuine `account_id`-unresolved orphan, before deleting it.
+        for (id, account_id, status) in [
+            ("mut-d1", "acct-deleted", "pending"),
+            ("mut-d2", "acct-deleted", "pending"),
+            ("mut-d3", "acct-deleted", "failed"),
+            ("mut-orphan", "", "pending"),
+        ] {
+            db.save_pending_mutation(&nuncio_filter::PendingRemoteMutation {
+                id: id.to_string(),
+                account_id: account_id.to_string(),
+                rule_id: "rule-1".to_string(),
+                message_id: format!("msg-{id}"),
+                mutation_type: "MOVE".to_string(),
+                payload: "{}".to_string(),
+                status: status.to_string(),
+                retry_count: 0,
+                created_at: 0,
+            })
+            .await
+            .expect("save mutation");
+        }
+
+        // `delete_account` only removes the `accounts` row; the outbox rows
+        // for `acct-deleted` survive with a non-empty, non-configured
+        // `account_id` -- the exact condition this test exists to catch.
+        db.delete_account("acct-deleted")
+            .await
+            .expect("delete account");
+
+        let unfiltered_total = db
+            .count_pending_mutations()
+            .await
+            .expect("count pending mutations");
+        assert_eq!(unfiltered_total, 3);
+
+        let event_bus = Arc::new(EventBus::new());
+        let filter_engine = Arc::new(FilterEngine::new(Vec::new()).expect("empty rule set"));
+        let secrets = Arc::new(SecretManager::mock());
+        let (addr, _handle) =
+            spawn_test_server_with(event_bus, db, filter_engine, secrets, "correct-token").await;
+
+        let mut client = nuncio_proto::client::connect_system(&addr.to_string(), "correct-token")
+            .await
+            .expect("connect");
+
+        let health = client
+            .get_health(GetHealthRequest {})
+            .await
+            .expect("get_health")
+            .into_inner();
+
+        // The live account is unaffected and still reported with zeros.
+        let live = health
+            .account_queues
+            .iter()
+            .find(|q| q.account_id == "acct-live")
+            .expect("acct-live must be reported");
+        assert_eq!(live.pending, 0);
+        assert_eq!(live.failed, 0);
+
+        // Backlog orphaned by the deleted account must be REPORTED, not
+        // dropped: folded into the empty-string orphan bucket alongside the
+        // genuine unresolved-`account_id` orphan, never attached to
+        // "acct-deleted" (which no longer exists as a configured account).
+        assert!(
+            !health
+                .account_queues
+                .iter()
+                .any(|q| q.account_id == "acct-deleted"),
+            "a deleted account must not reappear as its own queue entry"
+        );
+        let orphan = health
+            .account_queues
+            .iter()
+            .find(|q| q.account_id.is_empty())
+            .expect("orphaned backlog must be surfaced under the empty-string bucket");
+        assert_eq!(orphan.pending, 3);
+        assert_eq!(orphan.failed, 1);
+
+        // The reported PENDING totals must reconcile with
+        // `count_pending_mutations` (which counts only `pending`, not
+        // `failed`, rows): nothing may vanish between the two RPCs.
+        let reported_pending_total: u64 = health.account_queues.iter().map(|q| q.pending).sum();
+        assert_eq!(reported_pending_total, unfiltered_total);
     }
 
     #[tokio::test]

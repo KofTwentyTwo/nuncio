@@ -78,10 +78,10 @@ message ErrorInfo {
 service System {
   // GetStatus reports basic daemon/engine health information.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
-  // GetHealth reports operational depth: per-account outbox backlog, the
-  // per-account last-sync outcome, and database size signals. Distinct from
-  // GetStatus, which answers "is the engine up"; this answers "is it keeping
-  // up". Every value is read live when the RPC is served.
+  // GetHealth reports operational depth: per-account outbox backlog and
+  // database size signals. Distinct from GetStatus, which answers "is the
+  // engine up"; this answers "is it keeping up". Every value is read live
+  // when the RPC is served.
   rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
   // Subscribe opens a live, server-streaming push feed of daemon domain
   // events (see `nuncio_core::CoreEvent`) for the lifetime of the call. The
@@ -109,6 +109,13 @@ message GetHealthRequest {}
 // SEPARATELY and must never be summed into one number by a caller: a merged
 // total hides a stuck queue behind a healthy-looking figure.
 message AccountQueueDepth {
+  // Empty string is the orphan bucket: outbox work that cannot be
+  // attributed to any currently-configured account, either because the
+  // owning message row was deleted before the account-id backfill ran, or
+  // because the account itself was since deleted while mutations for it
+  // were still queued. It is real queued work, just not attributable to a
+  // configured account -- a caller that only cares about configured
+  // accounts can filter it out by id.
   string account_id = 1;
   uint64 pending = 2;
   uint64 failed = 3;
