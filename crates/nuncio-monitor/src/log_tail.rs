@@ -10,8 +10,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
-
 /// A single tailed log line, either successfully parsed as the daemon's JSON
 /// log shape or preserved verbatim as an opaque `RAW` record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,51 +22,53 @@ pub struct LogRecord {
     pub raw: String,
 }
 
-/// The shape `tracing_subscriber`'s JSON formatter emits per event. Fields we
-/// don't recognize are ignored rather than rejected.
-#[derive(Debug, Deserialize)]
-struct JsonEvent {
-    #[serde(default)]
-    timestamp: String,
-    #[serde(default)]
-    level: String,
-    #[serde(default)]
-    target: String,
-    #[serde(default)]
-    fields: JsonEventFields,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct JsonEventFields {
-    #[serde(default)]
-    message: String,
-    #[serde(default)]
-    request_id: Option<String>,
-}
-
 impl LogRecord {
-    /// Parses one log line. A line that is not valid JSON, or is JSON that
-    /// doesn't match the expected event shape, becomes an opaque `RAW`
-    /// record rather than an error — a single malformed line must never
-    /// abort the tail.
+    /// Parses one log line. A line that is not valid JSON, is JSON that
+    /// isn't an object, or is a JSON object that carries none of the
+    /// recognized event fields (`level`, `timestamp`, `fields.message`)
+    /// becomes an opaque `RAW` record with the original text preserved in
+    /// `raw`, rather than an error or a silently blank record — a single
+    /// malformed or unrecognized line must never abort the tail, and it
+    /// must never be mistaken for "nothing happened".
     pub fn parse(line: &str) -> Self {
-        match serde_json::from_str::<JsonEvent>(line) {
-            Ok(event) => LogRecord {
-                timestamp: event.timestamp,
-                level: event.level,
-                target: event.target,
-                request_id: event.fields.request_id,
-                message: event.fields.message,
-                raw: line.to_string(),
-            },
-            Err(_) => LogRecord {
-                timestamp: String::new(),
-                level: "RAW".to_string(),
-                target: String::new(),
-                request_id: None,
-                message: String::new(),
-                raw: line.to_string(),
-            },
+        let raw = || LogRecord {
+            timestamp: String::new(),
+            level: "RAW".to_string(),
+            target: String::new(),
+            request_id: None,
+            message: String::new(),
+            raw: line.to_string(),
+        };
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return raw();
+        };
+        let Some(obj) = value.as_object() else {
+            return raw();
+        };
+
+        let fields = obj.get("fields").and_then(|v| v.as_object());
+        let recognized = obj.contains_key("level")
+            || obj.contains_key("timestamp")
+            || fields.is_some_and(|f| f.contains_key("message"));
+        if !recognized {
+            return raw();
+        }
+
+        let as_str = |v: Option<&serde_json::Value>| {
+            v.and_then(|v| v.as_str()).unwrap_or_default().to_string()
+        };
+
+        LogRecord {
+            timestamp: as_str(obj.get("timestamp")),
+            level: as_str(obj.get("level")),
+            target: as_str(obj.get("target")),
+            request_id: fields
+                .and_then(|f| f.get("request_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            message: fields.map(|f| as_str(f.get("message"))).unwrap_or_default(),
+            raw: line.to_string(),
         }
     }
 }
@@ -124,19 +124,43 @@ impl LogTailer {
     /// midnight rotation is followed rather than leaving the tailer pinned
     /// to yesterday's file.
     pub fn poll(&mut self) -> Vec<LogRecord> {
-        let latest = match latest_log_file(&self.dir) {
-            Some(name) => name,
-            None => {
-                self.availability = if self.dir.is_dir() {
-                    LogAvailability::Ok
-                } else {
-                    LogAvailability::DirectoryMissing
-                };
+        self.poll_with(scan_log_dir)
+    }
+
+    /// `poll()`'s implementation, parameterized over how the directory is
+    /// scanned so tests can inject a transient scan failure deterministically
+    /// instead of relying on OS-specific permission errors.
+    fn poll_with(&mut self, scan: impl Fn(&Path) -> DirScan) -> Vec<LogRecord> {
+        let latest = match scan(&self.dir) {
+            DirScan::Missing => {
+                // The directory itself does not exist: per `docs/LOGGING.md`
+                // the daemon degrades to stderr-only logging when it can't
+                // create this directory, so this is a reportable "not
+                // writing logs" state, not "no logs yet".
+                self.availability = LogAvailability::DirectoryMissing;
                 self.current_file_name = None;
                 self.offset = 0;
                 self.initialized = false;
                 return Vec::new();
             }
+            DirScan::ReadError => {
+                // A transient failure to read an existing directory (a
+                // permission blip, a race with the daemon renaming a
+                // rotated file, ...). Hold position and retry on the next
+                // poll rather than treating this as "start over" — resetting
+                // here would make a reappearing file look brand new and
+                // silently discard whatever was written during the outage.
+                return Vec::new();
+            }
+            DirScan::Found(None) => {
+                // Directory exists but no log file has been written yet.
+                self.availability = LogAvailability::Ok;
+                self.current_file_name = None;
+                self.offset = 0;
+                self.initialized = false;
+                return Vec::new();
+            }
+            DirScan::Found(Some(name)) => name,
         };
 
         let rotated = self.current_file_name.as_deref() != Some(latest.as_str());
@@ -200,17 +224,38 @@ impl LogTailer {
     }
 }
 
-/// Returns the file name (not full path) of the lexicographically greatest
-/// `nunciod.log.*` entry in `dir`, or `None` if the directory is missing or
-/// has no matching files. ISO-8601 date suffixes sort lexicographically in
-/// chronological order.
-fn latest_log_file(dir: &Path) -> Option<String> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    entries
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.starts_with(FILE_PREFIX))
-        .max()
+/// The outcome of trying to list a log directory, distinguishing "the
+/// directory genuinely doesn't exist" from "reading it failed transiently" —
+/// the two must not be handled the same way, since only the former is safe
+/// to treat as a reset to the tailer's initial state.
+enum DirScan {
+    /// The directory does not exist (`io::ErrorKind::NotFound`).
+    Missing,
+    /// The directory could not be read for some other reason (permissions,
+    /// a race with a concurrent rename, ...). Transient by assumption.
+    ReadError,
+    /// The directory was read successfully; carries the lexicographically
+    /// greatest `nunciod.log.*` file name found, or `None` if there wasn't
+    /// one yet.
+    Found(Option<String>),
+}
+
+/// Lists `dir` and selects the lexicographically greatest `nunciod.log.*`
+/// entry. ISO-8601 date suffixes sort lexicographically in chronological
+/// order, so this is also the newest file.
+fn scan_log_dir(dir: &Path) -> DirScan {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            let latest = entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| name.starts_with(FILE_PREFIX))
+                .max();
+            DirScan::Found(latest)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => DirScan::Missing,
+        Err(_) => DirScan::ReadError,
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +276,17 @@ mod tests {
         let rec = LogRecord::parse("2026-08-07 plain text log line");
         assert_eq!(rec.level, "RAW");
         assert_eq!(rec.raw, "2026-08-07 plain text log line");
+    }
+
+    #[test]
+    fn a_well_formed_but_unrelated_json_object_becomes_raw_not_blank() {
+        // Legitimate JSON, but not the daemon's event shape: no `level`,
+        // `timestamp`, or `fields.message`. This must read as visibly
+        // opaque (RAW), never as a blank record that looks like "nothing
+        // happened".
+        let rec = LogRecord::parse(r#"{"foo":"bar"}"#);
+        assert_eq!(rec.level, "RAW");
+        assert_eq!(rec.raw, r#"{"foo":"bar"}"#);
     }
 
     #[test]
@@ -283,5 +339,39 @@ mod tests {
         let mut tailer = LogTailer::new(dir.path().join("does-not-exist"));
         assert_eq!(tailer.poll(), Vec::new());
         assert_eq!(tailer.availability(), LogAvailability::DirectoryMissing);
+    }
+
+    #[test]
+    fn a_transient_directory_read_failure_does_not_discard_data() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_file = dir.path().join("nunciod.log.2026-08-07");
+        let mut f = std::fs::File::create(&log_file).expect("create log file");
+        writeln!(f, r#"{{"level":"INFO","fields":{{"message":"first"}}}}"#).expect("write");
+        f.flush().expect("flush");
+
+        let mut tailer = LogTailer::new(dir.path().to_path_buf());
+
+        // First poll (real scan): establishes position at end-of-file.
+        assert_eq!(tailer.poll(), Vec::new());
+
+        // Content arrives while the directory is (simulated) transiently
+        // unreadable — e.g. a permission blip or a race with the daemon
+        // renaming a rotated file in. A poll during the outage must not
+        // reset the tailer's position.
+        writeln!(f, r#"{{"level":"WARN","fields":{{"message":"second"}}}}"#).expect("write");
+        f.flush().expect("flush");
+        writeln!(f, r#"{{"level":"ERROR","fields":{{"message":"third"}}}}"#).expect("write");
+        f.flush().expect("flush");
+
+        let during_outage = tailer.poll_with(|_dir| DirScan::ReadError);
+        assert_eq!(during_outage, Vec::new());
+
+        // Recovery: the next real poll must see everything written during
+        // the outage, not just what arrives after recovery.
+        let recovered = tailer.poll();
+        let messages: Vec<&str> = recovered.iter().map(|r| r.message.as_str()).collect();
+        assert_eq!(messages, vec!["second", "third"]);
     }
 }
