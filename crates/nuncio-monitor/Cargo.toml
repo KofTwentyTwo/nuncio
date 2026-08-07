@@ -20,6 +20,10 @@ eframe = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }
 tray-icon = { workspace = true }
+fs4 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+nunciod = { path = "../nunciod" }
