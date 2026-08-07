@@ -456,9 +456,22 @@ message ShutdownResponse {}
 
 - [ ] **Step 4: Regenerate the descriptor golden**
 
-Run: `cargo build -p nuncio-proto`
-Then follow the regeneration step the crate documents (check `crates/nuncio-proto/README.md` or the golden test's failure message for the exact command).
-Expected: `descriptor.bin` updated; the contract-stability test passes.
+The procedure is spelled out in the assertion message of `descriptor_matches_committed_golden` (`crates/nuncio-proto/src/lib.rs:112`). Concretely:
+
+```bash
+cargo build -p nuncio-proto
+cp "$(find target/debug/build -name nuncio_v1_descriptor.bin -printf '%T@ %p\n' \
+      | sort -rn | head -1 | cut -d' ' -f2-)" \
+   crates/nuncio-proto/proto/nuncio/v1/descriptor.bin
+cargo test -p nuncio-proto
+```
+
+**The `sort -rn` on mtime is load-bearing.** There are several
+`target/debug/build/nuncio-proto-<hash>/out/` directories; picking by name
+instead of newest-first can copy a STALE descriptor, committing a golden that
+does not match the `.proto` and failing CI in a confusing way.
+
+Expected: `descriptor.bin` updated; `cargo test -p nuncio-proto` passes.
 
 - [ ] **Step 5: Wire the controller into the service**
 
@@ -492,11 +505,32 @@ Add the handler inside `impl System for SystemGrpcService`:
     }
 ```
 
-Set `shutdown: None` in the test-server construction paths and thread the real controller through `serve_on_listener_with_overrides` to the construction at line 2979.
+**There are six public serve entry points**, all funnelling to the single `SystemGrpcService` construction at `grpc.rs:2979`:
+
+| Entry point | Line | Gets the controller? |
+| :--- | :--- | :--- |
+| `serve` | 2739 | No — pass `None` |
+| `serve_on_listener` | 2790 | No — pass `None` |
+| `serve_with_shutdown` | 2819 | **Yes** — this is the production path |
+| `serve_on_listener_with_shutdown` | 2866 | **Yes** |
+| `serve_on_listener_with_overrides` | 2915 | No — pass `None` |
+| `serve_on_listener_with_overrides_and_shutdown` | 2963 | **Yes** |
+
+Thread `Option<Arc<ShutdownController>>` through the three shutdown-aware entry points; the other three pass `None`. That asymmetry is exactly why the field is an `Option` and why the handler returns `Unavailable` instead of fabricating success when unwired.
+
+**`serve_with_shutdown` is the one production uses** (`crates/nunciod/src/main.rs:288`). Wiring only `serve_on_listener_with_overrides` would leave the real daemon returning `Unavailable` while every test passed.
 
 - [ ] **Step 6: Share the controller in main.rs**
 
-In `crates/nunciod/src/main.rs`, wrap the controller in an `Arc` at line 52 and clone it: one clone into `install_signal_handlers`, one into the gRPC serve call.
+The controller is **already** an `Arc` at `crates/nunciod/src/main.rs:53`:
+
+```rust
+let (shutdown_controller, shutdown_signal) = ShutdownController::new(event_bus.clone());
+let shutdown_controller = Arc::new(shutdown_controller);
+let signal_task = tokio::spawn(install_signal_handlers(shutdown_controller));
+```
+
+Line 54 **moves** it into the signal task. Do not wrap it again — insert an `Arc::clone` before that spawn and pass the clone to `serve_with_shutdown`.
 
 - [ ] **Step 7: Run the tests**
 
@@ -780,7 +814,11 @@ message GetHealthResponse {
 
 - [ ] **Step 4: Regenerate the golden and implement the handler**
 
-Regenerate `descriptor.bin` as in Task 2 Step 4. Implement `get_health` on `SystemGrpcService`, calling `count_pending_mutations_by_account()`. Return an honest error on a store read failure rather than an empty list, since an empty list means "no queued work" and a failure means "unknown".
+Regenerate `descriptor.bin` using the exact command block in Task 2 Step 4, including the mtime sort.
+
+Implement `get_health` on `SystemGrpcService`. It must **join the store counts against the configured account list**, not pass them through: `count_pending_mutations_by_account()` returns only accounts that have rows in the outbox, so a pass-through omits idle accounts entirely and the `acct-q2` assertion in Step 1 fails by design. Enumerate accounts with `self.db.list_accounts()` — the same call `get_status` already makes at `grpc.rs:270` — and emit a zero-filled entry for any account with no queued work.
+
+Return an honest error on a store read failure rather than an empty list: empty means "no queued work", failure means "unknown", and the two must not be conflated.
 
 - [ ] **Step 5: Run the tests**
 
@@ -973,18 +1011,19 @@ Tasks 6 through 8 depend on nothing in Phases 1 to 3 and may be built in paralle
 **Interfaces:**
 - Produces: a buildable `nuncio-monitor` binary that the gate covers.
 
-- [ ] **Step 1: Add the workspace member and dependencies**
+- [ ] **Step 1: Add the workspace member and let cargo resolve the GUI versions**
 
-In the root `Cargo.toml`, add `"crates/nuncio-monitor"` to `members`, and to `[workspace.dependencies]`:
+In the root `Cargo.toml`, add `"crates/nuncio-monitor"` to `members`.
 
-```toml
-eframe = "0.29"
-egui = "0.29"
-egui_extras = "0.29"
-tray-icon = "0.19"
+**Do not hand-pin the GUI crate versions.** Any version numbers written here would be guesses. Let cargo resolve versions compatible with the pinned 1.97.1 toolchain:
+
+```bash
+cargo add --package nuncio-monitor eframe egui egui_extras tray-icon
 ```
 
-Verify current versions against crates.io before pinning; these must compile on Rust 1.97.1.
+Then lift the resolved versions into `[workspace.dependencies]` at the root and switch the crate's entries to `{ workspace = true }`, matching how every other shared dependency in this workspace is declared.
+
+**Record the resolved versions in your report.** If cargo resolves a version requiring a newer rustc than 1.97.1, STOP and report it — do not bump the toolchain, which is a Global Constraint.
 
 - [ ] **Step 2: Create the crate manifest**
 
@@ -1251,7 +1290,22 @@ Expected: FAIL — `StatusPoller` not defined.
 
 - [ ] **Step 3: Implement token resolution and dialing**
 
-Read the token from the vault under `GRPC_TOKEN_ACCOUNT`, hex-encode it, and dial via `connect_system`. A missing vault entry returns `StatusError::NoToken`, distinct from a connection failure, because the two need different messages in the UI.
+Two things here are easy to get wrong and both are silent failures.
+
+**Use `get_secret`, never `get_or_create_key_bytes`.** `get_or_create_key_bytes` (`crates/nuncio-store/src/vault.rs:221`) MINTS a fresh key when none exists. The monitor is a read-only client: if no token exists, that means the daemon has never run on this machine, which is a state the UI must report — not paper over by writing key material into the user's OS keyring merely because they opened the app.
+
+**Do not hex-encode the result.** `get_secret` returns the **already hex-encoded** string; `get_or_create_key_bytes` hex-*decodes* it. Encoding again yields a token that never authenticates.
+
+```rust
+let token = match secrets.get_secret(nuncio_store::vault::GRPC_TOKEN_ACCOUNT) {
+    Ok(hex_token) => hex_token,
+    Err(nuncio_store::vault::VaultError::NotFound(_)) => return Err(StatusError::NoToken),
+    Err(e) => return Err(StatusError::Vault(e.to_string())),
+};
+nuncio_proto::client::connect_system(addr, &token).await
+```
+
+(For contrast, `nuncio-cli` at `runner.rs:1152` does `hex::encode(get_or_create_key_bytes(..))` — a decode-then-re-encode round trip, which is why it works there and why copying it here would be wrong.)
 
 - [ ] **Step 4: Implement the poll and stream loop**
 
@@ -1327,6 +1381,8 @@ git commit -m "feat(monitor): add bounded, filterable application state"
 - [ ] **Step 1: Implement the tray**
 
 Icon plus menu: Show, Start Engine, Stop Engine, Quit. Icon colour encodes `EngineState`. Start and Stop are disabled when not applicable rather than failing when clicked.
+
+**Event-loop hazard, read before writing code.** On Windows, `tray-icon` needs a Win32 message pump on the thread that created the icon, and `eframe`/`winit` owns the event loop. Create the tray **after** the event loop is running, on the event-loop thread, and route menu activations through winit's user-event proxy. Do **not** spawn a second event loop on a side thread: it appears to work, then drops menu events or deadlocks under load, presenting as "the window is fine but the tray menu is dead". If the resolved `tray-icon` version cannot cohabit with the resolved `eframe`, STOP and report rather than working around it with a second loop.
 
 - [ ] **Step 2: Implement the UI panes**
 
