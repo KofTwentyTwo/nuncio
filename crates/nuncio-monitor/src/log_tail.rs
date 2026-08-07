@@ -94,7 +94,14 @@ pub struct LogTailer {
     current_file_name: Option<String>,
     offset: u64,
     availability: LogAvailability,
-    initialized: bool,
+    /// Whether `poll_with` has ever been called before. This — not
+    /// "have we found a file yet" — is what decides whether an appearing
+    /// file's content is pre-existing history (seek to end) or new since
+    /// watching began (read from the start). A file that shows up on the
+    /// very first poll predates the tailer; a file that shows up on any
+    /// later poll was created while the tailer was already watching, even
+    /// if earlier polls found the directory empty or missing.
+    ever_polled: bool,
 }
 
 const FILE_PREFIX: &str = "nunciod.log.";
@@ -109,7 +116,7 @@ impl LogTailer {
             current_file_name: None,
             offset: 0,
             availability: LogAvailability::DirectoryMissing,
-            initialized: false,
+            ever_polled: false,
         }
     }
 
@@ -131,6 +138,15 @@ impl LogTailer {
     /// scanned so tests can inject a transient scan failure deterministically
     /// instead of relying on OS-specific permission errors.
     fn poll_with(&mut self, scan: impl Fn(&Path) -> DirScan) -> Vec<LogRecord> {
+        // Captured before dispatch and never reset: whether *this* call is
+        // the very first poll this tailer has ever made, regardless of what
+        // it finds. Only a file present on that first poll is pre-existing
+        // history; a file that shows up on any later poll — even if earlier
+        // polls found the directory empty or missing — was created while we
+        // were already watching, so none of its content should be skipped.
+        let is_first_poll = !self.ever_polled;
+        self.ever_polled = true;
+
         let latest = match scan(&self.dir) {
             DirScan::Missing => {
                 // The directory itself does not exist: per `docs/LOGGING.md`
@@ -140,7 +156,6 @@ impl LogTailer {
                 self.availability = LogAvailability::DirectoryMissing;
                 self.current_file_name = None;
                 self.offset = 0;
-                self.initialized = false;
                 return Vec::new();
             }
             DirScan::ReadError => {
@@ -154,10 +169,13 @@ impl LogTailer {
             }
             DirScan::Found(None) => {
                 // Directory exists but no log file has been written yet.
+                // `ever_polled` is deliberately left set: if a file appears
+                // on a later poll, it was created while we were watching,
+                // not before, and must be read from the start rather than
+                // seeked-to-end as if it were this tailer's first sighting.
                 self.availability = LogAvailability::Ok;
                 self.current_file_name = None;
                 self.offset = 0;
-                self.initialized = false;
                 return Vec::new();
             }
             DirScan::Found(Some(name)) => name,
@@ -176,17 +194,17 @@ impl LogTailer {
 
         if rotated {
             self.current_file_name = Some(latest.clone());
-            if !self.initialized {
-                // Seek to end on the very first open: the tailer follows
-                // new output, it does not replay the day's history.
+            if is_first_poll {
+                // This file predates the tailer: seek to its end so
+                // pre-existing history is not replayed.
                 self.offset = file.metadata().map(|m| m.len()).unwrap_or(0);
-                self.initialized = true;
                 self.availability = LogAvailability::Ok;
                 return Vec::new();
             }
-            // Rotation to a newer dated file after the tailer is already
-            // running: read it from the start, since none of it has been
-            // seen yet.
+            // Either a midnight rotation, or a file that was created after
+            // the tailer started watching (including the case where earlier
+            // polls saw an empty or missing directory): none of it has been
+            // seen yet, so read it from the start.
             self.offset = 0;
         }
 
@@ -373,5 +391,42 @@ mod tests {
         let recovered = tailer.poll();
         let messages: Vec<&str> = recovered.iter().map(|r| r.message.as_str()).collect();
         assert_eq!(messages, vec!["second", "third"]);
+    }
+
+    #[test]
+    fn a_log_file_created_after_the_monitor_starts_watching_is_read_from_its_start() {
+        use std::io::Write;
+
+        // The natural order for watching a daemon come up: open the monitor
+        // first, against an empty (but existing) log directory, then start
+        // the daemon. The file — and its startup diagnostics — does not
+        // exist yet at the time of the first poll.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut tailer = LogTailer::new(dir.path().to_path_buf());
+
+        let empty = tailer.poll();
+        assert_eq!(empty, Vec::new());
+
+        // The daemon starts and writes its first log file, already
+        // containing startup lines by the time we poll again.
+        let log_file = dir.path().join("nunciod.log.2026-08-07");
+        let mut f = std::fs::File::create(&log_file).expect("create log file");
+        writeln!(
+            f,
+            r#"{{"level":"INFO","fields":{{"message":"version banner"}}}}"#
+        )
+        .expect("write");
+        writeln!(
+            f,
+            r#"{{"level":"INFO","fields":{{"message":"bound to loopback"}}}}"#
+        )
+        .expect("write");
+        f.flush().expect("flush");
+
+        // Both startup lines must be seen — they were written entirely
+        // after the monitor started watching, so none of it is "history".
+        let batch = tailer.poll();
+        let messages: Vec<&str> = batch.iter().map(|r| r.message.as_str()).collect();
+        assert_eq!(messages, vec!["version banner", "bound to loopback"]);
     }
 }
