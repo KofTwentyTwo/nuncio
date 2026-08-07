@@ -137,7 +137,7 @@ git commit -m "test: use tracing-test for racy log assertions"
 **The migration alone is not sufficient.** Backfilling existing rows fixes history; new mutations would still write `NULL` because the write path has no account in it. All four of these must change together or per-account counts work once and then silently stop:
 
 - `PendingRemoteMutation` (`crates/nuncio-filter/src/ast.rs:322`) has 8 fields and no `account_id`.
-- `outbox::create_mutation` (`crates/nuncio-filter/src/outbox.rs:35`) takes `(rule_id, message_id, action_type, target)` — no account.
+- `OutboxManager::create_mutation` (`crates/nuncio-filter/src/outbox.rs:35`, re-exported at the crate root by `pub use outbox::*`) takes `(rule_id, message_id, action_type, target)` — no account.
 - `DatabaseEngine::save_pending_mutation` (`crates/nuncio-store/src/db.rs:2201`) binds only those 8 columns.
 - Call sites: `crates/nunciod/src/grpc.rs:3654` and `crates/nunciod/src/outbox.rs:608` (both tests), plus the production caller in the filter-action path.
 
@@ -338,7 +338,7 @@ async fn a_newly_saved_mutation_is_attributed_to_its_account() {
         .await
         .expect("ephemeral db");
 
-    let mutation = nuncio_filter::outbox::OutboxBuilder::create_mutation(
+    let mutation = nuncio_filter::OutboxManager::create_mutation(
         "acct-B",
         "rule-1",
         "msg-9",
