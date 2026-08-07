@@ -36,3 +36,4 @@ _reference/**/gen/
 **/node_modules/
 **/dist/
 trivy_err*.log
+scratchpad/

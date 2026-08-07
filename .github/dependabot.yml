@@ -13,20 +13,11 @@ updates:
     commit-message:
       prefix: "deps(cargo)"
 
-  # 2. Tauri v2 Desktop GUI UI (npm)
-  - package-ecosystem: "npm"
-    directory: "/crates/nuncio-gui/ui"
-    schedule:
-      interval: "daily"
-      time: "04:00"
-    open-pull-requests-limit: 10
-    labels:
-      - "dependencies"
-      - "gui"
-    commit-message:
-      prefix: "deps(npm)"
+  # The Tauri GUI's npm tree moved out of the workspace to `_reference/` and is
+  # being rebuilt as a separate client repo, so there is no npm ecosystem to
+  # update here. Re-add an npm entry in the client repo, not this one.
 
-  # 3. GitHub Actions Workflows
+  # 2. GitHub Actions Workflows
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
