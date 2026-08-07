@@ -1318,6 +1318,23 @@ nuncio_proto::client::connect_system(addr, &token).await
 
 Spawn a task running a timed `GetStatus` + `GetHealth` poll alongside a `Subscribe` stream. On stream error, mark `stream_stale` and reconnect with capped exponential backoff. Never let a failed poll emit zeros; emit `None` so the UI renders unknown.
 
+- [ ] **Step 5: Make `EngineState::NotResponding` actually reachable**
+
+`EngineController::liveness()` deliberately does **not** probe over gRPC: doing so would force every liveness call, including its unit tests, to read the real OS keyring and dial the real port, breaking the no-live-network and mock-keyring rules. It therefore reports only what the advisory lock can tell it, and `NotResponding` is currently unreachable in practice from that component alone.
+
+**This task owns the composite state**, because it is where the authenticated channel already lives. Derive the state the UI displays by combining the two signals:
+
+| Lock | RPC reachable | Displayed state |
+| :--- | :--- | :--- |
+| free | — | `Stopped` |
+| held | yes, `ready` | `Running` |
+| held | yes, not `ready` | `Starting` |
+| held | no | `NotResponding` |
+
+Expose that composite on `StatusUpdate` so `ui.rs` renders one state rather than re-deriving it. A wedged daemon must not display as either cleanly running or cleanly stopped.
+
+**Test this with an injected reachability result**, not a live dial — the mapping is pure logic and must be unit-testable offline. If you find yourself needing a real socket to test the table above, the seam is in the wrong place.
+
 - [ ] **Step 5: Run the tests and commit**
 
 ```bash
