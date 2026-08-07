@@ -2,7 +2,7 @@
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tempfile::TempDir;
 use thiserror::Error;
@@ -30,6 +30,11 @@ pub enum DatabaseError {
     /// Failed to execute schema migration.
     #[error("failed to run database migration: {0}")]
     Migration(String),
+    /// A filesystem operation against a database-adjacent file (e.g.
+    /// stat-ing the `-wal` sidecar) failed for a reason other than the file
+    /// simply not existing yet.
+    #[error("database filesystem operation failed: {0}")]
+    Io(String),
     /// Database query execution error.
     #[error("database query execution error: {0}")]
     Query(#[from] sqlx::Error),
@@ -110,6 +115,14 @@ impl DatabaseError {
     }
 }
 
+/// Path to the `-wal` sidecar file SQLite maintains next to a WAL-mode
+/// database file (e.g. `nuncio.sqlite` -> `nuncio.sqlite-wal`).
+fn wal_sidecar_path(db_path: &Path) -> PathBuf {
+    let mut wal_name = db_path.as_os_str().to_owned();
+    wal_name.push("-wal");
+    PathBuf::from(wal_name)
+}
+
 /// SQLite database storage engine managing WAL connection pools and migrations.
 ///
 /// All cryptographic key material (at-rest storage encryption, WORM audit HMAC, filter
@@ -123,6 +136,10 @@ pub struct DatabaseEngine {
     storage_key: Zeroizing<[u8; 32]>,
     worm_key: Zeroizing<[u8; 32]>,
     ledger_key: Zeroizing<[u8; 32]>,
+    /// Path to the main database file, captured at connect time. Carries no
+    /// secret material -- used only to stat the sibling `-wal` file for a
+    /// genuinely passive on-disk WAL size (see [`Self::wal_size_bytes`]).
+    db_path: PathBuf,
 }
 
 impl std::fmt::Debug for DatabaseEngine {
@@ -308,6 +325,7 @@ impl DatabaseEngine {
             storage_key,
             worm_key,
             ledger_key,
+            db_path: path.to_path_buf(),
         };
         engine.migrate().await?;
         Ok(engine)
@@ -513,28 +531,33 @@ impl DatabaseEngine {
             .collect())
     }
 
-    /// Current size of the write-ahead log, in bytes, read live via
-    /// `PRAGMA wal_checkpoint(PASSIVE)`. `PASSIVE` never blocks writers and
-    /// never forces a checkpoint -- it only reports the WAL's current frame
-    /// count, which this multiplies by the database's page size to get a
-    /// genuine byte figure. When the connection is not in WAL mode the
-    /// pragma reports `-1` for the frame count; that maps to `0` here, which
-    /// is the true WAL footprint (there is no WAL) rather than a fabricated
-    /// placeholder.
+    /// Current on-disk size of the write-ahead log, in bytes, read by
+    /// `stat`-ing the sibling `-wal` file next to the main database file.
+    ///
+    /// This deliberately does NOT run `PRAGMA wal_checkpoint`, even in
+    /// `PASSIVE` mode: that pragma opportunistically writes dirty WAL frames
+    /// back into the main database file (real I/O, a real mutation of the
+    /// main db file) and can shrink the very backlog a health poll is
+    /// supposed to observe -- a monitor polling every few seconds would
+    /// otherwise nudge the WAL toward empty on every poll, masking sustained
+    /// growth instead of reporting it. A filesystem `stat` has none of that:
+    /// it neither touches the database file nor changes what it measures.
+    ///
+    /// A missing `-wal` file is NOT an error: SQLite only creates it once a
+    /// write has happened in WAL mode, so its absence genuinely means zero
+    /// WAL bytes exist yet, and that maps to `Ok(0)`. Every other I/O error
+    /// (permission denied, disk failure, etc.) is propagated honestly --
+    /// this never guesses at a byte count it could not actually observe.
     pub async fn wal_size_bytes(&self) -> Result<u64, DatabaseError> {
-        let (page_size,): (i64,) = sqlx::query_as("PRAGMA page_size;")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(DatabaseError::Query)?;
-
-        let (_busy, log_frames, _checkpointed): (i64, i64, i64) =
-            sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE);")
-                .fetch_one(&self.pool)
-                .await
-                .map_err(DatabaseError::Query)?;
-
-        let frames = log_frames.max(0) as u64;
-        Ok(frames.saturating_mul(page_size.max(0) as u64))
+        let wal_path = wal_sidecar_path(&self.db_path);
+        match tokio::fs::metadata(&wal_path).await {
+            Ok(metadata) => Ok(metadata.len()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(DatabaseError::Io(format!(
+                "failed to stat WAL file {}: {e}",
+                wal_path.display()
+            ))),
+        }
     }
 
     /// Cryptographic hash-chain audit ledger verification (`verify_chain_integrity()`)
@@ -4093,6 +4116,60 @@ mod tests {
             .expect("counts");
 
         assert_eq!(counts, vec![("acct-B".to_string(), 1, 0)]);
+    }
+
+    /// After a full checkpoint (`close()` forces `PRAGMA wal_checkpoint(TRUNCATE)`),
+    /// the `-wal` sidecar is truncated back to empty -- and on some
+    /// platforms removed outright. Either way, `wal_size_bytes` must report
+    /// a genuine `0`: this proves the "file missing" branch maps to a real
+    /// zero rather than erroring, exercised via the same code path a
+    /// database that has never taken a write since a clean checkpoint would
+    /// hit.
+    #[tokio::test]
+    async fn wal_size_bytes_is_zero_after_a_full_checkpoint() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+
+        engine.close().await;
+
+        let size = engine.wal_size_bytes().await.expect("wal size");
+        assert_eq!(size, 0);
+    }
+
+    /// After a write, SQLite creates and grows the `-wal` sidecar file; this
+    /// must be reflected as a genuine non-zero byte count, and calling it
+    /// must not itself checkpoint (shrink) the WAL -- proven by reading twice
+    /// in a row and observing the size is stable rather than decaying.
+    #[tokio::test]
+    async fn wal_size_bytes_reports_real_growth_and_does_not_shrink_it_on_read() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+
+        engine
+            .save_pending_mutation(&nuncio_filter::PendingRemoteMutation {
+                id: "mut-wal".to_string(),
+                account_id: "acct-wal".to_string(),
+                rule_id: "rule-1".to_string(),
+                message_id: "msg-wal".to_string(),
+                mutation_type: "MOVE".to_string(),
+                payload: "{}".to_string(),
+                status: "pending".to_string(),
+                retry_count: 0,
+                created_at: 0,
+            })
+            .await
+            .expect("write forces WAL growth");
+
+        let first = engine.wal_size_bytes().await.expect("wal size");
+        assert!(first > 0, "a write must grow the WAL past zero bytes");
+
+        let second = engine.wal_size_bytes().await.expect("wal size again");
+        assert_eq!(
+            first, second,
+            "a passive stat-based read must never shrink the WAL it reports"
+        );
     }
 
     /// Applying an additive column migration against a pre-existing (old-schema)

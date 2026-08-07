@@ -397,10 +397,14 @@ impl System for SystemGrpcService {
             });
         }
 
-        let wal_size_bytes = self.db.wal_size_bytes().await.unwrap_or_else(|e| {
-            tracing::warn!("GetHealth: failed to read WAL size: {e}");
-            0
-        });
+        // Zero and "unknown" must not collapse into the same wire value: a
+        // stat failure (permission denied, disk failure) is exactly the kind
+        // of degraded state this RPC exists to surface, so it fails the call
+        // rather than reporting a `0` that a monitor cannot distinguish from
+        // a genuinely empty WAL.
+        let wal_size_bytes = self.db.wal_size_bytes().await.map_err(|e| {
+            Status::unavailable(format!("failed to read WAL size for health surface: {e}"))
+        })?;
 
         Ok(Response::new(GetHealthResponse {
             account_queues,
