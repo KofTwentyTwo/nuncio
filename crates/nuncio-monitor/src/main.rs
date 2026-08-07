@@ -8,6 +8,9 @@ mod engine;
 // Not yet wired into `main`; the engine controller and UI tasks consume this.
 #[allow(dead_code)]
 mod log_tail;
+// Consumed by `state`, but nothing yet consumes `state` itself.
+#[allow(dead_code)]
+mod state;
 // Not yet wired into `main`; the app state and UI tasks consume this.
 #[allow(dead_code)]
 mod status;
