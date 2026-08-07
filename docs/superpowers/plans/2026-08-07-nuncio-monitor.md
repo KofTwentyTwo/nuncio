@@ -52,6 +52,82 @@ One file per responsibility. `state.rs` holds `AppState`, the only thing `ui.rs`
 
 ---
 
+## Phase 0 — Make the gate trustworthy
+
+Added after the pre-flight scan. Every later task ends with "run the gate, expect green", which is meaningless while `dev` fails CI intermittently. Two of the three known-flaky tests live in the exact files this plan edits.
+
+### Task 0: Convert racy log-assertion tests to `tracing-test`
+
+**Root cause.** `tracing` caches callsite `Interest` globally, resolved once per callsite. A test installing a capturing subscriber with `tracing::subscriber::set_default` only observes events whose callsite was first evaluated while that subscriber was active. Under `cargo test`'s default parallelism, whichever test reaches a callsite first wins the cache, so these tests pass or fail on thread scheduling. They pass locally and fail on CI because core count and ordering differ.
+
+**Scope.** Only the two tests that actually fail CI *and* sit in files this plan modifies. Do not refactor the three `test_tracing.rs` helper modules or the other 28 hand-rolled captures; that is issue #375's full scope and is not needed here.
+
+The other two known-flaky tests have **different root causes** and are explicitly out of scope: `a_timed_out_item_does_not_block_a_later_item_in_a_subsequent_pass` (timing-sensitive, `crates/nunciod/tests/outbox_executor_e2e_test.rs`) and `mail_and_folder_report_honest_errors_when_daemon_unreachable` (port-reuse race, issue #347).
+
+**Files:**
+- Modify: `crates/nuncio-store/Cargo.toml` (add `tracing-test = "0.2"` to `[dev-dependencies]`)
+- Modify: `crates/nuncio-store/src/db.rs:3885` (`migrate_logs_when_an_additive_column_migration_actually_runs`)
+- Modify: `crates/nunciod/Cargo.toml` (add `tracing-test = "0.2"` to `[dev-dependencies]`)
+- Modify: `crates/nunciod/src/grpc.rs` (`create_rule_handler_logs_domain_event_under_request_scope`)
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: nothing. Behaviour-preserving test-infrastructure change.
+
+**Reference pattern — already in this repo.** `crates/nuncio-mail/src/imap.rs:1442` and `crates/nuncio-mail/src/smtp.rs:354` already use `tracing_test::traced_test`. Match that usage exactly rather than inventing a variant.
+
+- [ ] **Step 1: Confirm the current failure mode**
+
+Run: `cargo test -p nuncio-store migrate_logs_when_an_additive_column_migration_actually_runs -- --test-threads=1`
+Then: `cargo test -p nuncio-store -- --test-threads=8`
+Expected: passes single-threaded, and is the test most likely to fail under parallelism. It may pass both times; that is the nature of the race and is not evidence the problem is absent.
+
+- [ ] **Step 2: Convert the store test**
+
+Add `tracing-test = "0.2"` to `[dev-dependencies]` in `crates/nuncio-store/Cargo.toml`. Replace the hand-rolled `CapturedLogs` writer, its `std::io::Write` impl, its `MakeWriter` impl, and the `set_default` guard with the attribute macro:
+
+```rust
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn migrate_logs_when_an_additive_column_migration_actually_runs() {
+        // ... existing arrange/act body, minus all subscriber setup ...
+
+        assert!(logs_contain("applying schema migration"));
+        assert!(logs_contain("pending_remote_mutations"));
+    }
+```
+
+Delete the now-unused `use std::sync::{Arc, Mutex};` and `use tracing_subscriber::fmt::MakeWriter;` from inside the test. `logs_contain` is injected into scope by the macro; do not import it.
+
+- [ ] **Step 3: Run the store test**
+
+Run: `cargo test -p nuncio-store migrate_logs`
+Expected: PASS.
+
+- [ ] **Step 4: Convert the daemon test the same way**
+
+Add `tracing-test = "0.2"` to `[dev-dependencies]` in `crates/nunciod/Cargo.toml`. Apply the identical treatment to `create_rule_handler_logs_domain_event_under_request_scope` in `crates/nunciod/src/grpc.rs`, replacing its hand-rolled capture with `#[tracing_test::traced_test]` and `logs_contain(...)` assertions that check the same strings the original asserted. Do not weaken an assertion to make it pass: if the original checked a span field, check the same field.
+
+- [ ] **Step 5: Run the full gate repeatedly**
+
+```bash
+cargo fmt --all -- --check && cargo check-all
+cargo test-all
+cargo test-all
+cargo test-all
+```
+
+Expected: green all three runs. Three consecutive passes is weak evidence against a race but it is the evidence available locally; CI is the real check.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/nuncio-store/Cargo.toml crates/nuncio-store/src/db.rs crates/nunciod/Cargo.toml crates/nunciod/src/grpc.rs
+git commit -m "test: use tracing-test for racy log assertions"
+```
+
+---
+
 ## Phase 1 — Store: per-account outbox
 
 ### Task 1: Add `account_id` to `pending_remote_mutations` with backfill
