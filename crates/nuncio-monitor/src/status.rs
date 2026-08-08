@@ -33,7 +33,7 @@ use nuncio_proto::v1::{
     ListAccountsRequest,
 };
 use nuncio_store::vault::{SecretManager, VaultError, GRPC_TOKEN_ACCOUNT};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::engine::EngineState;
 
@@ -189,12 +189,35 @@ impl StatusPoller {
         // `StatusUpdate` carry both signals.
         let stream_stale = Arc::new(AtomicBool::new(true));
 
+        // Lets `poll_loop` -- which redials on a fixed, short `POLL_INTERVAL`
+        // rather than backing off -- tell `subscribe_loop` the instant the
+        // daemon answers. Without this, a `subscribe_loop` that started
+        // backing off while the daemon was down (the normal "monitor opened
+        // before nunciod started" case) would keep sleeping out a backoff it
+        // earned against a daemon that is no longer down, and the UI would
+        // show a healthy poll-derived header next to a stale stream for up
+        // to `MAX_SUBSCRIBE_BACKOFF`. `Notify` (not a `oneshot` or a second
+        // `AtomicBool`) is used because it needs to fire repeatedly for the
+        // lifetime of both loops and coalesces redundant wakeups: if
+        // `subscribe_loop` is not yet waiting, one permit is retained so the
+        // next `notified().await` resolves immediately instead of the signal
+        // being lost.
+        let daemon_reachable = Arc::new(Notify::new());
+
         tokio::spawn(subscribe_loop(
             addr.clone(),
             Arc::clone(&secrets),
             Arc::clone(&stream_stale),
+            Arc::clone(&daemon_reachable),
         ));
-        tokio::spawn(poll_loop(addr, secrets, lock_state, stream_stale, tx));
+        tokio::spawn(poll_loop(
+            addr,
+            secrets,
+            lock_state,
+            stream_stale,
+            daemon_reachable,
+            tx,
+        ));
 
         rx
     }
@@ -218,6 +241,7 @@ async fn poll_loop(
     secrets: Arc<SecretManager>,
     lock_state: impl Fn() -> EngineState + Send + Sync + 'static,
     stream_stale: Arc<AtomicBool>,
+    daemon_reachable: Arc<Notify>,
     tx: mpsc::Sender<StatusUpdate>,
 ) {
     // `tokio::time::interval` fires its first tick immediately, so the UI
@@ -226,7 +250,14 @@ async fn poll_loop(
     loop {
         interval.tick().await;
 
-        let update = poll_once(&addr, &secrets, &lock_state, &stream_stale).await;
+        let update = poll_once(
+            &addr,
+            &secrets,
+            &lock_state,
+            &stream_stale,
+            &daemon_reachable,
+        )
+        .await;
         if tx.send(update).await.is_err() {
             // The UI side is gone; stop polling rather than running forever
             // against a channel nobody reads.
@@ -244,6 +275,7 @@ async fn poll_once(
     secrets: &SecretManager,
     lock_state: &(impl Fn() -> EngineState + Send + Sync + 'static),
     stream_stale: &AtomicBool,
+    daemon_reachable: &Notify,
 ) -> StatusUpdate {
     let Ok(token) = resolve_token(secrets) else {
         // No token at all: nothing over gRPC can be attempted this cycle.
@@ -264,6 +296,14 @@ async fn poll_once(
     // [`StatusPoller::connect`]'s own tests pin down, rather than
     // hand-rolling a second copy of it here.
     let mut system_client = StatusPoller::connect(addr, secrets).await.ok();
+
+    if system_client.is_some() {
+        // The daemon just answered a dial on this cycle's fast, fixed
+        // `POLL_INTERVAL` cadence -- tell `subscribe_loop` so it retries now
+        // instead of serving out a backoff it earned while the daemon was
+        // still down.
+        daemon_reachable.notify_one();
+    }
 
     let status = match system_client.as_mut() {
         Some(client) => client
@@ -315,13 +355,17 @@ async fn fetch_accounts(addr: &str, token: &str) -> Vec<AccountConfig> {
 /// backoff. Runs until the process exits -- there is no receiver to signal
 /// this loop to stop, since its only output is the shared `stream_stale`
 /// flag consumed by [`poll_once`].
-async fn subscribe_loop(addr: String, secrets: Arc<SecretManager>, stream_stale: Arc<AtomicBool>) {
+async fn subscribe_loop(
+    addr: String,
+    secrets: Arc<SecretManager>,
+    stream_stale: Arc<AtomicBool>,
+    daemon_reachable: Arc<Notify>,
+) {
     let mut backoff = INITIAL_SUBSCRIBE_BACKOFF;
     loop {
         let Ok(token) = resolve_token(&secrets) else {
             stream_stale.store(true, Ordering::Relaxed);
-            tokio::time::sleep(backoff).await;
-            backoff = next_backoff(backoff);
+            backoff = wait_for_retry(backoff, &daemon_reachable).await;
             continue;
         };
 
@@ -329,8 +373,7 @@ async fn subscribe_loop(addr: String, secrets: Arc<SecretManager>, stream_stale:
             Ok(client) => client,
             Err(_) => {
                 stream_stale.store(true, Ordering::Relaxed);
-                tokio::time::sleep(backoff).await;
-                backoff = next_backoff(backoff);
+                backoff = wait_for_retry(backoff, &daemon_reachable).await;
                 continue;
             }
         };
@@ -339,8 +382,7 @@ async fn subscribe_loop(addr: String, secrets: Arc<SecretManager>, stream_stale:
             Ok(stream) => stream,
             Err(_) => {
                 stream_stale.store(true, Ordering::Relaxed);
-                tokio::time::sleep(backoff).await;
-                backoff = next_backoff(backoff);
+                backoff = wait_for_retry(backoff, &daemon_reachable).await;
                 continue;
             }
         };
@@ -365,8 +407,21 @@ async fn subscribe_loop(addr: String, secrets: Arc<SecretManager>, stream_stale:
             }
         }
 
-        tokio::time::sleep(backoff).await;
-        backoff = next_backoff(backoff);
+        backoff = wait_for_retry(backoff, &daemon_reachable).await;
+    }
+}
+
+/// Waits out `backoff` before the next reconnect attempt, unless
+/// `daemon_reachable` fires first -- in which case the wait is cut short and
+/// the backoff resets to [`INITIAL_SUBSCRIBE_BACKOFF`], so a daemon that just
+/// became reachable (signaled by `poll_loop`'s next short, fixed-interval
+/// tick) is retried immediately rather than after a backoff earned while it
+/// was still down. Returns the backoff to use if this reconnect attempt also
+/// fails.
+async fn wait_for_retry(backoff: Duration, daemon_reachable: &Notify) -> Duration {
+    tokio::select! {
+        () = tokio::time::sleep(backoff) => next_backoff(backoff),
+        () = daemon_reachable.notified() => INITIAL_SUBSCRIBE_BACKOFF,
     }
 }
 
@@ -715,5 +770,79 @@ mod tests {
 
         assert_eq!(update.engine_state, EngineState::Running);
         assert!(!update.stream_stale);
+    }
+
+    #[tokio::test]
+    async fn stream_stale_clears_promptly_once_a_previously_down_daemon_answers() {
+        // Reserve a port, then release it -- nothing is listening yet. This
+        // reproduces the normal "monitor started before nunciod" case,
+        // which is exactly what escalates the subscribe loop's backoff
+        // toward `MAX_SUBSCRIBE_BACKOFF` before the daemon ever answers.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("reserve an ephemeral port");
+            listener
+                .local_addr()
+                .expect("listener has local addr")
+                .to_string()
+        };
+
+        let secrets = Arc::new(SecretManager::mock());
+        secrets
+            .set_secret(GRPC_TOKEN_ACCOUNT, "deadbeef")
+            .expect("mock vault write succeeds");
+
+        let mut rx =
+            StatusPoller::spawn(addr.clone(), Arc::clone(&secrets), || EngineState::Running);
+
+        // Let both loops fail against the unreachable daemon for several
+        // seconds -- long enough for the subscribe loop's backoff to have
+        // grown well past `POLL_INTERVAL`, so the fix is proven rather than
+        // just timing being lucky.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        while let Ok(Some(update)) =
+            tokio::time::timeout(Duration::from_millis(50), rx.recv()).await
+        {
+            assert!(update.stream_stale);
+        }
+
+        // Now the daemon becomes reachable, bound on that same port.
+        let (subscribe_tx, subscribe_rx) = mpsc::channel(1);
+        // Held so the `Subscribe` stream stays open without ever emitting an
+        // event, isolating "the daemon is reachable" from "an event
+        // arrived".
+        let _keep_subscribe_open = subscribe_tx;
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .expect("rebind the same ephemeral port");
+        let system = StubSystem {
+            subscribe_rx: std::sync::Mutex::new(Some(subscribe_rx)),
+        };
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(SystemServer::new(system))
+                .add_service(AccountsServer::new(StubAccounts))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+
+        // The old worst case was up to `MAX_SUBSCRIBE_BACKOFF` (30s); the
+        // fix requires clearing within roughly one or two `POLL_INTERVAL`s,
+        // so a generous 10s bound still fails the old behavior while giving
+        // this test headroom against scheduling jitter.
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let update = rx.recv().await.expect("channel stays open");
+                if !update.stream_stale {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("stream_stale clears well within the old 30s worst case");
+
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 }

@@ -97,6 +97,7 @@ fn render_accounts_table(ui: &mut egui::Ui, state: &AppState) {
     let rows = state.account_rows();
 
     TableBuilder::new(ui)
+        .id_salt("accounts-table")
         .striped(true)
         .resizable(true)
         .column(Column::auto().at_least(140.0))
@@ -216,6 +217,7 @@ fn render_log_table(ui: &mut egui::Ui, state: &mut AppState) {
     let mut clicked_request_id: Option<String> = None;
 
     TableBuilder::new(ui)
+        .id_salt("logs-table")
         .striped(true)
         .resizable(true)
         .column(Column::auto().at_least(160.0))
