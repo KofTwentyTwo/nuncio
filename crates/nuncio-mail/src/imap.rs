@@ -52,7 +52,7 @@ const MAX_MESSAGES_PER_FETCH_BATCH: usize = 200;
 /// would ever accept is pointless to transfer only to reject.
 const MAX_MESSAGE_BODY_BYTES: u32 = 25 * 1024 * 1024;
 
-use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
+use crate::backend::{MailBackend, MutationOutcome, RemoteMutationKind, RemoteMutationSpec};
 use crate::parser::{MailError, MimeParserAdapter};
 
 /// Recover a raw IMAP UID from a [`RemoteMutationSpec::remote_id`] (a decimal
@@ -101,6 +101,34 @@ const CHECKPOINT_DELIM: char = ':';
 /// tag, or a bare `"42:105"` written before tagging existed -- resolves to a
 /// full re-fetch. Over-fetching is recoverable; misreading a token is not.
 const CHECKPOINT_SCHEME_UIDNEXT: &str = "v1:uidnext";
+
+/// Read a `COPY`/`MOVE` outcome from whether the server proved it.
+///
+/// `COPYUID` present is proof and names the destination UIDs. Absent is
+/// **unknown, never failure**: RFC 6851 section 4.3 makes it only `SHOULD` for
+/// `MOVE`, RFC 4315 section 3 permits omitting it for a `UIDNOTSTICKY`
+/// destination or one the client cannot `SELECT`, and a UID set matching
+/// nothing succeeds having done nothing (RFC 3501 section 6.4.8). Those are
+/// indistinguishable from here, and the caller has to re-enumerate to tell.
+fn copy_outcome(copy_uid: Option<crate::imap_raw::CopyUid>, op: &str) -> MutationOutcome {
+    match copy_uid {
+        Some(proof) if !proof.destination_uids.is_empty() => MutationOutcome::Applied {
+            token: Some(
+                proof
+                    .destination_uids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        },
+        _ => MutationOutcome::Unknown {
+            reason: format!(
+                "the server accepted the UID {op} without a COPYUID, so nothing proves it moved"
+            ),
+        },
+    }
+}
 
 /// Scheme for a mod-sequence checkpoint: `"v2:modseq:{uidvalidity}:{modseq}"`.
 ///
@@ -1343,7 +1371,7 @@ impl ImapEngine {
         &self,
         spec: &RemoteMutationSpec,
         session: &mut async_imap::Session<S>,
-    ) -> Result<(), MailError>
+    ) -> Result<MutationOutcome, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -1411,52 +1439,80 @@ impl ImapEngine {
         match &spec.kind {
             RemoteMutationKind::SetFlagged { value } => {
                 let op = if *value { "+FLAGS" } else { "-FLAGS" };
-                self.uid_store_flags(session, &uid_set, op, "\\Flagged")
-                    .await
+                let exchange = crate::imap_raw::run_collected(
+                    session,
+                    &format!("UID STORE {uid_set} {op} (\\Flagged)"),
+                )
+                .await?;
+                if let Some(conflicting) = exchange.modified_uids() {
+                    return Ok(MutationOutcome::Conflict {
+                        observed: format!("server reported MODIFIED for uid(s) {conflicting:?}"),
+                    });
+                }
+                if !exchange.ok {
+                    return Err(MailError::ImapError(format!(
+                        "UID STORE {op} for uid {uid_set} failed: {}",
+                        exchange.information.as_deref().unwrap_or("no detail")
+                    )));
+                }
+                // An untagged FETCH echoing the new flags is proof. Its absence
+                // is not failure: RFC 3501 section 6.4.6 lets a server suppress
+                // it, and a store that changes nothing legitimately produces
+                // none -- so the honest answer is that nothing was established.
+                if exchange.fetched_uids.is_empty() {
+                    Ok(MutationOutcome::Unknown {
+                        reason: "the server acknowledged the store without echoing the message"
+                            .to_string(),
+                    })
+                } else {
+                    Ok(MutationOutcome::Applied { token: None })
+                }
             }
             RemoteMutationKind::Copy { to_folder } => {
-                session.uid_copy(&uid_set, to_folder).await.map_err(|e| {
-                    MailError::ImapError(format!(
+                let exchange = crate::imap_raw::run_collected(
+                    session,
+                    &format!("UID COPY {uid_set} {to_folder}"),
+                )
+                .await?;
+                if !exchange.ok {
+                    return Err(MailError::ImapError(format!(
                         "UID COPY of '{}' to '{}' failed: {}",
-                        spec.message_id, to_folder, e
-                    ))
-                })
+                        spec.message_id,
+                        to_folder,
+                        exchange.information.as_deref().unwrap_or("no detail")
+                    )));
+                }
+                Ok(copy_outcome(exchange.copy_uid, "COPY"))
             }
             RemoteMutationKind::Move { to_folder } => {
                 self.uid_move(session, &uid_set, to_folder, &spec.message_id)
                     .await
             }
             RemoteMutationKind::Delete => {
-                self.uid_store_flags(session, &uid_set, "+FLAGS", "\\Deleted")
-                    .await?;
-                self.uid_expunge_scoped(session, &uid_set).await
+                let store = crate::imap_raw::run_collected(
+                    session,
+                    &format!("UID STORE {uid_set} +FLAGS (\\Deleted)"),
+                )
+                .await?;
+                if !store.ok {
+                    return Err(MailError::ImapError(format!(
+                        "UID STORE +FLAGS (\\Deleted) for uid {uid_set} failed: {}",
+                        store.information.as_deref().unwrap_or("no detail")
+                    )));
+                }
+                let expunged = self.uid_expunge_scoped(session, &uid_set).await?;
+                // Under QRESYNC the removal is reported as VANISHED rather than
+                // EXPUNGE (RFC 6851 section 4.4), so counting only EXPUNGE
+                // would report failure on every successful delete.
+                if expunged {
+                    Ok(MutationOutcome::Applied { token: None })
+                } else {
+                    Ok(MutationOutcome::Unknown {
+                        reason: "the server reported no removal for the expunged uid".to_string(),
+                    })
+                }
             }
         }
-    }
-
-    /// Issue a `UID STORE {uid} {op} ({flag})` and drain its untagged `FETCH`
-    /// responses, surfacing any protocol error. `op` is `+FLAGS`/`-FLAGS`.
-    async fn uid_store_flags<S>(
-        &self,
-        session: &mut async_imap::Session<S>,
-        uid_set: &str,
-        op: &str,
-        flag: &str,
-    ) -> Result<(), MailError>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
-    {
-        let query = format!("{op} ({flag})");
-        let updates = session.uid_store(uid_set, &query).await.map_err(|e| {
-            MailError::ImapError(format!("UID STORE {query} for uid {uid_set} failed: {e}"))
-        })?;
-        tokio::pin!(updates);
-        while let Some(item) = updates.next().await {
-            item.map_err(|e| {
-                MailError::ImapError(format!("reading UID STORE response failed: {e}"))
-            })?;
-        }
-        Ok(())
     }
 
     /// Permanently remove ONLY the target `uid_set` from the selected folder
@@ -1473,7 +1529,7 @@ impl ImapEngine {
         &self,
         session: &mut async_imap::Session<S>,
         uid_set: &str,
-    ) -> Result<(), MailError>
+    ) -> Result<bool, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -1491,17 +1547,19 @@ impl ImapEngine {
             )));
         }
 
-        let expunged = session
-            .uid_expunge(uid_set)
-            .await
-            .map_err(|e| MailError::ImapError(format!("UID EXPUNGE {uid_set} failed: {e}")))?;
-        tokio::pin!(expunged);
-        while let Some(item) = expunged.next().await {
-            item.map_err(|e| {
-                MailError::ImapError(format!("reading UID EXPUNGE response failed: {e}"))
-            })?;
+        // Collected rather than streamed, because a QRESYNC-enabled server
+        // answers with VANISHED instead of EXPUNGE (RFC 6851 section 4.4) and
+        // the typed expunge stream only yields the latter. Reading just that
+        // stream reports "nothing removed" on every successful delete.
+        let exchange =
+            crate::imap_raw::run_collected(session, &format!("UID EXPUNGE {uid_set}")).await?;
+        if !exchange.ok {
+            return Err(MailError::ImapError(format!(
+                "UID EXPUNGE {uid_set} failed: {}",
+                exchange.information.as_deref().unwrap_or("no detail")
+            )));
         }
-        Ok(())
+        Ok(!exchange.vanished_uids.is_empty() || !exchange.expunged_seqs.is_empty())
     }
 
     /// Move a message by UID, preferring RFC 6851 `UID MOVE` and falling back
@@ -1515,7 +1573,7 @@ impl ImapEngine {
         uid_set: &str,
         to_folder: &str,
         message_id: &str,
-    ) -> Result<(), MailError>
+    ) -> Result<MutationOutcome, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -1527,27 +1585,53 @@ impl ImapEngine {
         drop(caps);
 
         if has_move {
-            return session.uid_mv(uid_set, to_folder).await.map_err(|e| {
-                MailError::ImapError(format!(
-                    "UID MOVE of '{message_id}' to '{to_folder}' failed: {e}"
-                ))
-            });
+            let exchange =
+                crate::imap_raw::run_collected(session, &format!("UID MOVE {uid_set} {to_folder}"))
+                    .await?;
+            if !exchange.ok {
+                return Err(MailError::ImapError(format!(
+                    "UID MOVE of '{message_id}' to '{to_folder}' failed: {}",
+                    exchange.information.as_deref().unwrap_or("no detail")
+                )));
+            }
+            return Ok(copy_outcome(exchange.copy_uid, "MOVE"));
         }
 
-        session.uid_copy(uid_set, to_folder).await.map_err(|e| {
-            MailError::ImapError(format!(
-                "UID COPY (move fallback) of '{message_id}' to '{to_folder}' failed: {e}"
-            ))
-        })?;
-        self.uid_store_flags(session, uid_set, "+FLAGS", "\\Deleted")
-            .await?;
-        self.uid_expunge_scoped(session, uid_set).await
+        let copied =
+            crate::imap_raw::run_collected(session, &format!("UID COPY {uid_set} {to_folder}"))
+                .await?;
+        if !copied.ok {
+            return Err(MailError::ImapError(format!(
+                "UID COPY (move fallback) of '{message_id}' to '{to_folder}' failed: {}",
+                copied.information.as_deref().unwrap_or("no detail")
+            )));
+        }
+        // The copy half is what the destination proof refers to; the source
+        // removal below is separately verified, and a failure there leaves a
+        // duplicate rather than a lost message.
+        let outcome = copy_outcome(copied.copy_uid, "COPY");
+        let stored = crate::imap_raw::run_collected(
+            session,
+            &format!("UID STORE {uid_set} +FLAGS (\\Deleted)"),
+        )
+        .await?;
+        if !stored.ok {
+            return Err(MailError::ImapError(format!(
+                "UID STORE +FLAGS (\\Deleted) during move fallback failed: {}",
+                stored.information.as_deref().unwrap_or("no detail")
+            )));
+        }
+        self.uid_expunge_scoped(session, uid_set).await?;
+        Ok(outcome)
     }
 
     /// Apply a remote mutation over a freshly authenticated session. See
     /// [`Self::apply_mutation_with_session`] for the UIDVALIDITY guard and the
     /// per-action protocol commands.
-    pub async fn apply_remote_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+    pub async fn apply_remote_mutation(
+        &self,
+        spec: &RemoteMutationSpec,
+    ) -> Result<MutationOutcome, MailError> {
         let (username, password) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
             _ => {
@@ -1713,7 +1797,10 @@ impl MailBackend for ImapEngine {
         self.sync_folder_messages(folder_id, since_state).await
     }
 
-    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+    async fn apply_mutation(
+        &self,
+        spec: &RemoteMutationSpec,
+    ) -> Result<MutationOutcome, MailError> {
         self.apply_remote_mutation(spec).await
     }
 }
@@ -2612,7 +2699,7 @@ mod tests {
         advertise_move: bool,
         advertise_uidplus: bool,
         select_uid_validity: u32,
-    ) -> (Result<(), MailError>, Vec<String>) {
+    ) -> (Result<MutationOutcome, MailError>, Vec<String>) {
         let (client_io, server_io) = tokio::io::duplex(8192);
         let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let server_commands = commands.clone();

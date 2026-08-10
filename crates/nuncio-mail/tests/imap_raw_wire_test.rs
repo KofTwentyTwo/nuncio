@@ -478,3 +478,137 @@ async fn a_uidvalidity_change_refetches_rather_than_deleting_the_folder() {
     // part of identity -- so the caller replaces rather than merges.
     assert_ne!(second.upserts[0].id, first.upserts[0].id);
 }
+
+/// Build an engine pointed at the mock and apply one mutation through the
+/// real backend path.
+async fn apply(
+    server: &MockImapServer,
+    kind: nuncio_mail::RemoteMutationKind,
+    uid: u32,
+    uid_validity: &str,
+) -> nuncio_mail::MutationOutcome {
+    use nuncio_mail::MailBackend;
+    let engine = nuncio_mail::ImapEngine::with_credentials(
+        "acct-1",
+        server.host(),
+        server.port(),
+        nuncio_core::TlsMode::Plain,
+        "user",
+        "pass",
+    );
+    engine
+        .apply_mutation(&nuncio_mail::RemoteMutationSpec {
+            message_id: "m-1".to_string(),
+            remote_id: uid.to_string(),
+            folder_id: "INBOX".to_string(),
+            uid_validity: uid_validity.to_string(),
+            kind,
+        })
+        .await
+        .expect("the mutation attempt itself succeeds")
+}
+
+/// UIDVALIDITY the mock assigns to the first mailbox created.
+const FIRST_UID_VALIDITY: &str = "1000";
+
+#[tokio::test]
+async fn a_move_that_lost_a_race_is_unknown_rather_than_applied() {
+    // The silent-loss case. The server answers OK for a UID that no longer
+    // exists (RFC 3501 6.4.8), so only the absence of COPYUID distinguishes a
+    // real move from a no-op -- and absence cannot mean "applied".
+    let server = MockImapServer::start(ServerProfile::Qresync)
+        .await
+        .expect("server starts");
+    server.create_mailbox("INBOX");
+    server.create_mailbox("Archive");
+    server.create_mailbox("Trash");
+    let uid = server.append_message("INBOX", "Subject: contested\r\n\r\nx", &[]);
+
+    let applied = apply(
+        &server,
+        nuncio_mail::RemoteMutationKind::Move {
+            to_folder: "Archive".to_string(),
+        },
+        uid,
+        FIRST_UID_VALIDITY,
+    )
+    .await;
+    assert!(
+        matches!(
+            applied,
+            nuncio_mail::MutationOutcome::Applied { token: Some(_) }
+        ),
+        "a real move must be Applied and name its destination UID, got {applied:?}"
+    );
+
+    let lost = apply(
+        &server,
+        nuncio_mail::RemoteMutationKind::Move {
+            to_folder: "Trash".to_string(),
+        },
+        uid,
+        FIRST_UID_VALIDITY,
+    )
+    .await;
+    assert!(
+        matches!(lost, nuncio_mail::MutationOutcome::Unknown { .. }),
+        "a move of an already-moved UID must be Unknown, never Applied, got {lost:?}"
+    );
+    assert!(
+        server.uids("Trash").is_empty(),
+        "and nothing actually reached the destination"
+    );
+}
+
+#[tokio::test]
+async fn a_delete_is_applied_only_when_the_server_reports_the_removal() {
+    let server = MockImapServer::start(ServerProfile::Qresync)
+        .await
+        .expect("server starts");
+    server.create_mailbox("INBOX");
+    let uid = server.append_message("INBOX", "Subject: gone\r\n\r\nx", &[]);
+
+    let outcome = apply(
+        &server,
+        nuncio_mail::RemoteMutationKind::Delete,
+        uid,
+        FIRST_UID_VALIDITY,
+    )
+    .await;
+
+    // Under QRESYNC the proof arrives as VANISHED, not EXPUNGE. Reading only
+    // the typed expunge stream would report nothing removed here.
+    assert!(
+        matches!(outcome, nuncio_mail::MutationOutcome::Applied { .. }),
+        "a delete the server confirmed must be Applied, got {outcome:?}"
+    );
+    assert!(server.uids("INBOX").is_empty());
+}
+
+#[tokio::test]
+async fn a_delete_of_an_absent_uid_is_unknown() {
+    let server = MockImapServer::start(ServerProfile::Qresync)
+        .await
+        .expect("server starts");
+    server.create_mailbox("INBOX");
+    server.append_message("INBOX", "Subject: present\r\n\r\nx", &[]);
+
+    // UID 999 does not exist; the server ignores it and answers OK.
+    let outcome = apply(
+        &server,
+        nuncio_mail::RemoteMutationKind::Delete,
+        999,
+        FIRST_UID_VALIDITY,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, nuncio_mail::MutationOutcome::Unknown { .. }),
+        "a delete the server never confirmed must not be Applied, got {outcome:?}"
+    );
+    assert_eq!(
+        server.uids("INBOX").len(),
+        1,
+        "the real message must be untouched"
+    );
+}

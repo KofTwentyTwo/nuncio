@@ -5,7 +5,7 @@ use nuncio_core::model::{Email, Folder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
+use crate::backend::{MailBackend, MutationOutcome, RemoteMutationKind, RemoteMutationSpec};
 use crate::parser::MailError;
 
 /// Stand-in for the UIDVALIDITY scope on JMAP, which has no such concept: a
@@ -602,7 +602,10 @@ impl MailBackend for JmapEngine {
     }
 
     #[tracing::instrument(skip(self), fields(account_id = %self.account_id), err)]
-    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+    async fn apply_mutation(
+        &self,
+        spec: &RemoteMutationSpec,
+    ) -> Result<MutationOutcome, MailError> {
         if !self.has_credentials() {
             return Err(MailError::AuthError(
                 "JMAP remote mutation requires credentials".to_string(),
@@ -639,7 +642,12 @@ impl MailBackend for JmapEngine {
         let request = Self::build_email_set_request(&account_id, spec);
         let raw = self.post_jmap(&session.api_url, &request).await?;
         let expect_destroy = matches!(spec.kind, RemoteMutationKind::Delete);
-        Self::confirm_email_set_applied(&raw, &spec.remote_id, expect_destroy)
+        // `Email/set` names the ids it updated or destroyed, so a confirmed
+        // response is genuine proof rather than a bare acknowledgement. JMAP
+        // has no COPYUID-style ambiguity here; the id is stable and the server
+        // either lists it or does not.
+        Self::confirm_email_set_applied(&raw, &spec.remote_id, expect_destroy)?;
+        Ok(MutationOutcome::Applied { token: None })
     }
 }
 
