@@ -299,3 +299,182 @@ async fn a_qresync_select_without_enable_is_refused() {
         "the refusal must be surfaced, got: {err}"
     );
 }
+
+/// Drive a real folder sync against the mock and return what it observed.
+async fn sync_folder(
+    server: &MockImapServer,
+    since: Option<&str>,
+) -> nuncio_mail::backend::FolderChanges {
+    use nuncio_mail::MailBackend;
+    let engine = nuncio_mail::ImapEngine::with_credentials(
+        "acct-1",
+        server.host(),
+        server.port(),
+        nuncio_core::TlsMode::Plain,
+        "user",
+        "pass",
+    );
+    engine
+        .sync_changes("INBOX", since)
+        .await
+        .expect("folder sync succeeds")
+}
+
+#[tokio::test]
+async fn every_rung_reports_a_message_that_disappeared() {
+    // The defect this whole change exists for. A forward-only sync can only
+    // ever add, so a message removed by another client stays local forever.
+    // Each rung must be able to say it is gone -- QRESYNC because the server
+    // states it, the other two because the pass enumerated what remains.
+    for profile in [
+        ServerProfile::Qresync,
+        ServerProfile::Condstore,
+        ServerProfile::Basic,
+    ] {
+        let server = MockImapServer::start(profile).await.expect("server starts");
+        server.create_mailbox("INBOX");
+        let keep = server.append_message("INBOX", "Subject: keep\r\n\r\nkeep", &[]);
+        let gone = server.append_message("INBOX", "Subject: gone\r\n\r\ngone", &[]);
+
+        let first = sync_folder(&server, None).await;
+        assert_eq!(first.upserts.len(), 2, "{profile:?}: first pass sees both");
+
+        // Another client removes one while we are away.
+        assert!(server.expunge("INBOX", gone));
+
+        let second = sync_folder(&server, Some(&first.next_state)).await;
+
+        // However the rung learned it, the caller must end up able to identify
+        // the removed message and only that one.
+        let mut reported: Vec<String> = second.removals.clone();
+        if let Some(present) = &second.present {
+            let stored_gone = first
+                .upserts
+                .iter()
+                .map(|e| e.id.clone())
+                .filter(|id| !present.contains(id));
+            reported.extend(stored_gone);
+        }
+        reported.sort();
+        reported.dedup();
+
+        assert_eq!(
+            reported.len(),
+            1,
+            "{profile:?}: exactly one message must be reported gone, got {reported:?}"
+        );
+        let surviving = first
+            .upserts
+            .iter()
+            .find(|e| e.remote_id == keep.to_string())
+            .expect("the kept message was in the first pass");
+        assert!(
+            !reported.contains(&surviving.id),
+            "{profile:?}: the surviving message must not be reported gone"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_incremental_pass_that_cannot_see_absence_says_so() {
+    // `present: None` versus `Some(vec![])` is the difference between "I did
+    // not look" and "the folder is empty". Conflating them deletes a mailbox,
+    // so QRESYNC -- which never enumerates -- must report None.
+    let server = MockImapServer::start(ServerProfile::Qresync)
+        .await
+        .expect("server starts");
+    server.create_mailbox("INBOX");
+    server.append_message("INBOX", "Subject: one\r\n\r\nx", &[]);
+
+    let first = sync_folder(&server, None).await;
+    let second = sync_folder(&server, Some(&first.next_state)).await;
+
+    assert!(
+        second.next_state.starts_with("v2:modseq:"),
+        "a QRESYNC-capable mailbox must checkpoint by mod-sequence, got {:?}",
+        second.next_state
+    );
+    assert_eq!(
+        second.present, None,
+        "a QRESYNC pass does not enumerate the folder, so it cannot claim to know what is present"
+    );
+}
+
+#[tokio::test]
+async fn a_condstore_only_server_still_checkpoints_by_modseq_and_enumerates() {
+    // Gmail's rung. It cannot be told what vanished, so it must enumerate --
+    // and it must still upgrade its checkpoint so the next pass is narrow.
+    let server = MockImapServer::start(ServerProfile::Condstore)
+        .await
+        .expect("server starts");
+    server.create_mailbox("INBOX");
+    server.append_message("INBOX", "Subject: one\r\n\r\nx", &[]);
+
+    let first = sync_folder(&server, None).await;
+    assert!(
+        first.next_state.starts_with("v2:modseq:"),
+        "CONDSTORE alone is enough to checkpoint by mod-sequence, got {:?}",
+        first.next_state
+    );
+
+    let second = sync_folder(&server, Some(&first.next_state)).await;
+    assert!(
+        second.present.is_some(),
+        "without QRESYNC the only way to find removals is to enumerate"
+    );
+    assert!(
+        second.upserts.is_empty(),
+        "nothing changed, so CHANGEDSINCE must fetch no bodies"
+    );
+}
+
+#[tokio::test]
+async fn a_server_without_modseq_falls_back_to_a_uid_boundary_checkpoint() {
+    // Exchange's rung: no CONDSTORE, no QRESYNC.
+    let server = MockImapServer::start(ServerProfile::Basic)
+        .await
+        .expect("server starts");
+    server.create_mailbox("INBOX");
+    server.append_message("INBOX", "Subject: one\r\n\r\nx", &[]);
+
+    let first = sync_folder(&server, None).await;
+    assert!(
+        first.next_state.starts_with("v1:uidnext:"),
+        "a mailbox with no mod-sequences must checkpoint by UID boundary, got {:?}",
+        first.next_state
+    );
+    assert!(first.present.is_some());
+}
+
+#[tokio::test]
+async fn a_uidvalidity_change_refetches_rather_than_deleting_the_folder() {
+    // After a renumbering every stored UID names a different message. The
+    // dangerous outcome would be enumerating the new UID space, finding none
+    // of the old ids in it, and concluding the whole folder was deleted.
+    let server = MockImapServer::start(ServerProfile::Qresync)
+        .await
+        .expect("server starts");
+    server.create_mailbox("INBOX");
+    server.append_message("INBOX", "Subject: before\r\n\r\nx", &[]);
+
+    let first = sync_folder(&server, None).await;
+    assert_eq!(first.upserts.len(), 1);
+
+    server.bump_uid_validity("INBOX");
+    server.append_message("INBOX", "Subject: after\r\n\r\nx", &[]);
+
+    let second = sync_folder(&server, Some(&first.next_state)).await;
+
+    assert_eq!(
+        second.upserts.len(),
+        1,
+        "a renumbered mailbox must be re-fetched in full"
+    );
+    assert!(
+        second.removals.is_empty(),
+        "a renumbering is not a removal report"
+    );
+    // The re-fetched message has a different surrogate, because UIDVALIDITY is
+    // part of identity -- so the caller replaces rather than merges.
+    assert_ne!(second.upserts[0].id, first.upserts[0].id);
+}

@@ -102,95 +102,147 @@ const CHECKPOINT_DELIM: char = ':';
 /// full re-fetch. Over-fetching is recoverable; misreading a token is not.
 const CHECKPOINT_SCHEME_UIDNEXT: &str = "v1:uidnext";
 
-/// The `UID FETCH` sequence-set to issue for a folder sync, resolved from the
-/// stored checkpoint. Kept as a small typed value (rather than collapsing to a
-/// bare range string) so the distinct fall-back reasons stay observable: all
-/// of `Full`/`CorruptCheckpoint`/`UidValidityChanged` fetch `1:*`, but only the
-/// latter two are worth flagging, and tests can assert on which branch fired.
+/// Scheme for a mod-sequence checkpoint: `"v2:modseq:{uidvalidity}:{modseq}"`.
+///
+/// Written by both mod-sequence rungs. QRESYNC and CONDSTORE differ in how
+/// changes are *requested*, not in what has to be remembered -- both resume
+/// from `(UIDVALIDITY, HIGHESTMODSEQ)` -- so one scheme covers both and a
+/// mailbox can move between them without invalidating its checkpoint.
+const CHECKPOINT_SCHEME_MODSEQ: &str = "v2:modseq";
+
+/// Which mechanism a folder sync can use, in descending order of precision.
+///
+/// Chosen **per mailbox, not per account**: `NOMODSEQ` is a mailbox property
+/// (RFC 7162 section 3.1.2.2), so one folder on a CONDSTORE server can still be
+/// unable to answer mod-sequence queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FetchRange {
-    /// No prior checkpoint (first-ever sync of this folder): fetch everything.
+pub(crate) enum SyncRung {
+    /// `SELECT (QRESYNC …)` returns `VANISHED` plus changed messages in one
+    /// round trip. The server reports removals directly.
+    /// Fastmail/Cyrus, Dovecot.
+    Qresync,
+    /// `CHANGEDSINCE` narrows the fetch, but the server never volunteers
+    /// removals, so absence is found by diffing the full UID set.
+    /// **Gmail lives here**: it advertises CONDSTORE and not QRESYNC.
+    Condstore,
+    /// Neither extension. Changes and removals both come from a full UID-set
+    /// enumeration. **Exchange lives here.**
+    UidSetDiff,
+    /// No usable checkpoint: fetch everything. Also where an unreadable or
+    /// UIDVALIDITY-invalidated checkpoint lands.
     Full,
-    /// A checkpoint was stored but could not be parsed (malformed, or a legacy
-    /// bare-UID checkpoint predating UIDVALIDITY tracking). Falls back to a
-    /// full fetch, surfaced (logged) rather than silently ignored.
-    ///
-    /// Also covers a checkpoint whose scheme tag this build does not recognise
-    /// (see [`CHECKPOINT_SCHEME_UIDNEXT`]) -- including an untagged one, which
-    /// cannot be distinguished from a future scheme that happens to share its
-    /// shape.
-    CorruptCheckpoint,
-    /// The stored checkpoint's UIDVALIDITY no longer matches the mailbox's
-    /// current UIDVALIDITY (the mailbox was renumbered) or the server did not
-    /// report a current UIDVALIDITY to compare against. Stored UIDs are no
-    /// longer meaningful, so this falls back to a safe full re-fetch.
-    UidValidityChanged {
-        /// UIDVALIDITY recorded in the stored checkpoint.
-        stored: u32,
-        /// UIDVALIDITY the server reports now, if any.
-        current: Option<u32>,
-    },
-    /// A valid checkpoint whose UIDVALIDITY still matches: fetch only UIDs at
-    /// or above the stored boundary, i.e. messages that arrived since.
-    Incremental(u32),
 }
 
-impl FetchRange {
-    /// Render the IMAP `UID FETCH` sequence-set. Every non-incremental variant
-    /// fetches all UIDs (`1:*`); an incremental checkpoint `n` fetches `n:*`,
-    /// which the server bounds to UIDs `>= n` -- a genuinely narrower fetch.
-    fn sequence_set(self) -> String {
+/// What the server and this mailbox can actually do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MailboxSyncCapabilities {
+    /// Server advertises `QRESYNC` **and** this connection enabled it.
+    pub qresync_enabled: bool,
+    /// Server advertises `CONDSTORE`.
+    pub condstore: bool,
+    /// This mailbox reported a `HIGHESTMODSEQ`. A mailbox answering
+    /// `NOMODSEQ` has no mod-sequences to compare against no matter what the
+    /// server advertises.
+    pub mailbox_has_modseq: bool,
+}
+
+/// One folder-sync pass, resolved before any body is fetched.
+#[derive(Debug, Clone)]
+pub(crate) struct FolderSyncPlan {
+    /// The mechanism this pass negotiated.
+    pub rung: SyncRung,
+    pub uid_validity: Option<u32>,
+    pub uid_next: Option<u32>,
+    pub highest_modseq: Option<u64>,
+    /// UID set whose bodies this pass fetches. Empty means nothing changed.
+    pub body_sequence_set: String,
+    /// UIDs the server reported as gone (QRESYNC only).
+    pub vanished_uids: Vec<u32>,
+    /// The folder's complete UID set, when this pass enumerated it.
+    pub present_uids: Option<Vec<u32>>,
+}
+
+/// A checkpoint decoded into the resume point it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Checkpoint {
+    /// `v1:uidnext` -- resume from a UID boundary.
+    UidNext { uid_validity: u32, uid_next: u32 },
+    /// `v2:modseq` -- resume from a mod-sequence.
+    ModSeq { uid_validity: u32, modseq: u64 },
+}
+
+impl Checkpoint {
+    fn uid_validity(self) -> u32 {
         match self {
-            FetchRange::Full
-            | FetchRange::CorruptCheckpoint
-            | FetchRange::UidValidityChanged { .. } => "1:*".to_string(),
-            FetchRange::Incremental(uid) => format!("{}:*", uid),
+            Checkpoint::UidNext { uid_validity, .. } | Checkpoint::ModSeq { uid_validity, .. } => {
+                uid_validity
+            }
         }
     }
 }
 
-/// Resolve the fetch range from a stored `since_state` checkpoint and the
-/// mailbox's CURRENT UIDVALIDITY (as just reported by `SELECT`). `None` means
-/// no prior sync (full fetch). A checkpoint in the `"{uidvalidity}:{uidnext}"`
-/// format proceeds incrementally only when its UIDVALIDITY still matches the
-/// server's current one; a mismatch (mailbox renumbered) or a missing current
-/// UIDVALIDITY forces a safe full re-fetch. A malformed or legacy bare-number
-/// checkpoint is treated as corrupt (full fetch, flagged), never misread as a
-/// live UID boundary.
-fn resolve_fetch_range(since_state: Option<&str>, current_uid_validity: Option<u32>) -> FetchRange {
-    let Some(raw) = since_state else {
-        return FetchRange::Full;
-    };
-    // Require the scheme tag. A value without one is either pre-tagging or from
-    // a scheme this build cannot interpret; both must re-fetch rather than be
-    // guessed at.
-    let Some(body) = raw
-        .trim()
-        .strip_prefix(CHECKPOINT_SCHEME_UIDNEXT)
-        .and_then(|rest| rest.strip_prefix(CHECKPOINT_DELIM))
-    else {
-        return FetchRange::CorruptCheckpoint;
-    };
-    let parsed = body
-        .split_once(CHECKPOINT_DELIM)
-        .and_then(|(validity, uid)| {
-            Some((
-                validity.trim().parse::<u32>().ok()?,
-                uid.trim().parse::<u32>().ok()?,
-            ))
+/// Decode a stored checkpoint, or `None` when it carries no scheme this build
+/// recognises. An unrecognised token is never guessed at -- see
+/// [`CHECKPOINT_SCHEME_UIDNEXT`] for why that would lose mail silently.
+pub(crate) fn parse_checkpoint(raw: &str) -> Option<Checkpoint> {
+    let raw = raw.trim();
+    if let Some(body) = raw
+        .strip_prefix(CHECKPOINT_SCHEME_MODSEQ)
+        .and_then(|r| r.strip_prefix(CHECKPOINT_DELIM))
+    {
+        let (validity, modseq) = body.split_once(CHECKPOINT_DELIM)?;
+        return Some(Checkpoint::ModSeq {
+            uid_validity: validity.trim().parse().ok()?,
+            modseq: modseq.trim().parse().ok()?,
         });
-    let Some((stored_validity, uid)) = parsed else {
-        return FetchRange::CorruptCheckpoint;
-    };
-    if uid < 1 {
-        return FetchRange::CorruptCheckpoint;
     }
-    match current_uid_validity {
-        Some(current) if current == stored_validity => FetchRange::Incremental(uid),
-        current => FetchRange::UidValidityChanged {
-            stored: stored_validity,
-            current,
-        },
+    let body = raw
+        .strip_prefix(CHECKPOINT_SCHEME_UIDNEXT)
+        .and_then(|r| r.strip_prefix(CHECKPOINT_DELIM))?;
+    let (validity, uid) = body.split_once(CHECKPOINT_DELIM)?;
+    let uid_next: u32 = uid.trim().parse().ok()?;
+    if uid_next < 1 {
+        return None;
+    }
+    Some(Checkpoint::UidNext {
+        uid_validity: validity.trim().parse().ok()?,
+        uid_next,
+    })
+}
+
+/// Pick the rung for this pass.
+///
+/// A checkpoint whose UIDVALIDITY no longer matches the mailbox is not a
+/// downgrade to a lesser rung -- it is [`SyncRung::Full`]. UIDs restart after a
+/// UIDVALIDITY change, so every stored boundary refers to a different message
+/// than it did (RFC 3501 section 2.3.1.1).
+pub(crate) fn choose_rung(
+    checkpoint: Option<Checkpoint>,
+    current_uid_validity: Option<u32>,
+    caps: MailboxSyncCapabilities,
+) -> SyncRung {
+    let modseq_usable = caps.mailbox_has_modseq && (caps.qresync_enabled || caps.condstore);
+
+    let Some(checkpoint) = checkpoint else {
+        // No checkpoint means everything must be fetched regardless of what
+        // the server can do.
+        return SyncRung::Full;
+    };
+    let (Some(current), stored) = (current_uid_validity, checkpoint.uid_validity()) else {
+        return SyncRung::Full;
+    };
+    if current != stored {
+        return SyncRung::Full;
+    }
+
+    match checkpoint {
+        Checkpoint::ModSeq { .. } if modseq_usable && caps.qresync_enabled => SyncRung::Qresync,
+        Checkpoint::ModSeq { .. } if modseq_usable => SyncRung::Condstore,
+        // A mod-sequence checkpoint against a mailbox that can no longer
+        // answer mod-sequence queries (index loss, or a move to a server
+        // without the extension) has nothing to resume from.
+        Checkpoint::ModSeq { .. } => SyncRung::Full,
+        Checkpoint::UidNext { .. } => SyncRung::UidSetDiff,
     }
 }
 
@@ -719,7 +771,7 @@ impl ImapEngine {
         folder_id: &str,
         since_state: Option<&str>,
         session: &mut async_imap::Session<S>,
-    ) -> Result<(Vec<Email>, String), MailError>
+    ) -> Result<crate::backend::FolderChanges, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -758,35 +810,18 @@ impl ImapEngine {
         since_state: Option<&str>,
         session: &mut async_imap::Session<S>,
         batch_size: usize,
-    ) -> Result<(Vec<Email>, String), MailError>
+    ) -> Result<crate::backend::FolderChanges, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
-        let mailbox = session.select(folder_id).await.map_err(|e| {
-            MailError::ImapError(format!("failed to select folder '{}': {}", folder_id, e))
-        })?;
-        let server_uid_next = mailbox.uid_next;
-        let server_uid_validity = mailbox.uid_validity;
-
-        let range = resolve_fetch_range(since_state, server_uid_validity);
-        match range {
-            FetchRange::CorruptCheckpoint => tracing::warn!(
-                folder_id,
-                checkpoint = since_state.unwrap_or_default(),
-                "ignoring unparseable folder sync checkpoint; falling back to a full fetch"
-            ),
-            FetchRange::UidValidityChanged { stored, current } => tracing::warn!(
-                folder_id,
-                stored_uidvalidity = stored,
-                current_uidvalidity = current,
-                "mailbox UIDVALIDITY changed (renumbered); the stored UID checkpoint is no \
-                 longer valid, so re-fetching in full to avoid silently skipping messages"
-            ),
-            FetchRange::Full | FetchRange::Incremental(_) => {}
-        }
+        let plan = self
+            .plan_folder_sync(folder_id, since_state, session)
+            .await?;
+        let server_uid_next = plan.uid_next;
+        let server_uid_validity = plan.uid_validity;
 
         let batch_size = batch_size.max(1);
-        let sequence_set = range.sequence_set();
+        let sequence_set = plan.body_sequence_set.clone();
 
         // Phase 1: enumerate UIDs and sizes only -- no bodies transferred, so
         // this stays small even for an enormous mailbox.
@@ -888,8 +923,15 @@ impl ImapEngine {
         // safely falls back to a full fetch.
         let boundary_uid = server_uid_next
             .or_else(|| (max_uid_seen > 0).then_some(max_uid_seen.saturating_add(1)));
-        let new_checkpoint = match (server_uid_validity, boundary_uid) {
-            (Some(validity), Some(uid)) => format!(
+        // A mod-sequence checkpoint is preferred whenever the mailbox can
+        // supply one, even after a full pass: writing it is what lets the NEXT
+        // sync use a higher rung than this one did.
+        let new_checkpoint = match (server_uid_validity, plan.highest_modseq, boundary_uid) {
+            (Some(validity), Some(modseq), _) => format!(
+                "{}{}{}{}{}",
+                CHECKPOINT_SCHEME_MODSEQ, CHECKPOINT_DELIM, validity, CHECKPOINT_DELIM, modseq
+            ),
+            (Some(validity), None, Some(uid)) => format!(
                 "{}{}{}{}{}",
                 CHECKPOINT_SCHEME_UIDNEXT, CHECKPOINT_DELIM, validity, CHECKPOINT_DELIM, uid
             ),
@@ -898,16 +940,222 @@ impl ImapEngine {
                 .unwrap_or_else(|| "full-resync-required".to_string()),
         };
 
+        let removals: Vec<String> = plan
+            .vanished_uids
+            .iter()
+            .map(|uid| self.surrogate_for(folder_id, server_uid_validity, *uid))
+            .collect();
+        let present = plan.present_uids.as_ref().map(|uids| {
+            uids.iter()
+                .map(|uid| self.surrogate_for(folder_id, server_uid_validity, *uid))
+                .collect()
+        });
+
         tracing::info!(
             account_id = %self.account_id,
             folder_id,
+            rung = ?plan.rung,
             fetched = emails.len(),
+            removed = removals.len(),
+            enumerated = plan.present_uids.as_ref().map_or(0, Vec::len),
             oversized = oversized_uids.len(),
             skipped = skipped_no_uid,
             "imap folder sync complete"
         );
 
-        Ok((emails, new_checkpoint))
+        Ok(crate::backend::FolderChanges {
+            upserts: emails,
+            removals,
+            present,
+            next_state: new_checkpoint,
+        })
+    }
+
+    /// Negotiate capabilities, select the folder by the best available means,
+    /// and decide what this pass must fetch and what it can say about absence.
+    ///
+    /// This is where the ladder is applied. Ordering matters: `ENABLE` must
+    /// precede `SELECT` (RFC 7162 section 3.2.3 makes a server answer `BAD` to
+    /// a QRESYNC `SELECT` otherwise), and the rung cannot be finalised until
+    /// the mailbox has reported whether it has mod-sequences at all.
+    async fn plan_folder_sync<S>(
+        &self,
+        folder_id: &str,
+        since_state: Option<&str>,
+        session: &mut async_imap::Session<S>,
+    ) -> Result<FolderSyncPlan, MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
+        let (has_qresync, has_condstore) = {
+            let caps = session
+                .capabilities()
+                .await
+                .map_err(|e| MailError::ImapError(format!("CAPABILITY query failed: {e}")))?;
+            (caps.has_str("QRESYNC"), caps.has_str("CONDSTORE"))
+        };
+
+        let checkpoint = since_state.and_then(parse_checkpoint);
+        if since_state.is_some() && checkpoint.is_none() {
+            tracing::warn!(
+                folder_id,
+                checkpoint = since_state.unwrap_or_default(),
+                "folder sync checkpoint carries no scheme this build recognises; \
+                 re-fetching in full rather than guessing at its meaning"
+            );
+        }
+
+        // ENABLE before SELECT, and only when there is a mod-sequence
+        // checkpoint that a QRESYNC SELECT could actually resume from.
+        let qresync_enabled = match (has_qresync, checkpoint) {
+            (true, Some(Checkpoint::ModSeq { .. })) => {
+                crate::imap_raw::enable(session, &["QRESYNC"]).await?
+            }
+            _ => false,
+        };
+
+        // Try the QRESYNC SELECT when it is available. Per RFC 7162 section
+        // 3.2.5 a server whose UIDVALIDITY no longer matches simply ignores the
+        // QRESYNC parameters, so this is safe to attempt: the mismatch is
+        // detected below from the UIDVALIDITY it reports back.
+        let (selected, attempted_qresync) = match (qresync_enabled, checkpoint) {
+            (
+                true,
+                Some(Checkpoint::ModSeq {
+                    uid_validity,
+                    modseq,
+                }),
+            ) => (
+                crate::imap_raw::select_qresync(session, folder_id, uid_validity, modseq, None)
+                    .await?,
+                true,
+            ),
+            _ => {
+                let exchange =
+                    crate::imap_raw::run_collected(session, &format!("SELECT {folder_id}")).await?;
+                if !exchange.ok {
+                    return Err(MailError::ImapError(format!(
+                        "failed to select folder '{folder_id}': {}",
+                        exchange.information.as_deref().unwrap_or("no detail")
+                    )));
+                }
+                (exchange, false)
+            }
+        };
+
+        let caps = MailboxSyncCapabilities {
+            qresync_enabled,
+            condstore: has_condstore,
+            mailbox_has_modseq: selected.highest_modseq.is_some(),
+        };
+        let mut rung = choose_rung(checkpoint, selected.uid_validity, caps);
+        // The QRESYNC SELECT was issued optimistically; if the server answered
+        // with a different UIDVALIDITY it ignored our parameters, and anything
+        // it did report refers to a UID space that no longer exists.
+        if attempted_qresync && rung != SyncRung::Qresync {
+            tracing::warn!(
+                folder_id,
+                "QRESYNC resume was refused or the mailbox was renumbered; re-fetching in full"
+            );
+        }
+        if rung == SyncRung::Qresync && !attempted_qresync {
+            rung = SyncRung::Full;
+        }
+
+        let mut plan = FolderSyncPlan {
+            rung,
+            uid_validity: selected.uid_validity,
+            uid_next: selected.uid_next,
+            highest_modseq: selected.highest_modseq,
+            body_sequence_set: "1:*".to_string(),
+            vanished_uids: Vec::new(),
+            present_uids: None,
+        };
+
+        match rung {
+            SyncRung::Qresync => {
+                // The server volunteered both halves: what changed, and what
+                // disappeared. No enumeration of the folder is needed at all,
+                // which is the entire reason this rung is worth having.
+                plan.vanished_uids = selected.vanished_uids.clone();
+                plan.body_sequence_set = if selected.fetched_uids.is_empty() {
+                    // Nothing changed. An empty set would be a protocol error,
+                    // so ask for a range that cannot match instead of skipping
+                    // the fetch path.
+                    String::new()
+                } else {
+                    join_uid_batch(&selected.fetched_uids)
+                };
+            }
+            SyncRung::Condstore => {
+                let modseq = match checkpoint {
+                    Some(Checkpoint::ModSeq { modseq, .. }) => modseq,
+                    _ => 0,
+                };
+                let changed = self
+                    .enumerate_uids(session, folder_id, Some(modseq))
+                    .await?;
+                plan.body_sequence_set = if changed.is_empty() {
+                    String::new()
+                } else {
+                    join_uid_batch(&changed)
+                };
+                // CONDSTORE narrows the fetch but never reports removals, so
+                // absence has to be found by enumerating what remains.
+                plan.present_uids = Some(self.enumerate_uids(session, folder_id, None).await?);
+            }
+            SyncRung::UidSetDiff => {
+                // New arrivals come from the UID boundary; removals from the
+                // full UID set. Two cheap enumerations beat re-fetching bodies.
+                if let Some(Checkpoint::UidNext { uid_next, .. }) = checkpoint {
+                    plan.body_sequence_set = format!("{uid_next}:*");
+                }
+                plan.present_uids = Some(self.enumerate_uids(session, folder_id, None).await?);
+            }
+            SyncRung::Full => {
+                // Everything is fetched, so the same pass also establishes
+                // exactly what the folder holds.
+                plan.present_uids = Some(self.enumerate_uids(session, folder_id, None).await?);
+            }
+        }
+
+        Ok(plan)
+    }
+
+    /// List the folder's UIDs, optionally narrowed to those changed since
+    /// `changed_since`. Requests no bodies and no flags, so the cost is one
+    /// short line per message rather than a download.
+    async fn enumerate_uids<S>(
+        &self,
+        session: &mut async_imap::Session<S>,
+        folder_id: &str,
+        changed_since: Option<u64>,
+    ) -> Result<Vec<u32>, MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
+        let command = match changed_since {
+            Some(modseq) => format!("UID FETCH 1:* (UID) (CHANGEDSINCE {modseq})"),
+            None => "UID FETCH 1:* (UID)".to_string(),
+        };
+        let exchange = crate::imap_raw::run_collected(session, &command).await?;
+        if !exchange.ok {
+            return Err(MailError::ImapError(format!(
+                "UID enumeration of '{folder_id}' failed: {}",
+                exchange.information.as_deref().unwrap_or("no detail")
+            )));
+        }
+        let mut uids = exchange.fetched_uids;
+        uids.sort_unstable();
+        uids.dedup();
+        Ok(uids)
+    }
+
+    /// Surrogate id for a UID in this account/folder/UIDVALIDITY scope, so
+    /// removals name messages the same way stored rows do.
+    fn surrogate_for(&self, folder_id: &str, uid_validity: Option<u32>, uid: u32) -> String {
+        let validity = uid_validity.map(|v| v.to_string()).unwrap_or_default();
+        Email::surrogate_id(&self.account_id, folder_id, &validity, &uid.to_string())
     }
 
     /// Build an [`Email`] from a full-body (or envelope-only) FETCH item. When
@@ -1049,7 +1297,7 @@ impl ImapEngine {
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<crate::backend::FolderChanges, MailError> {
         let (username, password) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
             _ => {
@@ -1457,11 +1705,11 @@ impl MailBackend for ImapEngine {
         Ok(folders)
     }
 
-    async fn sync_messages(
+    async fn sync_changes(
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<crate::backend::FolderChanges, MailError> {
         self.sync_folder_messages(folder_id, since_state).await
     }
 
@@ -1526,7 +1774,16 @@ mod tests {
             while let Some(line) = read_scripted_line(&mut socket).await {
                 let tag = line.split_whitespace().next().unwrap_or("").to_string();
                 let upper = line.to_ascii_uppercase();
-                if upper.contains("LOGIN") {
+                if upper.contains("CAPABILITY") {
+                    let _ = socket
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                } else if upper.contains("LOGIN") {
                     let _ = socket
                         .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
                         .await;
@@ -1560,76 +1817,8 @@ mod tests {
         assert_eq!(folders[1].id, "Archive");
     }
 
-    #[test]
-    fn resolve_fetch_range_distinguishes_none_valid_corrupt_and_renumbered_checkpoints() {
-        // First-ever sync: full history (current UIDVALIDITY irrelevant).
-        assert_eq!(resolve_fetch_range(None, Some(1)), FetchRange::Full);
-        assert_eq!(resolve_fetch_range(None, None).sequence_set(), "1:*");
-
-        // Valid checkpoint whose UIDVALIDITY still matches: narrowed fetch.
-        assert_eq!(
-            resolve_fetch_range(Some("v1:uidnext:1:105"), Some(1)),
-            FetchRange::Incremental(105)
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("v1:uidnext:1:105"), Some(1)).sequence_set(),
-            "105:*"
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("v1:uidnext: 7 : 42 "), Some(7)),
-            FetchRange::Incremental(42)
-        );
-
-        // UIDVALIDITY changed (mailbox renumbered) or the server reported none
-        // to compare against: MUST fall back to a full fetch, distinctly, so a
-        // renumber can never silently skip the low new UIDs.
-        assert_eq!(
-            resolve_fetch_range(Some("v1:uidnext:1:105"), Some(2)),
-            FetchRange::UidValidityChanged {
-                stored: 1,
-                current: Some(2)
-            }
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("v1:uidnext:1:105"), Some(2)).sequence_set(),
-            "1:*"
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("v1:uidnext:1:105"), None),
-            FetchRange::UidValidityChanged {
-                stored: 1,
-                current: None
-            }
-        );
-
-        // Malformed or legacy bare-number (pre-UIDVALIDITY) checkpoints are
-        // corrupt -> full fetch, never misread as a live UID boundary.
-        assert_eq!(
-            resolve_fetch_range(Some(""), Some(1)),
-            FetchRange::CorruptCheckpoint
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("105"), Some(1)),
-            FetchRange::CorruptCheckpoint,
-            "a legacy bare-number checkpoint must not be read as a UID boundary"
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("v1:uidnext:1:0"), Some(1)),
-            FetchRange::CorruptCheckpoint
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("not:auid"), Some(1)),
-            FetchRange::CorruptCheckpoint
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("not-a-uid"), Some(1)).sequence_set(),
-            "1:*"
-        );
-    }
-
     /// Read a single CRLF-terminated line from a scripted-server stream,
-    /// returning `None` at EOF (client hung up). Used only by the in-memory
-    /// duplex tests below; the real fetch path never parses raw lines.
+    /// returning `None` at EOF (client hung up).
     async fn read_scripted_line<R: AsyncRead + Unpin>(reader: &mut R) -> Option<String> {
         let mut buf = Vec::new();
         let mut byte = [0u8; 1];
@@ -1655,6 +1844,159 @@ mod tests {
         }
     }
 
+    /// The body/size fetches from a captured command list, excluding the
+    /// `(UID)`-only enumeration a non-QRESYNC rung issues to find removals.
+    /// That pass is expected and says nothing about how the body fetch was
+    /// narrowed, which is what these tests are about.
+    fn body_fetch_ranges(all: &[String]) -> Vec<String> {
+        all.iter()
+            .filter(|c| !c.to_ascii_uppercase().ends_with("(UID)"))
+            .cloned()
+            .collect()
+    }
+
+    /// Capabilities that can reach every rung, so a test only has to vary the
+    /// one thing it is about.
+    fn full_caps() -> MailboxSyncCapabilities {
+        MailboxSyncCapabilities {
+            qresync_enabled: true,
+            condstore: true,
+            mailbox_has_modseq: true,
+        }
+    }
+
+    #[test]
+    fn checkpoints_round_trip_through_their_scheme() {
+        assert_eq!(
+            parse_checkpoint("v2:modseq:42:900"),
+            Some(Checkpoint::ModSeq {
+                uid_validity: 42,
+                modseq: 900
+            })
+        );
+        assert_eq!(
+            parse_checkpoint("v1:uidnext:42:105"),
+            Some(Checkpoint::UidNext {
+                uid_validity: 42,
+                uid_next: 105
+            })
+        );
+        assert_eq!(
+            parse_checkpoint("v1:uidnext: 7 : 42 "),
+            Some(Checkpoint::UidNext {
+                uid_validity: 7,
+                uid_next: 42
+            })
+        );
+    }
+
+    #[test]
+    fn an_untagged_or_unknown_scheme_checkpoint_is_not_interpreted() {
+        // A QRESYNC checkpoint is (uidvalidity, highestmodseq) -- the same
+        // shape as (uidvalidity, uidnext) and a different meaning. Reading one
+        // as the other hands the server a UIDNEXT where it expects a MODSEQ;
+        // UIDNEXT is normally the larger number, so the server answers
+        // "nothing changed" and everything below is never enumerated again.
+        for token in [
+            "42:105",           // pre-tagging
+            "v3:future:42:105", // a scheme from a later build
+            "v1:modseq:42:105", // tag-shaped but not ours
+            "v1:42:105",        // truncated tag
+            "v1:uidnext:42:0",  // a UID boundary below 1 is not addressable
+            "",
+        ] {
+            assert_eq!(
+                parse_checkpoint(token),
+                None,
+                "token {token:?} must not be interpreted"
+            );
+            assert_eq!(
+                choose_rung(parse_checkpoint(token), Some(42), full_caps()),
+                SyncRung::Full,
+                "an uninterpretable token must re-fetch everything"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rung_is_chosen_from_the_checkpoint_and_what_the_mailbox_supports() {
+        let modseq = parse_checkpoint("v2:modseq:42:900");
+        let uidnext = parse_checkpoint("v1:uidnext:42:105");
+
+        // Fastmail/Cyrus, Dovecot: the server states removals directly.
+        assert_eq!(
+            choose_rung(modseq, Some(42), full_caps()),
+            SyncRung::Qresync
+        );
+
+        // Gmail: CONDSTORE without QRESYNC. This is the rung a two-rung ladder
+        // would have skipped, pushing the largest provider onto full sweeps.
+        assert_eq!(
+            choose_rung(
+                modseq,
+                Some(42),
+                MailboxSyncCapabilities {
+                    qresync_enabled: false,
+                    condstore: true,
+                    mailbox_has_modseq: true
+                }
+            ),
+            SyncRung::Condstore
+        );
+
+        // Exchange: neither extension, so a UID-set diff is all that is left.
+        assert_eq!(
+            choose_rung(
+                uidnext,
+                Some(42),
+                MailboxSyncCapabilities {
+                    qresync_enabled: false,
+                    condstore: false,
+                    mailbox_has_modseq: false
+                }
+            ),
+            SyncRung::UidSetDiff
+        );
+
+        // NOMODSEQ is a MAILBOX property (RFC 7162 3.1.2.2): a mod-sequence
+        // checkpoint against a mailbox that cannot answer mod-sequence queries
+        // has nothing to resume from, whatever the server advertises.
+        assert_eq!(
+            choose_rung(
+                modseq,
+                Some(42),
+                MailboxSyncCapabilities {
+                    qresync_enabled: true,
+                    condstore: true,
+                    mailbox_has_modseq: false
+                }
+            ),
+            SyncRung::Full
+        );
+
+        // No checkpoint at all.
+        assert_eq!(choose_rung(None, Some(42), full_caps()), SyncRung::Full);
+    }
+
+    #[test]
+    fn a_uidvalidity_change_forces_a_full_pass_from_every_rung() {
+        // UIDs restart after a UIDVALIDITY change (RFC 3501 2.3.1.1), so every
+        // stored boundary now names a different message. This is not a
+        // downgrade to a lesser rung; nothing stored can be resumed from.
+        for token in ["v2:modseq:42:900", "v1:uidnext:42:105"] {
+            assert_eq!(
+                choose_rung(parse_checkpoint(token), Some(43), full_caps()),
+                SyncRung::Full,
+                "{token} must not survive a renumbering"
+            );
+            assert_eq!(
+                choose_rung(parse_checkpoint(token), None, full_caps()),
+                SyncRung::Full,
+                "{token}: a server that reports no UIDVALIDITY cannot be resumed against"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn incremental_sync_narrows_the_fetch_range_on_the_second_pass() {
         // Drives a real `async_imap::Session` over an in-memory duplex pair
@@ -1676,6 +2018,17 @@ mod tests {
                     }
                     let _ = io
                         .write_all(format!("{tag} OK FETCH completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("CAPABILITY") {
+                    // The planner negotiates capabilities before selecting; a
+                    // script that never answers this blocks the client forever.
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
                         .await;
                 } else if upper.contains("LOGIN") {
                     let _ = io
@@ -1708,26 +2061,33 @@ mod tests {
 
         // First sync: no checkpoint -> full history; returns
         // "{uidvalidity}:{uidnext}" from real server state.
-        let (first, checkpoint) = engine
+        let first_pass = engine
             .sync_folder_messages_with_session("INBOX", None, &mut session)
             .await
             .expect("first sync succeeds");
+        let (first, checkpoint) = (first_pass.upserts, first_pass.next_state);
         assert!(first.is_empty());
         assert_eq!(checkpoint, "v1:uidnext:1:105");
 
         // Second sync: feed back the checkpoint; UIDVALIDITY still matches
         // (1), so the fetch is narrowed.
-        let (_second, checkpoint2) = engine
+        let __changes = engine
             .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
             .await
             .expect("second sync succeeds");
+        let (_second, checkpoint2) = (__changes.upserts, __changes.next_state);
         assert_eq!(checkpoint2, "v1:uidnext:1:105");
 
         drop(session);
         let _ = server.await;
 
-        let ranges = fetch_ranges.lock().expect("lock captured ranges");
-        assert_eq!(ranges.len(), 2, "expected exactly two UID FETCH commands");
+        let all = fetch_ranges.lock().expect("lock captured ranges");
+        let ranges = body_fetch_ranges(&all);
+        assert_eq!(
+            ranges.len(),
+            2,
+            "expected one body fetch per sync, got: {all:?}"
+        );
         assert!(
             ranges[0].contains("1:*"),
             "first sync must fetch full history, got: {}",
@@ -1842,6 +2202,17 @@ mod tests {
                     }
                     resp.push_str(&format!("{tag} OK FETCH completed\r\n"));
                     let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("CAPABILITY") {
+                    // The planner negotiates capabilities before selecting; a
+                    // script that never answers this blocks the client forever.
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
                 } else if upper.contains("LOGIN") {
                     let _ = io
                         .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
@@ -1869,10 +2240,11 @@ mod tests {
             .map_err(|(e, _)| e)
             .expect("scripted login succeeds");
         let engine = ImapEngine::new("acct-1", "example.test", 993);
-        let (emails, checkpoint) = engine
+        let changes = engine
             .sync_folder_messages_batched("INBOX", since_state.as_deref(), &mut session, batch_size)
             .await
             .expect("batched sync succeeds");
+        let (emails, checkpoint) = (changes.upserts, changes.next_state);
         drop(session);
         let _ = server.await;
 
@@ -2008,13 +2380,23 @@ mod tests {
             checkpoint2, "v1:uidnext:1:4",
             "checkpoint stays stable across an empty pass"
         );
+        let second_bodies = body_fetch_ranges(&second_cmds);
         assert!(
-            second_cmds.iter().any(|c| c.contains("4:*")),
-            "second sync must enumerate the narrowed range, got: {second_cmds:?}"
+            second_bodies.iter().any(|c| c.contains("4:*")),
+            "second sync must fetch only the narrowed range, got: {second_bodies:?}"
         );
         assert!(
-            !second_cmds.iter().any(|c| c.contains("1:*")),
-            "second sync must NOT re-enumerate the full range, got: {second_cmds:?}"
+            !second_bodies.iter().any(|c| c.contains("1:*")),
+            "second sync must NOT re-fetch bodies for the full range, got: {second_bodies:?}"
+        );
+        // The `1:*` that IS expected: a UID-only enumeration. Without QRESYNC
+        // there is no other way to learn a message was removed, and it costs
+        // one short line per message rather than a body.
+        assert!(
+            second_cmds
+                .iter()
+                .any(|c| c.to_ascii_uppercase().ends_with("(UID)") && c.contains("1:*")),
+            "a non-QRESYNC rung must enumerate the folder to detect removals, got: {second_cmds:?}"
         );
     }
 
@@ -2041,6 +2423,17 @@ mod tests {
                     }
                     let _ = io
                         .write_all(format!("{tag} OK FETCH completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("CAPABILITY") {
+                    // The planner negotiates capabilities before selecting; a
+                    // script that never answers this blocks the client forever.
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
                         .await;
                 } else if upper.contains("LOGIN") {
                     let _ = io
@@ -2076,19 +2469,21 @@ mod tests {
         let engine = ImapEngine::new("acct-1", "example.test", 993);
 
         // First sync under UIDVALIDITY 1 stores "1:105".
-        let (_first, checkpoint) = engine
+        let __changes = engine
             .sync_folder_messages_with_session("INBOX", None, &mut session)
             .await
             .expect("first sync succeeds");
+        let (_first, checkpoint) = (__changes.upserts, __changes.next_state);
         assert_eq!(checkpoint, "v1:uidnext:1:105");
 
         // Second sync: server now reports UIDVALIDITY 2. The stored checkpoint
         // is stale, so the fetch MUST be a full `1:*`, and the checkpoint is
         // rewritten under the new UIDVALIDITY.
-        let (_second, checkpoint2) = engine
+        let __changes = engine
             .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
             .await
             .expect("second sync succeeds");
+        let (_second, checkpoint2) = (__changes.upserts, __changes.next_state);
         assert_eq!(
             checkpoint2, "v1:uidnext:2:105",
             "checkpoint must be rewritten under the new UIDVALIDITY"
@@ -2097,8 +2492,13 @@ mod tests {
         drop(session);
         let _ = server.await;
 
-        let ranges = fetch_ranges.lock().expect("lock captured ranges");
-        assert_eq!(ranges.len(), 2, "expected exactly two UID FETCH commands");
+        let all = fetch_ranges.lock().expect("lock captured ranges");
+        let ranges = body_fetch_ranges(&all);
+        assert_eq!(
+            ranges.len(),
+            2,
+            "expected one body fetch per sync, got: {all:?}"
+        );
         assert!(
             ranges[0].contains("1:*"),
             "first sync fetches full history, got: {}",
@@ -2127,6 +2527,17 @@ mod tests {
                 if upper.contains("UID FETCH") {
                     // Deliberately never respond: a mid-stream server stall.
                     std::future::pending::<()>().await;
+                } else if upper.contains("CAPABILITY") {
+                    // The planner negotiates capabilities before selecting; a
+                    // script that never answers this blocks the client forever.
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
                 } else if upper.contains("LOGIN") {
                     let _ = io
                         .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
@@ -2178,38 +2589,6 @@ mod tests {
         assert_eq!(parse_imap_uid("0"), None);
         assert_eq!(parse_imap_uid("imap-uid-42"), None);
         assert_eq!(parse_imap_uid("jmap-object-id"), None);
-    }
-
-    #[test]
-    fn an_untagged_or_unknown_scheme_checkpoint_forces_a_full_refetch() {
-        // The hazard this tag exists for. A QRESYNC checkpoint is
-        // `(uidvalidity, highestmodseq)` -- the same shape as this scheme's
-        // `(uidvalidity, uidnext)` and a different meaning. Read one as the
-        // other and the server is handed a UIDNEXT where it expects a MODSEQ;
-        // since UIDNEXT is normally the larger number it answers "nothing
-        // changed" and everything below is never enumerated again. Refusing
-        // to interpret an unrecognised token is the only safe reading.
-        for token in [
-            // Pre-tagging, written by an older build.
-            "1:105",
-            // A scheme from a future build.
-            "v2:qresync:1:900",
-            // Tag-shaped but not ours.
-            "v1:modseq:1:105",
-            // Truncated tag.
-            "v1:1:105",
-        ] {
-            assert_eq!(
-                resolve_fetch_range(Some(token), Some(1)),
-                FetchRange::CorruptCheckpoint,
-                "token {token:?} must not be interpreted as a UIDNEXT boundary"
-            );
-            assert_eq!(
-                resolve_fetch_range(Some(token), Some(1)).sequence_set(),
-                "1:*",
-                "an uninterpretable token must re-fetch everything"
-            );
-        }
     }
 
     #[test]
@@ -2698,7 +3077,16 @@ mod tests {
             while let Some(line) = read_scripted_line(&mut io).await {
                 let tag = line.split_whitespace().next().unwrap_or("").to_string();
                 let upper = line.to_ascii_uppercase();
-                if upper.contains("LOGIN") {
+                if upper.contains("CAPABILITY") {
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                } else if upper.contains("LOGIN") {
                     let _ = io
                         .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
                         .await;
@@ -2730,10 +3118,11 @@ mod tests {
             .expect("scripted login succeeds");
         let engine = ImapEngine::new("acct-completion", "example.test", 993);
 
-        let (emails, _checkpoint) = engine
+        let __changes = engine
             .sync_folder_messages_with_session("INBOX", None, &mut session)
             .await
             .expect("sync succeeds");
+        let (emails, _checkpoint) = (__changes.upserts, __changes.next_state);
         assert!(emails.is_empty());
 
         drop(session);

@@ -561,11 +561,11 @@ impl MailBackend for JmapEngine {
         fields(account_id = %self.account_id, folder_id = %folder_id),
         err
     )]
-    async fn sync_messages(
+    async fn sync_changes(
         &self,
         folder_id: &str,
         _since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<crate::backend::FolderChanges, MailError> {
         if !self.has_credentials() {
             return Err(MailError::AuthError(
                 "JMAP message sync requires credentials".to_string(),
@@ -589,7 +589,16 @@ impl MailBackend for JmapEngine {
             "jmap message sync complete"
         );
 
-        Ok((emails, state))
+        Ok(crate::backend::FolderChanges {
+            upserts: emails,
+            removals: Vec::new(),
+            // `Email/query` was filtered to one mailbox, but this engine does
+            // not yet use `Email/changes`, so it cannot claim to have seen the
+            // complete set. Reporting `None` keeps the caller from deleting
+            // anything on the strength of a partial view.
+            present: None,
+            next_state: state,
+        })
     }
 
     #[tracing::instrument(skip(self), fields(account_id = %self.account_id), err)]

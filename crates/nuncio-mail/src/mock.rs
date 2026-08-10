@@ -106,11 +106,11 @@ impl MailBackend for MockMailBackend {
         Ok(folders.clone())
     }
 
-    async fn sync_messages(
+    async fn sync_changes(
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<crate::backend::FolderChanges, MailError> {
         // Record the checkpoint arg before any early return, so even a failing
         // call is visible to a test asserting on how the caller resumes.
         if let Ok(mut calls) = self.since_state_calls.lock() {
@@ -136,19 +136,30 @@ impl MailBackend for MockMailBackend {
         // is nothing new to hand back, so the incremental fetch is genuinely
         // narrower (empty) rather than a full re-report of every message.
         if since_state.is_some() {
-            return Ok((Vec::new(), returned_state));
+            return Ok(crate::backend::FolderChanges {
+                next_state: returned_state,
+                ..Default::default()
+            });
         }
 
         let messages = self
             .messages
             .lock()
             .map_err(|e| MailError::ParseFailed(e.to_string()))?;
-        let matches = messages
+        let matches: Vec<_> = messages
             .iter()
             .filter(|m| m.folder_id == folder_id)
             .cloned()
             .collect();
-        Ok((matches, returned_state))
+        // A full pass over the mock's store did see everything in the folder,
+        // so it can honestly report what is present.
+        let present = matches.iter().map(|m| m.id.clone()).collect();
+        Ok(crate::backend::FolderChanges {
+            upserts: matches,
+            removals: Vec::new(),
+            present: Some(present),
+            next_state: returned_state,
+        })
     }
 
     async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {

@@ -1707,6 +1707,51 @@ impl DatabaseEngine {
     /// Lets a caller classify a whole fetched batch as new-vs-seen with one round trip instead
     /// of one existence lookup per id. Passing an empty slice short-circuits to an empty set
     /// without querying at all, since `IN ()` is not valid SQL.
+    /// Every message id currently stored for one folder of one account.
+    ///
+    /// The local half of a UID-set diff: a sync that enumerated the folder's
+    /// complete contents can subtract what the server reported from this to
+    /// find what disappeared. Scoped by account as well as folder because
+    /// folder ids are not globally unique -- two accounts both have an
+    /// `INBOX`, and diffing across them would delete one account's mail
+    /// because the other's server did not mention it.
+    pub async fn message_ids_in_folder(
+        &self,
+        account_id: &str,
+        folder_id: &str,
+    ) -> Result<Vec<String>, DatabaseError> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM messages WHERE account_id = ? AND folder_id = ?")
+                .bind(account_id)
+                .bind(folder_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Delete stored messages by id, returning how many rows went.
+    ///
+    /// The FTS index follows via the `messages_ad` trigger, so a deleted
+    /// message cannot survive as a searchable plaintext orphan.
+    pub async fn delete_messages(&self, ids: &[String]) -> Result<u64, DatabaseError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
+        let mut deleted = 0u64;
+        for id in ids {
+            let result = sqlx::query("DELETE FROM messages WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(DatabaseError::Query)?;
+            deleted += result.rows_affected();
+        }
+        tx.commit().await.map_err(DatabaseError::Query)?;
+        Ok(deleted)
+    }
+
     pub async fn existing_message_ids(
         &self,
         ids: &[String],
