@@ -266,6 +266,8 @@ mod tests {
             body_plain: Some(body_plain.to_string()),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         }
     }
 

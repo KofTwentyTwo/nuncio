@@ -95,6 +95,9 @@ impl MimeParserAdapter {
 
         let received_at = msg.date().map_or(0, |d| d.to_timestamp());
 
+        let message_id = msg.message_id().and_then(Email::normalize_message_id);
+        let content_hash = Some(Email::content_hash_of(raw_bytes));
+
         let body_plain = msg.body_text(0).map(|b| b.to_string());
         let body_html = msg.body_html(0).map(|b| b.to_string());
 
@@ -141,6 +144,8 @@ impl MimeParserAdapter {
             body_plain,
             body_html,
             attachments,
+            message_id,
+            content_hash,
         })
     }
 }
@@ -168,6 +173,39 @@ mod tests {
             email.body_plain,
             Some("Hello Bob, this is a plain text email.".to_string())
         );
+    }
+
+    #[test]
+    fn parse_captures_normalized_message_id_and_content_hash() {
+        let raw = b"From: Alice <alice@nuncio.mx>\r\n\
+                    To: Bob <bob@nuncio.mx>\r\n\
+                    Message-ID: <Abc.123@mail.nuncio.mx>\r\n\
+                    Subject: Test\r\n\
+                    \r\n\
+                    body";
+
+        let email =
+            MimeParserAdapter::parse_mime("msg-1", "acct-1", "inbox", raw).expect("parse succeeds");
+        assert_eq!(email.message_id.as_deref(), Some("Abc.123@mail.nuncio.mx"));
+        assert_eq!(
+            email.content_hash,
+            Some(nuncio_core::model::Email::content_hash_of(raw)),
+            "the hash must cover the octets actually parsed"
+        );
+    }
+
+    #[test]
+    fn parse_reports_no_message_id_when_the_header_is_absent() {
+        // RFC 5322 3.6.4 makes Message-ID a SHOULD. An absent header must read
+        // as "none present", never as an invented or empty value.
+        let raw = b"From: Alice <alice@nuncio.mx>\r\n\
+                    Subject: No id\r\n\
+                    \r\n\
+                    body";
+        let email =
+            MimeParserAdapter::parse_mime("msg-2", "acct-1", "inbox", raw).expect("parse succeeds");
+        assert_eq!(email.message_id, None);
+        assert!(email.content_hash.is_some());
     }
 
     #[test]

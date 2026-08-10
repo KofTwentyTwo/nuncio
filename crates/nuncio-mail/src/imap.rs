@@ -931,6 +931,14 @@ impl ImapEngine {
 
         let received_at = fetch_data.internal_date().map_or(0, |dt| dt.timestamp());
 
+        // No body was returned, so there are no octets to hash -- but the
+        // ENVELOPE carries `message-id` (RFC 3501 section 7.4.2), so identity
+        // capture does not have to be skipped on this path.
+        let message_id = fetch_data
+            .envelope()
+            .and_then(|env| env.message_id.as_ref())
+            .and_then(|raw| Email::normalize_message_id(&String::from_utf8_lossy(raw)));
+
         Ok(Email {
             id: email_id,
             account_id: self.account_id.clone(),
@@ -945,6 +953,8 @@ impl ImapEngine {
             body_plain: None,
             body_html: None,
             attachments: Vec::new(),
+            message_id,
+            content_hash: None,
         })
     }
 
@@ -982,6 +992,12 @@ impl ImapEngine {
                 email.body_plain = None;
                 email.body_html = None;
                 email.attachments = Vec::new();
+                // `parse_mime` hashed the header section it was handed, but
+                // `content_hash` is defined over a message's FULL octets.
+                // Keeping that value would publish a hash that silently means
+                // something else, so drop it; the `Message-ID` it recovered
+                // from those headers is still correct and is kept.
+                email.content_hash = None;
                 return email;
             }
         }
@@ -1004,6 +1020,8 @@ impl ImapEngine {
                 body_plain: None,
                 body_html: None,
                 attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
             })
     }
 

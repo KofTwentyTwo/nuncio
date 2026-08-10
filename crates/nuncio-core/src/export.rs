@@ -195,6 +195,8 @@ mod tests {
                 body_plain: Some("Hello world body text".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
             },
             Email {
                 id: "msg-101".to_string(),
@@ -210,6 +212,8 @@ mod tests {
                 body_plain: Some("Second body text".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
             },
         ]
     }

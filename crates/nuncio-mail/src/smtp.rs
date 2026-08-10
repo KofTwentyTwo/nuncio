@@ -368,6 +368,8 @@ mod tests {
             body_plain: Some("Plaintext status update".to_string()),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         }
     }
 

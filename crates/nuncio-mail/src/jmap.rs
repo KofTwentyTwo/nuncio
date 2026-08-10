@@ -92,6 +92,10 @@ pub struct JmapEmail {
     pub received_at: Option<i64>,
     pub is_unread: Option<bool>,
     pub body_snippet: Option<String>,
+    /// RFC 8621 models `messageId` as a list, because a message may carry more
+    /// than one `Message-ID` header. The first entry is the one used.
+    #[serde(default)]
+    pub message_id: Option<Vec<String>>,
 }
 
 /// JMAP email address object.
@@ -184,7 +188,7 @@ impl JmapEngine {
                     {
                         "accountId": account_id,
                         "ids": ids,
-                        "properties": ["id", "subject", "from", "to", "receivedAt", "isUnread", "bodySnippet"]
+                        "properties": ["id", "subject", "from", "to", "receivedAt", "isUnread", "bodySnippet", "messageId"]
                     },
                     "c1"
                 ]
@@ -418,6 +422,15 @@ impl JmapEngine {
                     body_plain: item.body_snippet,
                     body_html: None,
                     attachments: Vec::new(),
+                    message_id: item
+                        .message_id
+                        .as_ref()
+                        .and_then(|ids| ids.first())
+                        .and_then(|raw| Email::normalize_message_id(raw)),
+                    // `Email/get` returns a `bodySnippet`, not the message's
+                    // octets, so there is nothing to hash here without an
+                    // extra download per message.
+                    content_hash: None,
                 }
             })
             .collect();
@@ -703,6 +716,35 @@ mod tests {
         assert_eq!(updated.len(), 2);
         assert_eq!(destroyed.len(), 1);
         assert_eq!(new_state, "s-2");
+    }
+
+    #[test]
+    fn parse_email_get_response_captures_normalized_message_id() {
+        // RFC 8621 models `messageId` as a list; the first entry is taken and
+        // normalized to the same canonical form the IMAP paths produce, so two
+        // engines syncing one account via different protocols agree.
+        let raw = r#"{
+            "methodResponses": [
+                ["Email/get", {"state": "s-1", "list": [
+                    {"id": "m-1", "subject": "Hi", "messageId": ["<Abc.123@mail.nuncio.mx>"]},
+                    {"id": "m-2", "subject": "No id"}
+                ]}, "c1"]
+            ]
+        }"#;
+        let engine = JmapEngine::new("acct-1");
+        let (emails, _state) = engine.parse_email_get_response(raw).expect("parse get");
+
+        assert_eq!(
+            emails[0].message_id.as_deref(),
+            Some("Abc.123@mail.nuncio.mx")
+        );
+        assert_eq!(
+            emails[1].message_id, None,
+            "an absent messageId must stay None, not become empty"
+        );
+        // `Email/get` returns a snippet, never the octets, so there is nothing
+        // honest to hash on this path.
+        assert_eq!(emails[0].content_hash, None);
     }
 
     #[test]

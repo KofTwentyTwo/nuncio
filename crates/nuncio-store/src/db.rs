@@ -512,7 +512,13 @@ impl DatabaseEngine {
                 received_at INTEGER NOT NULL,
                 read_flag INTEGER NOT NULL DEFAULT 0,
                 body_plain TEXT,
-                body_html TEXT
+                body_html TEXT,
+                -- Captured at ingest, not yet read. Both are nullable because
+                -- neither is always available: `Message-ID` is SHOULD, not
+                -- MUST (RFC 5322 3.6.4), and a headers-only or envelope-only
+                -- fetch has no full octets to hash.
+                message_id TEXT,
+                content_hash TEXT
             );
 
             CREATE TABLE IF NOT EXISTS calendar_events (
@@ -751,7 +757,49 @@ impl DatabaseEngine {
         self.ensure_accounts_tls_mode_columns().await?;
         self.ensure_accounts_dav_columns().await?;
         self.ensure_messages_identity_columns().await?;
+        self.ensure_messages_provenance_columns().await?;
         self.backfill_message_fts().await?;
+
+        Ok(())
+    }
+
+    /// Additive migration adding the `message_id` / `content_hash` provenance
+    /// columns to a pre-existing `messages` table.
+    ///
+    /// Both are nullable and there is **no backfill**, deliberately. The values
+    /// cannot be reconstructed for rows already stored: the raw octets are
+    /// discarded after parsing and the `Message-ID` header was never persisted,
+    /// so the only ways to populate history would be to re-download every
+    /// message or to invent a value. Legacy rows therefore stay `NULL`, which
+    /// reads as "not captured" rather than as "this message has no
+    /// `Message-ID`" -- a distinction any future consumer has to respect.
+    ///
+    /// A fresh database gets both columns from `CREATE TABLE IF NOT EXISTS`
+    /// above, so the `PRAGMA table_info` check finds them present and this is a
+    /// no-op. SQLite has no `ADD COLUMN IF NOT EXISTS`, hence the explicit
+    /// check, which makes this safe to run on every daemon startup.
+    async fn ensure_messages_provenance_columns(&self) -> Result<(), DatabaseError> {
+        let existing_columns: Vec<String> = sqlx::query("PRAGMA table_info(messages)")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+
+        for column in ["message_id", "content_hash"] {
+            if existing_columns.iter().any(|c| c == column) {
+                continue;
+            }
+            sqlx::query(&format!("ALTER TABLE messages ADD COLUMN {column} TEXT"))
+                .execute(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+            tracing::info!(
+                column,
+                "migrated messages table: added message provenance column"
+            );
+        }
 
         Ok(())
     }
@@ -1295,8 +1343,8 @@ impl DatabaseEngine {
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO messages
-            (id, account_id, folder_id, remote_id, uid_validity, subject, sender, recipient, received_at, read_flag, body_plain, body_html)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, account_id, folder_id, remote_id, uid_validity, subject, sender, recipient, received_at, read_flag, body_plain, body_html, message_id, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&email.id)
@@ -1311,6 +1359,8 @@ impl DatabaseEngine {
         .bind(if email.read { 1i64 } else { 0i64 })
         .bind(&enc_plain)
         .bind(&enc_html)
+        .bind(&email.message_id)
+        .bind(&email.content_hash)
         .execute(&mut *tx)
         .await
         .map_err(DatabaseError::Query)?;
@@ -1361,9 +1411,11 @@ impl DatabaseEngine {
             Option<String>,
             String,
             String,
+            Option<String>,
+            Option<String>,
         )> = sqlx::query_as(
             r#"
-            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity
+            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash
             FROM messages
             WHERE folder_id = ?
             ORDER BY received_at DESC
@@ -1391,6 +1443,8 @@ impl DatabaseEngine {
                     body_html,
                     remote_id,
                     uid_validity,
+                    message_id,
+                    content_hash,
                 )| {
                     let dec_plain = body_plain
                         .map(|p| {
@@ -1424,6 +1478,8 @@ impl DatabaseEngine {
                         body_plain: dec_plain,
                         body_html: dec_html,
                         attachments: Vec::new(),
+                        message_id,
+                        content_hash,
                     })
                 },
             )
@@ -1445,7 +1501,7 @@ impl DatabaseEngine {
     ) -> Result<(Vec<nuncio_core::model::Email>, Option<(i64, String)>), DatabaseError> {
         let fetch = page_size.saturating_add(1);
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity FROM messages WHERE folder_id = ",
+            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash FROM messages WHERE folder_id = ",
         );
         builder.push_bind(folder_id.to_string());
         if let Some((ts, id)) = &after {
@@ -1474,6 +1530,8 @@ impl DatabaseEngine {
                 Option<String>,
                 String,
                 String,
+                Option<String>,
+                Option<String>,
             )>()
             .fetch_all(&self.pool)
             .await
@@ -1510,6 +1568,8 @@ impl DatabaseEngine {
                     body_plain: dec_plain,
                     body_html: dec_html,
                     attachments: Vec::new(),
+                    message_id: r.12,
+                    content_hash: r.13,
                 })
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
@@ -1545,9 +1605,11 @@ impl DatabaseEngine {
             Option<String>,
             String,
             String,
+            Option<String>,
+            Option<String>,
         ) = sqlx::query_as(
             r#"
-            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity
+            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash
             FROM messages
             WHERE id = ?
             "#,
@@ -1582,6 +1644,8 @@ impl DatabaseEngine {
             body_plain: dec_plain,
             body_html: dec_html,
             attachments: Vec::new(),
+            message_id: row.12,
+            content_hash: row.13,
         })
     }
 
@@ -2435,7 +2499,7 @@ impl DatabaseEngine {
         limit: usize,
     ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity FROM messages "
+            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash FROM messages "
         );
         if !last_id.is_empty() {
             builder.push("WHERE id > ");
@@ -2457,6 +2521,8 @@ impl DatabaseEngine {
             Option<String>,
             String,
             String,
+            Option<String>,
+            Option<String>,
         )>();
 
         let rows = query
@@ -2492,6 +2558,8 @@ impl DatabaseEngine {
                     body_plain: dec_plain,
                     body_html: dec_html,
                     attachments: Vec::new(),
+                    message_id: r.12,
+                    content_hash: r.13,
                 })
             })
             .collect::<Result<Vec<_>, DatabaseError>>()
@@ -2509,7 +2577,7 @@ impl DatabaseEngine {
         folder_id: Option<&str>,
     ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity FROM messages"
+            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash FROM messages"
         );
 
         let mut has_filter = false;
@@ -2541,6 +2609,8 @@ impl DatabaseEngine {
             Option<String>,
             String,
             String,
+            Option<String>,
+            Option<String>,
         )>();
 
         let rows = query
@@ -2576,6 +2646,8 @@ impl DatabaseEngine {
                     body_plain: dec_plain,
                     body_html: dec_html,
                     attachments: Vec::new(),
+                    message_id: r.12,
+                    content_hash: r.13,
                 })
             })
             .collect::<Result<Vec<_>, DatabaseError>>()
@@ -3084,6 +3156,8 @@ mod tests {
             body_plain: Some("Plaintext content".to_string()),
             body_html: Some("<p>HTML content</p>".to_string()),
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         };
 
         engine
@@ -3133,6 +3207,8 @@ mod tests {
             body_plain: Some("Sensitive plaintext body".to_string()),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         };
         engine
             .save_email(&email)
@@ -3437,6 +3513,8 @@ mod tests {
             body_plain: None,
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         };
         engine.save_email(&email).await.expect("save email");
 
@@ -4129,6 +4207,8 @@ mod tests {
                 body_plain: Some("Hello".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
             };
             engine.save_email(&email).await.unwrap();
         }
@@ -4256,6 +4336,8 @@ mod tests {
             body_plain: Some("body".to_string()),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         }
     }
 
@@ -4368,6 +4450,73 @@ mod tests {
             .expect("re-running an already-complete migration is a no-op");
     }
 
+    #[tokio::test]
+    async fn message_provenance_round_trips_through_every_read_path() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let mut email = synced_email("acct-1", "INBOX", "42", "7");
+        email.message_id = Some("abc123@mail.nuncio.mx".to_string());
+        email.content_hash = Some(nuncio_core::model::Email::content_hash_of(b"raw octets"));
+        engine.save_email(&email).await.expect("save");
+
+        let by_id = engine.get_message(&email.id).await.expect("get_message");
+        assert_eq!(by_id.message_id, email.message_id);
+        assert_eq!(by_id.content_hash, email.content_hash);
+
+        let listed = engine.list_messages("INBOX", 10).await.expect("list");
+        let found = listed
+            .iter()
+            .find(|m| m.id == email.id)
+            .expect("the saved message is listed");
+        assert_eq!(found.message_id, email.message_id);
+        assert_eq!(found.content_hash, email.content_hash);
+
+        // A message with no Message-ID stays None rather than becoming "".
+        let plain = synced_email("acct-1", "INBOX", "42", "8");
+        assert_eq!(plain.message_id, None);
+        engine.save_email(&plain).await.expect("save");
+        let fetched = engine.get_message(&plain.id).await.expect("get_message");
+        assert_eq!(fetched.message_id, None);
+        assert_eq!(fetched.content_hash, None);
+    }
+
+    #[tokio::test]
+    async fn provenance_migration_adds_nullable_columns_without_inventing_history() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        // Reproduce a pre-migration database: the columns cannot be dropped
+        // from a live table cheaply, so assert the property that matters --
+        // a row written before capture existed reads back as "not captured".
+        sqlx::query(
+            "INSERT INTO messages \
+             (id, account_id, folder_id, remote_id, uid_validity, subject, sender, recipient, received_at, read_flag) \
+             VALUES ('legacy-1', 'acct-1', 'INBOX', '9', '42', 'subj', 'a@nuncio.mx', 'b@nuncio.mx', 0, 0)",
+        )
+        .execute(engine.pool())
+        .await
+        .unwrap();
+
+        engine
+            .ensure_messages_provenance_columns()
+            .await
+            .expect("migration is idempotent on an already-migrated database");
+
+        let legacy = engine.get_message("legacy-1").await.expect("get_message");
+        assert_eq!(
+            legacy.message_id, None,
+            "a legacy row must read as not-captured, never as a fabricated id"
+        );
+        assert_eq!(legacy.content_hash, None);
+
+        // Running it twice more must stay a no-op.
+        for _ in 0..2 {
+            engine
+                .ensure_messages_provenance_columns()
+                .await
+                .expect("re-running is a no-op");
+        }
+    }
+
     fn export_test_email(id: &str, account_id: &str, folder_id: &str) -> nuncio_core::model::Email {
         nuncio_core::model::Email {
             id: id.to_string(),
@@ -4383,6 +4532,8 @@ mod tests {
             body_plain: Some(format!("Body {id}")),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         }
     }
 

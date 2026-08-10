@@ -53,6 +53,8 @@ fn sample_email(id: &str, subject: &str) -> Email {
         body_plain: Some("body".to_string()),
         body_html: None,
         attachments: Vec::new(),
+        message_id: None,
+        content_hash: None,
     }
 }
 

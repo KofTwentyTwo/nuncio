@@ -150,6 +150,8 @@ fn sentinel_inbound_email() -> Email {
         body_plain: Some(SENTINEL_BODY.to_string()),
         body_html: None,
         attachments: Vec::new(),
+        message_id: None,
+        content_hash: None,
     }
 }
 

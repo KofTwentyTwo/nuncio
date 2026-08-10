@@ -104,6 +104,26 @@ pub struct Email {
     pub body_html: Option<String>,
     /// List of attached files.
     pub attachments: Vec<Attachment>,
+    /// The message's RFC 5322 `Message-ID`, normalized by
+    /// [`Email::normalize_message_id`], or `None` when the message carried
+    /// none (the header is `SHOULD`, not `MUST`) or the transport did not
+    /// surface it.
+    ///
+    /// Captured but not yet used for identity. It is a *hint* toward a
+    /// folder-independent identity, never an identity on its own: the value is
+    /// public (it is echoed in the `References` of every reply) and forgeable,
+    /// so keying storage on it alone would let a crafted message address, and
+    /// overwrite, one the user already trusts.
+    pub message_id: Option<String>,
+    /// Hex SHA-256 over the full RFC822 octets the message was parsed from, or
+    /// `None` when only headers or an envelope were available.
+    ///
+    /// Pairs with [`Email::message_id`]: the same `Message-ID` carrying
+    /// different content is two messages, not one. That case is ordinary --
+    /// a mailing-list copy and a direct copy of the same mail share a
+    /// `Message-ID` while differing in headers and footer, and a draft keeps
+    /// one `Message-ID` across every save.
+    pub content_hash: Option<String>,
 }
 
 impl Email {
@@ -129,6 +149,51 @@ impl Email {
             hasher.update((field.len() as u64).to_le_bytes());
             hasher.update(field.as_bytes());
         }
+        hex::encode(hasher.finalize())
+    }
+
+    /// Canonicalize a raw `Message-ID` header value.
+    ///
+    /// Every engine syncing an account must derive byte-identical values from
+    /// the same header, or two caches that agree in substance will disagree in
+    /// bytes and no comparison between them can be trusted. The rules are
+    /// therefore fixed and deliberately small:
+    ///
+    /// 1. Remove **all** ASCII whitespace. A `msg-id` cannot legally contain
+    ///    any, so this unfolds a wrapped header without needing to know how the
+    ///    transport folded it -- and transports differ.
+    /// 2. Strip one surrounding pair of angle brackets, which servers include
+    ///    or omit inconsistently between `ENVELOPE` and a raw header.
+    /// 3. Preserve case. Only the domain half is case-insensitive per RFC 5322
+    ///    §3.6.4; lowercasing the whole value would merge ids that the
+    ///    originating server considers distinct, and the same server returns
+    ///    the same bytes to every engine anyway.
+    ///
+    /// Returns `None` for an absent or empty value so a missing header stays
+    /// distinguishable from a present-but-empty one.
+    pub fn normalize_message_id(raw: &str) -> Option<String> {
+        let stripped: String = raw.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        let stripped = stripped
+            .strip_prefix('<')
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(&stripped);
+        if stripped.is_empty() {
+            None
+        } else {
+            Some(stripped.to_string())
+        }
+    }
+
+    /// Hex SHA-256 over a message's full RFC822 octets, for the
+    /// `content_hash` field.
+    ///
+    /// Deterministic for identical bytes, which is what makes it usable as the
+    /// tiebreaker against a duplicated `Message-ID`. It is *not* stable across
+    /// servers that re-serialize a message, so it distinguishes content within
+    /// an account rather than identifying a message globally.
+    pub fn content_hash_of(raw_bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(raw_bytes);
         hex::encode(hasher.finalize())
     }
 }
@@ -245,6 +310,57 @@ mod tests {
         assert_ne!(
             Email::surrogate_id("a", "bc", "1", "1"),
             Email::surrogate_id("ab", "c", "1", "1"),
+        );
+    }
+
+    #[test]
+    fn normalize_message_id_unfolds_and_unwraps_to_one_canonical_form() {
+        // Every spelling a transport might hand us for the same id must
+        // collapse to identical bytes, or two engines holding the same message
+        // cannot be shown to agree.
+        let canonical = "abc123@mail.example.com";
+        for raw in [
+            "<abc123@mail.example.com>",
+            "abc123@mail.example.com",
+            "  <abc123@mail.example.com>  ",
+            "<abc123@mail.\r\n example.com>",
+            "<abc123@mail.\t example.com>",
+        ] {
+            assert_eq!(
+                Email::normalize_message_id(raw).as_deref(),
+                Some(canonical),
+                "input {raw:?} did not canonicalize"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_message_id_preserves_case_and_rejects_empty() {
+        // Only the domain half is case-insensitive per RFC 5322 3.6.4;
+        // lowercasing wholesale would merge ids the origin considers distinct.
+        assert_eq!(
+            Email::normalize_message_id("<AbC@Example.COM>").as_deref(),
+            Some("AbC@Example.COM")
+        );
+        assert_eq!(Email::normalize_message_id(""), None);
+        assert_eq!(Email::normalize_message_id("<>"), None);
+        assert_eq!(Email::normalize_message_id("   "), None);
+    }
+
+    #[test]
+    fn content_hash_distinguishes_identical_message_ids_with_different_bodies() {
+        // The case the hash exists for: a list copy and a direct copy share a
+        // Message-ID but are not the same message.
+        let direct = b"Message-ID: <shared@example.com>\r\n\r\nbody";
+        let via_list = b"Message-ID: <shared@example.com>\r\nList-Id: l\r\n\r\nbody\n--\nfooter";
+        assert_ne!(
+            Email::content_hash_of(direct),
+            Email::content_hash_of(via_list)
+        );
+        assert_eq!(
+            Email::content_hash_of(direct),
+            Email::content_hash_of(direct),
+            "the hash must be deterministic for identical octets"
         );
     }
 }

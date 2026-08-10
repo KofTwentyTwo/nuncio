@@ -1989,6 +1989,8 @@ fn synthetic_preview_email(id: &str) -> nuncio_core::model::Email {
         body_plain: Some("Sample body text".to_string()),
         body_html: None,
         attachments: Vec::new(),
+        message_id: None,
+        content_hash: None,
     }
 }
 
@@ -3303,6 +3305,8 @@ mod tests {
             body_plain: None,
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
             remote_id: "remote-1".to_string(),
             uid_validity: "1".to_string(),
         };
@@ -4498,6 +4502,8 @@ mod tests {
             body_plain: Some(body.to_string()),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         }
     }
 
@@ -5552,6 +5558,8 @@ mod tests {
             body_plain: Some("body".to_string()),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         };
 
         // Before creating anything, the live engine matches nothing.
@@ -5663,6 +5671,8 @@ mod tests {
                 body_plain: None,
                 body_html: None,
                 attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
             })
             .is_empty());
     }
@@ -5813,6 +5823,8 @@ mod tests {
             body_plain: Some("Please review the attached deck".to_string()),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         })
         .await
         .expect("seed message");
@@ -5987,6 +5999,8 @@ mod tests {
             body_plain: None,
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         });
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0.id, rule_id);
@@ -6168,6 +6182,8 @@ mod tests {
             body_plain: None,
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         });
         assert_eq!(matches.len(), 1);
     }
