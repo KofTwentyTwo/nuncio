@@ -5,6 +5,7 @@
 
 pub mod backend;
 pub mod imap;
+pub mod imap_raw;
 pub mod jmap;
 pub mod mock;
 pub mod parser;
