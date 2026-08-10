@@ -61,7 +61,14 @@ machine (or a new LLM) picks up the work cold.
 - **M7 (API freeze) has not started** — 5 stories open, 0 closed.
 - **Gate verified green on 2026-08-07** under the pinned 1.97.1 toolchain:
   `cargo fmt --all -- --check` clean, `cargo check-all` clean, `cargo test-all`
-  596 passed / 0 failed / 0 ignored across 37 suites.
+  596 passed / 0 failed / 0 ignored across 37 suites. (On
+  `story/monitor-and-health`: 664 passed / 40 suites.)
+- **CI on `dev` is intermittently RED and has been since before 2026-08-07**,
+  from three distinct flaky-test root causes — a `tracing` callsite-`Interest`
+  race (#375), a port-reuse race (#347), and a timing-sensitive outbox test.
+  Local green is therefore **not** CI-equivalent today, despite what the build
+  section of `CLAUDE.md` implies. Judge a red PR against this baseline before
+  assuming the PR caused it.
 - **`dev` is a superset of `main` again.** `main` had drifted ahead by one real
   commit, `157c7c2` (rustls 0.23.42 → 0.23.43), which was never back-merged;
   back-merged 2026-08-07 and the gate re-verified green on the new lockfile.
@@ -71,6 +78,16 @@ machine (or a new LLM) picks up the work cold.
 
 ## Branches & preserved WIP
 - **`dev`** — canonical. Base all story branches here.
+- **`story/monitor-and-health`** — ⏳ **COMPLETE, PUSHED, NOT MERGED, NO PR.**
+  26 commits off `dev`. Adds `System.Shutdown` and `System.GetHealth` to
+  `nuncio.v1` (the latter **closes #296**), `account_id` attribution on the
+  outbox, and `crates/nuncio-monitor` — a Windows tray dev instrument. Gate
+  green (664 passed / 40 suites). **GUI manual verification is NOT signed off**
+  — the tray menu's event-loop wiring is the outstanding unknown, and nothing
+  automated covers it. Full detail, design decisions, known gaps and follow-ups:
+  [`docs/handoff/2026-08-08-monitor-and-health.md`](handoff/2026-08-08-monitor-and-health.md).
+  **Read that before continuing this work on another machine** — the session
+  notes that produced it were git-ignored and do not travel.
 - **`docs/roadmap-to-client-ready`** — the roadmap doc (now merged into `dev`).
 - **`wip/unreviewed-account-tls-sync`** — ⚠️ **UNTRUSTED prior art.** A background
   agent produced this (account edit/delete/test-connection, TLS modes, sync
