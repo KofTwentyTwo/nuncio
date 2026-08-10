@@ -292,6 +292,7 @@ mod tests {
             email_address: format!("{id}@nuncio.mx"),
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,

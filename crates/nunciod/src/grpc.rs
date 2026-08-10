@@ -490,6 +490,7 @@ fn map_account_config_from_proto(
         email_address: config.email_address,
         keyring_secret_key: config.keyring_secret_key,
         sync_interval_secs: nuncio_proto::time::duration_to_secs(&sync_interval),
+        filters_enabled: false,
         transport,
     })
 }
@@ -1879,12 +1880,29 @@ impl Mail for MailGrpcService {
         }
 
         let synced = if let Some(backend) = &self.overrides.mail_backend {
+            // Filter execution is owned by whichever daemon the account opts
+            // in (see `AccountConfig::filters_enabled`). Resolve it from the
+            // stored account rather than assuming: an injected backend must
+            // take the same path production does, or the gate would only ever
+            // be exercised in production.
+            let filters_enabled = match &account_id {
+                Some(id) => self
+                    .db
+                    .list_accounts()
+                    .await
+                    .map_err(|e| Status::internal(format!("sync failed: {e}")))?
+                    .into_iter()
+                    .find(|a| &a.id == id)
+                    .is_some_and(|a| a.filters_enabled),
+                None => false,
+            };
             crate::sync::sync_with_backend(
                 &self.db,
                 &self.event_bus,
                 backend.as_ref(),
                 &self.filter_engine,
                 account_id,
+                filters_enabled,
             )
             .await
             .map_err(|e| Status::internal(format!("sync failed: {e}")))?
@@ -2388,7 +2406,34 @@ impl Filters for FiltersGrpcService {
             req.chunk_size as usize
         };
 
-        tracing::info!(chunk_size, "Filters: triage rescan started");
+        // Triage produces exactly the side effects a live sync produces, so it
+        // is bound by the same single-owner rule: only accounts this daemon
+        // owns filter execution for may be acted on. Resolved once here rather
+        // than per message.
+        let owning_accounts: std::collections::HashSet<String> = self
+            .db
+            .list_accounts()
+            .await
+            .map_err(|e| Status::internal(format!("failed to read accounts for triage: {e}")))?
+            .into_iter()
+            .filter(|a| a.filters_enabled)
+            .map(|a| a.id)
+            .collect();
+
+        if owning_accounts.is_empty() {
+            // An honest refusal beats streaming a scan that reports progress
+            // and applies nothing, which would read as "no rules matched".
+            return Err(Status::failed_precondition(
+                "no account on this daemon has filter execution enabled; \
+                 enable filters_enabled on exactly one daemon per account",
+            ));
+        }
+
+        tracing::info!(
+            chunk_size,
+            owning_accounts = owning_accounts.len(),
+            "Filters: triage rescan started"
+        );
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<TriageProgress, Status>>(16);
         let db = self.db.clone();
@@ -2419,8 +2464,14 @@ impl Filters for FiltersGrpcService {
                     let is_last_page = batch.len() < chunk_size;
 
                     for email in &batch {
-                        let actions_for_email =
-                            crate::sync::apply_filter_actions(&db, &engine, email).await;
+                        // Messages belonging to an account this daemon does not
+                        // own are counted as scanned but never acted on, so the
+                        // progress total still reflects the whole store.
+                        let actions_for_email = if owning_accounts.contains(&email.account_id) {
+                            crate::sync::apply_filter_actions(&db, &engine, email).await
+                        } else {
+                            0
+                        };
                         scanned += 1;
                         applied += actions_for_email as u64;
                         if actions_for_email > 0 {
@@ -3644,6 +3695,7 @@ mod tests {
                 email_address: format!("{id}@nuncio.mx"),
                 keyring_secret_key: format!("nuncio/{id}"),
                 sync_interval_secs: 60,
+                filters_enabled: false,
                 transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
                     endpoint_host: "jmap.nuncio.mx".to_string(),
                 }),
@@ -4405,6 +4457,7 @@ mod tests {
             email_address: "rotate@nuncio.mx".to_string(),
             keyring_secret_key: key.to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,
@@ -4448,6 +4501,7 @@ mod tests {
             email_address: "rotate2@nuncio.mx".to_string(),
             keyring_secret_key: key.to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,
@@ -5062,6 +5116,7 @@ mod tests {
             email_address: "sender@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-send-1".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,
@@ -5230,6 +5285,7 @@ mod tests {
             email_address: "sender@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-injected-send-1".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,
@@ -5346,6 +5402,7 @@ mod tests {
             email_address: "sender@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-injected-send-fail-1".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,

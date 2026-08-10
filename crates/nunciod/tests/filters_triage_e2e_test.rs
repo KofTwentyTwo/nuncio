@@ -56,6 +56,27 @@ fn sample_email(id: &str, subject: &str) -> Email {
     }
 }
 
+/// The account the seeded messages belong to, opted in as this daemon's
+/// filter-execution owner.
+fn owning_account() -> nuncio_core::AccountConfig {
+    nuncio_core::AccountConfig {
+        id: ACCOUNT_ID.to_string(),
+        name: "Triage E2E".to_string(),
+        email_address: "triage-e2e@nuncio.mx".to_string(),
+        keyring_secret_key: format!("nuncio/{ACCOUNT_ID}"),
+        sync_interval_secs: 60,
+        filters_enabled: true,
+        transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+            imap_host: "imap.nuncio.mx".to_string(),
+            imap_port: 993,
+            imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            smtp_host: "smtp.nuncio.mx".to_string(),
+            smtp_port: 465,
+            smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+        }),
+    }
+}
+
 /// Boots the real daemon gRPC server (bearer-token authenticated) on an
 /// ephemeral loopback port, backed by a real temp file-backed
 /// `DatabaseEngine` and the given live `FilterEngine`. Returns the server
@@ -78,6 +99,13 @@ async fn boot_daemon(
             .await
             .expect("open temp file-backed database"),
     );
+
+    // Triage only acts on accounts this daemon owns filter execution for, so
+    // the account must exist and be opted in -- otherwise the RPC honestly
+    // refuses rather than scanning and applying nothing.
+    db.save_account(&owning_account())
+        .await
+        .expect("seed the triage account");
 
     let token_bytes = secrets
         .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
@@ -266,4 +294,54 @@ async fn triage_streams_multiple_chunks_for_a_store_bigger_than_one_chunk() {
         assert!(update.scanned_count >= prev_scanned);
         prev_scanned = update.scanned_count;
     }
+}
+
+/// A daemon that owns filter execution for no account must refuse `Triage`
+/// outright. Streaming a scan that reports progress and applies nothing would
+/// be indistinguishable, from the caller's side, from "no rules matched" --
+/// and the whole point of single-owner execution is that the non-owner stays
+/// visibly inert rather than quietly so.
+#[tokio::test]
+async fn triage_refuses_when_this_daemon_owns_no_account() {
+    let secrets = Arc::new(SecretManager::mock());
+    let rule = NsqlParser::parse_rule(
+        "Urgent Auto-Read",
+        1,
+        "WHERE subject CONTAINS 'Urgent' ACTION MARK READ",
+    )
+    .expect("parse rule");
+    let filter_engine = Arc::new(FilterEngine::new(vec![rule]).expect("compile rule"));
+
+    let (addr, token, db, _dir) = boot_daemon(secrets, filter_engine).await;
+
+    // Take ownership away: the account exists, but this daemon is not its
+    // filter owner.
+    let mut account = owning_account();
+    account.filters_enabled = false;
+    db.save_account(&account)
+        .await
+        .expect("opt the account out");
+
+    db.save_email(&sample_email("m-1", "Urgent: server down"))
+        .await
+        .expect("seed a matching message");
+
+    let mut client = FiltersClient::connect(format!("http://{addr}"))
+        .await
+        .expect("connect to the daemon");
+    let status = client
+        .triage(authed_request(&token, TriageRequest::default()))
+        .await
+        .expect_err("triage must refuse without an owning account");
+
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        status.message().contains("filter execution"),
+        "the refusal must say why, got: {}",
+        status.message()
+    );
+
+    // And it must genuinely have applied nothing.
+    let stored = db.get_message("m-1").await.expect("message persisted");
+    assert!(!stored.read, "a refused triage must not apply any action");
 }

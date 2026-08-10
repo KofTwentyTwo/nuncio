@@ -232,6 +232,7 @@ async fn fetch_and_persist(
     backend: &dyn MailBackend,
     filter_engine: &FilterEngine,
     account_id: Option<&str>,
+    filters_enabled: bool,
 ) -> Result<usize, SyncError> {
     let folders = backend.sync_folders().await?;
     let mut synced = 0usize;
@@ -263,7 +264,12 @@ async fn fetch_and_persist(
             let is_new =
                 !already_present.contains(&email.id) && seen_this_pass.insert(email.id.clone());
             db.save_email(&email).await?;
-            if is_new {
+            // Filter execution is single-owner per account (see
+            // `AccountConfig::filters_enabled`). A daemon that is not the owner
+            // still syncs and stores the message; it just does not act on it,
+            // because the side-effecting actions -- FORWARD, CALL WEBHOOK --
+            // are not idempotent across daemons.
+            if is_new && filters_enabled {
                 apply_filter_actions(db, filter_engine, &email).await;
             }
             synced += 1;
@@ -305,6 +311,7 @@ pub async fn sync_with_backend(
     backend: &dyn MailBackend,
     filter_engine: &FilterEngine,
     account_id: Option<String>,
+    filters_enabled: bool,
 ) -> Result<usize, SyncError> {
     match &account_id {
         Some(id) => event_bus.process_command(CoreCommand::SyncAccount {
@@ -313,8 +320,15 @@ pub async fn sync_with_backend(
         None => event_bus.process_command(CoreCommand::SyncAll),
     }
 
-    let result =
-        fetch_and_persist(db, event_bus, backend, filter_engine, account_id.as_deref()).await;
+    let result = fetch_and_persist(
+        db,
+        event_bus,
+        backend,
+        filter_engine,
+        account_id.as_deref(),
+        filters_enabled,
+    )
+    .await;
 
     if let Err(e) = &result {
         event_bus.process_command(CoreCommand::ReportError {
@@ -386,18 +400,20 @@ pub async fn run_account_sync(
     let setup = async {
         let config = find_account(db, account_id).await?;
         let password = secrets.get_secret(&config.keyring_secret_key)?;
-        build_mail_backend(&config, &password)
+        let filters_enabled = config.filters_enabled;
+        build_mail_backend(&config, &password).map(|backend| (backend, filters_enabled))
     }
     .await;
 
     match setup {
-        Ok(backend) => {
+        Ok((backend, filters_enabled)) => {
             sync_with_backend(
                 db,
                 event_bus,
                 backend.as_ref(),
                 filter_engine,
                 Some(account_id.to_string()),
+                filters_enabled,
             )
             .await
         }
@@ -438,6 +454,7 @@ mod tests {
             email_address: format!("{id}@nuncio.mx"),
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: Transport::Jmap(nuncio_core::JmapTransport {
                 endpoint_host: host.to_string(),
             }),
@@ -524,6 +541,7 @@ mod tests {
             email_address: format!("{id}@nuncio.mx"),
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,
@@ -578,6 +596,7 @@ mod tests {
             &mock,
             &filter_engine,
             Some("acct-mock-1".to_string()),
+            true,
         )
         .await
         .expect("sync succeeds");
@@ -634,7 +653,7 @@ mod tests {
         });
 
         let filter_engine = empty_filter_engine();
-        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
             .expect("sync succeeds");
         assert_eq!(synced, 0);
@@ -677,6 +696,7 @@ mod tests {
             &mock,
             &filter_engine,
             Some("acct-fail".to_string()),
+            true,
         )
         .await
         .expect_err("sync fails");
@@ -896,7 +916,7 @@ mod tests {
         });
         mock.add_message(mock_email("m-urgent", "inbox", "Urgent: server down"));
 
-        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
             .expect("sync succeeds");
         assert_eq!(synced, 1);
@@ -925,6 +945,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_daemon_that_does_not_own_filters_stores_the_mail_but_fires_nothing() {
+        // The single-owner rule. A non-owning daemon must still sync and store
+        // -- it is a full mail client -- while producing none of the side
+        // effects that would be duplicated across the fleet.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+
+        let rule = nuncio_filter::NsqlParser::parse_rule(
+            "Urgent Auto-Read",
+            1,
+            "WHERE subject CONTAINS 'Urgent' ACTION MARK READ",
+        )
+        .expect("parse rule");
+        let filter_engine = FilterEngine::new(vec![rule]).expect("compile rule");
+
+        let mock = MockMailBackend::new();
+        mock.add_folder(Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 1,
+            unread_messages: 1,
+        });
+        mock.add_message(mock_email("m-urgent", "inbox", "Urgent: server down"));
+
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, false)
+            .await
+            .expect("sync succeeds");
+
+        assert_eq!(synced, 1, "the message must still be synced and stored");
+        let stored = db.get_message("m-urgent").await.expect("message persisted");
+        assert!(!stored.read, "a non-owning daemon must not apply MARK READ");
+        assert!(
+            db.list_filter_execution_logs(10)
+                .await
+                .expect("list logs")
+                .is_empty(),
+            "no rule ran, so nothing may be logged as executed"
+        );
+        assert!(
+            db.list_pending_mutations(10)
+                .await
+                .expect("list mutations")
+                .is_empty(),
+            "a non-owning daemon must enqueue no remote mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_account_sync_takes_filter_ownership_from_the_stored_account() {
+        // The flag has to come from the account row, not a caller's guess --
+        // otherwise the gate is only ever exercised by tests that pass it.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+
+        let mut account = sample_imap_account("acct-owner");
+        assert!(
+            !account.filters_enabled,
+            "a freshly constructed account must default to not owning filters"
+        );
+        db.save_account(&account).await.expect("save account");
+        let reloaded = db
+            .list_accounts()
+            .await
+            .expect("list accounts")
+            .into_iter()
+            .find(|a| a.id == "acct-owner")
+            .expect("account round-trips");
+        assert!(!reloaded.filters_enabled);
+
+        account.filters_enabled = true;
+        db.save_account(&account).await.expect("update account");
+        let reloaded = db
+            .list_accounts()
+            .await
+            .expect("list accounts")
+            .into_iter()
+            .find(|a| a.id == "acct-owner")
+            .expect("account round-trips");
+        assert!(
+            reloaded.filters_enabled,
+            "opting one daemon in must persist"
+        );
+    }
+
+    #[tokio::test]
     async fn sync_with_backend_enqueues_outbox_mutation_for_remote_action_on_match() {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
@@ -948,7 +1056,7 @@ mod tests {
         });
         mock.add_message(mock_email("m-archive", "inbox", "Please Archive Me"));
 
-        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
             .expect("sync succeeds");
         assert_eq!(synced, 1);
@@ -1002,7 +1110,7 @@ mod tests {
         });
         mock.add_message(mock_email("m-plain", "inbox", "Just a normal update"));
 
-        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
             .expect("sync succeeds");
         assert_eq!(synced, 1);
@@ -1062,7 +1170,7 @@ mod tests {
         mock.add_message(mock_email("m-repeat", "inbox", "Urgent: server down"));
 
         // First sync: the message is genuinely new, so both rules must fire.
-        let synced_first = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+        let synced_first = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
             .expect("first sync succeeds");
         assert_eq!(synced_first, 1);
@@ -1094,7 +1202,7 @@ mod tests {
 
         // Second sync: the mock backend reports the SAME message again
         // (unchanged id), simulating a non-incremental re-sync.
-        let synced_second = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+        let synced_second = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
             .expect("second sync succeeds");
         assert_eq!(synced_second, 1);
@@ -1171,7 +1279,7 @@ mod tests {
         mock.add_message(mock_email("m-new-1", "inbox", "Urgent: brand new"));
         mock.add_message(mock_email("m-new-2", "inbox", "Urgent: also new"));
 
-        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None)
+        let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
             .expect("sync succeeds");
         assert_eq!(synced, 3, "every fetched message is still persisted");
@@ -1235,6 +1343,7 @@ mod tests {
             &mock,
             &filter_engine,
             Some("acct-inc-1".to_string()),
+            true,
         )
         .await
         .expect("first sync succeeds");
@@ -1256,6 +1365,7 @@ mod tests {
             &mock,
             &filter_engine,
             Some("acct-inc-1".to_string()),
+            true,
         )
         .await
         .expect("second sync succeeds");

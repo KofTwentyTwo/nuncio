@@ -154,6 +154,7 @@ mod tests {
                 email_address: "orch@nuncio.mx".to_string(),
                 keyring_secret_key: "nuncio/acct-orch-1".to_string(),
                 sync_interval_secs: 60,
+                filters_enabled: false,
                 transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                     imap_host: "imap.nuncio.mx".to_string(),
                     imap_port: 993,

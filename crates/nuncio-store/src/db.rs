@@ -543,7 +543,13 @@ impl DatabaseEngine {
                 smtp_port INTEGER,
                 imap_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls',
                 smtp_tls_mode TEXT NOT NULL DEFAULT 'implicit_tls',
-                collection_url TEXT
+                collection_url TEXT,
+                -- Defaults to 0 (off), including for accounts written before
+                -- the column existed. Filter execution is not safe to run on
+                -- more than one daemon per account, and defaulting a shared
+                -- account to "every daemon forwards" would be the wrong way
+                -- to be wrong.
+                filters_enabled INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS filter_rules (
@@ -750,8 +756,45 @@ impl DatabaseEngine {
         self.ensure_accounts_smtp_columns().await?;
         self.ensure_accounts_tls_mode_columns().await?;
         self.ensure_accounts_dav_columns().await?;
+        self.ensure_accounts_filters_enabled_column().await?;
         self.ensure_messages_identity_columns().await?;
         self.backfill_message_fts().await?;
+
+        Ok(())
+    }
+
+    /// Additive migration adding the `filters_enabled` column to a
+    /// pre-existing `accounts` table.
+    ///
+    /// Defaults to `0` for every existing row. That is the deliberate choice:
+    /// an account already configured on several machines would otherwise have
+    /// each of them start executing its rules at once, and the observable
+    /// result is duplicated forwards and duplicated webhook calls to third
+    /// parties. Turning it back on is one setting; unsending a forward is not
+    /// possible.
+    ///
+    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, so presence is checked first,
+    /// making this safe to run on every daemon startup.
+    async fn ensure_accounts_filters_enabled_column(&self) -> Result<(), DatabaseError> {
+        let existing_columns: Vec<String> = sqlx::query("PRAGMA table_info(accounts)")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+
+        if existing_columns.iter().any(|c| c == "filters_enabled") {
+            return Ok(());
+        }
+
+        sqlx::query("ALTER TABLE accounts ADD COLUMN filters_enabled INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+        tracing::info!(
+            "migrated accounts table: added filters_enabled (defaulting existing accounts to off)"
+        );
 
         Ok(())
     }
@@ -1071,8 +1114,8 @@ impl DatabaseEngine {
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO accounts
-            (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, name, email_address, protocol, server_host, server_port, use_tls, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url, filters_enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&config.id)
@@ -1095,6 +1138,7 @@ impl DatabaseEngine {
         .bind(tls_mode_to_db(imap_tls_mode))
         .bind(tls_mode_to_db(smtp_tls_mode))
         .bind(&collection_url)
+        .bind(i64::from(config.filters_enabled))
         .execute(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
@@ -1140,9 +1184,10 @@ impl DatabaseEngine {
             String,
             String,
             Option<String>,
+            i64,
         )> = sqlx::query_as(
             r#"
-            SELECT id, name, email_address, protocol, server_host, server_port, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url
+            SELECT id, name, email_address, protocol, server_host, server_port, keyring_secret_key, sync_interval_secs, smtp_host, smtp_port, imap_tls_mode, smtp_tls_mode, collection_url, filters_enabled
             FROM accounts
             "#,
         )
@@ -1167,6 +1212,7 @@ impl DatabaseEngine {
                     imap_tls_mode,
                     smtp_tls_mode,
                     collection_url,
+                    filters_enabled,
                 )| {
                     let protocol = serde_json::from_str(&protocol_str)
                         .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
@@ -1213,6 +1259,7 @@ impl DatabaseEngine {
                         email_address,
                         keyring_secret_key,
                         sync_interval_secs: sync_interval_secs as u64,
+                        filters_enabled: filters_enabled != 0,
                         transport,
                     }
                 },
@@ -2901,6 +2948,7 @@ mod tests {
                 email_address: "contended@nuncio.mx".to_string(),
                 keyring_secret_key: "nuncio/acct-contended-1".to_string(),
                 sync_interval_secs: 60,
+                filters_enabled: false,
                 transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                     imap_host: "imap.nuncio.mx".to_string(),
                     imap_port: 993,
@@ -3480,6 +3528,7 @@ mod tests {
             email_address: "work@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-test-1".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,
@@ -3524,6 +3573,7 @@ mod tests {
             email_address: "mixed@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-tls-1".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 143,
@@ -3566,6 +3616,7 @@ mod tests {
             email_address: "cal@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-caldav-store-1".to_string(),
             sync_interval_secs: 300,
+            filters_enabled: false,
             transport: nuncio_core::Transport::Dav(nuncio_core::DavTransport {
                 collection_url: "https://dav.example.com/calendars/user/work/".to_string(),
             }),
@@ -3598,6 +3649,7 @@ mod tests {
             email_address: "imap@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-mix-imap".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 143,
@@ -3613,6 +3665,7 @@ mod tests {
             email_address: "jmap@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-mix-jmap".to_string(),
             sync_interval_secs: 120,
+            filters_enabled: false,
             transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
                 endpoint_host: "jmap.nuncio.mx".to_string(),
             }),
@@ -3623,6 +3676,7 @@ mod tests {
             email_address: "dav@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-mix-dav".to_string(),
             sync_interval_secs: 300,
+            filters_enabled: false,
             transport: nuncio_core::Transport::Dav(nuncio_core::DavTransport {
                 collection_url: "https://dav.example.com/cal/".to_string(),
             }),
@@ -3662,6 +3716,7 @@ mod tests {
             email_address: "del@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-del-1".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,
@@ -3854,6 +3909,7 @@ mod tests {
             email_address: "post@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-post-migration".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,
