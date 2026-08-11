@@ -241,6 +241,21 @@ pub struct WormChainReport {
     pub first_broken_seq: Option<u64>,
 }
 
+/// What a [`DatabaseEngine::save_email_at`] call actually changed.
+///
+/// The two flags answer different questions and a caller usually needs both:
+/// `message_is_new` gates work that should happen once per message (indexing,
+/// side-effecting filter actions), `placement_is_new` gates work that should
+/// happen once per mailbox occupancy (per-folder counters, per-placement
+/// evaluation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveOutcome {
+    /// The message identity had not been stored before this call.
+    pub message_is_new: bool,
+    /// This mailbox occupancy had not been stored before this call.
+    pub placement_is_new: bool,
+}
+
 /// Serialize a [`nuncio_core::TlsMode`] to its stable on-disk `accounts`
 /// column form. Kept as a bare snake_case token (matching the column's
 /// `'implicit_tls'` default) rather than JSON, so a row inserted by the
@@ -842,7 +857,7 @@ impl DatabaseEngine {
             -- ciphertext and a trigger-based mirror would index that ciphertext verbatim
             -- (defeating search entirely). Instead `messages_fts` is populated explicitly from
             -- the plaintext body in application code, at the moment of encryption in
-            -- `DatabaseEngine::save_email` (see there) and via `backfill_message_fts` below for
+            -- `DatabaseEngine::save_email_at` (see there) and via `backfill_message_fts` below for
             -- any pre-existing rows. This means the trigram index now contains
             -- plaintext-derived body text: the FTS index itself is NOT encrypted, so message
             -- body content is recoverable from `messages_fts` by anyone with filesystem access
@@ -860,8 +875,8 @@ impl DatabaseEngine {
             );
 
             -- Subject/sender are never encrypted in `messages`, so a delete-only trigger is
-            -- sufficient here: it just keeps the FTS index free of orphaned rows. Insertion and
-            -- update of `messages_fts` content happens explicitly in `upsert_message`, never via an
+            -- sufficient here: it just keeps the FTS index free of orphaned rows. Insertion of
+            -- `messages_fts` content happens explicitly in `save_email_at`, never via an
             -- AFTER INSERT/UPDATE trigger, because such a trigger would only ever see the
             -- ciphertext body column.
             --
@@ -1158,7 +1173,7 @@ impl DatabaseEngine {
 
     /// Backfill `messages_fts` for any `messages` row that does not yet have a matching FTS
     /// entry -- e.g. rows written before the FTS5 index existed, or written directly by a
-    /// process that bypassed `save_email`'s explicit index population. Run automatically as
+    /// process that bypassed `save_email_at`'s explicit index population. Run automatically as
     /// part of [`DatabaseEngine::migrate`] (idempotent: a fully-indexed database performs no
     /// work). The stored `body_plain` column holds AES-256-GCM ciphertext, so each candidate
     /// row is decrypted with this engine's storage key before being written into the
@@ -1446,7 +1461,19 @@ impl DatabaseEngine {
         Ok(())
     }
 
-    /// Save an [`nuncio_core::model::Email`] to SQLite (INSERT OR REPLACE).
+    /// Persist a message's identity and content, and record that it occupies
+    /// `placement`, in one transaction.
+    ///
+    /// The message row is **first-write-wins**: a second sighting of the same
+    /// key -- which is the normal case for a message that also exists in another
+    /// folder -- leaves the stored subject and body untouched. That is what
+    /// keeps a message whose identity rests on `Message-ID` + content hash from
+    /// being rewritten by a later fetch claiming the same key, and it is why the
+    /// FTS row is written only on the insert that actually created the message.
+    ///
+    /// The placement row is upserted rather than ignored, because its read flag
+    /// is genuinely mutable: `\Seen` changes in the mailbox and the store must
+    /// follow it.
     ///
     /// The message body is encrypted (AES-256-GCM) before being written to the `messages`
     /// table, but the *plaintext* body is also indexed into the standalone `messages_fts`
@@ -1456,7 +1483,12 @@ impl DatabaseEngine {
     /// `CREATE VIRTUAL TABLE` statement in [`DatabaseEngine::migrate`] -- the FTS index itself
     /// is not encrypted, so this intentionally trades some body confidentiality for working
     /// search.
-    pub async fn save_email(&self, email: &nuncio_core::model::Email) -> Result<(), DatabaseError> {
+    pub async fn save_email_at(
+        &self,
+        email: &nuncio_core::model::Email,
+        source: nuncio_core::model::IdentitySource,
+        placement: &nuncio_core::model::Placement,
+    ) -> Result<SaveOutcome, DatabaseError> {
         // Encryption failures MUST surface before any SQL runs: a swallowed error here would
         // otherwise leave a row with an empty/placeholder body column, indistinguishable from
         // a genuinely empty body on read-back.
@@ -1473,55 +1505,121 @@ impl DatabaseEngine {
 
         let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
 
-        sqlx::query(
+        // Ask before writing. SQLite reports one row affected for both arms of
+        // an upsert, so after the fact there is no way to tell an inserted
+        // placement from an updated one -- and the caller needs that distinction
+        // to decide whether this is a first arrival worth filtering.
+        let (already_placed,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM placements
+             WHERE account_id = ? AND folder_id = ? AND uidvalidity = ? AND uid = ?",
+        )
+        .bind(&placement.account_id)
+        .bind(&placement.folder_id)
+        .bind(&placement.uid_validity)
+        .bind(&placement.remote_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(DatabaseError::Query)?;
+        let placement_is_new = already_placed == 0;
+
+        let inserted = sqlx::query(
             r#"
-            INSERT OR REPLACE INTO messages
-            (id, account_id, folder_id, remote_id, uid_validity, subject, sender, recipient, received_at, read_flag, body_plain, body_html, message_id, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages
+            (message_key, account_id, subject, sender, recipient, received_at,
+             body_plain, body_html, message_id, content_hash, identity_source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (message_key) DO NOTHING
             "#,
         )
         .bind(&email.id)
         .bind(&email.account_id)
-        .bind(&email.folder_id)
-        .bind(&email.remote_id)
-        .bind(&email.uid_validity)
         .bind(&email.subject)
         .bind(&email.sender)
         .bind(&email.recipient)
         .bind(email.received_at)
-        .bind(if email.read { 1i64 } else { 0i64 })
         .bind(&enc_plain)
         .bind(&enc_html)
         .bind(&email.message_id)
         .bind(&email.content_hash)
+        .bind(source.as_str())
         .execute(&mut *tx)
         .await
         .map_err(DatabaseError::Query)?;
 
-        // Re-indexing: delete any prior FTS row for this message id, then insert the fresh
-        // plaintext-derived row. FTS5 has no natural "INSERT OR REPLACE" semantics for a
-        // standalone (non-external-content) table, so this is done explicitly rather than via
-        // trigger.
-        sqlx::query("DELETE FROM messages_fts WHERE id = ?")
+        let message_is_new = inserted.rows_affected() == 1;
+
+        // Index only on the insert that created the message. Re-indexing on
+        // every placement would either duplicate the row (FTS5 standalone tables
+        // have no upsert) or rewrite it with a body the first-write-wins rule
+        // just rejected.
+        if message_is_new {
+            sqlx::query(
+                "INSERT INTO messages_fts (message_key, subject, sender, body_plain) VALUES (?, ?, ?, ?)",
+            )
             .bind(&email.id)
+            .bind(&email.subject)
+            .bind(&email.sender)
+            .bind(email.body_plain.as_deref().unwrap_or(""))
             .execute(&mut *tx)
             .await
             .map_err(DatabaseError::Query)?;
+        }
 
         sqlx::query(
-            "INSERT INTO messages_fts (id, subject, sender, body_plain) VALUES (?, ?, ?, ?)",
+            r#"
+            INSERT INTO placements
+            (account_id, folder_id, uidvalidity, uid, message_key, read_flag)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (account_id, folder_id, uidvalidity, uid)
+            DO UPDATE SET message_key = excluded.message_key, read_flag = excluded.read_flag
+            "#,
         )
+        .bind(&placement.account_id)
+        .bind(&placement.folder_id)
+        .bind(&placement.uid_validity)
+        .bind(&placement.remote_id)
         .bind(&email.id)
-        .bind(&email.subject)
-        .bind(&email.sender)
-        .bind(email.body_plain.as_deref().unwrap_or(""))
+        .bind(if placement.read { 1i64 } else { 0i64 })
         .execute(&mut *tx)
         .await
         .map_err(DatabaseError::Query)?;
 
         tx.commit().await.map_err(DatabaseError::Query)?;
 
-        Ok(())
+        Ok(SaveOutcome {
+            message_is_new,
+            placement_is_new,
+        })
+    }
+
+    /// Every mailbox this message currently occupies.
+    pub async fn placements_of(
+        &self,
+        message_key: &str,
+    ) -> Result<Vec<nuncio_core::model::Placement>, DatabaseError> {
+        let rows: Vec<(String, String, String, String, i64)> = sqlx::query_as(
+            "SELECT account_id, folder_id, uidvalidity, uid, read_flag
+             FROM placements WHERE message_key = ? ORDER BY folder_id ASC",
+        )
+        .bind(message_key)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(account_id, folder_id, uid_validity, remote_id, read_flag)| {
+                    nuncio_core::model::Placement {
+                        account_id,
+                        folder_id,
+                        uid_validity,
+                        remote_id,
+                        read: read_flag != 0,
+                    }
+                },
+            )
+            .collect())
     }
 
     /// Query synced email messages for a specific folder.
@@ -1815,7 +1913,7 @@ impl DatabaseEngine {
 
     /// Save a [`nuncio_core::model::CalendarEvent`] to SQLite (INSERT OR REPLACE).
     ///
-    /// Unlike [`Self::save_email`], calendar event summary/location are never encrypted at
+    /// Unlike [`Self::save_email_at`], calendar event summary/location are never encrypted at
     /// rest (see the confidentiality note above the `events_fts` `CREATE VIRTUAL TABLE`
     /// statement in [`Self::migrate`]), so the `events_ai`/`events_ad`/`events_au` triggers
     /// created there keep `events_fts` in sync automatically -- there is no separate manual
@@ -4716,6 +4814,172 @@ mod tests {
             "fire-once claims name message keys that no longer resolve"
         );
         engine.close().await;
+    }
+
+    /// An `(Email, Placement)` pair for `account_id = "acct-1"`,
+    /// `uid_validity = "42"` -- the shape a sync hands the store once identity
+    /// and occupancy are separate.
+    fn sample_message_and_placement(
+        key: &str,
+        folder: &str,
+        uid: &str,
+    ) -> (nuncio_core::model::Email, nuncio_core::model::Placement) {
+        (
+            nuncio_core::model::Email {
+                id: key.into(),
+                account_id: "acct-1".into(),
+                subject: "Subject".into(),
+                sender: "a@nuncio.mx".into(),
+                recipient: "b@nuncio.mx".into(),
+                received_at: 1_000,
+                body_plain: Some("body".into()),
+                body_html: None,
+                attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
+            },
+            nuncio_core::model::Placement {
+                account_id: "acct-1".into(),
+                folder_id: folder.into(),
+                uid_validity: "42".into(),
+                remote_id: uid.into(),
+                read: false,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_second_placement_does_not_overwrite_the_stored_body() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let email = nuncio_core::model::Email {
+            id: "key-1".into(),
+            account_id: "acct-1".into(),
+            subject: "Original".into(),
+            sender: "a@nuncio.mx".into(),
+            recipient: "b@nuncio.mx".into(),
+            received_at: 1_000,
+            body_plain: Some("the trusted body".into()),
+            body_html: None,
+            attachments: Vec::new(),
+            message_id: Some("a@b.example".into()),
+            content_hash: Some("1111".into()),
+        };
+        let inbox = nuncio_core::model::Placement {
+            account_id: "acct-1".into(),
+            folder_id: "INBOX".into(),
+            uid_validity: "42".into(),
+            remote_id: "5".into(),
+            read: false,
+        };
+        let outcome = engine
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::MessageIdContent,
+                &inbox,
+            )
+            .await
+            .unwrap();
+        assert!(outcome.message_is_new && outcome.placement_is_new);
+
+        // The same key arriving from another folder, carrying a different body.
+        let impostor = nuncio_core::model::Email {
+            subject: "Replaced".into(),
+            body_plain: Some("attacker body".into()),
+            ..email.clone()
+        };
+        let archive = nuncio_core::model::Placement {
+            folder_id: "Archive".into(),
+            remote_id: "9".into(),
+            ..inbox.clone()
+        };
+        let outcome = engine
+            .save_email_at(
+                &impostor,
+                nuncio_core::model::IdentitySource::MessageIdContent,
+                &archive,
+            )
+            .await
+            .unwrap();
+        assert!(!outcome.message_is_new, "identity already existed");
+        assert!(outcome.placement_is_new, "but the Archive placement is new");
+
+        let stored = engine.get_message("key-1").await.unwrap();
+        assert_eq!(stored.subject, "Original", "first write must win");
+        assert_eq!(stored.body_plain.as_deref(), Some("the trusted body"));
+    }
+
+    #[tokio::test]
+    async fn re_placing_the_same_message_leaves_exactly_one_fts_row() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (email, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        engine
+            .save_email_at(&email, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+        let archive = nuncio_core::model::Placement {
+            folder_id: "Archive".into(),
+            remote_id: "9".into(),
+            ..inbox.clone()
+        };
+        engine
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::EmailId,
+                &archive,
+            )
+            .await
+            .unwrap();
+
+        let (rows,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages_fts WHERE message_key = 'key-1'")
+                .fetch_one(engine.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            rows, 1,
+            "the FTS index holds one row per message, not per placement"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_state_is_tracked_per_placement() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (email, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        let archive = nuncio_core::model::Placement {
+            folder_id: "Archive".into(),
+            remote_id: "9".into(),
+            read: true,
+            ..inbox.clone()
+        };
+        engine
+            .save_email_at(&email, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+        engine
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::EmailId,
+                &archive,
+            )
+            .await
+            .unwrap();
+
+        let placements = engine.placements_of("key-1").await.unwrap();
+        let inbox_read = placements
+            .iter()
+            .find(|p| p.folder_id == "INBOX")
+            .unwrap()
+            .read;
+        let archive_read = placements
+            .iter()
+            .find(|p| p.folder_id == "Archive")
+            .unwrap()
+            .read;
+        assert!(!inbox_read);
+        assert!(
+            archive_read,
+            "IMAP \\Seen is per-mailbox, so the flags differ"
+        );
     }
 
     #[tokio::test]
