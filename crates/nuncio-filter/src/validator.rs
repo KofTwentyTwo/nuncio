@@ -92,6 +92,10 @@ impl NsqlValidator {
                     "header field conditions are not yet supported: message headers are not indexed"
                         .to_string(),
                 )),
+                // `Folder` and `Account` are validated the same as the
+                // content fields here: only the value's shape (string or
+                // string list) matters at this pass. At evaluation time they
+                // read a placement's coordinates, not the message's content.
                 FilterField::Subject
                 | FilterField::From
                 | FilterField::To
