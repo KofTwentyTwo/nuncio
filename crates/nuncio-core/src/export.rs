@@ -87,7 +87,10 @@ impl ExportEngine {
             writer.write_all(from_line.as_bytes())?;
             total_bytes += from_line.len() as u64;
 
-            // Headers
+            // Headers. No X-Nuncio-Folder header: the folder is a property of
+            // a placement now, not of the message, so `Email` has none to
+            // name here. Restoring it would mean threading the relevant
+            // `Placement` into this function's signature.
             let headers = format!(
                 "Message-ID: <{}>\r\nFrom: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\nX-Nuncio-Account: {}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n",
                 email.id, email.sender, email.recipient, email.subject, date_str, email.account_id

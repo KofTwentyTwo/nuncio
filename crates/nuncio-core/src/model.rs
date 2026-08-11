@@ -547,17 +547,56 @@ mod tests {
 
     #[test]
     fn message_key_is_account_scoped_at_every_tier() {
-        let remote = || RemoteIdentity {
+        let emailid = || RemoteIdentity {
             email_id: Some("M00000001"),
             gm_msgid: None,
             message_id: None,
             content_hash: None,
         };
-        let a = Email::derive_message_key("acct-1", remote(), "INBOX", "42", "5");
-        let b = Email::derive_message_key("acct-2", remote(), "INBOX", "42", "5");
+        let a = Email::derive_message_key("acct-1", emailid(), "INBOX", "42", "5");
+        let b = Email::derive_message_key("acct-2", emailid(), "INBOX", "42", "5");
         assert_ne!(
             a.key, b.key,
             "the same EMAILID in two accounts must not collide"
+        );
+
+        let gmsgid = || RemoteIdentity {
+            email_id: None,
+            gm_msgid: Some("1234567890"),
+            message_id: None,
+            content_hash: None,
+        };
+        let a = Email::derive_message_key("acct-1", gmsgid(), "INBOX", "42", "5");
+        let b = Email::derive_message_key("acct-2", gmsgid(), "INBOX", "42", "5");
+        assert_ne!(
+            a.key, b.key,
+            "the same X-GM-MSGID in two accounts must not collide"
+        );
+
+        let msgid_content = || RemoteIdentity {
+            email_id: None,
+            gm_msgid: None,
+            message_id: Some("a@b.example"),
+            content_hash: Some("deadbeef"),
+        };
+        let a = Email::derive_message_key("acct-1", msgid_content(), "INBOX", "42", "5");
+        let b = Email::derive_message_key("acct-2", msgid_content(), "INBOX", "42", "5");
+        assert_ne!(
+            a.key, b.key,
+            "the same Message-ID and content hash in two accounts must not collide"
+        );
+
+        let surrogate = RemoteIdentity {
+            email_id: None,
+            gm_msgid: None,
+            message_id: None,
+            content_hash: None,
+        };
+        let a = Email::derive_message_key("acct-1", surrogate, "INBOX", "42", "5");
+        let b = Email::derive_message_key("acct-2", surrogate, "INBOX", "42", "5");
+        assert_ne!(
+            a.key, b.key,
+            "the same folder/uidvalidity/remote-id in two accounts must not collide"
         );
     }
 
