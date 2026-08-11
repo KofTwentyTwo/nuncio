@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 /// Search hit result for full-text query matches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchHit {
-    /// Entity ID matching the query.
+    /// Entity ID matching the query. For a message hit this is the
+    /// folder-independent message key: the index holds one row per message, so
+    /// a hit names a message and never one of its mailbox placements. Resolve
+    /// it through [`DatabaseEngine::get_message`].
     pub id: String,
     /// Matching title or subject.
     pub title: String,
@@ -50,7 +53,7 @@ impl<'a> SearchEngine<'a> {
 
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             r#"
-            SELECT id, subject, snippet(messages_fts, 3, '<b>', '</b>', '...', 10) as snippet
+            SELECT message_key, subject, snippet(messages_fts, 3, '<b>', '</b>', '...', 10) as snippet
             FROM messages_fts
             WHERE messages_fts MATCH ?
             ORDER BY rank
@@ -94,7 +97,7 @@ impl<'a> SearchEngine<'a> {
 
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
             "SELECT id, title, snippet, rk FROM ( \
-             SELECT id, subject AS title, \
+             SELECT message_key AS id, subject AS title, \
              snippet(messages_fts, 3, '<b>', '</b>', '...', 10) AS snippet, rank AS rk \
              FROM messages_fts WHERE messages_fts MATCH ",
         );
@@ -255,14 +258,10 @@ mod tests {
         nuncio_core::model::Email {
             id: id.to_string(),
             account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
-            remote_id: id.to_string(),
-            uid_validity: "1".to_string(),
             subject: subject.to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
             received_at: 1_700_000_000,
-            read: false,
             body_plain: Some(body_plain.to_string()),
             body_html: None,
             attachments: Vec::new(),
@@ -271,7 +270,27 @@ mod tests {
         }
     }
 
-    /// The crux test: proves body search works over the REAL `save_email` write path (no
+    fn sample_placement(uid: &str) -> nuncio_core::model::Placement {
+        nuncio_core::model::Placement {
+            account_id: "acct-1".to_string(),
+            folder_id: "inbox".to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: uid.to_string(),
+            read: false,
+        }
+    }
+
+    async fn save(db: &DatabaseEngine, email: &nuncio_core::model::Email) {
+        db.save_email_at(
+            email,
+            nuncio_core::model::IdentitySource::Surrogate,
+            &sample_placement(&email.id),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The crux test: proves body search works over the REAL `save_email_at` write path (no
     /// raw-SQL plaintext injection bypassing encryption), while the stored body column stays
     /// ciphertext. This is what the old `fts5_message_search_and_triggers` test failed to
     /// prove -- it inserted plaintext directly via raw SQL, which trivially "worked" but never
@@ -290,7 +309,7 @@ mod tests {
             "Quarterly Financial Meeting",
             "Let's discuss the annual budget revenue forecast",
         );
-        db.save_email(&email).await.unwrap();
+        save(&db, &email).await;
 
         // Body search matches a plaintext body term -- proves the FTS index holds real,
         // decrypted-at-write-time plaintext trigrams, not the AES-256-GCM ciphertext that is
@@ -307,39 +326,44 @@ mod tests {
         // The body column at rest must remain encrypted ciphertext -- never the plaintext
         // search term, and never equal to the original plaintext body.
         let (stored_body,): (String,) =
-            sqlx::query_as("SELECT body_plain FROM messages WHERE id = 'msg-1'")
+            sqlx::query_as("SELECT body_plain FROM messages WHERE message_key = 'msg-1'")
                 .fetch_one(db.pool())
                 .await
                 .unwrap();
         assert_ne!(stored_body, email.body_plain.clone().unwrap());
         assert!(!stored_body.to_lowercase().contains("revenue"));
 
-        // Re-saving via save_email (an update, not a fresh insert) replaces the FTS row rather
-        // than duplicating or leaving a stale entry: the old term no longer matches, the new
-        // one does.
-        let mut updated = email.clone();
-        updated.body_plain = Some("Updated strategy review notes".to_string());
-        db.save_email(&updated).await.unwrap();
+        // Re-saving the same key with a different body must leave the index alone: the message
+        // row is first-write-wins, so a second write that cannot change the stored body must
+        // not change what search returns for it either. Anything else would have search
+        // disagree with the store -- either finding a body that was never persisted, or holding
+        // two rows for one message.
+        let mut rewritten = email.clone();
+        rewritten.body_plain = Some("Updated strategy review notes".to_string());
+        save(&db, &rewritten).await;
 
-        assert!(search.search_messages("revenue").await.unwrap().is_empty());
-        let new_hits = search.search_messages("strategy").await.unwrap();
-        assert_eq!(new_hits.len(), 1);
-        assert_eq!(new_hits[0].id, "msg-1");
+        let unchanged = search.search_messages("revenue").await.unwrap();
+        assert_eq!(unchanged.len(), 1, "the stored body is still searchable");
+        assert_eq!(unchanged[0].id, "msg-1");
+        assert!(
+            search.search_messages("strategy").await.unwrap().is_empty(),
+            "a body the store rejected must never become searchable"
+        );
 
-        // Delete message trigger still cleans up the FTS row (subject/sender/id only -- no
+        // Delete message trigger still cleans up the FTS row (subject/sender/key only -- no
         // ciphertext involved).
-        sqlx::query("DELETE FROM messages WHERE id = 'msg-1'")
+        sqlx::query("DELETE FROM messages WHERE message_key = 'msg-1'")
             .execute(db.pool())
             .await
             .unwrap();
 
-        let deleted_hits = search.search_messages("strategy").await.unwrap();
+        let deleted_hits = search.search_messages("revenue").await.unwrap();
         assert!(deleted_hits.is_empty());
     }
 
     /// Proves the backfill half of the fix: a message saved through the real write path,
     /// whose FTS entry is then lost (simulating either a row written before the FTS5 index
-    /// existed, or one written by a process that bypassed `save_email`'s explicit indexing),
+    /// existed, or one written by a process that bypassed `save_email_at`'s explicit indexing),
     /// is NOT searchable until a migration pass runs -- at which point `backfill_message_fts`
     /// decrypts the ciphertext body column with this engine's real storage key and repopulates
     /// the plaintext-derived trigram index, with no search call ever required to trigger it.
@@ -351,11 +375,11 @@ mod tests {
             "Legacy Roadmap Notes",
             "Confidential quarterly roadmap details",
         );
-        db.save_email(&email).await.unwrap();
+        save(&db, &email).await;
 
         // Simulate pre-existing data whose FTS entry is missing (e.g. written before the FTS5
         // index existed) by dropping its messages_fts row directly.
-        sqlx::query("DELETE FROM messages_fts WHERE id = 'msg-legacy-1'")
+        sqlx::query("DELETE FROM messages_fts WHERE message_key = 'msg-legacy-1'")
             .execute(db.pool())
             .await
             .unwrap();
@@ -385,13 +409,15 @@ mod tests {
     async fn search_messages_page_returns_every_hit_once_no_gaps() {
         let (db, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
         for i in 0..5 {
-            db.save_email(&sample_email(
-                &format!("msg-{i}"),
-                "Budget Planning Meeting",
-                "annual budget revenue forecast discussion",
-            ))
-            .await
-            .unwrap();
+            save(
+                &db,
+                &sample_email(
+                    &format!("msg-{i}"),
+                    "Budget Planning Meeting",
+                    "annual budget revenue forecast discussion",
+                ),
+            )
+            .await;
         }
 
         let search = SearchEngine::new(&db);

@@ -256,6 +256,64 @@ pub struct SaveOutcome {
     pub placement_is_new: bool,
 }
 
+/// The four coordinates that address one mailbox occupancy.
+///
+/// `Ord` is derived because the sync path sorts and dedups batches of these
+/// before deleting; `Hash`/`Eq` because it is also the key of the
+/// already-present set used to classify a fetched chunk.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PlacementKey {
+    /// Account owning the mailbox.
+    pub account_id: String,
+    /// Mailbox folder identifier.
+    pub folder_id: String,
+    /// The UIDVALIDITY generation `remote_id` was captured under.
+    pub uid_validity: String,
+    /// Protocol-native id addressing the message in this mailbox.
+    pub remote_id: String,
+}
+
+/// A message paired with the mailbox occupancy it was read through.
+///
+/// The two travel together out of every folder-scoped read: the caller almost
+/// always needs the per-mailbox facts (the read flag, the addressing UID) as
+/// well as the message, and re-deriving them would cost a query per row.
+pub type PlacedMessage = (nuncio_core::model::Email, nuncio_core::model::Placement);
+
+/// Column order of the identity-only `messages` projection shared by every
+/// whole-store read path: key, account, subject, sender, recipient,
+/// received_at, body_plain, body_html, message_id, content_hash.
+type MessageRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// [`MessageRow`] widened with the joined placement's `uidvalidity`, `uid` and
+/// `read_flag`, in that order.
+type PlacedMessageRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    i64,
+);
+
 /// Serialize a [`nuncio_core::TlsMode`] to its stable on-disk `accounts`
 /// column form. Kept as a bare snake_case token (matching the column's
 /// `'implicit_tls'` default) rather than JSON, so a row inserted by the
@@ -482,11 +540,16 @@ impl DatabaseEngine {
     }
 
     /// Total unread messages across every folder, read live from the store.
+    ///
+    /// Counted over placements, not messages: `\Seen` is per-mailbox, so a
+    /// message sitting unread in two folders is genuinely two unread items to
+    /// clear.
     pub async fn count_unread_messages(&self) -> Result<u64, DatabaseError> {
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages WHERE read_flag = 0")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(DatabaseError::Query)?;
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM placements WHERE read_flag = 0")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
         Ok(count.max(0) as u64)
     }
 
@@ -1622,241 +1685,198 @@ impl DatabaseEngine {
             .collect())
     }
 
-    /// Query synced email messages for a specific folder.
-    #[allow(clippy::type_complexity)]
+    /// Messages occupying one folder of one account, newest first, paired with
+    /// the placement they were found through.
+    ///
+    /// The placement travels with the message because the caller almost always
+    /// needs the per-mailbox facts -- the read flag and the addressing UID --
+    /// and re-deriving them would mean a second query per row.
     pub async fn list_messages(
         &self,
+        account_id: &str,
         folder_id: &str,
         limit: usize,
-    ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
-        let rows: Vec<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            Option<String>,
-            Option<String>,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )> = sqlx::query_as(
+    ) -> Result<Vec<PlacedMessage>, DatabaseError> {
+        let rows: Vec<PlacedMessageRow> = sqlx::query_as(
             r#"
-            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash
-            FROM messages
-            WHERE folder_id = ?
-            ORDER BY received_at DESC
+            SELECT m.message_key, m.account_id, m.subject, m.sender, m.recipient,
+                   m.received_at, m.body_plain, m.body_html, m.message_id, m.content_hash,
+                   p.uidvalidity, p.uid, p.read_flag
+            FROM messages m
+            JOIN placements p ON p.message_key = m.message_key
+            WHERE p.account_id = ? AND p.folder_id = ?
+            ORDER BY m.received_at DESC
             LIMIT ?
             "#,
         )
+        .bind(account_id)
         .bind(folder_id)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
 
-        rows.into_iter()
-            .map(
-                |(
-                    id,
-                    account_id,
-                    folder_id,
-                    subject,
-                    sender,
-                    recipient,
-                    received_at,
-                    read_flag,
-                    body_plain,
-                    body_html,
-                    remote_id,
-                    uid_validity,
-                    message_id,
-                    content_hash,
-                )| {
-                    let dec_plain = body_plain
-                        .map(|p| {
-                            crate::cipher::PayloadCipher::decrypt_text_at_rest(
-                                &self.storage_key,
-                                &p,
-                            )
-                        })
-                        .transpose()
-                        .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-                    let dec_html = body_html
-                        .map(|h| {
-                            crate::cipher::PayloadCipher::decrypt_text_at_rest(
-                                &self.storage_key,
-                                &h,
-                            )
-                        })
-                        .transpose()
-                        .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-                    Ok(nuncio_core::model::Email {
-                        id,
-                        account_id,
-                        folder_id,
-                        remote_id,
-                        uid_validity,
-                        subject,
-                        sender,
-                        recipient,
-                        received_at,
-                        read: read_flag != 0,
-                        body_plain: dec_plain,
-                        body_html: dec_html,
-                        attachments: Vec::new(),
-                        message_id,
-                        content_hash,
-                    })
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let dec_plain = row
+                .6
+                .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
+                .transpose()
+                .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+            let dec_html = row
+                .7
+                .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h))
+                .transpose()
+                .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+
+            out.push((
+                nuncio_core::model::Email {
+                    id: row.0,
+                    account_id: row.1,
+                    subject: row.2,
+                    sender: row.3,
+                    recipient: row.4,
+                    received_at: row.5,
+                    body_plain: dec_plain,
+                    body_html: dec_html,
+                    attachments: Vec::new(),
+                    message_id: row.8,
+                    content_hash: row.9,
                 },
-            )
-            .collect::<Result<Vec<_>, DatabaseError>>()
+                nuncio_core::model::Placement {
+                    account_id: account_id.to_string(),
+                    folder_id: folder_id.to_string(),
+                    uid_validity: row.10,
+                    remote_id: row.11,
+                    read: row.12 != 0,
+                },
+            ));
+        }
+        Ok(out)
     }
 
-    /// Keyset-paginated listing of a folder's messages, newest first
-    /// (`received_at DESC, id DESC`). `after` is the `(received_at, id)` of
-    /// the last message of the previous page; `None` starts from the newest.
+    /// Keyset-paginated listing of one folder's messages, newest first
+    /// (`received_at DESC, message_key DESC`), each paired with the placement
+    /// it was found through. `after` is the `(received_at, message_key)` of the
+    /// last message of the previous page; `None` starts from the newest.
     /// Fetches `page_size + 1` rows to detect a following page: returns at
-    /// most `page_size` messages plus the `(received_at, id)` cursor of the
-    /// last returned message when more remain (else `None`).
-    #[allow(clippy::type_complexity)]
+    /// most `page_size` pairs plus the cursor of the last returned message when
+    /// more remain (else `None`).
+    ///
+    /// The cursor is a *message* coordinate rather than a placement one because
+    /// the ordering is by arrival time, which is a property of the message; the
+    /// join is one-to-one within a single folder, so no message can appear twice
+    /// on a page.
     pub async fn list_messages_page(
         &self,
+        account_id: &str,
         folder_id: &str,
         after: Option<(i64, String)>,
         page_size: usize,
-    ) -> Result<(Vec<nuncio_core::model::Email>, Option<(i64, String)>), DatabaseError> {
+    ) -> Result<(Vec<PlacedMessage>, Option<(i64, String)>), DatabaseError> {
         let fetch = page_size.saturating_add(1);
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash FROM messages WHERE folder_id = ",
+            "SELECT m.message_key, m.account_id, m.subject, m.sender, m.recipient, \
+             m.received_at, m.body_plain, m.body_html, m.message_id, m.content_hash, \
+             p.uidvalidity, p.uid, p.read_flag \
+             FROM messages m JOIN placements p ON p.message_key = m.message_key \
+             WHERE p.account_id = ",
         );
+        builder.push_bind(account_id.to_string());
+        builder.push(" AND p.folder_id = ");
         builder.push_bind(folder_id.to_string());
-        if let Some((ts, id)) = &after {
-            builder.push(" AND (received_at < ");
+        if let Some((ts, key)) = &after {
+            builder.push(" AND (m.received_at < ");
             builder.push_bind(*ts);
-            builder.push(" OR (received_at = ");
+            builder.push(" OR (m.received_at = ");
             builder.push_bind(*ts);
-            builder.push(" AND id < ");
-            builder.push_bind(id.clone());
+            builder.push(" AND m.message_key < ");
+            builder.push_bind(key.clone());
             builder.push("))");
         }
-        builder.push(" ORDER BY received_at DESC, id DESC LIMIT ");
+        builder.push(" ORDER BY m.received_at DESC, m.message_key DESC LIMIT ");
         builder.push_bind(fetch as i64);
 
         let rows = builder
-            .build_query_as::<(
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                i64,
-                i64,
-                Option<String>,
-                Option<String>,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-            )>()
+            .build_query_as::<PlacedMessageRow>()
             .fetch_all(&self.pool)
             .await
             .map_err(DatabaseError::Query)?;
 
         let has_more = rows.len() > page_size;
-        let mut emails = rows
-            .into_iter()
-            .take(page_size)
-            .map(|r| {
-                let dec_plain =
-                    r.8.map(|p| {
-                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
-                    })
-                    .transpose()
-                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-                let dec_html =
-                    r.9.map(|h| {
-                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
-                    })
-                    .transpose()
-                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-                Ok(nuncio_core::model::Email {
-                    id: r.0,
-                    account_id: r.1,
-                    folder_id: r.2,
-                    remote_id: r.10,
-                    uid_validity: r.11,
-                    subject: r.3,
-                    sender: r.4,
-                    recipient: r.5,
-                    received_at: r.6,
-                    read: r.7 != 0,
+        let mut placed = Vec::with_capacity(rows.len().min(page_size));
+        for row in rows.into_iter().take(page_size) {
+            let dec_plain = row
+                .6
+                .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
+                .transpose()
+                .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+            let dec_html = row
+                .7
+                .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h))
+                .transpose()
+                .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+            placed.push((
+                nuncio_core::model::Email {
+                    id: row.0,
+                    account_id: row.1,
+                    subject: row.2,
+                    sender: row.3,
+                    recipient: row.4,
+                    received_at: row.5,
                     body_plain: dec_plain,
                     body_html: dec_html,
                     attachments: Vec::new(),
-                    message_id: r.12,
-                    content_hash: r.13,
-                })
-            })
-            .collect::<Result<Vec<_>, DatabaseError>>()?;
+                    message_id: row.8,
+                    content_hash: row.9,
+                },
+                nuncio_core::model::Placement {
+                    account_id: account_id.to_string(),
+                    folder_id: folder_id.to_string(),
+                    uid_validity: row.10,
+                    remote_id: row.11,
+                    read: row.12 != 0,
+                },
+            ));
+        }
 
         let next = if has_more {
-            emails
-                .last()
-                .map(|e| (e.received_at, e.id.clone()))
-                .filter(|_| !emails.is_empty())
+            placed.last().map(|(e, _)| (e.received_at, e.id.clone()))
         } else {
             None
         };
-        emails.shrink_to_fit();
-        Ok((emails, next))
+        placed.shrink_to_fit();
+        Ok((placed, next))
     }
 
-    /// Retrieve a single message by ID.
-    #[allow(clippy::type_complexity)]
+    /// Retrieve a message's identity and content by its key.
+    ///
+    /// Returns the message alone. Where it sits, and whether it is read there,
+    /// are per-mailbox facts -- ask [`Self::placements_of`] for those.
     pub async fn get_message(
         &self,
-        message_id: &str,
+        message_key: &str,
     ) -> Result<nuncio_core::model::Email, DatabaseError> {
-        let row: (
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            Option<String>,
-            Option<String>,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        ) = sqlx::query_as(
+        let row: MessageRow = sqlx::query_as(
             r#"
-            SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash
+            SELECT message_key, account_id, subject, sender, recipient, received_at,
+                   body_plain, body_html, message_id, content_hash
             FROM messages
-            WHERE id = ?
+            WHERE message_key = ?
             "#,
         )
-        .bind(message_id)
+        .bind(message_key)
         .fetch_one(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
 
         let dec_plain = row
-            .8
+            .6
             .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
             .transpose()
             .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
         let dec_html = row
-            .9
+            .7
             .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h))
             .transpose()
             .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
@@ -1864,41 +1884,123 @@ impl DatabaseEngine {
         Ok(nuncio_core::model::Email {
             id: row.0,
             account_id: row.1,
-            folder_id: row.2,
-            remote_id: row.10,
-            uid_validity: row.11,
-            subject: row.3,
-            sender: row.4,
-            recipient: row.5,
-            received_at: row.6,
-            read: row.7 != 0,
+            subject: row.2,
+            sender: row.3,
+            recipient: row.4,
+            received_at: row.5,
             body_plain: dec_plain,
             body_html: dec_html,
             attachments: Vec::new(),
-            message_id: row.12,
-            content_hash: row.13,
+            message_id: row.8,
+            content_hash: row.9,
         })
     }
 
-    /// Return the subset of `ids` already present in the `messages` table, as a single
-    /// `SELECT id FROM messages WHERE id IN (...)` query.
+    /// Every placement currently stored for one folder of one account.
+    ///
+    /// The local half of a UID-set diff. This returns placements rather than
+    /// message keys because what a server stops reporting is an occupancy, not a
+    /// message: the same mail may still exist in another folder and must survive
+    /// there.
+    pub async fn placements_in_folder(
+        &self,
+        account_id: &str,
+        folder_id: &str,
+    ) -> Result<Vec<PlacementKey>, DatabaseError> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT uidvalidity, uid FROM placements WHERE account_id = ? AND folder_id = ?",
+        )
+        .bind(account_id)
+        .bind(folder_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(uid_validity, remote_id)| PlacementKey {
+                account_id: account_id.to_string(),
+                folder_id: folder_id.to_string(),
+                uid_validity,
+                remote_id,
+            })
+            .collect())
+    }
+
+    /// The subset of `keys` already stored, in one round trip.
+    ///
+    /// SQLite supports row-value `IN` lists, so the whole batch is one query
+    /// rather than one existence check per placement. An empty slice
+    /// short-circuits, since `IN ()` is not valid SQL.
+    pub async fn existing_placements(
+        &self,
+        keys: &[PlacementKey],
+    ) -> Result<std::collections::HashSet<PlacementKey>, DatabaseError> {
+        if keys.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+
+        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "SELECT account_id, folder_id, uidvalidity, uid FROM placements
+             WHERE (account_id, folder_id, uidvalidity, uid) IN (",
+        );
+        for (index, key) in keys.iter().enumerate() {
+            if index > 0 {
+                builder.push(", ");
+            }
+            builder.push("(");
+            builder.push_bind(key.account_id.clone());
+            builder.push(", ");
+            builder.push_bind(key.folder_id.clone());
+            builder.push(", ");
+            builder.push_bind(key.uid_validity.clone());
+            builder.push(", ");
+            builder.push_bind(key.remote_id.clone());
+            builder.push(")");
+        }
+        builder.push(")");
+
+        let rows: Vec<(String, String, String, String)> = builder
+            .build_query_as()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(account_id, folder_id, uid_validity, remote_id)| PlacementKey {
+                    account_id,
+                    folder_id,
+                    uid_validity,
+                    remote_id,
+                },
+            )
+            .collect())
+    }
+
+    /// Return the subset of `keys` whose message identity is already present in the
+    /// `messages` table, as a single `SELECT message_key FROM messages WHERE message_key
+    /// IN (...)` query.
     ///
     /// Lets a caller classify a whole fetched batch as new-vs-seen with one round trip instead
-    /// of one existence lookup per id. Passing an empty slice short-circuits to an empty set
-    /// without querying at all, since `IN ()` is not valid SQL.
+    /// of one existence lookup per key. Answers a strictly different question from
+    /// [`Self::existing_placements`]: a message already known from another folder is *not* new
+    /// here, but its arrival in this folder still is. Passing an empty slice short-circuits to
+    /// an empty set without querying at all, since `IN ()` is not valid SQL.
     pub async fn existing_message_ids(
         &self,
-        ids: &[String],
+        keys: &[String],
     ) -> Result<std::collections::HashSet<String>, DatabaseError> {
-        if ids.is_empty() {
+        if keys.is_empty() {
             return Ok(std::collections::HashSet::new());
         }
 
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> =
-            sqlx::QueryBuilder::new("SELECT id FROM messages WHERE id IN (");
+            sqlx::QueryBuilder::new("SELECT message_key FROM messages WHERE message_key IN (");
         let mut separated = builder.separated(", ");
-        for id in ids {
-            separated.push_bind(id);
+        for key in keys {
+            separated.push_bind(key);
         }
         builder.push(")");
 
@@ -1908,7 +2010,7 @@ impl DatabaseEngine {
             .await
             .map_err(DatabaseError::Query)?;
 
-        Ok(rows.into_iter().map(|(id,)| id).collect())
+        Ok(rows.into_iter().map(|(key,)| key).collect())
     }
 
     /// Save a [`nuncio_core::model::CalendarEvent`] to SQLite (INSERT OR REPLACE).
@@ -2249,23 +2351,30 @@ impl DatabaseEngine {
         Ok(contact_from_row(&row))
     }
 
-    /// Update a single message's read/unread flag in place.
+    /// Update one placement's read flag in place.
     ///
-    /// Returns `DatabaseError::Query(sqlx::Error::RowNotFound)` if no message
-    /// with `message_id` exists, so callers can distinguish "flag flipped"
-    /// from "message never existed" rather than silently succeeding on a
-    /// no-op update.
-    pub async fn set_message_read(
+    /// Scoped to a single mailbox occupancy because IMAP `\Seen` is per-mailbox:
+    /// a message read in `INBOX` is not thereby read in `Archive`. Returns
+    /// `DatabaseError::Query(sqlx::Error::RowNotFound)` when no such placement
+    /// exists, so callers can still distinguish "flag flipped" from "never
+    /// there" rather than silently succeeding on a no-op update.
+    pub async fn set_placement_read(
         &self,
-        message_id: &str,
+        key: &PlacementKey,
         read: bool,
     ) -> Result<(), DatabaseError> {
-        let result = sqlx::query("UPDATE messages SET read_flag = ? WHERE id = ?")
-            .bind(if read { 1i64 } else { 0i64 })
-            .bind(message_id)
-            .execute(&self.pool)
-            .await
-            .map_err(DatabaseError::Query)?;
+        let result = sqlx::query(
+            "UPDATE placements SET read_flag = ?
+             WHERE account_id = ? AND folder_id = ? AND uidvalidity = ? AND uid = ?",
+        )
+        .bind(if read { 1i64 } else { 0i64 })
+        .bind(&key.account_id)
+        .bind(&key.folder_id)
+        .bind(&key.uid_validity)
+        .bind(&key.remote_id)
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
 
         if result.rows_affected() == 0 {
             return Err(DatabaseError::Query(sqlx::Error::RowNotFound));
@@ -2273,15 +2382,28 @@ impl DatabaseEngine {
         Ok(())
     }
 
-    /// Query available folders with message counts.
-    pub async fn list_folders(&self) -> Result<Vec<nuncio_core::model::Folder>, DatabaseError> {
+    /// Query one account's folders with message counts.
+    ///
+    /// Folders are derived from the placements that reference them rather than
+    /// stored in their own table, so a folder exists exactly as long as it holds
+    /// mail. Scoping by account is required, not cosmetic: folder ids are not
+    /// globally unique -- every account has an `INBOX` -- and grouping across
+    /// accounts would report one merged folder holding both accounts' mail.
+    pub async fn list_folders(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<nuncio_core::model::Folder>, DatabaseError> {
         let rows: Vec<(String, i64, i64)> = sqlx::query_as(
             r#"
-            SELECT folder_id, COUNT(*) as total, SUM(CASE WHEN read_flag = 0 THEN 1 ELSE 0 END) as unread
-            FROM messages
+            SELECT folder_id, COUNT(*) as total,
+                   SUM(CASE WHEN read_flag = 0 THEN 1 ELSE 0 END) as unread
+            FROM placements
+            WHERE account_id = ?
             GROUP BY folder_id
+            ORDER BY folder_id ASC
             "#,
         )
+        .bind(account_id)
         .fetch_all(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
@@ -2297,21 +2419,24 @@ impl DatabaseEngine {
             .collect())
     }
 
-    /// Keyset-paginated listing of folders with message counts, folder id
-    /// ascending. `after` is the id of the last folder of the previous page.
-    /// Fetches `page_size + 1` groups to detect a following page and returns
-    /// the id of the last returned folder as the cursor when more remain.
+    /// Keyset-paginated listing of one account's folders with message counts,
+    /// folder id ascending. `after` is the id of the last folder of the previous
+    /// page. Fetches `page_size + 1` groups to detect a following page and
+    /// returns the id of the last returned folder as the cursor when more
+    /// remain. Account-scoped for the same reason as [`Self::list_folders`].
     pub async fn list_folders_page(
         &self,
+        account_id: &str,
         after: Option<String>,
         page_size: usize,
     ) -> Result<(Vec<nuncio_core::model::Folder>, Option<String>), DatabaseError> {
         let fetch = page_size.saturating_add(1);
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT folder_id, COUNT(*) as total, SUM(CASE WHEN read_flag = 0 THEN 1 ELSE 0 END) as unread FROM messages ",
+            "SELECT folder_id, COUNT(*) as total, SUM(CASE WHEN read_flag = 0 THEN 1 ELSE 0 END) as unread FROM placements WHERE account_id = ",
         );
+        builder.push_bind(account_id.to_string());
         if let Some(id) = &after {
-            builder.push("WHERE folder_id > ");
+            builder.push(" AND folder_id > ");
             builder.push_bind(id.clone());
         }
         builder.push(" GROUP BY folder_id ORDER BY folder_id ASC LIMIT ");
@@ -2723,165 +2848,114 @@ impl DatabaseEngine {
         Ok(true)
     }
 
-    /// Fetch a page of messages using Keyset Chunking (`WHERE id > ? ORDER BY id ASC LIMIT ?`).
+    /// Fetch a page of messages using Keyset Chunking
+    /// (`WHERE message_key > ? ORDER BY message_key ASC LIMIT ?`).
+    ///
+    /// Walks message identities, not placements: a chunked pass over the store
+    /// wants each message exactly once, however many folders it occupies.
     pub async fn get_message_chunk(
         &self,
-        last_id: &str,
+        last_key: &str,
         limit: usize,
     ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash FROM messages "
+            "SELECT message_key, account_id, subject, sender, recipient, received_at, \
+             body_plain, body_html, message_id, content_hash FROM messages ",
         );
-        if !last_id.is_empty() {
-            builder.push("WHERE id > ");
-            builder.push_bind(last_id);
+        if !last_key.is_empty() {
+            builder.push("WHERE message_key > ");
+            builder.push_bind(last_key);
         }
-        builder.push(" ORDER BY id ASC LIMIT ");
+        builder.push(" ORDER BY message_key ASC LIMIT ");
         builder.push_bind(limit as i64);
 
-        let query = builder.build_query_as::<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            Option<String>,
-            Option<String>,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )>();
+        let query = builder.build_query_as::<MessageRow>();
 
         let rows = query
             .fetch_all(&self.pool)
             .await
             .map_err(DatabaseError::Query)?;
 
-        rows.into_iter()
-            .map(|r| {
-                let dec_plain =
-                    r.8.map(|p| {
-                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
-                    })
-                    .transpose()
-                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-                let dec_html =
-                    r.9.map(|h| {
-                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
-                    })
-                    .transpose()
-                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-                Ok(nuncio_core::model::Email {
-                    id: r.0,
-                    account_id: r.1,
-                    folder_id: r.2,
-                    remote_id: r.10,
-                    uid_validity: r.11,
-                    subject: r.3,
-                    sender: r.4,
-                    recipient: r.5,
-                    received_at: r.6,
-                    read: r.7 != 0,
-                    body_plain: dec_plain,
-                    body_html: dec_html,
-                    attachments: Vec::new(),
-                    message_id: r.12,
-                    content_hash: r.13,
-                })
-            })
-            .collect::<Result<Vec<_>, DatabaseError>>()
+        rows.into_iter().map(|r| self.email_from_row(r)).collect()
     }
 
     /// Query messages across the WHOLE store for export purposes,
     /// optionally narrowed to a single account or a
     /// single folder. Passing `None` for both returns every message in the
-    /// store. Ordered by `id` ascending, mirroring [`Self::get_message_chunk`]'s
-    /// deterministic keyset ordering.
-    #[allow(clippy::type_complexity)]
+    /// store. Ordered by `message_key` ascending, mirroring
+    /// [`Self::get_message_chunk`]'s deterministic keyset ordering.
+    ///
+    /// The folder filter is an `EXISTS` over `placements` rather than a join:
+    /// a message occupying two folders must still export as one message, and a
+    /// join would emit it once per matching placement.
     pub async fn list_messages_for_export(
         &self,
         account_id: Option<&str>,
         folder_id: Option<&str>,
     ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain, body_html, remote_id, uid_validity, message_id, content_hash FROM messages"
+            "SELECT m.message_key, m.account_id, m.subject, m.sender, m.recipient, \
+             m.received_at, m.body_plain, m.body_html, m.message_id, m.content_hash \
+             FROM messages m",
         );
 
         let mut has_filter = false;
         if let Some(account_id) = account_id {
-            builder.push(" WHERE account_id = ");
+            builder.push(" WHERE m.account_id = ");
             builder.push_bind(account_id);
             has_filter = true;
         }
         if let Some(folder_id) = folder_id {
-            builder.push(if has_filter {
-                " AND folder_id = "
-            } else {
-                " WHERE folder_id = "
-            });
+            builder.push(if has_filter { " AND " } else { " WHERE " });
+            builder.push("EXISTS (SELECT 1 FROM placements p WHERE p.message_key = m.message_key AND p.folder_id = ");
             builder.push_bind(folder_id);
+            builder.push(")");
         }
-        builder.push(" ORDER BY id ASC");
+        builder.push(" ORDER BY m.message_key ASC");
 
-        let query = builder.build_query_as::<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            Option<String>,
-            Option<String>,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )>();
+        let query = builder.build_query_as::<MessageRow>();
 
         let rows = query
             .fetch_all(&self.pool)
             .await
             .map_err(DatabaseError::Query)?;
 
-        rows.into_iter()
-            .map(|r| {
-                let dec_plain =
-                    r.8.map(|p| {
-                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p)
-                    })
-                    .transpose()
-                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-                let dec_html =
-                    r.9.map(|h| {
-                        crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h)
-                    })
-                    .transpose()
-                    .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-                Ok(nuncio_core::model::Email {
-                    id: r.0,
-                    account_id: r.1,
-                    folder_id: r.2,
-                    remote_id: r.10,
-                    uid_validity: r.11,
-                    subject: r.3,
-                    sender: r.4,
-                    recipient: r.5,
-                    received_at: r.6,
-                    read: r.7 != 0,
-                    body_plain: dec_plain,
-                    body_html: dec_html,
-                    attachments: Vec::new(),
-                    message_id: r.12,
-                    content_hash: r.13,
-                })
-            })
-            .collect::<Result<Vec<_>, DatabaseError>>()
+        rows.into_iter().map(|r| self.email_from_row(r)).collect()
+    }
+
+    /// Rebuild an [`nuncio_core::model::Email`] from the identity-column row
+    /// shape shared by the whole-store read paths, decrypting the body columns
+    /// with this engine's storage key.
+    ///
+    /// Decryption failures propagate as [`DatabaseError::Decryption`] rather
+    /// than degrading to an empty body: a body that will not authenticate has
+    /// been tampered with or corrupted, and silently returning nothing would
+    /// hide exactly the event the AEAD exists to detect.
+    fn email_from_row(&self, row: MessageRow) -> Result<nuncio_core::model::Email, DatabaseError> {
+        let dec_plain = row
+            .6
+            .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
+            .transpose()
+            .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+        let dec_html = row
+            .7
+            .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h))
+            .transpose()
+            .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
+
+        Ok(nuncio_core::model::Email {
+            id: row.0,
+            account_id: row.1,
+            subject: row.2,
+            sender: row.3,
+            recipient: row.4,
+            received_at: row.5,
+            body_plain: dec_plain,
+            body_html: dec_html,
+            attachments: Vec::new(),
+            message_id: row.8,
+            content_hash: row.9,
+        })
     }
 
     /// Append a new immutable WORM audit record to the log ledger, signed with the WORM
@@ -3354,17 +3428,18 @@ mod tests {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
 
         sqlx::query(
-            "INSERT INTO messages (id, account_id, folder_id, subject, sender, recipient, received_at, read_flag, body_plain)
-             VALUES ('msg-1', 'acct-1', 'inbox', 'Hello', 'alice@nuncio.mx', 'bob@nuncio.mx', 1700000000, 0, 'Hi Bob')",
+            "INSERT INTO messages (message_key, account_id, subject, sender, recipient, received_at, body_plain)
+             VALUES ('msg-1', 'acct-1', 'Hello', 'alice@nuncio.mx', 'bob@nuncio.mx', 1700000000, 'Hi Bob')",
         )
         .execute(engine.pool())
         .await
         .unwrap();
 
-        let subject: (String,) = sqlx::query_as("SELECT subject FROM messages WHERE id = 'msg-1'")
-            .fetch_one(engine.pool())
-            .await
-            .unwrap();
+        let subject: (String,) =
+            sqlx::query_as("SELECT subject FROM messages WHERE message_key = 'msg-1'")
+                .fetch_one(engine.pool())
+                .await
+                .unwrap();
 
         assert_eq!(subject.0, "Hello");
     }
@@ -3376,23 +3451,30 @@ mod tests {
         let email = nuncio_core::model::Email {
             id: "msg-db-100".to_string(),
             account_id: "acct-1".to_string(),
-            folder_id: "INBOX".to_string(),
-            remote_id: "100".to_string(),
-            uid_validity: "1".to_string(),
             subject: "Database Sync Test".to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
             received_at: 1700000000,
-            read: false,
             body_plain: Some("Plaintext content".to_string()),
             body_html: Some("<p>HTML content</p>".to_string()),
             attachments: Vec::new(),
             message_id: None,
             content_hash: None,
         };
+        let placement = nuncio_core::model::Placement {
+            account_id: "acct-1".to_string(),
+            folder_id: "INBOX".to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: "100".to_string(),
+            read: false,
+        };
 
         engine
-            .save_email(&email)
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::Surrogate,
+                &placement,
+            )
             .await
             .expect("save email succeeds");
 
@@ -3401,16 +3483,23 @@ mod tests {
             .await
             .expect("get message succeeds");
         assert_eq!(fetched.subject, "Database Sync Test");
-        assert!(!fetched.read);
+        assert!(
+            !engine.placements_of("msg-db-100").await.unwrap()[0].read,
+            "read state now lives on the placement, not the message"
+        );
 
         let msgs = engine
-            .list_messages("INBOX", 10)
+            .list_messages("acct-1", "INBOX", 10)
             .await
             .expect("list messages succeeds");
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].id, "msg-db-100");
+        assert_eq!(msgs[0].0.id, "msg-db-100");
+        assert_eq!(msgs[0].1.remote_id, "100");
 
-        let folders = engine.list_folders().await.expect("list folders succeeds");
+        let folders = engine
+            .list_folders("acct-1")
+            .await
+            .expect("list folders succeeds");
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].id, "INBOX");
         assert_eq!(folders[0].unread_messages, 1);
@@ -3427,38 +3516,46 @@ mod tests {
         let email = nuncio_core::model::Email {
             id: "msg-db-corrupt".to_string(),
             account_id: "acct-1".to_string(),
-            folder_id: "INBOX".to_string(),
-            remote_id: "corrupt".to_string(),
-            uid_validity: "1".to_string(),
             subject: "Corrupted At Rest".to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
             received_at: 1700000000,
-            read: false,
             body_plain: Some("Sensitive plaintext body".to_string()),
             body_html: None,
             attachments: Vec::new(),
             message_id: None,
             content_hash: None,
         };
+        let placement = nuncio_core::model::Placement {
+            account_id: "acct-1".to_string(),
+            folder_id: "INBOX".to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: "corrupt".to_string(),
+            read: false,
+        };
         engine
-            .save_email(&email)
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::Surrogate,
+                &placement,
+            )
             .await
             .expect("save email succeeds");
 
         // Flip a byte in the stored (still valid-hex) ciphertext to simulate tampering or
         // storage bit-rot.
-        let (stored,): (String,) = sqlx::query_as("SELECT body_plain FROM messages WHERE id = ?")
-            .bind("msg-db-corrupt")
-            .fetch_one(&engine.pool)
-            .await
-            .expect("fetch stored ciphertext");
+        let (stored,): (String,) =
+            sqlx::query_as("SELECT body_plain FROM messages WHERE message_key = ?")
+                .bind("msg-db-corrupt")
+                .fetch_one(&engine.pool)
+                .await
+                .expect("fetch stored ciphertext");
         let mut bytes = hex::decode(&stored).expect("stored ciphertext is valid hex");
         let last_idx = bytes.len() - 1;
         bytes[last_idx] ^= 0xFF;
         let tampered = hex::encode(bytes);
 
-        sqlx::query("UPDATE messages SET body_plain = ? WHERE id = ?")
+        sqlx::query("UPDATE messages SET body_plain = ? WHERE message_key = ?")
             .bind(&tampered)
             .bind("msg-db-corrupt")
             .execute(&engine.pool)
@@ -3472,9 +3569,18 @@ mod tests {
         assert!(matches!(err, DatabaseError::Decryption(_)));
 
         let err = engine
-            .list_messages("INBOX", 10)
+            .list_messages("acct-1", "INBOX", 10)
             .await
             .expect_err("list_messages must fail closed on corrupted ciphertext");
+        assert!(matches!(err, DatabaseError::Decryption(_)));
+
+        // The export path reads the same ciphertext column and must fail closed too --
+        // an export that silently dropped an unauthenticated body would write a file
+        // the user could not tell apart from a genuinely empty message.
+        let err = engine
+            .list_messages_for_export(None, None)
+            .await
+            .expect_err("export must fail closed on corrupted ciphertext");
         assert!(matches!(err, DatabaseError::Decryption(_)));
     }
 
@@ -3722,57 +3828,69 @@ mod tests {
         ));
     }
 
-    /// `set_message_read` flips the persisted
-    /// `read_flag` in place (both directions), and reports
-    /// `sqlx::Error::RowNotFound` for a message ID that was never saved,
-    /// rather than silently succeeding on a no-op update.
+    /// `set_placement_read` flips the persisted `read_flag` in place (both
+    /// directions), and reports `sqlx::Error::RowNotFound` for a placement that
+    /// was never saved, rather than silently succeeding on a no-op update.
     #[tokio::test]
-    async fn set_message_read_flips_flag_and_reports_not_found_for_missing_message() {
+    async fn set_placement_read_flips_flag_and_reports_not_found_for_missing_placement() {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
 
         let email = nuncio_core::model::Email {
             id: "msg-mark-1".to_string(),
             account_id: "acct-1".to_string(),
-            folder_id: "INBOX".to_string(),
-            remote_id: "mark-1".to_string(),
-            uid_validity: "1".to_string(),
             subject: "Mark Read Test".to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
             received_at: 1700000000,
-            read: false,
             body_plain: None,
             body_html: None,
             attachments: Vec::new(),
             message_id: None,
             content_hash: None,
         };
-        engine.save_email(&email).await.expect("save email");
+        let placement = nuncio_core::model::Placement {
+            account_id: "acct-1".to_string(),
+            folder_id: "INBOX".to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: "mark-1".to_string(),
+            read: false,
+        };
+        engine
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::Surrogate,
+                &placement,
+            )
+            .await
+            .expect("save email");
+
+        let key = PlacementKey {
+            account_id: "acct-1".to_string(),
+            folder_id: "INBOX".to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: "mark-1".to_string(),
+        };
 
         engine
-            .set_message_read("msg-mark-1", true)
+            .set_placement_read(&key, true)
             .await
             .expect("mark read succeeds");
-        let fetched = engine
-            .get_message("msg-mark-1")
-            .await
-            .expect("get message succeeds");
-        assert!(fetched.read);
+        assert!(engine.placements_of("msg-mark-1").await.unwrap()[0].read);
 
         engine
-            .set_message_read("msg-mark-1", false)
+            .set_placement_read(&key, false)
             .await
             .expect("mark unread succeeds");
-        let fetched = engine
-            .get_message("msg-mark-1")
-            .await
-            .expect("get message succeeds");
-        assert!(!fetched.read);
+        assert!(!engine.placements_of("msg-mark-1").await.unwrap()[0].read);
 
+        let missing = PlacementKey {
+            remote_id: "never-placed".to_string(),
+            ..key.clone()
+        };
         let err = engine
-            .set_message_read("msg-does-not-exist", true)
+            .set_placement_read(&missing, true)
             .await
-            .expect_err("marking an unknown message must fail");
+            .expect_err("marking an unknown placement must fail");
         assert!(matches!(
             err,
             DatabaseError::Query(sqlx::Error::RowNotFound)
@@ -4427,21 +4545,31 @@ mod tests {
             let email = nuncio_core::model::Email {
                 id: format!("msg-{i:03}"),
                 account_id: "acct-1".to_string(),
-                folder_id: "inbox".to_string(),
-                remote_id: format!("{i}"),
-                uid_validity: "1".to_string(),
                 subject: format!("Subject {i}"),
                 sender: "alice@nuncio.mx".to_string(),
                 recipient: "bob@nuncio.mx".to_string(),
                 received_at: 1700000000 + i,
-                read: false,
                 body_plain: Some("Hello".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
                 message_id: None,
                 content_hash: None,
             };
-            engine.save_email(&email).await.unwrap();
+            let placement = nuncio_core::model::Placement {
+                account_id: "acct-1".to_string(),
+                folder_id: "inbox".to_string(),
+                uid_validity: "1".to_string(),
+                remote_id: format!("{i}"),
+                read: false,
+            };
+            engine
+                .save_email_at(
+                    &email,
+                    nuncio_core::model::IdentitySource::Surrogate,
+                    &placement,
+                )
+                .await
+                .unwrap();
         }
 
         let chunk1 = engine.get_message_chunk("", 3).await.unwrap();
@@ -4539,42 +4667,62 @@ mod tests {
         );
     }
 
-    /// Build a message exactly as a real sync would: an opaque surrogate id
-    /// hashed over its addressing coordinates, with the protocol-native id and
-    /// UIDVALIDITY scope carried in their own columns.
+    /// Build a message and its placement exactly as a real sync would when the
+    /// server offered no stable identity: an opaque surrogate key hashed over
+    /// the addressing coordinates, and a placement carrying those coordinates.
     fn synced_email(
         account_id: &str,
         folder_id: &str,
         uid_validity: &str,
         remote_id: &str,
-    ) -> nuncio_core::model::Email {
-        nuncio_core::model::Email {
-            id: nuncio_core::model::Email::surrogate_id(
-                account_id,
-                folder_id,
-                uid_validity,
-                remote_id,
-            ),
-            account_id: account_id.to_string(),
-            folder_id: folder_id.to_string(),
-            remote_id: remote_id.to_string(),
-            uid_validity: uid_validity.to_string(),
-            subject: format!("{folder_id}/{remote_id}"),
-            sender: "alice@nuncio.mx".to_string(),
-            recipient: "bob@nuncio.mx".to_string(),
-            received_at: 1_700_000_000,
-            read: false,
-            body_plain: Some("body".to_string()),
-            body_html: None,
-            attachments: Vec::new(),
-            message_id: None,
-            content_hash: None,
-        }
+    ) -> (nuncio_core::model::Email, nuncio_core::model::Placement) {
+        (
+            nuncio_core::model::Email {
+                id: nuncio_core::model::Email::surrogate_id(
+                    account_id,
+                    folder_id,
+                    uid_validity,
+                    remote_id,
+                ),
+                account_id: account_id.to_string(),
+                subject: format!("{folder_id}/{remote_id}"),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1_700_000_000,
+                body_plain: Some("body".to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
+            },
+            nuncio_core::model::Placement {
+                account_id: account_id.to_string(),
+                folder_id: folder_id.to_string(),
+                uid_validity: uid_validity.to_string(),
+                remote_id: remote_id.to_string(),
+                read: false,
+            },
+        )
+    }
+
+    /// Persist a `synced_email` pair under the surrogate identity tier.
+    async fn save_synced(
+        engine: &DatabaseEngine,
+        pair: &(nuncio_core::model::Email, nuncio_core::model::Placement),
+    ) -> SaveOutcome {
+        engine
+            .save_email_at(
+                &pair.0,
+                nuncio_core::model::IdentitySource::Surrogate,
+                &pair.1,
+            )
+            .await
+            .expect("save synced message")
     }
 
     /// The C1 regression: the same protocol UID reused across folders or
     /// accounts must persist as DISTINCT rows (never silently overwrite), and a
-    /// re-sync of the SAME message must upsert the one row it already owns.
+    /// re-sync of the SAME message must not duplicate the row it already owns.
     #[tokio::test]
     async fn message_identity_prevents_cross_folder_and_cross_account_collision() {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
@@ -4585,41 +4733,77 @@ mod tests {
         let sent = synced_email("acct-1", "Sent", "7", "5");
         let other_account = synced_email("acct-2", "INBOX", "99", "5");
 
-        // Every surrogate id is distinct, so none can overwrite another.
-        assert_ne!(inbox.id, sent.id);
-        assert_ne!(inbox.id, other_account.id);
-        assert_ne!(sent.id, other_account.id);
+        // Every surrogate key is distinct, so none can overwrite another.
+        assert_ne!(inbox.0.id, sent.0.id);
+        assert_ne!(inbox.0.id, other_account.0.id);
+        assert_ne!(sent.0.id, other_account.0.id);
 
-        engine.save_email(&inbox).await.expect("save inbox");
-        engine.save_email(&sent).await.expect("save sent");
-        engine
-            .save_email(&other_account)
-            .await
-            .expect("save other account");
+        save_synced(&engine, &inbox).await;
+        save_synced(&engine, &sent).await;
+        save_synced(&engine, &other_account).await;
 
-        // All three coexist as separate rows, addressed by their own folder.
-        assert_eq!(engine.list_messages("INBOX", 10).await.unwrap().len(), 2);
-        assert_eq!(engine.list_messages("Sent", 10).await.unwrap().len(), 1);
-
-        // Re-syncing the SAME message recomputes the SAME id, so the upsert
-        // updates the one row rather than duplicating it.
-        let inbox_resynced = synced_email("acct-1", "INBOX", "42", "5");
-        assert_eq!(inbox_resynced.id, inbox.id);
-        engine
-            .save_email(&inbox_resynced)
-            .await
-            .expect("re-sync upserts");
+        // All three coexist as separate messages, each reachable only through
+        // its own account's folder -- the second account's INBOX is not folded
+        // into the first's.
         assert_eq!(
-            engine.list_messages("INBOX", 10).await.unwrap().len(),
-            2,
-            "a re-sync must upsert, not duplicate"
+            engine
+                .list_messages("acct-1", "INBOX", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .list_messages("acct-1", "Sent", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .list_messages("acct-2", "INBOX", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let (messages,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages")
+            .fetch_one(engine.pool())
+            .await
+            .unwrap();
+        assert_eq!(messages, 3);
+
+        // Re-syncing the SAME message recomputes the SAME key, so it lands on
+        // the row it already owns rather than duplicating it.
+        let inbox_resynced = synced_email("acct-1", "INBOX", "42", "5");
+        assert_eq!(inbox_resynced.0.id, inbox.0.id);
+        let outcome = save_synced(&engine, &inbox_resynced).await;
+        assert!(
+            !outcome.message_is_new,
+            "a re-sync must not create a message"
+        );
+        assert!(
+            !outcome.placement_is_new,
+            "nor a second placement in the same mailbox"
+        );
+        assert_eq!(
+            engine
+                .list_messages("acct-1", "INBOX", 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a re-sync must not duplicate"
         );
 
-        // The recovered row round-trips its protocol addressing columns.
-        let fetched = engine.get_message(&inbox.id).await.expect("get message");
-        assert_eq!(fetched.remote_id, "5");
-        assert_eq!(fetched.uid_validity, "42");
-        assert_eq!(fetched.folder_id, "INBOX");
+        // The placement round-trips the protocol addressing coordinates.
+        let placements = engine.placements_of(&inbox.0.id).await.expect("placements");
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].remote_id, "5");
+        assert_eq!(placements[0].uid_validity, "42");
+        assert_eq!(placements[0].folder_id, "INBOX");
     }
 
     /// A crash between `ADD COLUMN remote_id` and its backfill can commit an
@@ -4672,10 +4856,7 @@ mod tests {
             }),
         };
         engine.save_account(&account).await.expect("save account");
-        engine
-            .save_email(&synced_email("acct-reset", "INBOX", "42", "7"))
-            .await
-            .expect("save email");
+        save_synced(&engine, &synced_email("acct-reset", "INBOX", "42", "7")).await;
         engine
             .save_folder_sync_state("acct-reset", "INBOX", "v1:uidnext:42:8")
             .await
@@ -4983,31 +5164,248 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn folders_are_derived_from_placements_and_scoped_per_account() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        for (account, folder, uid) in [
+            ("acct-1", "INBOX", "1"),
+            ("acct-1", "Archive", "2"),
+            ("acct-2", "INBOX", "1"),
+        ] {
+            let (mut email, mut placement) =
+                sample_message_and_placement(&format!("key-{account}-{folder}"), folder, uid);
+            email.account_id = account.into();
+            placement.account_id = account.into();
+            engine
+                .save_email_at(
+                    &email,
+                    nuncio_core::model::IdentitySource::EmailId,
+                    &placement,
+                )
+                .await
+                .unwrap();
+        }
+
+        let folders = engine.list_folders("acct-1").await.unwrap();
+        let names: Vec<&str> = folders.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(names, vec!["Archive", "INBOX"]);
+        assert!(
+            !folders.iter().any(|f| f.total_messages > 1),
+            "acct-2's INBOX must not be folded into acct-1's"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_message_in_two_folders_counts_once_in_each() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (email, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        let archive = nuncio_core::model::Placement {
+            folder_id: "Archive".into(),
+            remote_id: "9".into(),
+            ..inbox.clone()
+        };
+        engine
+            .save_email_at(&email, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+        engine
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::EmailId,
+                &archive,
+            )
+            .await
+            .unwrap();
+
+        let folders = engine.list_folders("acct-1").await.unwrap();
+        assert_eq!(folders.len(), 2);
+        for folder in &folders {
+            assert_eq!(
+                folder.total_messages, 1,
+                "{} should hold the message once",
+                folder.id
+            );
+        }
+        let (messages,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages")
+            .fetch_one(engine.pool())
+            .await
+            .unwrap();
+        assert_eq!(messages, 1, "but it is still one message");
+    }
+
+    #[tokio::test]
+    async fn existing_placements_reports_the_occupancy_not_the_message() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (email, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        engine
+            .save_email_at(&email, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+
+        let in_inbox = PlacementKey {
+            account_id: "acct-1".into(),
+            folder_id: "INBOX".into(),
+            uid_validity: "42".into(),
+            remote_id: "5".into(),
+        };
+        let in_archive = PlacementKey {
+            folder_id: "Archive".into(),
+            remote_id: "9".into(),
+            ..in_inbox.clone()
+        };
+
+        let found = engine
+            .existing_placements(&[in_inbox.clone(), in_archive.clone()])
+            .await
+            .unwrap();
+        assert!(found.contains(&in_inbox));
+        assert!(
+            !found.contains(&in_archive),
+            "the same message arriving in a new folder is a new placement and must be seen as such"
+        );
+
+        // The message identity, by contrast, IS already known -- the two
+        // questions must not be conflated.
+        let known = engine
+            .existing_message_ids(&["key-1".to_string()])
+            .await
+            .unwrap();
+        assert!(known.contains("key-1"));
+    }
+
+    #[tokio::test]
+    async fn existing_placements_with_empty_input_returns_empty_set_without_querying() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let found = engine.existing_placements(&[]).await.unwrap();
+
+        assert!(found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn placements_in_folder_reports_only_that_mailbox() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (email, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        let archive = nuncio_core::model::Placement {
+            folder_id: "Archive".into(),
+            remote_id: "9".into(),
+            ..inbox.clone()
+        };
+        engine
+            .save_email_at(&email, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+        engine
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::EmailId,
+                &archive,
+            )
+            .await
+            .unwrap();
+
+        let local = engine
+            .placements_in_folder("acct-1", "INBOX")
+            .await
+            .unwrap();
+        assert_eq!(
+            local,
+            vec![PlacementKey {
+                account_id: "acct-1".into(),
+                folder_id: "INBOX".into(),
+                uid_validity: "42".into(),
+                remote_id: "5".into(),
+            }],
+            "the local half of a UID-set diff is scoped to the folder being synced"
+        );
+    }
+
+    #[tokio::test]
+    async fn marking_read_in_one_folder_leaves_the_other_unread() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (email, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        let archive = nuncio_core::model::Placement {
+            folder_id: "Archive".into(),
+            remote_id: "9".into(),
+            ..inbox.clone()
+        };
+        engine
+            .save_email_at(&email, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+        engine
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::EmailId,
+                &archive,
+            )
+            .await
+            .unwrap();
+
+        let inbox_key = PlacementKey {
+            account_id: "acct-1".into(),
+            folder_id: "INBOX".into(),
+            uid_validity: "42".into(),
+            remote_id: "5".into(),
+        };
+        engine.set_placement_read(&inbox_key, true).await.unwrap();
+
+        let placements = engine.placements_of("key-1").await.unwrap();
+        assert!(
+            placements
+                .iter()
+                .find(|p| p.folder_id == "INBOX")
+                .unwrap()
+                .read
+        );
+        assert!(
+            !placements
+                .iter()
+                .find(|p| p.folder_id == "Archive")
+                .unwrap()
+                .read
+        );
+    }
+
+    #[tokio::test]
     async fn message_provenance_round_trips_through_every_read_path() {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
 
-        let mut email = synced_email("acct-1", "INBOX", "42", "7");
-        email.message_id = Some("abc123@mail.nuncio.mx".to_string());
-        email.content_hash = Some(nuncio_core::model::Email::content_hash_of(b"raw octets"));
-        engine.save_email(&email).await.expect("save");
+        let mut pair = synced_email("acct-1", "INBOX", "42", "7");
+        pair.0.message_id = Some("abc123@mail.nuncio.mx".to_string());
+        pair.0.content_hash = Some(nuncio_core::model::Email::content_hash_of(b"raw octets"));
+        save_synced(&engine, &pair).await;
 
-        let by_id = engine.get_message(&email.id).await.expect("get_message");
-        assert_eq!(by_id.message_id, email.message_id);
-        assert_eq!(by_id.content_hash, email.content_hash);
+        let by_key = engine.get_message(&pair.0.id).await.expect("get_message");
+        assert_eq!(by_key.message_id, pair.0.message_id);
+        assert_eq!(by_key.content_hash, pair.0.content_hash);
 
-        let listed = engine.list_messages("INBOX", 10).await.expect("list");
+        let listed = engine
+            .list_messages("acct-1", "INBOX", 10)
+            .await
+            .expect("list");
         let found = listed
             .iter()
-            .find(|m| m.id == email.id)
+            .find(|(m, _)| m.id == pair.0.id)
             .expect("the saved message is listed");
-        assert_eq!(found.message_id, email.message_id);
-        assert_eq!(found.content_hash, email.content_hash);
+        assert_eq!(found.0.message_id, pair.0.message_id);
+        assert_eq!(found.0.content_hash, pair.0.content_hash);
+
+        let exported = engine
+            .list_messages_for_export(None, None)
+            .await
+            .expect("export");
+        let found = exported
+            .iter()
+            .find(|m| m.id == pair.0.id)
+            .expect("the saved message is exportable");
+        assert_eq!(found.message_id, pair.0.message_id);
+        assert_eq!(found.content_hash, pair.0.content_hash);
 
         // A message with no Message-ID stays None rather than becoming "".
         let plain = synced_email("acct-1", "INBOX", "42", "8");
-        assert_eq!(plain.message_id, None);
-        engine.save_email(&plain).await.expect("save");
-        let fetched = engine.get_message(&plain.id).await.expect("get_message");
+        assert_eq!(plain.0.message_id, None);
+        save_synced(&engine, &plain).await;
+        let fetched = engine.get_message(&plain.0.id).await.expect("get_message");
         assert_eq!(fetched.message_id, None);
         assert_eq!(fetched.content_hash, None);
     }
@@ -5021,8 +5419,8 @@ mod tests {
         // a row written before capture existed reads back as "not captured".
         sqlx::query(
             "INSERT INTO messages \
-             (id, account_id, folder_id, remote_id, uid_validity, subject, sender, recipient, received_at, read_flag) \
-             VALUES ('legacy-1', 'acct-1', 'INBOX', '9', '42', 'subj', 'a@nuncio.mx', 'b@nuncio.mx', 0, 0)",
+             (message_key, account_id, subject, sender, recipient, received_at) \
+             VALUES ('legacy-1', 'acct-1', 'subj', 'a@nuncio.mx', 'b@nuncio.mx', 0)",
         )
         .execute(engine.pool())
         .await
@@ -5049,51 +5447,41 @@ mod tests {
         }
     }
 
-    fn export_test_email(id: &str, account_id: &str, folder_id: &str) -> nuncio_core::model::Email {
-        nuncio_core::model::Email {
+    /// Save one exportable message into `folder_id` of `account_id`.
+    async fn save_export_message(
+        engine: &DatabaseEngine,
+        id: &str,
+        account_id: &str,
+        folder_id: &str,
+    ) {
+        let email = nuncio_core::model::Email {
             id: id.to_string(),
             account_id: account_id.to_string(),
-            folder_id: folder_id.to_string(),
-            remote_id: id.to_string(),
-            uid_validity: "1".to_string(),
             subject: format!("Subject {id}"),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
             received_at: 1_700_000_000,
-            read: false,
             body_plain: Some(format!("Body {id}")),
             body_html: None,
             attachments: Vec::new(),
             message_id: None,
             content_hash: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn existing_message_ids_returns_only_the_ids_already_persisted() {
-        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        };
+        let placement = nuncio_core::model::Placement {
+            account_id: account_id.to_string(),
+            folder_id: folder_id.to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: id.to_string(),
+            read: false,
+        };
         engine
-            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::Surrogate,
+                &placement,
+            )
             .await
             .unwrap();
-        engine
-            .save_email(&export_test_email("msg-2", "acct-a", "inbox"))
-            .await
-            .unwrap();
-
-        let found = engine
-            .existing_message_ids(&[
-                "msg-1".to_string(),
-                "msg-2".to_string(),
-                "msg-3-never-saved".to_string(),
-            ])
-            .await
-            .unwrap();
-
-        assert_eq!(found.len(), 2);
-        assert!(found.contains("msg-1"));
-        assert!(found.contains("msg-2"));
-        assert!(!found.contains("msg-3-never-saved"));
     }
 
     #[tokio::test]
@@ -5108,14 +5496,8 @@ mod tests {
     #[tokio::test]
     async fn list_messages_for_export_with_no_filters_returns_every_message() {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
-        engine
-            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
-            .await
-            .unwrap();
-        engine
-            .save_email(&export_test_email("msg-2", "acct-b", "archive"))
-            .await
-            .unwrap();
+        save_export_message(&engine, "msg-1", "acct-a", "inbox").await;
+        save_export_message(&engine, "msg-2", "acct-b", "archive").await;
 
         let all = engine.list_messages_for_export(None, None).await.unwrap();
         assert_eq!(all.len(), 2);
@@ -5126,14 +5508,8 @@ mod tests {
     #[tokio::test]
     async fn list_messages_for_export_filters_by_account_id() {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
-        engine
-            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
-            .await
-            .unwrap();
-        engine
-            .save_email(&export_test_email("msg-2", "acct-b", "inbox"))
-            .await
-            .unwrap();
+        save_export_message(&engine, "msg-1", "acct-a", "inbox").await;
+        save_export_message(&engine, "msg-2", "acct-b", "inbox").await;
 
         let scoped = engine
             .list_messages_for_export(Some("acct-a"), None)
@@ -5146,14 +5522,8 @@ mod tests {
     #[tokio::test]
     async fn list_messages_for_export_filters_by_folder_id() {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
-        engine
-            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
-            .await
-            .unwrap();
-        engine
-            .save_email(&export_test_email("msg-2", "acct-a", "archive"))
-            .await
-            .unwrap();
+        save_export_message(&engine, "msg-1", "acct-a", "inbox").await;
+        save_export_message(&engine, "msg-2", "acct-a", "archive").await;
 
         let scoped = engine
             .list_messages_for_export(None, Some("archive"))
@@ -5166,18 +5536,9 @@ mod tests {
     #[tokio::test]
     async fn list_messages_for_export_filters_by_account_and_folder_together() {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
-        engine
-            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
-            .await
-            .unwrap();
-        engine
-            .save_email(&export_test_email("msg-2", "acct-a", "archive"))
-            .await
-            .unwrap();
-        engine
-            .save_email(&export_test_email("msg-3", "acct-b", "inbox"))
-            .await
-            .unwrap();
+        save_export_message(&engine, "msg-1", "acct-a", "inbox").await;
+        save_export_message(&engine, "msg-2", "acct-a", "archive").await;
+        save_export_message(&engine, "msg-3", "acct-b", "inbox").await;
 
         let scoped = engine
             .list_messages_for_export(Some("acct-a"), Some("inbox"))
@@ -5194,10 +5555,7 @@ mod tests {
     #[tokio::test]
     async fn export_messages_to_file_fails_when_worm_audit_write_fails() {
         let (engine, dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
-        engine
-            .save_email(&export_test_email("msg-1", "acct-a", "inbox"))
-            .await
-            .unwrap();
+        save_export_message(&engine, "msg-1", "acct-a", "inbox").await;
         let messages = engine.list_messages_for_export(None, None).await.unwrap();
 
         engine.close().await;
