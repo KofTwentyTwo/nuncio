@@ -314,6 +314,15 @@ type PlacedMessageRow = (
     i64,
 );
 
+/// What a [`DatabaseEngine::delete_placements`] call removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteOutcome {
+    /// Mailbox occupancies removed.
+    pub placements_removed: u64,
+    /// Messages that lost their last placement and were removed with it.
+    pub messages_reaped: u64,
+}
+
 /// Serialize a [`nuncio_core::TlsMode`] to its stable on-disk `accounts`
 /// column form. Kept as a bare snake_case token (matching the column's
 /// `'implicit_tls'` default) rather than JSON, so a row inserted by the
@@ -1652,6 +1661,96 @@ impl DatabaseEngine {
         Ok(SaveOutcome {
             message_is_new,
             placement_is_new,
+        })
+    }
+
+    /// Remove mailbox occupancies, reaping any message left with none.
+    ///
+    /// A server that stops reporting a UID has told us the message left *that
+    /// mailbox*, not that it ceased to exist -- a move reports exactly this in
+    /// the source folder while the message continues in the destination. So the
+    /// placement goes unconditionally and the message goes only when its last
+    /// placement does.
+    ///
+    /// The reap is what keeps the plaintext FTS index honest. `messages_fts`
+    /// holds decrypted bodies keyed on `message_key`, reaped by the
+    /// `messages_ad` trigger on `messages`. Deleting the message row is
+    /// therefore the only thing that clears the index: skip the reap and every
+    /// fully-deleted message leaves its body readable to anyone with filesystem
+    /// access to the database.
+    pub async fn delete_placements(
+        &self,
+        keys: &[PlacementKey],
+    ) -> Result<DeleteOutcome, DatabaseError> {
+        if keys.is_empty() {
+            return Ok(DeleteOutcome {
+                placements_removed: 0,
+                messages_reaped: 0,
+            });
+        }
+
+        let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
+        let mut placements_removed = 0u64;
+        let mut touched: Vec<String> = Vec::with_capacity(keys.len());
+
+        for key in keys {
+            // Remember which message each placement pointed at before removing
+            // it -- afterwards there is nothing left to join through.
+            let owner: Option<(String,)> = sqlx::query_as(
+                "SELECT message_key FROM placements
+                 WHERE account_id = ? AND folder_id = ? AND uidvalidity = ? AND uid = ?",
+            )
+            .bind(&key.account_id)
+            .bind(&key.folder_id)
+            .bind(&key.uid_validity)
+            .bind(&key.remote_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+            let Some((message_key,)) = owner else {
+                continue;
+            };
+
+            let result = sqlx::query(
+                "DELETE FROM placements
+                 WHERE account_id = ? AND folder_id = ? AND uidvalidity = ? AND uid = ?",
+            )
+            .bind(&key.account_id)
+            .bind(&key.folder_id)
+            .bind(&key.uid_validity)
+            .bind(&key.remote_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+            placements_removed += result.rows_affected();
+            touched.push(message_key);
+        }
+
+        touched.sort_unstable();
+        touched.dedup();
+
+        let mut messages_reaped = 0u64;
+        for message_key in touched {
+            // Reap only where nothing is left pointing at the message. The
+            // `messages_ad` trigger clears the FTS row as a consequence.
+            let result = sqlx::query(
+                "DELETE FROM messages WHERE message_key = ?
+                 AND NOT EXISTS (SELECT 1 FROM placements WHERE message_key = ?)",
+            )
+            .bind(&message_key)
+            .bind(&message_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(DatabaseError::Query)?;
+            messages_reaped += result.rows_affected();
+        }
+
+        tx.commit().await.map_err(DatabaseError::Query)?;
+        Ok(DeleteOutcome {
+            placements_removed,
+            messages_reaped,
         })
     }
 
@@ -5160,6 +5259,87 @@ mod tests {
         assert!(
             archive_read,
             "IMAP \\Seen is per-mailbox, so the flags differ"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_one_placement_keeps_the_body_searchable_from_the_other() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (email, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        let archive = nuncio_core::model::Placement {
+            folder_id: "Archive".into(),
+            remote_id: "9".into(),
+            ..inbox.clone()
+        };
+        engine
+            .save_email_at(&email, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+        engine
+            .save_email_at(
+                &email,
+                nuncio_core::model::IdentitySource::EmailId,
+                &archive,
+            )
+            .await
+            .unwrap();
+
+        let inbox_key = PlacementKey {
+            account_id: "acct-1".into(),
+            folder_id: "INBOX".into(),
+            uid_validity: "42".into(),
+            remote_id: "5".into(),
+        };
+        let outcome = engine.delete_placements(&[inbox_key]).await.unwrap();
+        assert_eq!(outcome.placements_removed, 1);
+        assert_eq!(
+            outcome.messages_reaped, 0,
+            "the message still lives in Archive"
+        );
+
+        engine
+            .get_message("key-1")
+            .await
+            .expect("the message must survive");
+        let (fts,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages_fts WHERE message_key = 'key-1'")
+                .fetch_one(engine.pool())
+                .await
+                .unwrap();
+        assert_eq!(fts, 1, "search must still find a message that still exists");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_last_placement_reaps_the_message_and_its_plaintext_index() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (email, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        engine
+            .save_email_at(&email, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+
+        let inbox_key = PlacementKey {
+            account_id: "acct-1".into(),
+            folder_id: "INBOX".into(),
+            uid_validity: "42".into(),
+            remote_id: "5".into(),
+        };
+        let outcome = engine.delete_placements(&[inbox_key]).await.unwrap();
+        assert_eq!(outcome.messages_reaped, 1);
+
+        engine
+            .get_message("key-1")
+            .await
+            .expect_err("the message is gone");
+        let (fts,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages_fts WHERE message_key = 'key-1'")
+                .fetch_one(engine.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            fts, 0,
+            "an orphaned FTS row would leave the plaintext body readable to anyone \
+             with filesystem access after the message itself was deleted"
         );
     }
 
