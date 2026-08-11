@@ -86,6 +86,22 @@ fn parse_uid_validity(uid_validity: &str) -> Option<u32> {
 /// first turns that into a safe full re-fetch instead.
 const CHECKPOINT_DELIM: char = ':';
 
+/// Scheme tag prefixing every checkpoint this build writes.
+///
+/// The stored value is `"v1:uidnext:{uidvalidity}:{uidnext}"`. The tag exists
+/// because the *next* checkpoint scheme -- a QRESYNC `(uidvalidity,
+/// highestmodseq)` pair -- has exactly the same shape as this one and a wholly
+/// different meaning. Untagged, an upgraded engine would hand a stored UIDNEXT
+/// to a server as a MODSEQ. UIDNEXT is normally the larger number, so the
+/// server would answer "nothing changed since" and every message below that
+/// point would never be enumerated again: silent, permanent mail loss with no
+/// error anywhere.
+///
+/// Anything that does not carry a scheme this build recognises -- an unknown
+/// tag, or a bare `"42:105"` written before tagging existed -- resolves to a
+/// full re-fetch. Over-fetching is recoverable; misreading a token is not.
+const CHECKPOINT_SCHEME_UIDNEXT: &str = "v1:uidnext";
+
 /// The `UID FETCH` sequence-set to issue for a folder sync, resolved from the
 /// stored checkpoint. Kept as a small typed value (rather than collapsing to a
 /// bare range string) so the distinct fall-back reasons stay observable: all
@@ -98,6 +114,11 @@ enum FetchRange {
     /// A checkpoint was stored but could not be parsed (malformed, or a legacy
     /// bare-UID checkpoint predating UIDVALIDITY tracking). Falls back to a
     /// full fetch, surfaced (logged) rather than silently ignored.
+    ///
+    /// Also covers a checkpoint whose scheme tag this build does not recognise
+    /// (see [`CHECKPOINT_SCHEME_UIDNEXT`]) -- including an untagged one, which
+    /// cannot be distinguished from a future scheme that happens to share its
+    /// shape.
     CorruptCheckpoint,
     /// The stored checkpoint's UIDVALIDITY no longer matches the mailbox's
     /// current UIDVALIDITY (the mailbox was renumbered) or the server did not
@@ -140,7 +161,17 @@ fn resolve_fetch_range(since_state: Option<&str>, current_uid_validity: Option<u
     let Some(raw) = since_state else {
         return FetchRange::Full;
     };
-    let parsed = raw
+    // Require the scheme tag. A value without one is either pre-tagging or from
+    // a scheme this build cannot interpret; both must re-fetch rather than be
+    // guessed at.
+    let Some(body) = raw
+        .trim()
+        .strip_prefix(CHECKPOINT_SCHEME_UIDNEXT)
+        .and_then(|rest| rest.strip_prefix(CHECKPOINT_DELIM))
+    else {
+        return FetchRange::CorruptCheckpoint;
+    };
+    let parsed = body
         .split_once(CHECKPOINT_DELIM)
         .and_then(|(validity, uid)| {
             Some((
@@ -858,7 +889,10 @@ impl ImapEngine {
         let boundary_uid = server_uid_next
             .or_else(|| (max_uid_seen > 0).then_some(max_uid_seen.saturating_add(1)));
         let new_checkpoint = match (server_uid_validity, boundary_uid) {
-            (Some(validity), Some(uid)) => format!("{}{}{}", validity, CHECKPOINT_DELIM, uid),
+            (Some(validity), Some(uid)) => format!(
+                "{}{}{}{}{}",
+                CHECKPOINT_SCHEME_UIDNEXT, CHECKPOINT_DELIM, validity, CHECKPOINT_DELIM, uid
+            ),
             _ => since_state
                 .map(str::to_string)
                 .unwrap_or_else(|| "full-resync-required".to_string()),
@@ -1552,15 +1586,15 @@ mod tests {
 
         // Valid checkpoint whose UIDVALIDITY still matches: narrowed fetch.
         assert_eq!(
-            resolve_fetch_range(Some("1:105"), Some(1)),
+            resolve_fetch_range(Some("v1:uidnext:1:105"), Some(1)),
             FetchRange::Incremental(105)
         );
         assert_eq!(
-            resolve_fetch_range(Some("1:105"), Some(1)).sequence_set(),
+            resolve_fetch_range(Some("v1:uidnext:1:105"), Some(1)).sequence_set(),
             "105:*"
         );
         assert_eq!(
-            resolve_fetch_range(Some(" 7 : 42 "), Some(7)),
+            resolve_fetch_range(Some("v1:uidnext: 7 : 42 "), Some(7)),
             FetchRange::Incremental(42)
         );
 
@@ -1568,18 +1602,18 @@ mod tests {
         // to compare against: MUST fall back to a full fetch, distinctly, so a
         // renumber can never silently skip the low new UIDs.
         assert_eq!(
-            resolve_fetch_range(Some("1:105"), Some(2)),
+            resolve_fetch_range(Some("v1:uidnext:1:105"), Some(2)),
             FetchRange::UidValidityChanged {
                 stored: 1,
                 current: Some(2)
             }
         );
         assert_eq!(
-            resolve_fetch_range(Some("1:105"), Some(2)).sequence_set(),
+            resolve_fetch_range(Some("v1:uidnext:1:105"), Some(2)).sequence_set(),
             "1:*"
         );
         assert_eq!(
-            resolve_fetch_range(Some("1:105"), None),
+            resolve_fetch_range(Some("v1:uidnext:1:105"), None),
             FetchRange::UidValidityChanged {
                 stored: 1,
                 current: None
@@ -1598,7 +1632,7 @@ mod tests {
             "a legacy bare-number checkpoint must not be read as a UID boundary"
         );
         assert_eq!(
-            resolve_fetch_range(Some("1:0"), Some(1)),
+            resolve_fetch_range(Some("v1:uidnext:1:0"), Some(1)),
             FetchRange::CorruptCheckpoint
         );
         assert_eq!(
@@ -1697,7 +1731,7 @@ mod tests {
             .await
             .expect("first sync succeeds");
         assert!(first.is_empty());
-        assert_eq!(checkpoint, "1:105");
+        assert_eq!(checkpoint, "v1:uidnext:1:105");
 
         // Second sync: feed back the checkpoint; UIDVALIDITY still matches
         // (1), so the fetch is narrowed.
@@ -1705,7 +1739,7 @@ mod tests {
             .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
             .await
             .expect("second sync succeeds");
-        assert_eq!(checkpoint2, "1:105");
+        assert_eq!(checkpoint2, "v1:uidnext:1:105");
 
         drop(session);
         let _ = server.await;
@@ -1886,7 +1920,7 @@ mod tests {
         let (emails, checkpoint, cmds) = run_batched_sync(messages, 1, 6, None, 2).await;
 
         assert_eq!(emails.len(), 5, "every message must be synced");
-        assert_eq!(checkpoint, "1:6");
+        assert_eq!(checkpoint, "v1:uidnext:1:6");
 
         let body_cmds = body_fetch_commands(&cmds);
         assert_eq!(
@@ -1975,7 +2009,7 @@ mod tests {
         let (first, checkpoint, first_cmds) =
             run_batched_sync(messages.clone(), 1, 4, None, 2).await;
         assert_eq!(first.len(), 3);
-        assert_eq!(checkpoint, "1:4");
+        assert_eq!(checkpoint, "v1:uidnext:1:4");
         assert!(
             first_cmds.iter().any(|c| c.contains("1:*")),
             "first sync enumerates the full range, got: {first_cmds:?}"
@@ -1989,7 +2023,7 @@ mod tests {
             "no new mail arrived, so an incremental sync returns nothing"
         );
         assert_eq!(
-            checkpoint2, "1:4",
+            checkpoint2, "v1:uidnext:1:4",
             "checkpoint stays stable across an empty pass"
         );
         assert!(
@@ -2064,7 +2098,7 @@ mod tests {
             .sync_folder_messages_with_session("INBOX", None, &mut session)
             .await
             .expect("first sync succeeds");
-        assert_eq!(checkpoint, "1:105");
+        assert_eq!(checkpoint, "v1:uidnext:1:105");
 
         // Second sync: server now reports UIDVALIDITY 2. The stored checkpoint
         // is stale, so the fetch MUST be a full `1:*`, and the checkpoint is
@@ -2074,7 +2108,7 @@ mod tests {
             .await
             .expect("second sync succeeds");
         assert_eq!(
-            checkpoint2, "2:105",
+            checkpoint2, "v1:uidnext:2:105",
             "checkpoint must be rewritten under the new UIDVALIDITY"
         );
 
@@ -2162,6 +2196,38 @@ mod tests {
         assert_eq!(parse_imap_uid("0"), None);
         assert_eq!(parse_imap_uid("imap-uid-42"), None);
         assert_eq!(parse_imap_uid("jmap-object-id"), None);
+    }
+
+    #[test]
+    fn an_untagged_or_unknown_scheme_checkpoint_forces_a_full_refetch() {
+        // The hazard this tag exists for. A QRESYNC checkpoint is
+        // `(uidvalidity, highestmodseq)` -- the same shape as this scheme's
+        // `(uidvalidity, uidnext)` and a different meaning. Read one as the
+        // other and the server is handed a UIDNEXT where it expects a MODSEQ;
+        // since UIDNEXT is normally the larger number it answers "nothing
+        // changed" and everything below is never enumerated again. Refusing
+        // to interpret an unrecognised token is the only safe reading.
+        for token in [
+            // Pre-tagging, written by an older build.
+            "1:105",
+            // A scheme from a future build.
+            "v2:qresync:1:900",
+            // Tag-shaped but not ours.
+            "v1:modseq:1:105",
+            // Truncated tag.
+            "v1:1:105",
+        ] {
+            assert_eq!(
+                resolve_fetch_range(Some(token), Some(1)),
+                FetchRange::CorruptCheckpoint,
+                "token {token:?} must not be interpreted as a UIDNEXT boundary"
+            );
+            assert_eq!(
+                resolve_fetch_range(Some(token), Some(1)).sequence_set(),
+                "1:*",
+                "an uninterpretable token must re-fetch everything"
+            );
+        }
     }
 
     #[test]
