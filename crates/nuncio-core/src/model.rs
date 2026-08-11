@@ -93,7 +93,11 @@ impl IdentitySource {
     /// Parse a token written by [`Self::as_str`]. Returns `None` for anything
     /// else so an unrecognised value fails loudly rather than defaulting to a
     /// tier that would overstate how trustworthy the key is.
-    pub fn from_str(s: &str) -> Option<Self> {
+    ///
+    /// Deliberately not `std::str::FromStr`: that trait forces a `Result` and
+    /// therefore an error type, when the only failure here is "not one of four
+    /// known tokens" and `None` already says exactly that.
+    pub fn from_token(s: &str) -> Option<Self> {
         match s {
             "emailid" => Some(Self::EmailId),
             "gmsgid" => Some(Self::GmailMsgId),
@@ -693,7 +697,12 @@ mod tests {
             IdentitySource::MessageIdContent,
             IdentitySource::Surrogate,
         ] {
-            assert_eq!(IdentitySource::from_str(source.as_str()), Some(source));
+            assert_eq!(IdentitySource::from_token(source.as_str()), Some(source));
         }
+        assert_eq!(
+            IdentitySource::from_token("not_a_tier"),
+            None,
+            "an unrecognised token must fail loudly, never default to a tier"
+        );
     }
 }
