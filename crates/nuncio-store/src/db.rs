@@ -280,6 +280,14 @@ pub struct PlacementKey {
 /// well as the message, and re-deriving them would cost a query per row.
 pub type PlacedMessage = (nuncio_core::model::Email, nuncio_core::model::Placement);
 
+/// Keyset cursor for [`DatabaseEngine::list_messages_page`]: the
+/// `(received_at, message_key, uidvalidity, uid)` of the last row of a page.
+///
+/// It addresses a placement, not a message, because a message can occupy one
+/// folder more than once -- see that method for why a message-only cursor
+/// silently drops rows.
+pub type MessagePageCursor = (i64, String, String, String);
+
 /// Column order of the identity-only `messages` projection shared by every
 /// whole-store read path: key, account, subject, sender, recipient,
 /// received_at, body_plain, body_html, message_id, content_hash.
@@ -1575,7 +1583,17 @@ impl DatabaseEngine {
             .map(|h| crate::cipher::PayloadCipher::encrypt_text_at_rest(&self.storage_key, h))
             .transpose()?;
 
-        let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
+        // `BEGIN IMMEDIATE` takes the write lock before the first statement runs. This
+        // transaction reads (the placement existence check) and then writes what it read, and in
+        // WAL mode a deferred transaction that upgrades to a writer after another connection has
+        // committed aborts with SQLITE_BUSY_SNAPSHOT -- which `busy_timeout` does not retry,
+        // because there is no lock to wait for, only a stale snapshot. Acquiring the lock up
+        // front makes a concurrent save block instead of failing.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(DatabaseError::Query)?;
 
         // Ask before writing. SQLite reports one row affected for both arms of
         // an upsert, so after the fact there is no way to tell an inserted
@@ -1689,7 +1707,15 @@ impl DatabaseEngine {
             });
         }
 
-        let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
+        // `BEGIN IMMEDIATE` for the same reason as in [`Self::save_email_at`]: this reads each
+        // placement's owning message key and then deletes based on what it read, and a deferred
+        // WAL transaction that upgrades to a writer mid-flight aborts with SQLITE_BUSY_SNAPSHOT
+        // rather than waiting out `busy_timeout`.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(DatabaseError::Query)?;
         let mut placements_removed = 0u64;
         let mut touched: Vec<String> = Vec::with_capacity(keys.len());
 
@@ -1854,25 +1880,32 @@ impl DatabaseEngine {
         Ok(out)
     }
 
-    /// Keyset-paginated listing of one folder's messages, newest first
-    /// (`received_at DESC, message_key DESC`), each paired with the placement
-    /// it was found through. `after` is the `(received_at, message_key)` of the
-    /// last message of the previous page; `None` starts from the newest.
-    /// Fetches `page_size + 1` rows to detect a following page: returns at
-    /// most `page_size` pairs plus the cursor of the last returned message when
-    /// more remain (else `None`).
+    /// Keyset-paginated listing of one folder's placements, newest first
+    /// (`received_at DESC, message_key DESC, uidvalidity DESC, uid DESC`), each
+    /// paired with the message it holds. `after` is the cursor of the last row
+    /// of the previous page; `None` starts from the newest. Fetches
+    /// `page_size + 1` rows to detect a following page: returns at most
+    /// `page_size` pairs plus the cursor of the last returned row when more
+    /// remain (else `None`).
     ///
-    /// The cursor is a *message* coordinate rather than a placement one because
-    /// the ordering is by arrival time, which is a property of the message; the
-    /// join is one-to-one within a single folder, so no message can appear twice
-    /// on a page.
+    /// The cursor carries the full placement address, not just the message
+    /// coordinates, because the join is **not** one-to-one within a folder: the
+    /// placements primary key is `(account, folder, uidvalidity, uid)`, so one
+    /// message legitimately occupies a single mailbox twice -- two `COPY`s of
+    /// the same mail into one folder land under different UIDs. With only
+    /// `(received_at, message_key)` in the keyset the ordering is not total, and
+    /// two such rows straddling a page boundary make the second unreachable:
+    /// the next page resumes strictly after the message key and skips its twin.
+    /// `uidvalidity`/`uid` are compared as the text they are stored as, which is
+    /// an arbitrary but total order -- and matching the `ORDER BY` exactly is
+    /// all a keyset needs.
     pub async fn list_messages_page(
         &self,
         account_id: &str,
         folder_id: &str,
-        after: Option<(i64, String)>,
+        after: Option<MessagePageCursor>,
         page_size: usize,
-    ) -> Result<(Vec<PlacedMessage>, Option<(i64, String)>), DatabaseError> {
+    ) -> Result<(Vec<PlacedMessage>, Option<MessagePageCursor>), DatabaseError> {
         let fetch = page_size.saturating_add(1);
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
             "SELECT m.message_key, m.account_id, m.subject, m.sender, m.recipient, \
@@ -1884,16 +1917,33 @@ impl DatabaseEngine {
         builder.push_bind(account_id.to_string());
         builder.push(" AND p.folder_id = ");
         builder.push_bind(folder_id.to_string());
-        if let Some((ts, key)) = &after {
+        if let Some((ts, key, uid_validity, remote_id)) = &after {
             builder.push(" AND (m.received_at < ");
             builder.push_bind(*ts);
             builder.push(" OR (m.received_at = ");
             builder.push_bind(*ts);
             builder.push(" AND m.message_key < ");
             builder.push_bind(key.clone());
+            builder.push(") OR (m.received_at = ");
+            builder.push_bind(*ts);
+            builder.push(" AND m.message_key = ");
+            builder.push_bind(key.clone());
+            builder.push(" AND p.uidvalidity < ");
+            builder.push_bind(uid_validity.clone());
+            builder.push(") OR (m.received_at = ");
+            builder.push_bind(*ts);
+            builder.push(" AND m.message_key = ");
+            builder.push_bind(key.clone());
+            builder.push(" AND p.uidvalidity = ");
+            builder.push_bind(uid_validity.clone());
+            builder.push(" AND p.uid < ");
+            builder.push_bind(remote_id.clone());
             builder.push("))");
         }
-        builder.push(" ORDER BY m.received_at DESC, m.message_key DESC LIMIT ");
+        builder.push(
+            " ORDER BY m.received_at DESC, m.message_key DESC, \
+             p.uidvalidity DESC, p.uid DESC LIMIT ",
+        );
         builder.push_bind(fetch as i64);
 
         let rows = builder
@@ -1940,7 +1990,14 @@ impl DatabaseEngine {
         }
 
         let next = if has_more {
-            placed.last().map(|(e, _)| (e.received_at, e.id.clone()))
+            placed.last().map(|(e, p)| {
+                (
+                    e.received_at,
+                    e.id.clone(),
+                    p.uid_validity.clone(),
+                    p.remote_id.clone(),
+                )
+            })
         } else {
             None
         };
@@ -3006,7 +3063,15 @@ impl DatabaseEngine {
         }
         if let Some(folder_id) = folder_id {
             builder.push(if has_filter { " AND " } else { " WHERE " });
-            builder.push("EXISTS (SELECT 1 FROM placements p WHERE p.message_key = m.message_key AND p.folder_id = ");
+            // Scoped to the message's own account, not just the folder name: folder ids are not
+            // globally unique, so an unscoped `p.folder_id` match would export another account's
+            // INBOX alongside this one -- the very collision this model exists to remove.
+            builder.push(
+                "EXISTS (SELECT 1 FROM placements p \
+                 WHERE p.message_key = m.message_key \
+                 AND p.account_id = m.account_id \
+                 AND p.folder_id = ",
+            );
             builder.push_bind(folder_id);
             builder.push(")");
         }
@@ -5421,6 +5486,20 @@ mod tests {
             .await
             .unwrap();
 
+        // A *different* message really does occupy Archive. Without this the
+        // "Archive is not present" assertion below would hold even if the
+        // `IN (...)` filter were dropped entirely, since the table would have
+        // no Archive row to over-report in the first place.
+        let (other, other_in_archive) = sample_message_and_placement("key-2", "Archive", "77");
+        engine
+            .save_email_at(
+                &other,
+                nuncio_core::model::IdentitySource::EmailId,
+                &other_in_archive,
+            )
+            .await
+            .unwrap();
+
         let in_inbox = PlacementKey {
             account_id: "acct-1".into(),
             folder_id: "INBOX".into(),
@@ -5432,9 +5511,14 @@ mod tests {
             remote_id: "9".into(),
             ..in_inbox.clone()
         };
+        let never_placed = PlacementKey {
+            folder_id: "Sent".into(),
+            remote_id: "404".into(),
+            ..in_inbox.clone()
+        };
 
         let found = engine
-            .existing_placements(&[in_inbox.clone(), in_archive.clone()])
+            .existing_placements(&[in_inbox.clone(), in_archive.clone(), never_placed.clone()])
             .await
             .unwrap();
         assert!(found.contains(&in_inbox));
@@ -5442,14 +5526,145 @@ mod tests {
             !found.contains(&in_archive),
             "the same message arriving in a new folder is a new placement and must be seen as such"
         );
+        assert!(
+            !found.contains(&never_placed),
+            "over-reporting would make genuinely new mail look already-seen and be skipped"
+        );
+        assert_eq!(found.len(), 1, "and nothing else may be reported either");
 
         // The message identity, by contrast, IS already known -- the two
         // questions must not be conflated.
         let known = engine
-            .existing_message_ids(&["key-1".to_string()])
+            .existing_message_ids(&["key-1".to_string(), "key-3-never-saved".to_string()])
             .await
             .unwrap();
         assert!(known.contains("key-1"));
+        assert!(
+            !known.contains("key-3-never-saved"),
+            "a key that was never persisted must never be reported as known"
+        );
+        assert_eq!(known.len(), 1, "and the query must not echo its own input");
+    }
+
+    /// `save_email_at` reads (the placement existence check) and then writes what
+    /// it read, so it must serialize rather than error under concurrency: in WAL
+    /// mode a deferred transaction upgrading to a writer aborts with
+    /// SQLITE_BUSY_SNAPSHOT, which `busy_timeout` does not retry. Twenty racing
+    /// saves of the SAME message and placement must therefore all succeed, and
+    /// exactly one of them must claim each of the two "is new" flags -- if two
+    /// callers both saw a first arrival, a fire-once filter action would run
+    /// twice.
+    #[tokio::test]
+    async fn concurrent_saves_of_one_placement_serialize_and_elect_one_winner() {
+        const CONCURRENT_SAVES: usize = 20;
+
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let engine = std::sync::Arc::new(engine);
+        let (email, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+
+        let mut handles = Vec::with_capacity(CONCURRENT_SAVES);
+        for _ in 0..CONCURRENT_SAVES {
+            let engine = std::sync::Arc::clone(&engine);
+            let email = email.clone();
+            let inbox = inbox.clone();
+            handles.push(tokio::spawn(async move {
+                engine
+                    .save_email_at(&email, nuncio_core::model::IdentitySource::EmailId, &inbox)
+                    .await
+            }));
+        }
+
+        let mut new_messages = 0;
+        let mut new_placements = 0;
+        for handle in handles {
+            let outcome = handle.await.expect("save task must not panic").expect(
+                "a concurrent save must never fail outright -- it must serialize, not error",
+            );
+            new_messages += usize::from(outcome.message_is_new);
+            new_placements += usize::from(outcome.placement_is_new);
+        }
+        assert_eq!(new_messages, 1, "exactly one caller created the message");
+        assert_eq!(
+            new_placements, 1,
+            "exactly one caller created the placement"
+        );
+
+        let (messages,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages")
+            .fetch_one(engine.pool())
+            .await
+            .unwrap();
+        let (fts,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages_fts")
+            .fetch_one(engine.pool())
+            .await
+            .unwrap();
+        let (placements,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM placements")
+            .fetch_one(engine.pool())
+            .await
+            .unwrap();
+        assert_eq!((messages, fts, placements), (1, 1, 1));
+    }
+
+    /// Paging a folder must yield every placement in it EXACTLY once, with no
+    /// dupes and no gaps -- including the case the keyset exists to survive: one
+    /// message occupying a single folder more than once (two `COPY`s of the same
+    /// mail land under different UIDs). Every row here also shares one
+    /// `received_at`, so the tiebreaker columns carry the whole ordering.
+    #[tokio::test]
+    async fn list_messages_page_returns_every_placement_once_no_gaps() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let mut expected: Vec<(String, String)> = Vec::new();
+        for (key, uid) in [
+            ("key-a", "1"),
+            ("key-a", "2"),
+            ("key-b", "3"),
+            ("key-b", "4"),
+            ("key-c", "5"),
+        ] {
+            let (email, placement) = sample_message_and_placement(key, "INBOX", uid);
+            engine
+                .save_email_at(
+                    &email,
+                    nuncio_core::model::IdentitySource::EmailId,
+                    &placement,
+                )
+                .await
+                .unwrap();
+            expected.push((key.to_string(), uid.to_string()));
+        }
+
+        let mut seen: Vec<(String, String)> = Vec::new();
+        let mut after: Option<MessagePageCursor> = None;
+        let mut pages = 0;
+        loop {
+            let (rows, next) = engine
+                .list_messages_page("acct-1", "INBOX", after.clone(), 2)
+                .await
+                .unwrap();
+            pages += 1;
+            assert!(rows.len() <= 2, "page must not exceed page_size");
+            seen.extend(
+                rows.iter()
+                    .map(|(e, p)| (e.id.clone(), p.remote_id.clone())),
+            );
+            match next {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+            assert!(pages < 100, "pagination must terminate");
+        }
+
+        let mut deduped = seen.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), seen.len(), "no placement returned twice");
+
+        expected.sort();
+        assert_eq!(
+            deduped, expected,
+            "every placement in the folder must be reachable across pages"
+        );
+        assert!(pages >= 3, "5 rows at page_size 2 must span multiple pages");
     }
 
     #[tokio::test]

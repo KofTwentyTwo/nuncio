@@ -12,7 +12,8 @@
 
 - **Branch:** `story/message-placement-split`, already created off `dev` with `story/message-id-capture` (#386) and `story/schema-version-and-token-scheme` (#387) merged in. Baseline gate is green on it (627+ tests). Do not rebase onto the #401–#403 chain.
 - **Gate.** Removing `Email`'s folder scalars breaks four crates until Task 9 lands, so the gate is staged:
-  - **Tasks 1–8:** `cargo fmt --all -- --check` **and** `cargo test -p <crate under change>` must pass. The workspace will not compile end-to-end during these tasks; that is expected and is not a reason to stop or to widen the task.
+  - **Tasks 1–8:** all three of `cargo fmt --all -- --check`, `cargo clippy -p <crate under change> --all-targets -- -D warnings`, and `cargo test -p <crate under change>` must pass. The workspace will not compile end-to-end during these tasks; that is expected and is not a reason to stop or to widen the task.
+    **Clippy is not optional at the per-crate stage.** `cargo check-all` is the workspace-wide clippy gate and cannot run mid-refactor, so a per-crate clippy run is the only thing standing between a lint failure and the end of the plan. Omitting it once already let `should_implement_trait` reach the branch undetected.
   - **Task 9 onward, and the PR head:** the full gate — `cargo fmt --all -- --check`, then `cargo check-all`, then `cargo test-all`.
   - Warnings are hard errors throughout; `unwrap_used` / `expect_used` / `panic` / `todo` are `deny` outside tests. Never silence a lint to get a commit through.
   - `cargo test-all` can exceed a 10-minute tool timeout on this workspace; allow ~540s.
