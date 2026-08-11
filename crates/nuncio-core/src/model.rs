@@ -61,33 +61,113 @@ pub struct Attachment {
     pub content: Bytes,
 }
 
-/// Email message domain entity owned by Nuncio core.
+/// Which tier of the identity precedence produced a [`MessageIdentity`].
+///
+/// Persisted alongside the key so a later pass can tell a server-assigned
+/// identity from a locally-derived fallback without recomputing it, and so a
+/// store can be audited for how much of it rests on the weakest tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IdentitySource {
+    /// RFC 8474 OBJECTID `EMAILID` -- server-assigned and stable across folders.
+    EmailId,
+    /// Gmail's `X-GM-MSGID`, the same guarantee by a vendor extension.
+    GmailMsgId,
+    /// `Message-ID` **and** a content hash together. Never the header alone.
+    MessageIdContent,
+    /// Folder-scoped last resort: the message is only identified by where it
+    /// currently sits, so the same mail in another folder is a second message.
+    Surrogate,
+}
+
+impl IdentitySource {
+    /// Stable token persisted in `messages.identity_source`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EmailId => "emailid",
+            Self::GmailMsgId => "gmsgid",
+            Self::MessageIdContent => "msgid_content",
+            Self::Surrogate => "surrogate",
+        }
+    }
+
+    /// Parse a token written by [`Self::as_str`]. Returns `None` for anything
+    /// else so an unrecognised value fails loudly rather than defaulting to a
+    /// tier that would overstate how trustworthy the key is.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "emailid" => Some(Self::EmailId),
+            "gmsgid" => Some(Self::GmailMsgId),
+            "msgid_content" => Some(Self::MessageIdContent),
+            "surrogate" => Some(Self::Surrogate),
+            _ => None,
+        }
+    }
+}
+
+/// A content-addressed message key together with the tier that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageIdentity {
+    /// Hex SHA-256 key identifying the message within its account.
+    pub key: String,
+    /// Which precedence tier produced `key`.
+    pub source: IdentitySource,
+}
+
+/// Server-supplied identity hints for one message, in precedence order.
+///
+/// Borrowed rather than owned because every caller already holds these as
+/// fields on a parsed response and only needs them for the duration of the
+/// key derivation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RemoteIdentity<'a> {
+    /// RFC 8474 `EMAILID` from a `FETCH ... (EMAILID)`, if the server has OBJECTID.
+    pub email_id: Option<&'a str>,
+    /// Gmail `X-GM-MSGID`, if the server advertises `X-GM-EXT-1`.
+    pub gm_msgid: Option<&'a str>,
+    /// Normalized `Message-ID` (see [`Email::normalize_message_id`]).
+    pub message_id: Option<&'a str>,
+    /// Hex SHA-256 over the full RFC822 octets (see [`Email::content_hash_of`]).
+    pub content_hash: Option<&'a str>,
+}
+
+/// One occupancy of a message in one mailbox.
+///
+/// A message can sit in several folders at once (an IMAP `COPY`, a Gmail label,
+/// a message that is both in a thread's folder and in `\All`). The addressing
+/// coordinates and the read flag are properties of the *occupancy*, not of the
+/// message: IMAP `\Seen` is per-mailbox, and a UID is only meaningful inside one
+/// `uid_validity` scope of one folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Email {
-    /// Opaque, deterministic surrogate identifier for the message.
-    ///
-    /// Derived from [`Email::surrogate_id`] over the account, folder,
-    /// UIDVALIDITY, and protocol-native id. It carries no decodable internal
-    /// encoding (callers must treat it as opaque) and is stable across
-    /// re-syncs of the same message, so persisting it upserts the same row
-    /// rather than duplicating. Distinct messages that happen to share a
-    /// protocol id across folders or accounts hash to distinct surrogates, so
-    /// one can never silently overwrite another.
-    pub id: String,
-    /// Account identifier owning the message.
+pub struct Placement {
+    /// Account owning the mailbox.
     pub account_id: String,
     /// Mailbox folder identifier (e.g. "inbox").
     pub folder_id: String,
-    /// Protocol-native message id used to address the message on its server:
-    /// the IMAP UID as a decimal string, or the JMAP Email object id. This is
-    /// what a remote mutation must use to identify the message on the wire --
-    /// never the opaque [`Email::id`].
-    pub remote_id: String,
-    /// The addressing scope the `remote_id` is only meaningful within: the IMAP
-    /// folder UIDVALIDITY as a decimal string. Protocols without a UIDVALIDITY
-    /// (JMAP) carry a stable sentinel instead, so the surrogate id stays
-    /// deterministic.
+    /// The IMAP UIDVALIDITY the `remote_id` was captured under, as a decimal
+    /// string; a stable sentinel for protocols without one (JMAP). In the
+    /// primary key because UIDs restart at 1 after a bump and would otherwise
+    /// collide with rows written before it.
     pub uid_validity: String,
+    /// Protocol-native id addressing the message in this mailbox: the IMAP UID
+    /// as a decimal string, or the JMAP Email object id.
+    pub remote_id: String,
+    /// Read/unread state **in this mailbox**.
+    pub read: bool,
+}
+
+/// Email message domain entity owned by Nuncio core.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Email {
+    /// Opaque, account-scoped identity for the message itself.
+    ///
+    /// Derived by [`Email::derive_message_key`], so it is independent of which
+    /// folder the message currently occupies: moving a message between folders
+    /// does not change it. Where the message actually sits, and its read state
+    /// there, live in [`Placement`] rows instead. Callers must treat this as an
+    /// opaque token -- it carries no decodable structure.
+    pub id: String,
+    /// Account identifier owning the message.
+    pub account_id: String,
     /// Subject line.
     pub subject: String,
     /// Sender address (e.g. "alice@nuncio.mx").
@@ -96,8 +176,6 @@ pub struct Email {
     pub recipient: String,
     /// Unix timestamp of message arrival.
     pub received_at: i64,
-    /// Read/unread flag status.
-    pub read: bool,
     /// Plaintext message body.
     pub body_plain: Option<String>,
     /// HTML message body.
@@ -195,6 +273,82 @@ impl Email {
         let mut hasher = Sha256::new();
         hasher.update(raw_bytes);
         hex::encode(hasher.finalize())
+    }
+
+    /// Domain-separated, length-prefixed digest over an identity tier's inputs.
+    ///
+    /// The tier label participates in the hash so that a value appearing in two
+    /// different tiers (a server whose `EMAILID` happens to equal another's
+    /// `X-GM-MSGID`) cannot produce one key. Length prefixes stop two distinct
+    /// field tuples serializing to the same byte stream, exactly as in
+    /// [`Email::surrogate_id`].
+    fn identity_digest(tier: &str, account_id: &str, parts: &[&str]) -> String {
+        let mut hasher = Sha256::new();
+        for field in [tier, account_id].into_iter().chain(parts.iter().copied()) {
+            hasher.update((field.len() as u64).to_le_bytes());
+            hasher.update(field.as_bytes());
+        }
+        hex::encode(hasher.finalize())
+    }
+
+    /// Derive the account-scoped message key by identity precedence.
+    ///
+    /// `EMAILID` → `X-GM-MSGID` → (`Message-ID` + content hash) → surrogate.
+    /// Every tier is account-scoped: identity is only ever claimed within the
+    /// account that fetched it, so one account's server cannot mint a key that
+    /// addresses another account's mail.
+    ///
+    /// The third tier requires **both** a `Message-ID` and a content hash. A
+    /// `Message-ID` is public -- it is echoed in the `References` of every reply
+    /// -- and forgeable, so keying on it alone would let a crafted message
+    /// address, and with an upsert overwrite, a message the user already trusts,
+    /// and would evade filtering by never being classified as new. Pairing it
+    /// with the content hash also gets the ordinary cases right: a mailing-list
+    /// copy and a direct copy share a `Message-ID` but differ in content, and so
+    /// are correctly two messages.
+    ///
+    /// The surrogate tier is folder-scoped and therefore *not* stable across a
+    /// move; it is the honest answer when the server offered nothing better.
+    pub fn derive_message_key(
+        account_id: &str,
+        remote: RemoteIdentity<'_>,
+        folder_id: &str,
+        uid_validity: &str,
+        remote_id: &str,
+    ) -> MessageIdentity {
+        if let Some(email_id) = remote.email_id.filter(|v| !v.is_empty()) {
+            return MessageIdentity {
+                key: Self::identity_digest("emailid", account_id, &[email_id]),
+                source: IdentitySource::EmailId,
+            };
+        }
+        if let Some(gm_msgid) = remote.gm_msgid.filter(|v| !v.is_empty()) {
+            return MessageIdentity {
+                key: Self::identity_digest("gmsgid", account_id, &[gm_msgid]),
+                source: IdentitySource::GmailMsgId,
+            };
+        }
+        if let (Some(message_id), Some(content_hash)) = (
+            remote.message_id.filter(|v| !v.is_empty()),
+            remote.content_hash.filter(|v| !v.is_empty()),
+        ) {
+            return MessageIdentity {
+                key: Self::identity_digest(
+                    "msgid_content",
+                    account_id,
+                    &[message_id, content_hash],
+                ),
+                source: IdentitySource::MessageIdContent,
+            };
+        }
+        MessageIdentity {
+            key: Self::identity_digest(
+                "surrogate",
+                account_id,
+                &[folder_id, uid_validity, remote_id],
+            ),
+            source: IdentitySource::Surrogate,
+        }
     }
 }
 
@@ -362,5 +516,145 @@ mod tests {
             Email::content_hash_of(direct),
             "the hash must be deterministic for identical octets"
         );
+    }
+
+    #[test]
+    fn message_key_precedence_prefers_emailid_over_everything_below_it() {
+        let remote = RemoteIdentity {
+            email_id: Some("M00000001"),
+            gm_msgid: Some("1234567890"),
+            message_id: Some("a@b.example"),
+            content_hash: Some("deadbeef"),
+        };
+        let id = Email::derive_message_key("acct-1", remote, "INBOX", "42", "5");
+        assert_eq!(id.source, IdentitySource::EmailId);
+
+        // Same EMAILID in a different folder is the SAME message.
+        let elsewhere = Email::derive_message_key(
+            "acct-1",
+            RemoteIdentity {
+                email_id: Some("M00000001"),
+                gm_msgid: None,
+                message_id: None,
+                content_hash: None,
+            },
+            "Archive",
+            "99",
+            "7",
+        );
+        assert_eq!(id.key, elsewhere.key);
+    }
+
+    #[test]
+    fn message_key_is_account_scoped_at_every_tier() {
+        let remote = || RemoteIdentity {
+            email_id: Some("M00000001"),
+            gm_msgid: None,
+            message_id: None,
+            content_hash: None,
+        };
+        let a = Email::derive_message_key("acct-1", remote(), "INBOX", "42", "5");
+        let b = Email::derive_message_key("acct-2", remote(), "INBOX", "42", "5");
+        assert_ne!(
+            a.key, b.key,
+            "the same EMAILID in two accounts must not collide"
+        );
+    }
+
+    #[test]
+    fn a_message_id_without_a_content_hash_never_reaches_the_content_tier() {
+        // The non-negotiable: a Message-ID is public and forgeable, so it must
+        // never key storage on its own. Missing content hash falls through to the
+        // folder-scoped surrogate rather than trusting the header alone.
+        let id = Email::derive_message_key(
+            "acct-1",
+            RemoteIdentity {
+                email_id: None,
+                gm_msgid: None,
+                message_id: Some("a@b.example"),
+                content_hash: None,
+            },
+            "INBOX",
+            "42",
+            "5",
+        );
+        assert_eq!(id.source, IdentitySource::Surrogate);
+
+        let surrogate_only = Email::derive_message_key(
+            "acct-1",
+            RemoteIdentity {
+                email_id: None,
+                gm_msgid: None,
+                message_id: None,
+                content_hash: None,
+            },
+            "INBOX",
+            "42",
+            "5",
+        );
+        assert_eq!(id.key, surrogate_only.key);
+    }
+
+    #[test]
+    fn the_same_message_id_with_different_content_is_two_messages() {
+        let mk = |hash: &str| {
+            Email::derive_message_key(
+                "acct-1",
+                RemoteIdentity {
+                    email_id: None,
+                    gm_msgid: None,
+                    message_id: Some("a@b.example"),
+                    content_hash: Some(hash),
+                },
+                "INBOX",
+                "42",
+                "5",
+            )
+        };
+        let list_copy = mk("1111");
+        let direct_copy = mk("2222");
+        assert_eq!(list_copy.source, IdentitySource::MessageIdContent);
+        assert_ne!(list_copy.key, direct_copy.key);
+    }
+
+    #[test]
+    fn tiers_are_domain_separated_so_a_shared_value_cannot_collide_across_them() {
+        let as_emailid = Email::derive_message_key(
+            "acct-1",
+            RemoteIdentity {
+                email_id: Some("X"),
+                gm_msgid: None,
+                message_id: None,
+                content_hash: None,
+            },
+            "INBOX",
+            "42",
+            "5",
+        );
+        let as_gmsgid = Email::derive_message_key(
+            "acct-1",
+            RemoteIdentity {
+                email_id: None,
+                gm_msgid: Some("X"),
+                message_id: None,
+                content_hash: None,
+            },
+            "INBOX",
+            "42",
+            "5",
+        );
+        assert_ne!(as_emailid.key, as_gmsgid.key);
+    }
+
+    #[test]
+    fn identity_source_round_trips_through_its_stored_string() {
+        for source in [
+            IdentitySource::EmailId,
+            IdentitySource::GmailMsgId,
+            IdentitySource::MessageIdContent,
+            IdentitySource::Surrogate,
+        ] {
+            assert_eq!(IdentitySource::from_str(source.as_str()), Some(source));
+        }
     }
 }
