@@ -522,7 +522,7 @@ impl DatabaseEngine {
     ///
     /// Bump this only for a change of that kind, and only together with the
     /// reset it implies (see [`DatabaseEngine::reconcile_schema_version`]).
-    pub const IDENTITY_SCHEMA_VERSION: i64 = 1;
+    pub const IDENTITY_SCHEMA_VERSION: i64 = 2;
 
     /// Reconcile the on-disk identity-schema generation with this binary's.
     ///
@@ -582,11 +582,12 @@ impl DatabaseEngine {
     /// Drop everything derived from the server, keeping everything the user
     /// configured.
     ///
-    /// Cleared: messages and their FTS index, per-folder sync checkpoints, and
-    /// the filter execution ledger. The ledger goes because its hash chain is
-    /// keyed on message ids that will no longer resolve, and a chain pointing
-    /// at absent rows has no audit value -- reinitialising it is more honest
-    /// than carrying a permanently mixed-namespace log.
+    /// Cleared: messages and their FTS index, mailbox placements, the filter
+    /// fire-once ledger, per-folder sync checkpoints, and the filter execution
+    /// ledger. The execution ledger goes because its hash chain is keyed on
+    /// message ids that will no longer resolve, and a chain pointing at absent
+    /// rows has no audit value -- reinitialising it is more honest than
+    /// carrying a permanently mixed-namespace log.
     ///
     /// Kept: accounts, credentials (which live in the OS keyring regardless),
     /// filter rules, and the WORM audit records, whose triggers forbid deletion
@@ -596,6 +597,8 @@ impl DatabaseEngine {
         for statement in [
             "DELETE FROM messages",
             "DELETE FROM messages_fts",
+            "DELETE FROM placements",
+            "DELETE FROM filter_fired",
             "DELETE FROM folder_sync_state",
             "DELETE FROM filter_execution_logs",
         ] {
@@ -608,21 +611,82 @@ impl DatabaseEngine {
         Ok(())
     }
 
+    /// Atomically claim the right to run `rule_id`'s actions against
+    /// `message_key`, returning `true` only for the claim that won.
+    ///
+    /// The claim is the fire-once guard for side-effecting actions. It is keyed
+    /// on message identity rather than on a placement because the same message
+    /// legitimately arrives in several folders -- and, under the old
+    /// folder-scoped identity, each arrival looked like a different message and
+    /// fired the rule again. `INSERT ... ON CONFLICT DO NOTHING` makes winning
+    /// the claim a single atomic statement, so two passes racing over the same
+    /// message cannot both act.
+    pub async fn claim_filter_fire(
+        &self,
+        rule_id: &str,
+        message_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        let result = sqlx::query(
+            "INSERT INTO filter_fired (rule_id, message_key, fired_at) VALUES (?, ?, ?)
+             ON CONFLICT (rule_id, message_key) DO NOTHING",
+        )
+        .bind(rule_id)
+        .bind(message_key)
+        .bind(chrono::Utc::now().timestamp())
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Whether `rule_id` has already acted on `message_key`.
+    ///
+    /// Public rather than test-only: the claim ledger answers a question
+    /// operators and the outbox both have a real reason to ask -- "did this rule
+    /// already act on this message" -- and callers in other crates cannot reach
+    /// the pool directly.
+    pub async fn has_filter_fired(
+        &self,
+        rule_id: &str,
+        message_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        let found: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM filter_fired WHERE rule_id = ? AND message_key = ?")
+                .bind(rule_id)
+                .bind(message_key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+
+        Ok(found.is_some())
+    }
+
+    /// How many distinct (rule, message) fires the ledger records.
+    ///
+    /// Counterpart to [`Self::has_filter_fired`] for callers that need to assert
+    /// on the ledger as a whole rather than one entry.
+    pub async fn filter_fire_count(&self) -> Result<i64, DatabaseError> {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM filter_fired")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+        Ok(count)
+    }
+
     /// Execute initial database migrations creating core envelope tables.
     pub async fn migrate(&self) -> Result<(), DatabaseError> {
         sqlx::query(
             r#"
+            -- Identity and immutable content, one row per message. Where the
+            -- message sits lives in `placements`; nothing here is folder-scoped.
             CREATE TABLE IF NOT EXISTS messages (
-                id TEXT PRIMARY KEY NOT NULL,
+                message_key TEXT PRIMARY KEY NOT NULL,
                 account_id TEXT NOT NULL,
-                folder_id TEXT NOT NULL,
-                remote_id TEXT NOT NULL DEFAULT '',
-                uid_validity TEXT NOT NULL DEFAULT '',
                 subject TEXT NOT NULL,
                 sender TEXT NOT NULL,
                 recipient TEXT NOT NULL,
                 received_at INTEGER NOT NULL,
-                read_flag INTEGER NOT NULL DEFAULT 0,
                 body_plain TEXT,
                 body_html TEXT,
                 -- Captured at ingest, not yet read. Both are nullable because
@@ -630,7 +694,34 @@ impl DatabaseEngine {
                 -- MUST (RFC 5322 3.6.4), and a headers-only or envelope-only
                 -- fetch has no full octets to hash.
                 message_id TEXT,
-                content_hash TEXT
+                content_hash TEXT,
+                identity_source TEXT NOT NULL DEFAULT 'surrogate'
+            );
+
+            -- One row per (mailbox, message) occupancy. `uidvalidity` is in the
+            -- primary key because UIDs restart at 1 after a bump: without it the
+            -- first message of the new generation would overwrite the row of
+            -- whichever old message shared its UID.
+            CREATE TABLE IF NOT EXISTS placements (
+                account_id TEXT NOT NULL,
+                folder_id TEXT NOT NULL,
+                uidvalidity TEXT NOT NULL,
+                uid TEXT NOT NULL,
+                message_key TEXT NOT NULL,
+                read_flag INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (account_id, folder_id, uidvalidity, uid)
+            );
+
+            -- Fire-once ledger for filter actions. Keyed on the message
+            -- *identity*, not a placement, so a message arriving in a second
+            -- folder does not re-fire a rule that already acted on it -- which
+            -- matters most for FORWARD and CALL WEBHOOK, whose effects land on
+            -- third parties and cannot be undone by convergence.
+            CREATE TABLE IF NOT EXISTS filter_fired (
+                rule_id TEXT NOT NULL,
+                message_key TEXT NOT NULL,
+                fired_at INTEGER NOT NULL,
+                PRIMARY KEY (rule_id, message_key)
             );
 
             CREATE TABLE IF NOT EXISTS calendar_events (
@@ -737,6 +828,8 @@ impl DatabaseEngine {
             CREATE INDEX IF NOT EXISTS idx_filter_logs_rule ON filter_execution_logs(rule_id, matched_at DESC);
             CREATE INDEX IF NOT EXISTS idx_pending_mutations_status ON pending_remote_mutations(status, created_at ASC);
             CREATE INDEX IF NOT EXISTS idx_worm_audit_seq ON worm_audit_records(sequence ASC);
+            CREATE INDEX IF NOT EXISTS idx_placements_message ON placements(message_key);
+            CREATE INDEX IF NOT EXISTS idx_placements_folder ON placements(account_id, folder_id);
 
             -- Full-text search indexes are created eagerly at migration time (not lazily on
             -- first search) so no message or event saved before the first search call is ever
@@ -759,7 +852,7 @@ impl DatabaseEngine {
             -- encrypted search index, or whole-database encryption) is future work and is NOT
             -- provided today.
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                id UNINDEXED,
+                message_key UNINDEXED,
                 subject,
                 sender,
                 body_plain,
@@ -768,11 +861,18 @@ impl DatabaseEngine {
 
             -- Subject/sender are never encrypted in `messages`, so a delete-only trigger is
             -- sufficient here: it just keeps the FTS index free of orphaned rows. Insertion and
-            -- update of `messages_fts` content happens explicitly in `save_email`, never via an
+            -- update of `messages_fts` content happens explicitly in `upsert_message`, never via an
             -- AFTER INSERT/UPDATE trigger, because such a trigger would only ever see the
             -- ciphertext body column.
+            --
+            -- This trigger MUST stay on `messages` and never move to `placements`. Dropping one
+            -- placement of a message that still sits in another folder must leave the body
+            -- searchable; only losing the last placement removes the `messages` row, and that is
+            -- what reaps the FTS row here. Firing on `placements` instead would delete the index
+            -- entry while the body remained -- and, inverted, leaving it off `messages` entirely
+            -- would strand plaintext bodies in `messages_fts` after the message itself was gone.
             CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                DELETE FROM messages_fts WHERE id = old.id;
+                DELETE FROM messages_fts WHERE message_key = old.message_key;
             END;
 
             -- Calendar event summary/location are never encrypted at rest, so trigger-based
@@ -872,7 +972,6 @@ impl DatabaseEngine {
         // the additive column migrations, so a rebuild lands on the current
         // shape rather than an intermediate one.
         self.reconcile_schema_version().await?;
-        self.ensure_messages_identity_columns().await?;
         self.ensure_messages_provenance_columns().await?;
         self.backfill_message_fts().await?;
 
@@ -916,88 +1015,6 @@ impl DatabaseEngine {
                 "migrated messages table: added message provenance column"
             );
         }
-
-        Ok(())
-    }
-
-    /// Additive, backfill-safe migration that adds the `remote_id` /
-    /// `uid_validity` message-identity columns to a pre-existing `messages`
-    /// table that predated the opaque surrogate id, and installs the
-    /// `UNIQUE(account_id, folder_id, uid_validity, remote_id)` index that is
-    /// the real correctness guard against a shared protocol id (e.g. an IMAP
-    /// UID reused across folders/accounts) overwriting an unrelated message.
-    ///
-    /// A fresh database already gets both columns from `CREATE TABLE IF NOT
-    /// EXISTS messages` above, so on a fresh database the `PRAGMA table_info`
-    /// check finds them present and the backfill matches no rows -- only the
-    /// index is created. For a pre-existing database file the columns are added
-    /// with an empty-string default and every legacy row is backfilled to
-    /// `remote_id = id` (the old primary key, which was globally unique) so the
-    /// UNIQUE index can be built without collisions. SQLite has no `ADD COLUMN
-    /// IF NOT EXISTS`, so column presence is checked explicitly first, making
-    /// this safe to run on every daemon startup.
-    ///
-    /// The whole step runs in a single transaction, and the backfill is
-    /// unconditional (idempotent `WHERE remote_id = ''`) rather than gated on
-    /// having just added the column. Both properties make a partial run
-    /// self-healing: a crash mid-migration rolls back atomically, and even a
-    /// committed intermediate state (column present but a legacy row still
-    /// carrying the empty default) is completed by the next startup's backfill
-    /// before the index is built -- so the daemon can never wedge on an index
-    /// collision it could have avoided.
-    async fn ensure_messages_identity_columns(&self) -> Result<(), DatabaseError> {
-        let existing_columns: Vec<String> = sqlx::query("PRAGMA table_info(messages)")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(DatabaseError::Query)?
-            .iter()
-            .map(|row| row.get::<String, _>("name"))
-            .collect();
-
-        let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
-
-        if !existing_columns.iter().any(|c| c == "remote_id") {
-            sqlx::query("ALTER TABLE messages ADD COLUMN remote_id TEXT NOT NULL DEFAULT ''")
-                .execute(&mut *tx)
-                .await
-                .map_err(DatabaseError::Query)?;
-            tracing::info!(
-                table = "messages",
-                column = "remote_id",
-                "applying schema migration"
-            );
-        }
-        if !existing_columns.iter().any(|c| c == "uid_validity") {
-            sqlx::query("ALTER TABLE messages ADD COLUMN uid_validity TEXT NOT NULL DEFAULT ''")
-                .execute(&mut *tx)
-                .await
-                .map_err(DatabaseError::Query)?;
-            tracing::info!(
-                table = "messages",
-                column = "uid_validity",
-                "applying schema migration"
-            );
-        }
-
-        // Seed any legacy row still carrying the empty-string default with a
-        // unique, non-empty remote id (the old primary key) so the UNIQUE
-        // identity index is satisfiable. Unconditional so a partial prior run
-        // is always completed before the index is (re)built; a no-op on a fresh
-        // or already-migrated database.
-        sqlx::query("UPDATE messages SET remote_id = id WHERE remote_id = ''")
-            .execute(&mut *tx)
-            .await
-            .map_err(DatabaseError::Query)?;
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_identity \
-             ON messages (account_id, folder_id, uid_validity, remote_id)",
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(DatabaseError::Query)?;
-
-        tx.commit().await.map_err(DatabaseError::Query)?;
 
         Ok(())
     }
@@ -1150,16 +1167,16 @@ impl DatabaseEngine {
     async fn backfill_message_fts(&self) -> Result<(), DatabaseError> {
         let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
             r#"
-            SELECT m.id, m.subject, m.sender, m.body_plain
+            SELECT m.message_key, m.subject, m.sender, m.body_plain
             FROM messages m
-            WHERE NOT EXISTS (SELECT 1 FROM messages_fts f WHERE f.id = m.id)
+            WHERE NOT EXISTS (SELECT 1 FROM messages_fts f WHERE f.message_key = m.message_key)
             "#,
         )
         .fetch_all(&self.pool)
         .await
         .map_err(DatabaseError::Query)?;
 
-        for (id, subject, sender, body_plain) in rows {
+        for (message_key, subject, sender, body_plain) in rows {
             let dec_plain = body_plain
                 .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
                 .transpose()
@@ -1167,9 +1184,9 @@ impl DatabaseEngine {
                 .unwrap_or_default();
 
             sqlx::query(
-                "INSERT INTO messages_fts (id, subject, sender, body_plain) VALUES (?, ?, ?, ?)",
+                "INSERT INTO messages_fts (message_key, subject, sender, body_plain) VALUES (?, ?, ?, ?)",
             )
-            .bind(&id)
+            .bind(&message_key)
             .bind(&subject)
             .bind(&sender)
             .bind(&dec_plain)
@@ -4611,57 +4628,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn messages_identity_migration_completes_from_a_partial_run() {
+    async fn placements_primary_key_includes_uidvalidity() {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
 
-        // Reproduce the partial state: drop the identity index, then insert two
-        // rows in the same folder that both still hold the empty default. With
-        // the index gone this is permitted, and the two would collide on
-        // (account, folder, uid_validity='', remote_id='') if it were rebuilt now.
-        sqlx::query("DROP INDEX IF EXISTS idx_messages_identity")
-            .execute(engine.pool())
-            .await
-            .unwrap();
-        for id in ["legacy-a", "legacy-b"] {
+        // Same folder, same UID, different UIDVALIDITY: two distinct placements.
+        // After a UIDVALIDITY bump the server restarts UIDs at 1, so without
+        // uidvalidity in the key the new mail would overwrite the old.
+        for validity in ["42", "43"] {
             sqlx::query(
-                "INSERT INTO messages \
-                 (id, account_id, folder_id, remote_id, uid_validity, subject, sender, recipient, received_at, read_flag) \
-                 VALUES (?, 'acct-1', 'INBOX', '', '', 'subj', 'a@nuncio.mx', 'b@nuncio.mx', 0, 0)",
+                "INSERT INTO placements (account_id, folder_id, uidvalidity, uid, message_key, read_flag)
+                 VALUES (?, ?, ?, ?, ?, 0)",
             )
-            .bind(id)
+            .bind("acct-1")
+            .bind("INBOX")
+            .bind(validity)
+            .bind("1")
+            .bind(format!("key-{validity}"))
             .execute(engine.pool())
             .await
-            .unwrap();
+            .expect("both placements must insert");
         }
 
-        // Re-running the migration must finish the backfill and build the index.
-        engine
-            .ensure_messages_identity_columns()
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM placements")
+            .fetch_one(engine.pool())
             .await
-            .expect("a partial migration must complete on the next open");
+            .unwrap();
+        assert_eq!(count, 2);
+    }
 
-        // Both legacy rows survive with a unique, non-empty backfilled remote id.
+    #[tokio::test]
+    async fn a_filter_fired_claim_is_won_exactly_once() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        assert!(engine.claim_filter_fire("rule-1", "key-1").await.unwrap());
+        assert!(
+            !engine.claim_filter_fire("rule-1", "key-1").await.unwrap(),
+            "a second claim on the same (rule, message) must lose"
+        );
+        assert!(
+            engine.claim_filter_fire("rule-2", "key-1").await.unwrap(),
+            "a different rule still gets its own claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn bumping_the_identity_schema_rebuilds_placements_and_claims_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nuncio.db");
+        let secrets = crate::vault::SecretManager::mock();
+
+        {
+            let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO placements (account_id, folder_id, uidvalidity, uid, message_key, read_flag)
+                 VALUES ('a', 'INBOX', '1', '1', 'k', 0)",
+            )
+            .execute(engine.pool())
+            .await
+            .unwrap();
+            engine.claim_filter_fire("rule-1", "k").await.unwrap();
+            // Pretend this file was written by the previous identity generation.
+            sqlx::query("PRAGMA user_version = 1")
+                .execute(engine.pool())
+                .await
+                .unwrap();
+            engine.close().await;
+        }
+
+        let engine = DatabaseEngine::connect_file(&db_path, &secrets)
+            .await
+            .unwrap();
+        let (placements,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM placements")
+            .fetch_one(engine.pool())
+            .await
+            .unwrap();
+        let (claims,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM filter_fired")
+            .fetch_one(engine.pool())
+            .await
+            .unwrap();
         assert_eq!(
-            engine.get_message("legacy-a").await.unwrap().remote_id,
-            "legacy-a"
+            placements, 0,
+            "placements are derived from the server and must be rebuilt"
         );
         assert_eq!(
-            engine.get_message("legacy-b").await.unwrap().remote_id,
-            "legacy-b"
+            claims, 0,
+            "fire-once claims name message keys that no longer resolve"
         );
-
-        // The unique identity index is now present, and re-running is idempotent.
-        let index: Option<(String,)> = sqlx::query_as(
-            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_identity'",
-        )
-        .fetch_optional(engine.pool())
-        .await
-        .unwrap();
-        assert!(index.is_some(), "the unique identity index must be built");
-        engine
-            .ensure_messages_identity_columns()
-            .await
-            .expect("re-running an already-complete migration is a no-op");
+        engine.close().await;
     }
 
     #[tokio::test]
