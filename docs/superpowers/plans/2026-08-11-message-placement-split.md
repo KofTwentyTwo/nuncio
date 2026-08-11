@@ -11,7 +11,11 @@
 ## Global Constraints
 
 - **Branch:** `story/message-placement-split`, already created off `dev` with `story/message-id-capture` (#386) and `story/schema-version-and-token-scheme` (#387) merged in. Baseline gate is green on it (627+ tests). Do not rebase onto the #401–#403 chain.
-- **Gate (all three must pass before every commit):** `cargo fmt --all -- --check`, then `cargo check-all`, then `cargo test-all`. Warnings are hard errors; `unwrap_used` / `expect_used` / `panic` / `todo` are `deny` outside tests.
+- **Gate.** Removing `Email`'s folder scalars breaks four crates until Task 9 lands, so the gate is staged:
+  - **Tasks 1–8:** `cargo fmt --all -- --check` **and** `cargo test -p <crate under change>` must pass. The workspace will not compile end-to-end during these tasks; that is expected and is not a reason to stop or to widen the task.
+  - **Task 9 onward, and the PR head:** the full gate — `cargo fmt --all -- --check`, then `cargo check-all`, then `cargo test-all`.
+  - Warnings are hard errors throughout; `unwrap_used` / `expect_used` / `panic` / `todo` are `deny` outside tests. Never silence a lint to get a commit through.
+  - `cargo test-all` can exceed a 10-minute tool timeout on this workspace; allow ~540s.
 - **Commits:** Conventional Commits, imperative, <72-char subject, **no AI attribution**. `Refs #394` in the message body is fine.
 - **Comments:** explain intent, constraints, rationale. **No issue numbers, GH refs, or `Phase N` breadcrumbs in `.rs` / `.proto` comments.**
 - **No live network in tests.** IMAP/JMAP/SMTP/CalDAV/CardDAV all mocked; keyring via `MockKeyring`. Ephemeral SQLite (`tempfile` / `:memory:`) per test.
@@ -387,7 +391,12 @@ git commit -m "feat(core): separate message identity from mailbox placement"
 
 **Interfaces:**
 - Consumes: `DatabaseEngine::reconcile_schema_version` and `reset_cached_message_store` (both from #387).
-- Produces: `placements` and `filter_fired` tables; `messages` reshaped to `message_key` + identity columns; `IDENTITY_SCHEMA_VERSION == 2`.
+- Produces: `placements` and `filter_fired` tables; `messages` reshaped to `message_key` + identity columns; `IDENTITY_SCHEMA_VERSION == 2`; and three store methods —
+  - `claim_filter_fire(&self, rule_id: &str, message_key: &str) -> Result<bool, DatabaseError>`
+  - `has_filter_fired(&self, rule_id: &str, message_key: &str) -> Result<bool, DatabaseError>`
+  - `filter_fire_count(&self) -> Result<i64, DatabaseError>`
+
+  The last two are `pub` (not test-only) because `nunciod` asserts on the ledger from another crate and cannot reach the pool.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -630,6 +639,41 @@ separate function.
         .map_err(DatabaseError::Query)?;
 
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Whether `rule_id` has already acted on `message_key`.
+    ///
+    /// Public rather than test-only: the claim ledger answers a question
+    /// operators and the outbox both have a real reason to ask -- "did this rule
+    /// already act on this message" -- and callers in other crates cannot reach
+    /// the pool directly.
+    pub async fn has_filter_fired(
+        &self,
+        rule_id: &str,
+        message_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        let found: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM filter_fired WHERE rule_id = ? AND message_key = ?",
+        )
+        .bind(rule_id)
+        .bind(message_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+
+        Ok(found.is_some())
+    }
+
+    /// How many distinct (rule, message) fires the ledger records.
+    ///
+    /// Counterpart to [`Self::has_filter_fired`] for callers that need to assert
+    /// on the ledger as a whole rather than one entry.
+    pub async fn filter_fire_count(&self) -> Result<i64, DatabaseError> {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM filter_fired")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+        Ok(count)
     }
 ```
 
@@ -1950,11 +1994,12 @@ async fn a_rule_fires_once_for_a_message_that_lands_in_two_folders() {
         .await
         .unwrap();
 
-    let (fires,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM filter_fired")
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-    assert_eq!(fires, 1, "one claim, therefore one set of actions");
+    assert_eq!(
+        db.filter_fire_count().await.unwrap(),
+        1,
+        "one claim, therefore one set of actions"
+    );
+    assert!(db.has_filter_fired(&rule_matching_everything().id, &expected_key()).await.unwrap());
 }
 ```
 
@@ -2146,6 +2191,42 @@ Run: `cargo test -p nunciod --test spine_e2e_test list_messages_reports_the_fold
 Expected: FAIL to compile until `grpc.rs` is migrated.
 
 - [ ] **Step 3: Migrate the gRPC layer**
+
+**Account scoping at the boundary.** The store methods now take an
+`account_id`, but `ListFoldersRequest` and `ListMessagesRequest` carry none and
+this plan does not change the wire schema. Bridge it by iterating the accounts
+and merging, which reproduces exactly today's behaviour — no wire change, no
+regression:
+
+```rust
+        // The request carries no account, so this reproduces the pre-existing
+        // account-blind view: every account's folders, merged by folder id. The
+        // store below it is account-scoped and correct; only this presentation
+        // is ambiguous, and it is ambiguous in precisely the way it already was.
+        // An account-scoped request field is the real fix and belongs with the
+        // rest of the placement surface.
+        let mut merged: std::collections::BTreeMap<String, nuncio_core::model::Folder> =
+            std::collections::BTreeMap::new();
+        for account in db.list_accounts().await? {
+            for folder in db.list_folders(&account.id).await? {
+                let entry = merged.entry(folder.id.clone()).or_insert_with(|| {
+                    nuncio_core::model::Folder {
+                        id: folder.id.clone(),
+                        name: folder.name.clone(),
+                        total_messages: 0,
+                        unread_messages: 0,
+                    }
+                });
+                entry.total_messages += folder.total_messages;
+                entry.unread_messages += folder.unread_messages;
+            }
+        }
+```
+
+Apply the same account loop to `ListMessages`, concatenating each account's
+matches for the requested folder and then applying the existing ordering and
+page size to the merged result. Use whatever account-listing method `db`
+already exposes rather than adding one.
 
 `ListMessages` already carries a folder, so map each `(Email, Placement)` pair
 straight onto the proto `Message`, taking `folder_id` and `read` from the
