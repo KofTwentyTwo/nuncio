@@ -1,7 +1,7 @@
 //! IMAP4rev1 dual-socket connection engine and IDLE push stream manager.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Email, Folder};
+use nuncio_core::model::{Email, Folder, MessageIdentity, Placement, RemoteIdentity};
 use nuncio_core::TlsMode;
 use std::fmt::Debug;
 use std::pin::Pin;
@@ -52,7 +52,7 @@ const MAX_MESSAGES_PER_FETCH_BATCH: usize = 200;
 /// would ever accept is pointless to transfer only to reject.
 const MAX_MESSAGE_BODY_BYTES: u32 = 25 * 1024 * 1024;
 
-use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
+use crate::backend::{MailBackend, PlacedMessage, RemoteMutationKind, RemoteMutationSpec};
 use crate::parser::{MailError, MimeParserAdapter};
 
 /// Recover a raw IMAP UID from a [`RemoteMutationSpec::remote_id`] (a decimal
@@ -703,7 +703,8 @@ impl ImapEngine {
     }
 
     /// Fetch and parse the messages in a folder over an active IMAP session,
-    /// returning the fetched messages and the new sync checkpoint.
+    /// returning each message with the occupancy it was found in, plus the new
+    /// sync checkpoint.
     ///
     /// `since_state` is the checkpoint returned by a previous sync of this
     /// folder, encoded as `"{uidvalidity}:{uidnext}"` (see [`CHECKPOINT_DELIM`]).
@@ -719,7 +720,7 @@ impl ImapEngine {
         folder_id: &str,
         since_state: Option<&str>,
         session: &mut async_imap::Session<S>,
-    ) -> Result<(Vec<Email>, String), MailError>
+    ) -> Result<(Vec<PlacedMessage>, String), MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -758,7 +759,7 @@ impl ImapEngine {
         since_state: Option<&str>,
         session: &mut async_imap::Session<S>,
         batch_size: usize,
-    ) -> Result<(Vec<Email>, String), MailError>
+    ) -> Result<(Vec<PlacedMessage>, String), MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -910,38 +911,88 @@ impl ImapEngine {
         Ok((emails, new_checkpoint))
     }
 
-    /// Build an [`Email`] from a full-body (or envelope-only) FETCH item. When
-    /// the item carries a `BODY[]` it is parsed as a full MIME message; when it
-    /// does not (a server that returned only the ENVELOPE), a minimal record is
-    /// synthesised from the envelope so the message is still surfaced honestly.
+    /// Build the identity and placement for one fetched message.
+    ///
+    /// `EMAILID` and `X-GM-MSGID` are only present when the server advertised
+    /// `OBJECTID` / `X-GM-EXT-1` and the FETCH asked for them; when neither is
+    /// available the pair of `Message-ID` and content hash carries the identity,
+    /// and only if both are missing does this fall back to the folder-scoped
+    /// surrogate -- which is the one tier that does not survive a move.
+    ///
+    /// The server-supplied hints arrive as one [`RemoteIdentity`] rather than as
+    /// four loose arguments: they are already a single value at every call site,
+    /// and spreading them out buys no clarity while pushing this function past
+    /// the argument-count lint.
+    fn place(
+        &self,
+        folder_id: &str,
+        uid_validity: &str,
+        remote_id: &str,
+        remote: RemoteIdentity<'_>,
+        read: bool,
+    ) -> (MessageIdentity, Placement) {
+        let identity =
+            Email::derive_message_key(&self.account_id, remote, folder_id, uid_validity, remote_id);
+        let placement = Placement {
+            account_id: self.account_id.clone(),
+            folder_id: folder_id.to_string(),
+            uid_validity: uid_validity.to_string(),
+            remote_id: remote_id.to_string(),
+            read,
+        };
+        (identity, placement)
+    }
+
+    /// Build a [`PlacedMessage`] from a full-body (or envelope-only) FETCH item.
+    /// When the item carries a `BODY[]` it is parsed as a full MIME message;
+    /// when it does not (a server that returned only the ENVELOPE), a minimal
+    /// record is synthesised from the envelope so the message is still surfaced
+    /// honestly.
     fn build_email_from_fetch(
         &self,
         folder_id: &str,
         server_uid_validity: Option<u32>,
         fetch_data: &async_imap::types::Fetch,
-    ) -> Result<Email, MailError> {
+    ) -> Result<PlacedMessage, MailError> {
         let uid_num = fetch_data.uid.unwrap_or(0);
         // The message is addressed on the wire by its UID within the folder's
-        // UIDVALIDITY scope; the persisted id is an opaque surrogate hashed over
-        // both plus the account and folder, so the same UID in another
-        // folder/account can never collide.
+        // UIDVALIDITY scope. That pair, with the folder and account, is the
+        // *placement*; the message's own identity is derived separately so that
+        // moving it between folders does not make it a different message.
         let remote_id = uid_num.to_string();
         let uid_validity = server_uid_validity
             .map(|v| v.to_string())
             .unwrap_or_default();
-        let email_id = Email::surrogate_id(&self.account_id, folder_id, &uid_validity, &remote_id);
 
         let is_read = fetch_data
             .flags()
             .any(|flag| matches!(flag, async_imap::types::Flag::Seen));
 
+        // EMAILID (RFC 8474) and X-GM-MSGID are not requested by the current
+        // FETCH, so identity rests on the Message-ID/content pair where the
+        // message carried a Message-ID and on the folder-scoped surrogate
+        // otherwise. Adding those FETCH items lifts existing rows to a stronger
+        // tier on the next resync at no cost to this code path.
         if let Some(raw_bytes) = fetch_data.body() {
-            let mut email =
-                MimeParserAdapter::parse_mime(&email_id, &self.account_id, folder_id, raw_bytes)?;
-            email.remote_id = remote_id;
-            email.uid_validity = uid_validity;
-            email.read = is_read;
-            return Ok(email);
+            let mut email = MimeParserAdapter::parse_mime(&self.account_id, raw_bytes)?;
+            let (identity, placement) = self.place(
+                folder_id,
+                &uid_validity,
+                &remote_id,
+                RemoteIdentity {
+                    email_id: None,
+                    gm_msgid: None,
+                    message_id: email.message_id.as_deref(),
+                    content_hash: email.content_hash.as_deref(),
+                },
+                is_read,
+            );
+            email.id = identity.key;
+            return Ok(PlacedMessage {
+                email,
+                source: identity.source,
+                placement,
+            });
         }
 
         let subject = fetch_data
@@ -973,26 +1024,43 @@ impl ImapEngine {
             .and_then(|env| env.message_id.as_ref())
             .and_then(|raw| Email::normalize_message_id(&String::from_utf8_lossy(raw)));
 
-        Ok(Email {
-            id: email_id,
-            account_id: self.account_id.clone(),
-            folder_id: folder_id.to_string(),
-            remote_id,
-            uid_validity,
-            subject,
-            sender,
-            recipient,
-            received_at,
-            read: is_read,
-            body_plain: None,
-            body_html: None,
-            attachments: Vec::new(),
-            message_id,
-            content_hash: None,
+        // With no octets there is no content hash, and the `Message-ID` alone
+        // is never enough to key on, so this path lands on the surrogate tier.
+        // That is the honest answer: nothing was fetched that could prove two
+        // folders hold the same message.
+        let (identity, placement) = self.place(
+            folder_id,
+            &uid_validity,
+            &remote_id,
+            RemoteIdentity {
+                email_id: None,
+                gm_msgid: None,
+                message_id: message_id.as_deref(),
+                content_hash: None,
+            },
+            is_read,
+        );
+
+        Ok(PlacedMessage {
+            email: Email {
+                id: identity.key,
+                account_id: self.account_id.clone(),
+                subject,
+                sender,
+                recipient,
+                received_at,
+                body_plain: None,
+                body_html: None,
+                attachments: Vec::new(),
+                message_id,
+                content_hash: None,
+            },
+            source: identity.source,
+            placement,
         })
     }
 
-    /// Build an [`Email`] for a message whose body exceeded
+    /// Build a [`PlacedMessage`] for a message whose body exceeded
     /// [`MAX_MESSAGE_BODY_BYTES`]: its headers (`BODY[HEADER]`) are parsed for
     /// honest metadata (subject/sender/date) but the oversized body is left
     /// unfetched, so the record carries an EMPTY body rather than a fabricated
@@ -1003,26 +1071,20 @@ impl ImapEngine {
         folder_id: &str,
         server_uid_validity: Option<u32>,
         fetch_data: &async_imap::types::Fetch,
-    ) -> Email {
+    ) -> PlacedMessage {
         let uid_num = fetch_data.uid.unwrap_or(0);
         let remote_id = uid_num.to_string();
         let uid_validity = server_uid_validity
             .map(|v| v.to_string())
             .unwrap_or_default();
-        let email_id = Email::surrogate_id(&self.account_id, folder_id, &uid_validity, &remote_id);
         let is_read = fetch_data
             .flags()
             .any(|flag| matches!(flag, async_imap::types::Flag::Seen));
 
         if let Some(header_bytes) = fetch_data.header() {
-            if let Ok(mut email) =
-                MimeParserAdapter::parse_mime(&email_id, &self.account_id, folder_id, header_bytes)
-            {
+            if let Ok(mut email) = MimeParserAdapter::parse_mime(&self.account_id, header_bytes) {
                 // A headers-only parse yields no body, but be explicit that the
                 // oversized body was intentionally not fetched.
-                email.remote_id = remote_id;
-                email.uid_validity = uid_validity;
-                email.read = is_read;
                 email.body_plain = None;
                 email.body_html = None;
                 email.attachments = Vec::new();
@@ -1030,9 +1092,29 @@ impl ImapEngine {
                 // `content_hash` is defined over a message's FULL octets.
                 // Keeping that value would publish a hash that silently means
                 // something else, so drop it; the `Message-ID` it recovered
-                // from those headers is still correct and is kept.
+                // from those headers is still correct and is kept. Dropping it
+                // also costs this message the content tier -- a `Message-ID`
+                // never keys on its own -- so an oversized message identifies
+                // by its folder-scoped surrogate until the octets are fetched.
                 email.content_hash = None;
-                return email;
+                let (identity, placement) = self.place(
+                    folder_id,
+                    &uid_validity,
+                    &remote_id,
+                    RemoteIdentity {
+                        email_id: None,
+                        gm_msgid: None,
+                        message_id: email.message_id.as_deref(),
+                        content_hash: None,
+                    },
+                    is_read,
+                );
+                email.id = identity.key;
+                return PlacedMessage {
+                    email,
+                    source: identity.source,
+                    placement,
+                };
             }
         }
 
@@ -1040,22 +1122,31 @@ impl ImapEngine {
         // `build_email_from_fetch` cannot error on this path (no body to parse),
         // but if it ever did, surface a minimal honest record rather than panic.
         self.build_email_from_fetch(folder_id, server_uid_validity, fetch_data)
-            .unwrap_or_else(|_| Email {
-                id: email_id,
-                account_id: self.account_id.clone(),
-                folder_id: folder_id.to_string(),
-                remote_id,
-                uid_validity,
-                subject: "No Subject".to_string(),
-                sender: "unknown@nuncio.mx".to_string(),
-                recipient: "me@nuncio.mx".to_string(),
-                received_at: 0,
-                read: is_read,
-                body_plain: None,
-                body_html: None,
-                attachments: Vec::new(),
-                message_id: None,
-                content_hash: None,
+            .unwrap_or_else(|_| {
+                let (identity, placement) = self.place(
+                    folder_id,
+                    &uid_validity,
+                    &remote_id,
+                    RemoteIdentity::default(),
+                    is_read,
+                );
+                PlacedMessage {
+                    email: Email {
+                        id: identity.key,
+                        account_id: self.account_id.clone(),
+                        subject: "No Subject".to_string(),
+                        sender: "unknown@nuncio.mx".to_string(),
+                        recipient: "me@nuncio.mx".to_string(),
+                        received_at: 0,
+                        body_plain: None,
+                        body_html: None,
+                        attachments: Vec::new(),
+                        message_id: None,
+                        content_hash: None,
+                    },
+                    source: identity.source,
+                    placement,
+                }
             })
     }
 
@@ -1067,7 +1158,7 @@ impl ImapEngine {
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<(Vec<PlacedMessage>, String), MailError> {
         let (username, password) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
             _ => {
@@ -1479,7 +1570,7 @@ impl MailBackend for ImapEngine {
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<(Vec<PlacedMessage>, String), MailError> {
         self.sync_folder_messages(folder_id, since_state).await
     }
 
@@ -1491,6 +1582,7 @@ impl MailBackend for ImapEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nuncio_core::model::IdentitySource;
     use tracing_test::traced_test;
 
     #[tokio::test]
@@ -1814,7 +1906,7 @@ mod tests {
         uidnext: u32,
         since_state: Option<String>,
         batch_size: usize,
-    ) -> (Vec<Email>, String, Vec<String>) {
+    ) -> (Vec<PlacedMessage>, String, Vec<String>) {
         let (client_io, server_io) = tokio::io::duplex(65536);
         let fetch_cmds = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let server_cmds = fetch_cmds.clone();
@@ -1975,14 +2067,14 @@ mod tests {
         // body -- never a fabricated one.
         let oversized = emails
             .iter()
-            .find(|e| e.remote_id == "2")
+            .find(|e| e.placement.remote_id == "2")
             .expect("oversized message must be present");
         assert!(
-            oversized.body_plain.is_none() && oversized.body_html.is_none(),
+            oversized.email.body_plain.is_none() && oversized.email.body_html.is_none(),
             "oversized message must carry no body, got: {oversized:?}"
         );
         assert!(
-            oversized.subject.contains('2'),
+            oversized.email.subject.contains('2'),
             "oversized message must keep honest header metadata, got: {oversized:?}"
         );
 
@@ -1990,10 +2082,10 @@ mod tests {
         for uid in ["1", "3"] {
             let email = emails
                 .iter()
-                .find(|e| e.remote_id == uid)
+                .find(|e| e.placement.remote_id == uid)
                 .expect("normal message present");
             assert!(
-                email.body_plain.is_some(),
+                email.email.body_plain.is_some(),
                 "normal message {uid} must have a body, got: {email:?}"
             );
         }
@@ -2799,5 +2891,165 @@ mod tests {
             IdleSocketState::Listening
         );
         Ok(())
+    }
+
+    /// Drive a folder sync over a scripted server that serves exactly ONE
+    /// message: `uid`, with `raw` as its full RFC822 octets and `seen`
+    /// controlling its `\Seen` flag. Holding the octets fixed while varying the
+    /// folder, UIDVALIDITY and UID is the shape of "the same message, found in
+    /// two mailboxes" -- which is what the identity/placement split exists for.
+    async fn run_single_message_sync(
+        folder_id: &str,
+        uidvalidity: u32,
+        uid: u32,
+        seen: bool,
+        raw: &str,
+    ) -> PlacedMessage {
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let raw = raw.to_string();
+        let uidnext = uid.saturating_add(1);
+        let flags = if seen { "\\Seen" } else { "" };
+
+        let server = tokio::spawn(async move {
+            let mut io = server_io;
+            while let Some(line) = read_scripted_line(&mut io).await {
+                let tag = line.split_whitespace().next().unwrap_or("").to_string();
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("UID FETCH") {
+                    let size = raw.len();
+                    let resp = if upper.contains("BODY.PEEK[]") {
+                        format!(
+                            "* 1 FETCH (UID {uid} RFC822.SIZE {size} FLAGS ({flags}) \
+                             BODY[] {{{size}}}\r\n{raw})\r\n{tag} OK FETCH completed\r\n"
+                        )
+                    } else {
+                        // Enumeration pass: UID + size only, no body.
+                        format!(
+                            "* 1 FETCH (UID {uid} RFC822.SIZE {size})\r\n\
+                             {tag} OK FETCH completed\r\n"
+                        )
+                    };
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("LOGIN") {
+                    let _ = io
+                        .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("SELECT") {
+                    let resp = format!(
+                        "* FLAGS (\\Seen)\r\n* 1 EXISTS\r\n* 0 RECENT\r\n\
+                         * OK [UIDVALIDITY {uidvalidity}] ok\r\n* OK [UIDNEXT {uidnext}] ok\r\n\
+                         {tag} OK [READ-WRITE] SELECT done\r\n"
+                    );
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("LOGOUT") {
+                    let _ = io
+                        .write_all(format!("* BYE\r\n{tag} OK LOGOUT\r\n").as_bytes())
+                        .await;
+                    break;
+                }
+            }
+        });
+
+        let client = async_imap::Client::new(client_io);
+        let mut session = client
+            .login("user", "pass")
+            .await
+            .map_err(|(e, _)| e)
+            .expect("scripted login succeeds");
+        let engine = ImapEngine::new("acct-1", "example.test", 993);
+        let (placed, _checkpoint) = engine
+            .sync_folder_messages_batched(folder_id, None, &mut session, 8)
+            .await
+            .expect("scripted sync succeeds");
+        drop(session);
+        let _ = server.await;
+
+        placed
+            .into_iter()
+            .next()
+            .expect("the scripted message must be surfaced")
+    }
+
+    #[tokio::test]
+    async fn the_imap_backend_gives_one_identity_to_a_message_found_in_two_folders() {
+        // Byte-identical octets under two different UIDs in two different
+        // mailboxes -- an IMAP COPY, or a Gmail label. Identity comes from the
+        // Message-ID/content pair, so the derived key is ONE value while the
+        // placements stay distinct. Before the split this was two messages.
+        let raw = "Message-ID: <a@b.example>\r\nSubject: Hi\r\n\
+                   From: alice@b.example\r\n\r\nbody\r\n";
+        let inbox = run_single_message_sync("INBOX", 42, 5, true, raw).await;
+        let archive = run_single_message_sync("Archive", 77, 9, false, raw).await;
+
+        assert_eq!(inbox.source, IdentitySource::MessageIdContent);
+        assert_eq!(archive.source, IdentitySource::MessageIdContent);
+        assert_eq!(
+            inbox.email.id, archive.email.id,
+            "the same octets in two folders must derive one message key"
+        );
+
+        assert_eq!(inbox.placement.account_id, "acct-1");
+        assert_eq!(inbox.placement.folder_id, "INBOX");
+        assert_eq!(inbox.placement.uid_validity, "42");
+        assert_eq!(inbox.placement.remote_id, "5");
+        assert_eq!(archive.placement.folder_id, "Archive");
+        assert_eq!(archive.placement.uid_validity, "77");
+        assert_eq!(archive.placement.remote_id, "9");
+
+        // IMAP `\Seen` is per-mailbox (RFC 3501 section 2.3.2), so read state
+        // belongs to the occupancy, not to the message.
+        assert!(inbox.placement.read);
+        assert!(!archive.placement.read);
+    }
+
+    #[tokio::test]
+    async fn a_message_with_no_message_id_stays_on_the_folder_scoped_surrogate() {
+        // RFC 5322 section 3.6.4 makes Message-ID a SHOULD, so a message may
+        // carry none. Without it there is no content tier, and the backend must
+        // report two honest folder-scoped keys rather than claim a stability
+        // the server gave it no basis for.
+        let raw = "Subject: No id\r\nFrom: alice@b.example\r\n\r\nbody\r\n";
+        let inbox = run_single_message_sync("INBOX", 42, 5, false, raw).await;
+        let archive = run_single_message_sync("Archive", 77, 9, false, raw).await;
+
+        assert_eq!(inbox.source, IdentitySource::Surrogate);
+        assert_ne!(
+            inbox.email.id, archive.email.id,
+            "a surrogate is folder-scoped and must not be claimed to survive a move"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_fetched_from_two_folders_keeps_one_identity() {
+        // Both folders return the same Message-ID and the same octets, so the
+        // content tier must produce one key from two different UIDs.
+        let raw = b"Message-ID: <a@b.example>\r\nSubject: Hi\r\n\r\nbody";
+        let hash = Email::content_hash_of(raw);
+        let inbox = Email::derive_message_key(
+            "acct-1",
+            RemoteIdentity {
+                email_id: None,
+                gm_msgid: None,
+                message_id: Some("a@b.example"),
+                content_hash: Some(&hash),
+            },
+            "INBOX",
+            "42",
+            "5",
+        );
+        let archive = Email::derive_message_key(
+            "acct-1",
+            RemoteIdentity {
+                email_id: None,
+                gm_msgid: None,
+                message_id: Some("a@b.example"),
+                content_hash: Some(&hash),
+            },
+            "Archive",
+            "77",
+            "9",
+        );
+        assert_eq!(inbox.key, archive.key);
+        assert_eq!(inbox.source, IdentitySource::MessageIdContent);
     }
 }

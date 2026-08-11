@@ -2,6 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use nuncio_core::model::IdentitySource;
 use nuncio_mail::{JmapEngine, MailBackend, RemoteMutationKind, RemoteMutationSpec};
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, method, path};
@@ -84,13 +85,16 @@ async fn wiremock_jmap_session_discovery_and_email_get_sync() {
         .expect("parse email get");
 
     assert_eq!(emails.len(), 1);
-    // The JMAP object id is preserved as the protocol-native `remote_id`, while
-    // the persisted id is an opaque 64-char surrogate hash (never the raw id).
-    assert_eq!(emails[0].remote_id, "msg-wm-100");
-    assert_ne!(emails[0].id, "msg-wm-100");
-    assert_eq!(emails[0].id.len(), 64);
-    assert_eq!(emails[0].subject, "WireMock JMAP E2E Test");
-    assert_eq!(emails[0].sender, "sender@nuncio.mx");
+    // The JMAP object id is preserved as the placement's protocol-native
+    // `remote_id`, while the message's own id is an opaque 64-char derived key
+    // (never the raw id). The object id is account-stable, so it enters the
+    // precedence at the EMAILID tier rather than as a folder-scoped surrogate.
+    assert_eq!(emails[0].placement.remote_id, "msg-wm-100");
+    assert_eq!(emails[0].source, IdentitySource::EmailId);
+    assert_ne!(emails[0].email.id, "msg-wm-100");
+    assert_eq!(emails[0].email.id.len(), 64);
+    assert_eq!(emails[0].email.subject, "WireMock JMAP E2E Test");
+    assert_eq!(emails[0].email.sender, "sender@nuncio.mx");
     assert_eq!(new_state, "sync-state-500");
 }
 
@@ -204,15 +208,18 @@ async fn jmap_engine_sync_folders_and_messages_through_mail_backend_trait() {
         .await
         .expect("sync_messages succeeds");
     assert_eq!(emails.len(), 1);
-    assert_eq!(emails[0].remote_id, "msg-wm-200");
-    assert_ne!(emails[0].id, "msg-wm-200");
-    assert_eq!(emails[0].id.len(), 64);
-    assert_eq!(emails[0].subject, "Trait-Level JMAP Sync");
-    assert_eq!(emails[0].sender, "sender@nuncio.mx");
-    assert_eq!(emails[0].received_at, 1700002000);
-    assert!(!emails[0].read);
+    assert_eq!(emails[0].placement.remote_id, "msg-wm-200");
+    assert_eq!(emails[0].placement.folder_id, "inbox");
+    assert_eq!(emails[0].source, IdentitySource::EmailId);
+    assert_ne!(emails[0].email.id, "msg-wm-200");
+    assert_eq!(emails[0].email.id.len(), 64);
+    assert_eq!(emails[0].email.subject, "Trait-Level JMAP Sync");
+    assert_eq!(emails[0].email.sender, "sender@nuncio.mx");
+    assert_eq!(emails[0].email.received_at, 1700002000);
+    // Read state is a property of the occupancy, not of the message.
+    assert!(!emails[0].placement.read);
     assert_eq!(
-        emails[0].body_plain,
+        emails[0].email.body_plain,
         Some("Fetched through the MailBackend trait.".to_string())
     );
     assert_eq!(new_state, "sync-state-900");

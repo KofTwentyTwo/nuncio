@@ -11,7 +11,8 @@ pub mod parser;
 pub mod smtp;
 
 pub use backend::{
-    MailBackend, MessageSender, OutboundMessage, RemoteMutationKind, RemoteMutationSpec,
+    MailBackend, MessageSender, OutboundMessage, PlacedMessage, RemoteMutationKind,
+    RemoteMutationSpec,
 };
 pub use imap::{IdleSocketState, ImapDualSocketManager, ImapEngine};
 pub use jmap::JmapEngine;

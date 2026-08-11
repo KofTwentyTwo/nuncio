@@ -1,9 +1,27 @@
 //! Protocol-agnostic async mail backend trait definitions.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Attachment, Email, Folder};
+use nuncio_core::model::{Attachment, Email, Folder, IdentitySource, Placement};
 
 use crate::parser::MailError;
+
+/// One message as a backend surfaced it: identity, content, and the mailbox
+/// occupancy it was found in.
+///
+/// Backends emit this rather than a bare [`Email`] because a fetch observes two
+/// separate facts at once: *which message this is* -- folder-independent, and
+/// the same in every mailbox that holds a copy -- and *where this pass found
+/// it*, which is per-mailbox and changes under a move. Collapsing them into one
+/// record is what made a moved message read as a new one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedMessage {
+    /// Identity and content. `email.id` is the derived message key.
+    pub email: Email,
+    /// Which precedence tier produced `email.id`.
+    pub source: IdentitySource,
+    /// The occupancy this fetch found it in.
+    pub placement: Placement,
+}
 
 /// The remote change a [`RemoteMutationSpec`] applies to one addressed message.
 ///
@@ -72,12 +90,18 @@ pub trait MailBackend: Send + Sync {
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError>;
 
     /// Synchronize message envelopes for a specific folder since a checkpoint state.
-    /// Returns the updated email list and the new server state checkpoint.
+    /// Returns the messages with the occupancy each was found in, and the new
+    /// server state checkpoint.
+    ///
+    /// Every message is reported as a [`PlacedMessage`] so the caller can tell
+    /// a message it already stores in another folder from one it has never
+    /// seen: the derived key is the same in both folders, only the placement
+    /// differs.
     async fn sync_messages(
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError>;
+    ) -> Result<(Vec<PlacedMessage>, String), MailError>;
 
     /// Apply a remote mutation (move/copy/flag/delete) to a single message
     /// against the real server. MUST return `Ok(())` only when the server

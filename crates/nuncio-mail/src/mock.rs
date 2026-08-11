@@ -1,17 +1,19 @@
 //! Deterministic mock mail backend for offline testing and integration verification.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Email, Folder};
+use nuncio_core::model::Folder;
 use std::sync::{Arc, Mutex};
 
-use crate::backend::{MailBackend, MessageSender, OutboundMessage, RemoteMutationSpec};
+use crate::backend::{
+    MailBackend, MessageSender, OutboundMessage, PlacedMessage, RemoteMutationSpec,
+};
 use crate::parser::MailError;
 
 /// Thread-safe mock mail backend for offline testing.
 #[derive(Debug, Clone, Default)]
 pub struct MockMailBackend {
     folders: Arc<Mutex<Vec<Folder>>>,
-    messages: Arc<Mutex<Vec<Email>>>,
+    messages: Arc<Mutex<Vec<PlacedMessage>>>,
     should_fail: Arc<Mutex<bool>>,
     /// Every `since_state` argument this mock's `sync_messages` was called
     /// with, in call order, so tests can prove a caller threads the returned
@@ -68,10 +70,13 @@ impl MockMailBackend {
         }
     }
 
-    /// Add a mock email message to the storage.
-    pub fn add_message(&self, email: Email) {
+    /// Add a mock message to the storage, as the occupancy a backend would
+    /// have found it in. Taking a [`PlacedMessage`] rather than a bare `Email`
+    /// lets a test stage the same message key in two folders and prove the
+    /// caller treats it as one message in two places.
+    pub fn add_message(&self, message: PlacedMessage) {
         if let Ok(mut guard) = self.messages.lock() {
-            guard.push(email);
+            guard.push(message);
         }
     }
 
@@ -110,7 +115,7 @@ impl MailBackend for MockMailBackend {
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<(Vec<PlacedMessage>, String), MailError> {
         // Record the checkpoint arg before any early return, so even a failing
         // call is visible to a test asserting on how the caller resumes.
         if let Ok(mut calls) = self.since_state_calls.lock() {
@@ -145,7 +150,7 @@ impl MailBackend for MockMailBackend {
             .map_err(|e| MailError::ParseFailed(e.to_string()))?;
         let matches = messages
             .iter()
-            .filter(|m| m.folder_id == folder_id)
+            .filter(|m| m.placement.folder_id == folder_id)
             .cloned()
             .collect();
         Ok((matches, returned_state))
@@ -229,6 +234,7 @@ impl MessageSender for MockMessageSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nuncio_core::model::{Email, IdentitySource, Placement};
 
     #[tokio::test]
     async fn mock_backend_folder_and_message_operations() {
@@ -240,24 +246,30 @@ mod tests {
             unread_messages: 1,
         });
 
-        let email = Email {
-            id: "msg-mock-1".to_string(),
-            account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
-            remote_id: "1".to_string(),
-            uid_validity: "1".to_string(),
-            subject: "Mock Test".to_string(),
-            sender: "alice@nuncio.mx".to_string(),
-            recipient: "bob@nuncio.mx".to_string(),
-            received_at: 1700000000,
-            read: false,
-            body_plain: Some("Mock body".to_string()),
-            body_html: None,
-            attachments: Vec::new(),
-            message_id: None,
-            content_hash: None,
+        let placed = PlacedMessage {
+            email: Email {
+                id: "msg-mock-1".to_string(),
+                account_id: "acct-1".to_string(),
+                subject: "Mock Test".to_string(),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1700000000,
+                body_plain: Some("Mock body".to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
+            },
+            source: IdentitySource::Surrogate,
+            placement: Placement {
+                account_id: "acct-1".to_string(),
+                folder_id: "inbox".to_string(),
+                uid_validity: "1".to_string(),
+                remote_id: "1".to_string(),
+                read: false,
+            },
         };
-        mock.add_message(email.clone());
+        mock.add_message(placed.clone());
 
         let folders = mock.sync_folders().await.expect("sync folders succeeds");
         assert_eq!(folders.len(), 1);
@@ -267,6 +279,10 @@ mod tests {
             .await
             .expect("sync messages succeeds");
         assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0], placed,
+            "the mock must hand back exactly the placement it was staged with"
+        );
         assert_eq!(state, "mock-state-token-100");
 
         // Test error simulation

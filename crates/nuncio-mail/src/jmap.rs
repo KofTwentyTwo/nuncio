@@ -1,19 +1,19 @@
 //! JMAP (RFC 8620 / RFC 8621) protocol engine, session discovery, and differential update parser.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Email, Folder};
+use nuncio_core::model::{Email, Folder, Placement, RemoteIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
+use crate::backend::{MailBackend, PlacedMessage, RemoteMutationKind, RemoteMutationSpec};
 use crate::parser::MailError;
 
 /// Stand-in for the UIDVALIDITY scope on JMAP, which has no such concept: a
-/// JMAP Email object id is already globally stable within its account (RFC
-/// 8621), so a fixed sentinel keeps the surrogate-id computation uniform with
-/// IMAP without implying a UIDVALIDITY guard. The IMAP UIDVALIDITY guard treats
-/// this non-numeric value as "no validity to compare" and is never engaged for
-/// a JMAP mutation, which addresses messages by object id.
+/// JMAP Email object id is already stable within its account (RFC 8621), so a
+/// fixed sentinel keeps a placement key the same shape on both protocols
+/// without implying a UIDVALIDITY guard. The IMAP UIDVALIDITY guard treats this
+/// non-numeric value as "no validity to compare" and is never engaged for a
+/// JMAP mutation, which addresses messages by object id.
 const JMAP_UID_VALIDITY_SENTINEL: &str = "jmap";
 
 /// JMAP Session Object (RFC 8620 Section 2).
@@ -368,11 +368,12 @@ impl JmapEngine {
         }
     }
 
-    /// Parse raw JMAP `Email/get` JSON response payload into domain [`Email`] list and new state string.
+    /// Parse a raw JMAP `Email/get` JSON response payload into a list of
+    /// [`PlacedMessage`] and the new state string.
     pub fn parse_email_get_response(
         &self,
         raw_json: &str,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<(Vec<PlacedMessage>, String), MailError> {
         let val: Value = serde_json::from_str(raw_json)
             .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
         let payload = Self::extract_method_response_payload(&val)?;
@@ -398,39 +399,58 @@ impl JmapEngine {
                     .unwrap_or_else(|| "me@nuncio.mx".to_string());
 
                 let folder_id = "inbox".to_string();
-                // The JMAP object id is the protocol-native id; the persisted
-                // id is an opaque surrogate hashed over it plus the account,
-                // folder, and (sentinel) scope so it stays uniform with IMAP.
                 let remote_id = item.id;
-                let id = Email::surrogate_id(
+                let message_id = item
+                    .message_id
+                    .as_ref()
+                    .and_then(|ids| ids.first())
+                    .and_then(|raw| Email::normalize_message_id(raw));
+
+                // A JMAP Email id is server-assigned and stable across mailboxes
+                // within the account, which is the same guarantee RFC 8474
+                // EMAILID gives, so it enters at the top tier rather than
+                // through the surrogate.
+                let identity = Email::derive_message_key(
                     &self.account_id,
+                    RemoteIdentity {
+                        email_id: Some(&remote_id),
+                        gm_msgid: None,
+                        message_id: message_id.as_deref(),
+                        // `Email/get` returns a `bodySnippet`, not the
+                        // message's octets, so there is nothing to hash here
+                        // without an extra download per message.
+                        content_hash: None,
+                    },
                     &folder_id,
                     JMAP_UID_VALIDITY_SENTINEL,
                     &remote_id,
                 );
-                Email {
-                    id,
+                let placement = Placement {
                     account_id: self.account_id.clone(),
                     folder_id,
-                    remote_id,
+                    // JMAP has no UIDVALIDITY; the sentinel keeps the placement
+                    // key the same shape as IMAP's without implying a guard.
                     uid_validity: JMAP_UID_VALIDITY_SENTINEL.to_string(),
-                    subject: item.subject.unwrap_or_else(|| "No Subject".to_string()),
-                    sender,
-                    recipient,
-                    received_at: item.received_at.unwrap_or(0),
+                    remote_id: remote_id.clone(),
                     read: !item.is_unread.unwrap_or(false),
-                    body_plain: item.body_snippet,
-                    body_html: None,
-                    attachments: Vec::new(),
-                    message_id: item
-                        .message_id
-                        .as_ref()
-                        .and_then(|ids| ids.first())
-                        .and_then(|raw| Email::normalize_message_id(raw)),
-                    // `Email/get` returns a `bodySnippet`, not the message's
-                    // octets, so there is nothing to hash here without an
-                    // extra download per message.
-                    content_hash: None,
+                };
+
+                PlacedMessage {
+                    email: Email {
+                        id: identity.key,
+                        account_id: self.account_id.clone(),
+                        subject: item.subject.unwrap_or_else(|| "No Subject".to_string()),
+                        sender,
+                        recipient,
+                        received_at: item.received_at.unwrap_or(0),
+                        body_plain: item.body_snippet,
+                        body_html: None,
+                        attachments: Vec::new(),
+                        message_id,
+                        content_hash: None,
+                    },
+                    source: identity.source,
+                    placement,
                 }
             })
             .collect();
@@ -578,7 +598,7 @@ impl MailBackend for JmapEngine {
         &self,
         folder_id: &str,
         _since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<(Vec<PlacedMessage>, String), MailError> {
         if !self.has_credentials() {
             return Err(MailError::AuthError(
                 "JMAP message sync requires credentials".to_string(),
@@ -735,16 +755,16 @@ mod tests {
         let (emails, _state) = engine.parse_email_get_response(raw).expect("parse get");
 
         assert_eq!(
-            emails[0].message_id.as_deref(),
+            emails[0].email.message_id.as_deref(),
             Some("Abc.123@mail.nuncio.mx")
         );
         assert_eq!(
-            emails[1].message_id, None,
+            emails[1].email.message_id, None,
             "an absent messageId must stay None, not become empty"
         );
         // `Email/get` returns a snippet, never the octets, so there is nothing
         // honest to hash on this path.
-        assert_eq!(emails[0].content_hash, None);
+        assert_eq!(emails[0].email.content_hash, None);
     }
 
     #[test]
