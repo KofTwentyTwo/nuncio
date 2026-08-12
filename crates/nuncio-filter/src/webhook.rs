@@ -240,53 +240,10 @@ impl WebhookDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use tracing::field::{Field, Visit};
-    use tracing::span;
+    use crate::test_tracing::block_on_captured;
+    use tracing::Level;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    /// Minimal `tracing::Subscriber` that records a formatted line per event
-    /// so tests can assert on emitted level + fields without pulling in
-    /// `tracing-subscriber`'s registry machinery.
-    struct CapturingSubscriber {
-        events: std::sync::Arc<Mutex<Vec<String>>>,
-    }
-
-    struct LineVisitor<'a>(&'a mut String);
-
-    impl Visit for LineVisitor<'_> {
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!(" {}={:?}", field.name(), value));
-        }
-    }
-
-    impl tracing::Subscriber for CapturingSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
-            span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut line = format!("{}", event.metadata().level());
-            let mut visitor = LineVisitor(&mut line);
-            event.record(&mut visitor);
-            if let Ok(mut events) = self.events.lock() {
-                events.push(line);
-            }
-        }
-
-        fn enter(&self, _span: &span::Id) {}
-
-        fn exit(&self, _span: &span::Id) {}
-    }
 
     #[tokio::test]
     async fn test_pinned_client_connects_to_checked_ip_not_dns() {
@@ -391,80 +348,80 @@ mod tests {
         assert_eq!(first_blocked_address(&addrs), None);
     }
 
-    #[tokio::test]
-    async fn test_blocked_webhook_logs_warn_with_host_and_reason() {
-        let events: std::sync::Arc<Mutex<Vec<String>>> =
-            std::sync::Arc::new(Mutex::new(Vec::new()));
-        let subscriber = CapturingSubscriber {
-            events: events.clone(),
-        };
-        let _guard = tracing::subscriber::set_default(subscriber);
-
-        let dispatcher = WebhookDispatcher::new("secret_key_123");
-        let result = dispatcher
-            .dispatch(
-                "http://169.254.169.254/latest/meta-data",
-                "rule_1",
-                "msg_1",
-                "Test",
-                "a@b.com",
-            )
-            .await;
+    // Not `#[tokio::test]`: the capture subscriber is thread-local, so the
+    // runtime has to be built inside the capture scope for the dispatch's
+    // telemetry to land on the thread holding it.
+    #[test]
+    fn test_blocked_webhook_logs_warn_with_host_and_reason() {
+        let (recorder, result) = block_on_captured(async {
+            let dispatcher = WebhookDispatcher::new("secret_key_123");
+            dispatcher
+                .dispatch(
+                    "http://169.254.169.254/latest/meta-data",
+                    "rule_1",
+                    "msg_1",
+                    "Test",
+                    "a@b.com",
+                )
+                .await
+        });
 
         assert!(matches!(result, Err(WebhookError::SecurityViolation(_))));
 
-        let captured = events.lock().unwrap();
+        let events = recorder.events();
         assert!(
-            captured.iter().any(|line| line.contains("WARN")
-                && line.contains("blocked")
-                && line.contains("169.254.169.254")),
-            "expected a WARN log carrying the blocked host and reason, got: {captured:?}"
+            events.iter().any(|e| e.level == Level::WARN
+                && e.message().contains("blocked")
+                && e.field("host")
+                    .is_some_and(|h| h.contains("169.254.169.254"))),
+            "expected a WARN log carrying the blocked host and reason, got: {events:?}"
         );
         assert!(
-            !captured.iter().any(|line| line.contains("secret_key_123")),
+            !recorder
+                .all_field_values()
+                .iter()
+                .any(|v| v.contains("secret_key_123")),
             "the webhook HMAC secret must never appear in a log line"
         );
     }
 
-    #[tokio::test]
-    async fn test_allowed_webhook_logs_debug_not_warn() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/hook"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&mock_server)
-            .await;
+    // See the sibling capture test for why this is not a `#[tokio::test]`.
+    // The wiremock server is started inside the same runtime so the whole
+    // exchange runs on the capturing thread.
+    #[test]
+    fn test_allowed_webhook_logs_debug_not_warn() {
+        let (recorder, status) = block_on_captured(async {
+            let mock_server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/hook"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&mock_server)
+                .await;
 
-        let events: std::sync::Arc<Mutex<Vec<String>>> =
-            std::sync::Arc::new(Mutex::new(Vec::new()));
-        let subscriber = CapturingSubscriber {
-            events: events.clone(),
-        };
-        let _guard = tracing::subscriber::set_default(subscriber);
-
-        let dispatcher = WebhookDispatcher::new("secret_key_123");
-        let opts = ValidationOptions {
-            available_folders: None,
-            allowed_forward_domains: None,
-            block_private_webhooks: false,
-        };
-        let url = format!("{}/hook", mock_server.uri());
-        let status = dispatcher
-            .dispatch_with_options(&url, "rule_1", "msg_1", "Test", "a@b.com", &opts)
-            .await
-            .expect("dispatch to the mock server must succeed");
+            let dispatcher = WebhookDispatcher::new("secret_key_123");
+            let opts = ValidationOptions {
+                available_folders: None,
+                allowed_forward_domains: None,
+                block_private_webhooks: false,
+            };
+            let url = format!("{}/hook", mock_server.uri());
+            dispatcher
+                .dispatch_with_options(&url, "rule_1", "msg_1", "Test", "a@b.com", &opts)
+                .await
+                .expect("dispatch to the mock server must succeed")
+        });
         assert_eq!(status, 200);
 
-        let captured = events.lock().unwrap();
+        let events = recorder.events();
         assert!(
-            captured
+            events
                 .iter()
-                .any(|line| line.contains("DEBUG") && line.contains("allowed")),
-            "expected a DEBUG log for the allowed egress decision, got: {captured:?}"
+                .any(|e| e.level == Level::DEBUG && e.message().contains("allowed")),
+            "expected a DEBUG log for the allowed egress decision, got: {events:?}"
         );
         assert!(
-            !captured.iter().any(|line| line.contains("WARN")),
-            "an allowed dispatch must not emit a WARN, got: {captured:?}"
+            !events.iter().any(|e| e.level == Level::WARN),
+            "an allowed dispatch must not emit a WARN, got: {events:?}"
         );
     }
 }

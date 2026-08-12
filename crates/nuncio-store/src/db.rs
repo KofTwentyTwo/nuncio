@@ -258,27 +258,24 @@ pub struct SaveOutcome {
 
 /// The four coordinates that address one mailbox occupancy.
 ///
-/// `Ord` is derived because the sync path sorts and dedups batches of these
-/// before deleting; `Hash`/`Eq` because it is also the key of the
-/// already-present set used to classify a fetched chunk.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PlacementKey {
-    /// Account owning the mailbox.
-    pub account_id: String,
-    /// Mailbox folder identifier.
-    pub folder_id: String,
-    /// The UIDVALIDITY generation `remote_id` was captured under.
-    pub uid_validity: String,
-    /// Protocol-native id addressing the message in this mailbox.
-    pub remote_id: String,
-}
+/// Re-exported from `nuncio-core` rather than defined here: a protocol backend
+/// reports these when a folder stops mentioning a message, and this store
+/// deletes exactly the rows they name, so both crates must be able to name one
+/// type. `nuncio-mail` must not depend on `nuncio-store`, which leaves `core`
+/// as the only place both can reach.
+pub use nuncio_core::model::PlacementKey;
 
 /// A message paired with the mailbox occupancy it was read through.
 ///
 /// The two travel together out of every folder-scoped read: the caller almost
 /// always needs the per-mailbox facts (the read flag, the addressing UID) as
 /// well as the message, and re-deriving them would cost a query per row.
-pub type PlacedMessage = (nuncio_core::model::Email, nuncio_core::model::Placement);
+///
+/// Deliberately not called `PlacedMessage`: `nuncio_mail::PlacedMessage` is a
+/// different type carrying a third field (the identity tier a backend derived
+/// the key from), and the sync path imports both. One name for two shapes in
+/// one call site is a trap worth a longer name to avoid.
+pub type MessageWithPlacement = (nuncio_core::model::Email, nuncio_core::model::Placement);
 
 /// Keyset cursor for [`DatabaseEngine::list_messages_page`]: the
 /// `(received_at, message_key, uidvalidity, uid)` of the last row of a page.
@@ -306,7 +303,7 @@ type MessageRow = (
 
 /// [`MessageRow`] widened with the joined placement's `uidvalidity`, `uid` and
 /// `read_flag`, in that order.
-type PlacedMessageRow = (
+type MessageWithPlacementRow = (
     String,
     String,
     String,
@@ -1821,8 +1818,8 @@ impl DatabaseEngine {
         account_id: &str,
         folder_id: &str,
         limit: usize,
-    ) -> Result<Vec<PlacedMessage>, DatabaseError> {
-        let rows: Vec<PlacedMessageRow> = sqlx::query_as(
+    ) -> Result<Vec<MessageWithPlacement>, DatabaseError> {
+        let rows: Vec<MessageWithPlacementRow> = sqlx::query_as(
             r#"
             SELECT m.message_key, m.account_id, m.subject, m.sender, m.recipient,
                    m.received_at, m.body_plain, m.body_html, m.message_id, m.content_hash,
@@ -1905,7 +1902,7 @@ impl DatabaseEngine {
         folder_id: &str,
         after: Option<MessagePageCursor>,
         page_size: usize,
-    ) -> Result<(Vec<PlacedMessage>, Option<MessagePageCursor>), DatabaseError> {
+    ) -> Result<(Vec<MessageWithPlacement>, Option<MessagePageCursor>), DatabaseError> {
         let fetch = page_size.saturating_add(1);
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
             "SELECT m.message_key, m.account_id, m.subject, m.sender, m.recipient, \
@@ -1947,7 +1944,7 @@ impl DatabaseEngine {
         builder.push_bind(fetch as i64);
 
         let rows = builder
-            .build_query_as::<PlacedMessageRow>()
+            .build_query_as::<MessageWithPlacementRow>()
             .fetch_all(&self.pool)
             .await
             .map_err(DatabaseError::Query)?;

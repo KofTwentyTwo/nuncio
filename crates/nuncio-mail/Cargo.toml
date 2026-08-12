@@ -9,6 +9,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes `test_server`, a stateful loopback IMAP server, to dependent crates'
+# test suites. Never enabled in a production build.
+test-support = []
+
 [dependencies]
 nuncio-core = { path = "../nuncio-core" }
 tokio.workspace = true
@@ -29,6 +34,10 @@ tokio-stream.workspace = true
 reqwest.workspace = true
 
 [dev-dependencies]
+# Integration tests need the loopback IMAP server, which production builds
+# must not carry. A self dev-dependency is how a crate enables its own feature
+# for its own `tests/` targets.
+nuncio-mail = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
 wiremock.workspace = true
 tracing-test = "0.2"

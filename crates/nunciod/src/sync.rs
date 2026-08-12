@@ -245,10 +245,12 @@ async fn fetch_and_persist(
             Some(acct) => db.get_folder_sync_state(acct, &folder.id).await?,
             None => None,
         };
-        let (emails, new_state) = backend
-            .sync_messages(&folder.id, last_state.as_deref())
+        let changes = backend
+            .sync_changes(&folder.id, last_state.as_deref())
             .await?;
+        let emails = changes.upserts;
         let fetched = emails.len();
+        let new_state = changes.next_state;
 
         // One round trip classifies the whole chunk instead of one lookup per
         // message. A lookup failure that is not "not found" would be a
@@ -268,6 +270,37 @@ async fn fetch_and_persist(
             }
             synced += 1;
         }
+        // Reconcile what the server no longer has. Until this existed, a sync
+        // could only ever add: a message moved or deleted by any other client
+        // -- another daemon, a phone, webmail -- stayed in the local store
+        // forever, and every account accumulated ghosts.
+        if let Some(acct) = account_id {
+            let mut gone: Vec<String> = changes.removals;
+
+            // `present` is the folder's complete contents when the pass was
+            // able to enumerate them. `None` and `Some(vec![])` are NOT the
+            // same: `None` means the pass was incremental and cannot speak to
+            // absence, and treating it as "nothing is present" would delete
+            // the folder.
+            if let Some(present) = changes.present {
+                let present: std::collections::HashSet<String> = present.into_iter().collect();
+                let stored = db.message_ids_in_folder(acct, &folder.id).await?;
+                gone.extend(stored.into_iter().filter(|id| !present.contains(id)));
+            }
+
+            gone.sort_unstable();
+            gone.dedup();
+            if !gone.is_empty() {
+                let deleted = db.delete_messages(&gone).await?;
+                tracing::info!(
+                    account_id = %acct,
+                    folder_id = %folder.id,
+                    deleted,
+                    "removed messages that are no longer on the server"
+                );
+            }
+        }
+
         // Persist the returned checkpoint only AFTER this folder's messages
         // have landed, so the stored high-water mark can never advance past
         // work that actually reached the store.

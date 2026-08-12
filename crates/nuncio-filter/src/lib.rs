@@ -11,6 +11,9 @@ pub mod parser;
 pub mod validator;
 pub mod webhook;
 
+#[cfg(test)]
+mod test_tracing;
+
 pub use ast::*;
 pub use codegen::*;
 pub use engine::*;

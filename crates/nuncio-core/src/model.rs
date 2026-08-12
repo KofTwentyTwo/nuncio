@@ -159,6 +159,42 @@ pub struct Placement {
     pub read: bool,
 }
 
+/// The four coordinates that address one mailbox occupancy.
+///
+/// The addressing half of a [`Placement`], without the read flag: enough to
+/// name an occupancy, not enough to describe it. A protocol backend reports
+/// these when a folder stops mentioning a message, and the store deletes
+/// exactly the rows they name -- which is why the type lives here in `core`
+/// rather than in either crate. What a folder stops reporting is an occupancy,
+/// never a message; a message goes only when its last placement does.
+///
+/// `Ord` is derived because the sync path sorts and dedups batches of these
+/// before deleting; `Hash`/`Eq` because it is also the key of the
+/// already-present set used to classify a fetched chunk.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PlacementKey {
+    /// Account owning the mailbox.
+    pub account_id: String,
+    /// Mailbox folder identifier.
+    pub folder_id: String,
+    /// The UIDVALIDITY generation `remote_id` was captured under.
+    pub uid_validity: String,
+    /// Protocol-native id addressing the message in this mailbox.
+    pub remote_id: String,
+}
+
+impl Placement {
+    /// The addressing coordinates of this occupancy, dropping the read flag.
+    pub fn key(&self) -> PlacementKey {
+        PlacementKey {
+            account_id: self.account_id.clone(),
+            folder_id: self.folder_id.clone(),
+            uid_validity: self.uid_validity.clone(),
+            remote_id: self.remote_id.clone(),
+        }
+    }
+}
+
 /// Email message domain entity owned by Nuncio core.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Email {

@@ -1,7 +1,7 @@
 //! Protocol-agnostic async mail backend trait definitions.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Attachment, Email, Folder, IdentitySource, Placement};
+use nuncio_core::model::{Attachment, Email, Folder, IdentitySource, Placement, PlacementKey};
 
 use crate::parser::MailError;
 
@@ -83,17 +83,108 @@ pub struct RemoteMutationSpec {
     pub kind: RemoteMutationKind,
 }
 
+/// What one folder-sync pass observed on the server.
+///
+/// The reason this is not just a list of messages: a sync that can only report
+/// what *is* there can never report what stopped being there. A message moved
+/// or deleted by any other client -- another Nuncio daemon, a phone, webmail --
+/// simply stays in the local store forever. Expressing absence is the whole
+/// point of the type.
+///
+/// Absence is reported as [`PlacementKey`]s, not message keys, because what a
+/// folder stops mentioning is an *occupancy*. The same message may still sit in
+/// another mailbox, and deleting the message on the strength of one folder's
+/// silence would destroy a copy the user still has. A message goes only when
+/// its last placement does.
+#[derive(Debug, Default, Clone)]
+pub struct FolderChanges {
+    /// Messages to store, whether newly arrived or changed, each with the
+    /// occupancy this pass found it in.
+    pub upserts: Vec<PlacedMessage>,
+    /// Occupancies the server **explicitly reported as gone**, via QRESYNC
+    /// `VANISHED`. Always safe to delete.
+    pub removals: Vec<PlacementKey>,
+    /// Every occupancy the folder currently holds, when this pass enumerated
+    /// the complete UID set. The caller may delete any placement it stores for
+    /// this folder that is absent from this list.
+    ///
+    /// `None` and `Some(vec![])` mean different things, and conflating them
+    /// deletes a mailbox. `None` is "this pass was incremental and cannot
+    /// speak to absence"; `Some(vec![])` is "the folder is genuinely empty".
+    pub present: Option<Vec<PlacementKey>>,
+    /// The checkpoint to resume from next time.
+    pub next_state: String,
+}
+
+/// What a mutation attempt actually established.
+///
+/// Two states are not enough. A protocol that answers `OK` for a command that
+/// did nothing -- which IMAP does, by design, for a UID that no longer exists
+/// (RFC 3501 section 6.4.8) -- makes "succeeded" and "failed" an incomplete
+/// partition. The missing third state is *the server accepted the command and
+/// its response does not establish what happened*, and collapsing that into
+/// either neighbour is how a lost mutation gets recorded as done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationOutcome {
+    /// The server's response proves the change was made.
+    ///
+    /// Requires positive evidence: a `COPYUID` naming the destination UIDs, a
+    /// removal report for a delete, or an explicit acknowledgement for a flag
+    /// change. `token` carries whatever the server returned to address the
+    /// result afterwards (the destination UID for a move), when it returned
+    /// one at all -- a DAV server that rewrites the object MUST NOT return an
+    /// ETag (RFC 4791 section 5.3.4), so absence here is ordinary.
+    Applied {
+        /// Server-assigned handle for the result, when the response carried one.
+        token: Option<String>,
+    },
+    /// Another client changed the message first, and the server said so.
+    ///
+    /// Requires positive evidence too: `[MODIFIED …]` (RFC 7162 section 3.1.3)
+    /// or an HTTP 412. A mutation that merely failed to find its target is
+    /// **not** a conflict -- `MODIFIED` reports "changed by someone else",
+    /// never "gone".
+    Conflict {
+        /// What the server reported about the conflicting state.
+        observed: String,
+    },
+    /// The command was accepted and its response settles nothing.
+    ///
+    /// The honest reading of an absent `COPYUID` (only `SHOULD` for `MOVE` per
+    /// RFC 6851 section 4.3, and legitimately omitted for a `UIDNOTSTICKY`
+    /// destination), or of a UID set that matched nothing. The caller must
+    /// re-enumerate to find out, not guess.
+    Unknown {
+        /// Why the response was inconclusive.
+        reason: String,
+    },
+}
+
 /// Protocol-agnostic mail backend engine trait implemented by JMAP and IMAP engines.
 #[async_trait]
 pub trait MailBackend: Send + Sync {
     /// Synchronize and list available mailbox folders.
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError>;
 
-    /// Synchronize message envelopes for a specific folder since a checkpoint state.
-    /// Returns the messages with the occupancy each was found in, and the new
-    /// server state checkpoint.
+    /// Enumerate what changed in a folder since `since_state`.
     ///
-    /// Every message is reported as a [`PlacedMessage`] so the caller can tell
+    /// Replaces a fetch-only sync: implementations must report removals when
+    /// the protocol can express them, and must say honestly (via
+    /// [`FolderChanges::present`]) whether the pass was able to observe
+    /// absence at all.
+    async fn sync_changes(
+        &self,
+        folder_id: &str,
+        since_state: Option<&str>,
+    ) -> Result<FolderChanges, MailError>;
+
+    /// Fetch-only view of [`MailBackend::sync_changes`], for callers that
+    /// genuinely only want the messages.
+    ///
+    /// Provided rather than required so no implementation can satisfy the
+    /// trait by supplying this and quietly never reporting a removal.
+    ///
+    /// Every message comes back as a [`PlacedMessage`] so the caller can tell
     /// a message it already stores in another folder from one it has never
     /// seen: the derived key is the same in both folders, only the placement
     /// differs.
@@ -101,14 +192,21 @@ pub trait MailBackend: Send + Sync {
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<PlacedMessage>, String), MailError>;
+    ) -> Result<(Vec<PlacedMessage>, String), MailError> {
+        let changes = self.sync_changes(folder_id, since_state).await?;
+        Ok((changes.upserts, changes.next_state))
+    }
 
     /// Apply a remote mutation (move/copy/flag/delete) to a single message
-    /// against the real server. MUST return `Ok(())` only when the server
-    /// genuinely applied the change -- implementations must never fabricate
-    /// success, and must refuse to act (returning an error) when the target
-    /// message cannot be safely identified (e.g. an IMAP UIDVALIDITY mismatch).
-    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError>;
+    /// against the real server.
+    ///
+    /// Returns what the server's response actually proves. Implementations
+    /// must never report [`MutationOutcome::Applied`] on the strength of a
+    /// tagged `OK` alone, and must refuse to act (returning `Err`) when the
+    /// target cannot be safely identified -- e.g. an IMAP UIDVALIDITY
+    /// mismatch, where the stored UID now names a different message.
+    async fn apply_mutation(&self, spec: &RemoteMutationSpec)
+        -> Result<MutationOutcome, MailError>;
 }
 
 /// A composed outbound email message ready to send over SMTP. Deliberately
