@@ -725,6 +725,97 @@ mod tests {
         assert_ne!(as_emailid.key, as_gmsgid.key);
     }
 
+    fn sample_placement() -> Placement {
+        Placement {
+            account_id: "acct-1".to_string(),
+            folder_id: "INBOX".to_string(),
+            uid_validity: "42".to_string(),
+            remote_id: "5".to_string(),
+            read: true,
+        }
+    }
+
+    #[test]
+    fn placement_key_carries_every_addressing_coordinate_and_drops_the_read_flag() {
+        // The key must reproduce all four coordinates exactly. A key that
+        // dropped or reordered one would address a different occupancy, and a
+        // sync diffing reported-against-stored would delete live mail.
+        let placement = sample_placement();
+        let key = placement.key();
+        assert_eq!(key.account_id, "acct-1");
+        assert_eq!(key.folder_id, "INBOX");
+        assert_eq!(key.uid_validity, "42");
+        assert_eq!(key.remote_id, "5");
+
+        // The read flag is the one field a key must NOT carry: it describes an
+        // occupancy rather than naming it, so including it would make the same
+        // occupancy compare unequal to itself after the user opened the message.
+        let mut unread = placement.clone();
+        unread.read = false;
+        assert_ne!(placement, unread);
+        assert_eq!(placement.key(), unread.key());
+    }
+
+    #[test]
+    fn placement_keys_distinguish_every_coordinate_that_can_differ() {
+        let base = sample_placement().key();
+        for mutated in [
+            PlacementKey {
+                account_id: "acct-2".to_string(),
+                ..base.clone()
+            },
+            PlacementKey {
+                folder_id: "Archive".to_string(),
+                ..base.clone()
+            },
+            PlacementKey {
+                uid_validity: "43".to_string(),
+                ..base.clone()
+            },
+            PlacementKey {
+                remote_id: "6".to_string(),
+                ..base.clone()
+            },
+        ] {
+            assert_ne!(
+                base, mutated,
+                "changing one coordinate must yield a different occupancy"
+            );
+        }
+
+        // Usable as a set key and sortable, which is what the sync path needs
+        // to diff a reported UID set against what the store holds.
+        let mut set = std::collections::HashSet::new();
+        assert!(set.insert(base.clone()));
+        assert!(!set.insert(base.clone()), "an equal key must not re-insert");
+        let mut keys = [
+            PlacementKey {
+                remote_id: "6".to_string(),
+                ..base.clone()
+            },
+            base.clone(),
+        ];
+        keys.sort();
+        assert_eq!(keys[0], base);
+    }
+
+    #[test]
+    fn placement_key_round_trips_through_serde() {
+        let key = sample_placement().key();
+        let json = serde_json::to_string(&key).unwrap();
+        let parsed: PlacementKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, key);
+    }
+
+    #[test]
+    fn placement_round_trips_through_serde_including_its_read_flag() {
+        let placement = sample_placement();
+        let json = serde_json::to_string(&placement).unwrap();
+        let parsed: Placement = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, placement);
+        assert!(parsed.read);
+    }
+
     #[test]
     fn identity_source_round_trips_through_its_stored_string() {
         for source in [

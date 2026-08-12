@@ -972,18 +972,44 @@ impl ImapEngine {
                 .unwrap_or_else(|| "full-resync-required".to_string()),
         };
 
-        // Both are occupancies, not messages: a UID that vanished from this
-        // folder says nothing about copies of the same message elsewhere.
-        let removals: Vec<PlacementKey> = plan
-            .vanished_uids
-            .iter()
-            .map(|uid| self.placement_key_for(folder_id, server_uid_validity, *uid))
-            .collect();
-        let present = plan.present_uids.as_ref().map(|uids| {
-            uids.iter()
-                .map(|uid| self.placement_key_for(folder_id, server_uid_validity, *uid))
-                .collect()
-        });
+        // Absence can only be reported against a known UIDVALIDITY generation.
+        //
+        // `[UIDVALIDITY]` is REQUIRED on a successful SELECT (RFC 3501 section
+        // 6.3.1), so this should not happen -- but a server that omits it would
+        // otherwise produce keys carrying an empty generation, and NONE of them
+        // would match placements stored under a real one. Under the documented
+        // contract ("delete any placement absent from `present`") that reads as
+        // "the folder holds nothing", and the caller deletes the whole mailbox.
+        // Saying nothing is the only safe answer, and it mirrors the checkpoint
+        // above, which likewise refuses to write a validity-less value.
+        let (removals, present) = match server_uid_validity {
+            Some(_) => {
+                // Both are occupancies, not messages: a UID that vanished from
+                // this folder says nothing about copies of the same message
+                // elsewhere.
+                let removals: Vec<PlacementKey> = plan
+                    .vanished_uids
+                    .iter()
+                    .map(|uid| self.placement_key_for(folder_id, server_uid_validity, *uid))
+                    .collect();
+                let present = plan.present_uids.as_ref().map(|uids| {
+                    uids.iter()
+                        .map(|uid| self.placement_key_for(folder_id, server_uid_validity, *uid))
+                        .collect()
+                });
+                (removals, present)
+            }
+            None => {
+                tracing::warn!(
+                    folder_id,
+                    vanished = plan.vanished_uids.len(),
+                    enumerated = plan.present_uids.as_ref().map_or(0, Vec::len),
+                    "mailbox reported no UIDVALIDITY, so this pass cannot key an occupancy and \
+                     reports no absence; upserts are still surfaced"
+                );
+                (Vec::new(), None)
+            }
+        };
 
         tracing::info!(
             account_id = %self.account_id,
@@ -991,7 +1017,7 @@ impl ImapEngine {
             rung = ?plan.rung,
             fetched = emails.len(),
             removed = removals.len(),
-            enumerated = plan.present_uids.as_ref().map_or(0, Vec::len),
+            enumerated = present.as_ref().map_or(0, Vec::len),
             oversized = oversized_uids.len(),
             skipped = skipped_no_uid,
             "imap folder sync complete"
@@ -2324,17 +2350,25 @@ mod tests {
     }
 
     /// The RFC822 body of a scripted fixture message.
+    ///
+    /// Carries a `Message-ID` so the full-body path reaches the content tier.
+    /// That is what makes the headers-only path's tier meaningful to assert:
+    /// the same message identifies differently there, and only because the
+    /// header-section hash is deliberately discarded.
     fn fixture_body(uid: u32) -> String {
         format!(
             "Subject: Message {uid}\r\nFrom: sender{uid}@example.test\r\n\
+             Message-ID: <msg{uid}@example.test>\r\n\
              To: me@example.test\r\n\r\nBody of message {uid}.\r\n"
         )
     }
 
-    /// The header block (no body) of a scripted fixture message.
+    /// The header block (no body) of a scripted fixture message. Same headers
+    /// as [`fixture_body`], including the `Message-ID`.
     fn fixture_header(uid: u32) -> String {
         format!(
             "Subject: Message {uid}\r\nFrom: sender{uid}@example.test\r\n\
+             Message-ID: <msg{uid}@example.test>\r\n\
              To: me@example.test\r\n\r\n"
         )
     }
@@ -2368,13 +2402,17 @@ mod tests {
     /// and records every `UID FETCH` command line the client issued so a test
     /// can assert on the exact batching. Returns the synced emails, the new
     /// checkpoint, and the captured `UID FETCH` command lines.
+    ///
+    /// `uidvalidity` is an `Option` so a test can script the one thing RFC 3501
+    /// section 6.3.1 says a SELECT must never do -- omit `[UIDVALIDITY]` -- and
+    /// check the sync stays safe when a server does it anyway.
     async fn run_batched_sync(
         messages: Vec<(u32, u32)>,
-        uidvalidity: u32,
+        uidvalidity: Option<u32>,
         uidnext: u32,
         since_state: Option<String>,
         batch_size: usize,
-    ) -> (Vec<PlacedMessage>, String, Vec<String>) {
+    ) -> (FolderChanges, Vec<String>) {
         let (client_io, server_io) = tokio::io::duplex(65536);
         let fetch_cmds = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let server_cmds = fetch_cmds.clone();
@@ -2436,9 +2474,13 @@ mod tests {
                         .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
                         .await;
                 } else if upper.contains("SELECT") {
+                    let validity_line = match uidvalidity {
+                        Some(v) => format!("* OK [UIDVALIDITY {v}] ok\r\n"),
+                        None => String::new(),
+                    };
                     let resp = format!(
                         "* FLAGS (\\Seen)\r\n* {exists} EXISTS\r\n* 0 RECENT\r\n\
-                         * OK [UIDVALIDITY {uidvalidity}] ok\r\n* OK [UIDNEXT {uidnext}] ok\r\n\
+                         {validity_line}* OK [UIDNEXT {uidnext}] ok\r\n\
                          {tag} OK [READ-WRITE] SELECT done\r\n"
                     );
                     let _ = io.write_all(resp.as_bytes()).await;
@@ -2462,12 +2504,11 @@ mod tests {
             .sync_folder_messages_batched("INBOX", since_state.as_deref(), &mut session, batch_size)
             .await
             .expect("batched sync succeeds");
-        let (emails, checkpoint) = (changes.upserts, changes.next_state);
         drop(session);
         let _ = server.await;
 
         let cmds = fetch_cmds.lock().expect("lock captured commands").clone();
-        (emails, checkpoint, cmds)
+        (changes, cmds)
     }
 
     /// The captured `UID FETCH` command lines that pulled FULL bodies (a
@@ -2489,10 +2530,11 @@ mod tests {
         // `1:*` body fetch. The enumeration discovers the UIDs; the bodies are
         // then fetched in explicit UID-set chunks of at most the batch size.
         let messages: Vec<(u32, u32)> = (1..=5).map(|u| (u, 100)).collect();
-        let (emails, checkpoint, cmds) = run_batched_sync(messages, 1, 6, None, 2).await;
+        let (changes, cmds) = run_batched_sync(messages, Some(1), 6, None, 2).await;
+        let emails = &changes.upserts;
 
         assert_eq!(emails.len(), 5, "every message must be synced");
-        assert_eq!(checkpoint, "v1:uidnext:1:6");
+        assert_eq!(changes.next_state, "v1:uidnext:1:6");
 
         let body_cmds = body_fetch_commands(&cmds);
         assert_eq!(
@@ -2522,7 +2564,8 @@ mod tests {
         // normal messages get full bodies.
         let huge = MAX_MESSAGE_BODY_BYTES + 1;
         let messages: Vec<(u32, u32)> = vec![(1, 100), (2, huge), (3, 100)];
-        let (emails, _checkpoint, cmds) = run_batched_sync(messages, 1, 4, None, 200).await;
+        let (changes, cmds) = run_batched_sync(messages, Some(1), 4, None, 200).await;
+        let emails = &changes.upserts;
 
         assert_eq!(emails.len(), 3, "no message may be silently dropped");
 
@@ -2558,6 +2601,26 @@ mod tests {
             "oversized message must keep honest header metadata, got: {oversized:?}"
         );
 
+        // The header section it WAS given hashes to something, but that hash
+        // covers only the headers, not the message. Publishing it would key the
+        // message on the wrong octets -- and then the same message would key
+        // differently once its body was finally fetched, resurrecting it as a
+        // duplicate. So the hash is dropped, which costs this message the
+        // content tier even though it carried a Message-ID.
+        assert!(
+            oversized.email.message_id.is_some(),
+            "the headers-only parse must still recover the Message-ID"
+        );
+        assert_eq!(
+            oversized.email.content_hash, None,
+            "a hash over only the header section must never be published"
+        );
+        assert_eq!(
+            oversized.source,
+            IdentitySource::Surrogate,
+            "without octets to hash, a Message-ID alone must not reach the content tier"
+        );
+
         // The normal messages DID get full bodies.
         for uid in ["1", "3"] {
             let email = emails
@@ -2567,6 +2630,13 @@ mod tests {
             assert!(
                 email.email.body_plain.is_some(),
                 "normal message {uid} must have a body, got: {email:?}"
+            );
+            // The contrast that gives the assertion above its force: the same
+            // headers, plus the octets, DO reach the content tier.
+            assert_eq!(
+                email.source,
+                IdentitySource::MessageIdContent,
+                "a full-body fetch with a Message-ID must reach the content tier"
             );
         }
     }
@@ -2578,24 +2648,24 @@ mod tests {
         // checkpoint enumerates only the narrowed `{uidnext}:*` range (so a
         // fire-once-per-new-message consumer never re-sees old mail).
         let messages: Vec<(u32, u32)> = (1..=3).map(|u| (u, 100)).collect();
-        let (first, checkpoint, first_cmds) =
-            run_batched_sync(messages.clone(), 1, 4, None, 2).await;
-        assert_eq!(first.len(), 3);
+        let (first, first_cmds) = run_batched_sync(messages.clone(), Some(1), 4, None, 2).await;
+        let checkpoint = first.next_state.clone();
+        assert_eq!(first.upserts.len(), 3);
         assert_eq!(checkpoint, "v1:uidnext:1:4");
         assert!(
             first_cmds.iter().any(|c| c.contains("1:*")),
             "first sync enumerates the full range, got: {first_cmds:?}"
         );
 
-        let (second, checkpoint2, second_cmds) =
-            run_batched_sync(messages, 1, 4, Some(checkpoint.clone()), 2).await;
+        let (second, second_cmds) =
+            run_batched_sync(messages, Some(1), 4, Some(checkpoint.clone()), 2).await;
         assert_eq!(
-            second.len(),
+            second.upserts.len(),
             0,
             "no new mail arrived, so an incremental sync returns nothing"
         );
         assert_eq!(
-            checkpoint2, "v1:uidnext:1:4",
+            second.next_state, "v1:uidnext:1:4",
             "checkpoint stays stable across an empty pass"
         );
         let second_bodies = body_fetch_ranges(&second_cmds);
@@ -3395,15 +3465,19 @@ mod tests {
     /// controlling its `\Seen` flag. Holding the octets fixed while varying the
     /// folder, UIDVALIDITY and UID is the shape of "the same message, found in
     /// two mailboxes" -- which is what the identity/placement split exists for.
+    ///
+    /// Passing `raw = None` scripts the envelope-only path instead: the server
+    /// answers the body fetch with an `ENVELOPE` and no `BODY[]`, which is what
+    /// a server that will not hand over octets looks like.
     async fn run_single_message_sync(
         folder_id: &str,
         uidvalidity: u32,
         uid: u32,
         seen: bool,
-        raw: &str,
+        raw: Option<&str>,
     ) -> PlacedMessage {
         let (client_io, server_io) = tokio::io::duplex(65536);
-        let raw = raw.to_string();
+        let raw = raw.map(str::to_string);
         let uidnext = uid.saturating_add(1);
         let flags = if seen { "\\Seen" } else { "" };
 
@@ -3413,16 +3487,31 @@ mod tests {
                 let tag = line.split_whitespace().next().unwrap_or("").to_string();
                 let upper = line.to_ascii_uppercase();
                 if upper.contains("UID FETCH") {
-                    let size = raw.len();
-                    let resp = if upper.contains("BODY.PEEK[]") {
+                    let size = raw.as_ref().map_or(64, String::len);
+                    let resp = if !upper.contains("BODY.PEEK[]") {
+                        // Enumeration pass: UID + size only, no body.
+                        format!(
+                            "* 1 FETCH (UID {uid} RFC822.SIZE {size})\r\n\
+                             {tag} OK FETCH completed\r\n"
+                        )
+                    } else if let Some(raw) = raw.as_ref() {
                         format!(
                             "* 1 FETCH (UID {uid} RFC822.SIZE {size} FLAGS ({flags}) \
                              BODY[] {{{size}}}\r\n{raw})\r\n{tag} OK FETCH completed\r\n"
                         )
                     } else {
-                        // Enumeration pass: UID + size only, no body.
+                        // A server that answers with metadata but no octets.
+                        // ENVELOPE still carries `message-id` (RFC 3501
+                        // section 7.4.2), so identity capture is not skipped --
+                        // but there is nothing to hash.
                         format!(
-                            "* 1 FETCH (UID {uid} RFC822.SIZE {size})\r\n\
+                            "* 1 FETCH (UID {uid} RFC822.SIZE {size} FLAGS ({flags}) \
+                             ENVELOPE (\"Mon, 1 Jan 2024 00:00:00 +0000\" \"Env subject\" \
+                             ((\"A\" NIL \"alice\" \"b.example\")) \
+                             ((\"A\" NIL \"alice\" \"b.example\")) \
+                             ((\"A\" NIL \"alice\" \"b.example\")) \
+                             ((\"B\" NIL \"bob\" \"b.example\")) \
+                             NIL NIL NIL \"<env@b.example>\"))\r\n\
                              {tag} OK FETCH completed\r\n"
                         )
                     };
@@ -3487,8 +3576,8 @@ mod tests {
         // placements stay distinct. Before the split this was two messages.
         let raw = "Message-ID: <a@b.example>\r\nSubject: Hi\r\n\
                    From: alice@b.example\r\n\r\nbody\r\n";
-        let inbox = run_single_message_sync("INBOX", 42, 5, true, raw).await;
-        let archive = run_single_message_sync("Archive", 77, 9, false, raw).await;
+        let inbox = run_single_message_sync("INBOX", 42, 5, true, Some(raw)).await;
+        let archive = run_single_message_sync("Archive", 77, 9, false, Some(raw)).await;
 
         assert_eq!(inbox.source, IdentitySource::MessageIdContent);
         assert_eq!(archive.source, IdentitySource::MessageIdContent);
@@ -3518,14 +3607,78 @@ mod tests {
         // report two honest folder-scoped keys rather than claim a stability
         // the server gave it no basis for.
         let raw = "Subject: No id\r\nFrom: alice@b.example\r\n\r\nbody\r\n";
-        let inbox = run_single_message_sync("INBOX", 42, 5, false, raw).await;
-        let archive = run_single_message_sync("Archive", 77, 9, false, raw).await;
+        let inbox = run_single_message_sync("INBOX", 42, 5, false, Some(raw)).await;
+        let archive = run_single_message_sync("Archive", 77, 9, false, Some(raw)).await;
 
         assert_eq!(inbox.source, IdentitySource::Surrogate);
         assert_ne!(
             inbox.email.id, archive.email.id,
             "a surrogate is folder-scoped and must not be claimed to survive a move"
         );
+    }
+
+    #[tokio::test]
+    async fn an_envelope_only_fetch_keeps_its_message_id_but_stays_on_the_surrogate() {
+        // A server that returns metadata and no octets. ENVELOPE carries
+        // `message-id` (RFC 3501 section 7.4.2) so the header is still
+        // captured, but there is nothing to hash -- and a Message-ID alone is
+        // public and forgeable, so it must never key storage by itself.
+        let placed = run_single_message_sync("INBOX", 42, 5, false, None).await;
+
+        assert_eq!(placed.email.subject, "Env subject");
+        assert_eq!(placed.email.message_id.as_deref(), Some("env@b.example"));
+        assert_eq!(
+            placed.email.content_hash, None,
+            "no octets were fetched, so there is nothing honest to hash"
+        );
+        assert_eq!(
+            placed.source,
+            IdentitySource::Surrogate,
+            "an envelope-only fetch must not reach the content tier"
+        );
+        assert_eq!(placed.placement.remote_id, "5");
+        assert_eq!(placed.placement.uid_validity, "42");
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn a_select_without_uidvalidity_reports_no_absence_at_all() {
+        // RFC 3501 section 6.3.1 makes `[UIDVALIDITY]` REQUIRED on SELECT, so a
+        // server omitting it is broken -- but the failure mode is a wiped
+        // mailbox, not a bad sync. Every placement key this pass could build
+        // would carry an empty generation and match nothing the store holds,
+        // and under the `present` contract that reads as "the folder is empty".
+        // The pass must therefore decline to speak about absence, while still
+        // surfacing what it fetched.
+        let messages: Vec<(u32, u32)> = (1..=2).map(|u| (u, 100)).collect();
+        let (changes, _cmds) = run_batched_sync(messages, None, 3, None, 200).await;
+
+        assert_eq!(
+            changes.upserts.len(),
+            2,
+            "the messages themselves are still surfaced"
+        );
+        assert_eq!(
+            changes.present, None,
+            "a pass that cannot key an occupancy must not claim to know what is present"
+        );
+        assert!(
+            changes.removals.is_empty(),
+            "nor may it report a removal, got: {:?}",
+            changes.removals
+        );
+        // And it must say why, rather than failing silently.
+        assert!(logs_contain("mailbox reported no UIDVALIDITY"));
+
+        // The same pass against a compliant server DOES report presence, so the
+        // assertions above are about the missing UIDVALIDITY and nothing else.
+        let messages: Vec<(u32, u32)> = (1..=2).map(|u| (u, 100)).collect();
+        let (compliant, _cmds) = run_batched_sync(messages, Some(7), 3, None, 200).await;
+        let present = compliant
+            .present
+            .expect("a compliant SELECT must let the pass report presence");
+        assert_eq!(present.len(), 2);
+        assert!(present.iter().all(|k| k.uid_validity == "7"));
     }
 
     #[tokio::test]
