@@ -963,23 +963,28 @@ fn map_attachment_from_proto(attachment: AttachmentProto) -> nuncio_core::model:
     }
 }
 
-/// Maps a `nuncio_core::model::Email` onto its wire-format `nuncio.v1.Message`
-/// representation. The store (`DatabaseEngine::get_message` /
-/// `list_messages`) already returns `body_plain`/`body_html` decrypted, so
-/// there is no further decryption to do here -- just field-for-field
-/// mapping.
-fn map_email_to_proto(email: nuncio_core::model::Email) -> MessageProto {
+/// Maps a message and the mailbox occupancy it was read through onto the
+/// wire-format `nuncio.v1.Message` representation. The store
+/// (`DatabaseEngine::get_message` / `list_messages`) already returns
+/// `body_plain`/`body_html` decrypted, so there is no further decryption to do
+/// here -- just field-for-field mapping.
+///
+/// `folder_id` and `read` come from the placement: both are per-mailbox facts
+/// now, and the wire message still carries exactly one of each, so it describes
+/// one occupancy of the message rather than the message as a whole.
+fn map_email_to_proto(placed: nuncio_store::db::MessageWithPlacement) -> MessageProto {
+    let (email, placement) = placed;
     MessageProto {
         id: email.id,
         account_id: email.account_id,
-        folder_id: email.folder_id,
+        folder_id: placement.folder_id,
         subject: email.subject,
         sender: email.sender,
         recipient: email.recipient,
         received_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
             email.received_at,
         )),
-        read: email.read,
+        read: placement.read,
         body_plain: email.body_plain,
         body_html: email.body_html,
         attachments: email
@@ -1633,6 +1638,145 @@ struct MailGrpcService {
     sync_dispatcher: Arc<SyncDispatcher>,
 }
 
+/// Account-merging read helpers.
+///
+/// The store's folder and message reads are account-scoped, because folder ids
+/// are not globally unique -- every account has an `INBOX`, and grouping across
+/// accounts would report one merged folder holding two accounts' mail. The
+/// `nuncio.v1.Mail` requests carry no account field, so these reproduce the
+/// pre-split cross-account behaviour by asking each account and merging. They
+/// are a compatibility shim, not the destination: the honest fix is an account
+/// on the wire, which lands with the placement-aware surface.
+impl MailGrpcService {
+    /// One page of folders, merged across every configured account.
+    ///
+    /// Counts for a folder id that several accounts share are summed, matching
+    /// what the old account-blind `GROUP BY folder_id` returned.
+    async fn merged_folders_page(
+        &self,
+        after: Option<String>,
+        page_size: usize,
+    ) -> Result<(Vec<nuncio_core::model::Folder>, Option<String>), nuncio_store::db::DatabaseError>
+    {
+        let accounts = self.db.list_accounts().await?;
+        let mut merged: std::collections::BTreeMap<String, nuncio_core::model::Folder> =
+            std::collections::BTreeMap::new();
+        // One more than the page from each account, for the same reason the
+        // store itself over-fetches by one: the merge cannot tell "this is the
+        // last page" from "this account was truncated at exactly page_size"
+        // unless at least one extra row can show up.
+        let probe = page_size.saturating_add(1);
+        for account in &accounts {
+            // Each account is asked from the same cursor; the merge below
+            // re-truncates, so no account's page is starved by another's.
+            let (folders, _) = self
+                .db
+                .list_folders_page(&account.id, after.clone(), probe)
+                .await?;
+            for folder in folders {
+                merged
+                    .entry(folder.id.clone())
+                    .and_modify(|existing| {
+                        existing.total_messages += folder.total_messages;
+                        existing.unread_messages += folder.unread_messages;
+                    })
+                    .or_insert(folder);
+            }
+        }
+
+        let mut folders: Vec<nuncio_core::model::Folder> = merged.into_values().collect();
+        let has_more = folders.len() > page_size;
+        folders.truncate(page_size);
+        let next = has_more
+            .then(|| folders.last().map(|f| f.id.clone()))
+            .flatten();
+        Ok((folders, next))
+    }
+
+    /// One page of a folder's messages, merged across every configured account,
+    /// in the store's own `received_at DESC, message_key DESC, uidvalidity
+    /// DESC, uid DESC` order.
+    async fn merged_messages_page(
+        &self,
+        folder_id: &str,
+        after: Option<nuncio_store::db::MessagePageCursor>,
+        page_size: usize,
+    ) -> Result<
+        (
+            Vec<nuncio_store::db::MessageWithPlacement>,
+            Option<nuncio_store::db::MessagePageCursor>,
+        ),
+        nuncio_store::db::DatabaseError,
+    > {
+        let accounts = self.db.list_accounts().await?;
+        let mut rows: Vec<nuncio_store::db::MessageWithPlacement> = Vec::new();
+        // One more than the page from each account -- see `merged_folders_page`
+        // for why the extra row is what makes "is there another page?"
+        // answerable after the merge.
+        let probe = page_size.saturating_add(1);
+        for account in &accounts {
+            let (page, _) = self
+                .db
+                .list_messages_page(&account.id, folder_id, after.clone(), probe)
+                .await?;
+            rows.extend(page);
+        }
+
+        // Re-impose the store's ordering over the concatenated per-account
+        // pages, so the cursor this returns is a position in the merged
+        // sequence rather than in whichever account happened to be last.
+        rows.sort_by(|(a_mail, a_place), (b_mail, b_place)| {
+            b_mail
+                .received_at
+                .cmp(&a_mail.received_at)
+                .then_with(|| b_mail.id.cmp(&a_mail.id))
+                .then_with(|| b_place.uid_validity.cmp(&a_place.uid_validity))
+                .then_with(|| b_place.remote_id.cmp(&a_place.remote_id))
+        });
+
+        let has_more = rows.len() > page_size;
+        rows.truncate(page_size);
+        let next = has_more
+            .then(|| {
+                rows.last().map(|(email, placement)| {
+                    (
+                        email.received_at,
+                        email.id.clone(),
+                        placement.uid_validity.clone(),
+                        placement.remote_id.clone(),
+                    )
+                })
+            })
+            .flatten();
+        Ok((rows, next))
+    }
+
+    /// The mailbox occupancy a message-scoped RPC should speak for.
+    ///
+    /// `GetMessage`/`MarkRead` name a message, but `folder_id` and the read
+    /// flag are per-mailbox now, so one occupancy has to be chosen. This takes
+    /// the store's first in its deterministic order. A message with no
+    /// occupancy at all is not "unread in no folder" -- it is gone -- and is
+    /// reported as not found.
+    async fn primary_placement(
+        &self,
+        message_key: &str,
+    ) -> Result<nuncio_core::model::Placement, Status> {
+        let placements = self.db.placements_of(message_key).await.map_err(|e| {
+            Status::internal(format!(
+                "failed to read placements for '{message_key}': {e}"
+            ))
+        })?;
+        placements.into_iter().next().ok_or_else(|| {
+            errors::status_with_metadata(
+                ErrorReason::MessageNotFound,
+                format!("message '{message_key}' occupies no mailbox"),
+                [("message_id".to_string(), message_key.to_string())],
+            )
+        })
+    }
+}
+
 #[tonic::async_trait]
 impl Mail for MailGrpcService {
     async fn list_folders(
@@ -1646,9 +1790,13 @@ impl Mail for MailGrpcService {
             _ => None,
         })?;
 
+        // The store scopes folders by account -- folder ids are not globally
+        // unique, every account has an INBOX -- while this RPC has no account
+        // field yet. Merging every account's page by folder id reproduces the
+        // pre-split behaviour exactly; narrowing it properly needs a wire
+        // change and belongs with the placement-aware surface.
         let (folders, next) = self
-            .db
-            .list_folders_page(after, page_size)
+            .merged_folders_page(after, page_size)
             .await
             .map_err(|e| Status::internal(format!("failed to list folders: {e}")))?;
 
@@ -1672,19 +1820,31 @@ impl Mail for MailGrpcService {
             return Err(Status::invalid_argument("folder_id is required"));
         }
         let page_size = pagination::clamp_page_size(req.page_size);
+        // Four cursor fields, not two: the store's keyset addresses a
+        // placement (`received_at, message_key, uidvalidity, uid`), because one
+        // message can occupy a single folder twice and a message-only cursor
+        // makes the second copy unreachable across a page boundary.
         let after = pagination::parse_token(&req.page_token, |f| match f {
-            [CursorField::I(ts), CursorField::S(id)] => Some((*ts, id.clone())),
+            [CursorField::I(ts), CursorField::S(key), CursorField::S(uidvalidity), CursorField::S(uid)] => {
+                Some((*ts, key.clone(), uidvalidity.clone(), uid.clone()))
+            }
             _ => None,
         })?;
 
         let (messages, next) = self
-            .db
-            .list_messages_page(&req.folder_id, after, page_size)
+            .merged_messages_page(&req.folder_id, after, page_size)
             .await
             .map_err(|e| Status::internal(format!("failed to list messages: {e}")))?;
 
         let next_page_token = next
-            .map(|(ts, id)| pagination::encode_cursor(&[CursorField::I(ts), CursorField::S(id)]))
+            .map(|(ts, key, uidvalidity, uid)| {
+                pagination::encode_cursor(&[
+                    CursorField::I(ts),
+                    CursorField::S(key),
+                    CursorField::S(uidvalidity),
+                    CursorField::S(uid),
+                ])
+            })
             .unwrap_or_default();
         let messages = messages.into_iter().map(map_email_to_proto).collect();
 
@@ -1711,8 +1871,10 @@ impl Mail for MailGrpcService {
             )
         })?;
 
+        let placement = self.primary_placement(&req.message_id).await?;
+
         Ok(Response::new(GetMessageResponse {
-            message: Some(map_email_to_proto(email)),
+            message: Some(map_email_to_proto((email, placement))),
         }))
     }
 
@@ -1733,8 +1895,13 @@ impl Mail for MailGrpcService {
             return Err(Status::invalid_argument("message_id is required"));
         }
 
+        // `\Seen` is per-mailbox, and this request names only a message, so it
+        // is applied to the occupancy `GetMessage` would report -- keeping the
+        // two RPCs consistent with each other. Naming a placement on the wire
+        // is what makes this well-defined, and lands with that surface.
+        let placement = self.primary_placement(&req.message_id).await?;
         self.db
-            .set_message_read(&req.message_id, req.read)
+            .set_placement_read(&placement.key(), req.read)
             .await
             .map_err(|e| {
                 errors::status_with_metadata(
@@ -1977,20 +2144,28 @@ fn synthetic_preview_email(id: &str) -> nuncio_core::model::Email {
     nuncio_core::model::Email {
         id: id.to_string(),
         account_id: "acct-1".to_string(),
-        folder_id: "inbox".to_string(),
-        // Synthetic preview only -- never persisted or mutated remotely.
-        remote_id: id.to_string(),
-        uid_validity: String::new(),
         subject: "Test Subject".to_string(),
         sender: "test@nuncio.mx".to_string(),
         recipient: "me@nuncio.mx".to_string(),
         received_at,
-        read: false,
         body_plain: Some("Sample body text".to_string()),
         body_html: None,
         attachments: Vec::new(),
         message_id: None,
         content_hash: None,
+    }
+}
+
+/// The occupancy a synthetic preview message is pretended to sit in, so
+/// `WHERE FOLDER = ...` and `WHERE ACCOUNT = ...` have something to answer
+/// against. Synthetic only -- never persisted, never mutated remotely.
+fn synthetic_preview_placement(id: &str) -> nuncio_core::model::Placement {
+    nuncio_core::model::Placement {
+        account_id: "acct-1".to_string(),
+        folder_id: "inbox".to_string(),
+        uid_validity: "1".to_string(),
+        remote_id: id.to_string(),
+        read: false,
     }
 }
 
@@ -2175,17 +2350,39 @@ impl Filters for FiltersGrpcService {
         let preview_engine = FilterEngine::new(vec![rule])
             .map_err(|e| Status::internal(format!("failed to build preview engine: {e}")))?;
 
-        let email = match &req.message_id {
+        // A preview needs a placement as well as a message, because the rule
+        // language can ask where the message sits. A stored message is
+        // previewed against a real occupancy; a message that does not resolve
+        // falls back to the synthetic pair, exactly as before.
+        let (email, placement) = match &req.message_id {
             Some(message_id) if !message_id.is_empty() => {
                 match self.db.get_message(message_id).await {
-                    Ok(email) => email,
-                    Err(_) => synthetic_preview_email(message_id),
+                    Ok(email) => {
+                        let placement = self
+                            .db
+                            .placements_of(message_id)
+                            .await
+                            .ok()
+                            .and_then(|placements| placements.into_iter().next())
+                            .unwrap_or_else(|| synthetic_preview_placement(message_id));
+                        (email, placement)
+                    }
+                    Err(_) => (
+                        synthetic_preview_email(message_id),
+                        synthetic_preview_placement(message_id),
+                    ),
                 }
             }
-            _ => synthetic_preview_email("msg-test"),
+            _ => (
+                synthetic_preview_email("msg-test"),
+                synthetic_preview_placement("msg-test"),
+            ),
         };
 
-        let preview = preview_engine.preview(&email);
+        let preview = preview_engine.preview(nuncio_filter::PlacedEmail {
+            email: &email,
+            placement: &placement,
+        });
         Ok(Response::new(map_preview_result_to_proto(preview)))
     }
 
@@ -2421,8 +2618,28 @@ impl Filters for FiltersGrpcService {
                     let is_last_page = batch.len() < chunk_size;
 
                     for email in &batch {
-                        let actions_for_email =
-                            crate::sync::apply_filter_actions(&db, &engine, email).await;
+                        // Rules can ask where a message is, so a retroactive
+                        // pass evaluates each mailbox the message occupies --
+                        // the same fan-out live sync does. The fire-once claim
+                        // inside `apply_filter_actions` keeps a message in two
+                        // folders from acting twice.
+                        let placements = match db.placements_of(&email.id).await {
+                            Ok(placements) => placements,
+                            Err(e) => {
+                                let _ = tx
+                                    .send(Err(Status::internal(format!(
+                                        "failed to read placements during triage: {e}"
+                                    ))))
+                                    .await;
+                                return;
+                            }
+                        };
+                        let mut actions_for_email = 0usize;
+                        for placement in &placements {
+                            actions_for_email +=
+                                crate::sync::apply_filter_actions(&db, &engine, email, placement)
+                                    .await;
+                        }
                         scanned += 1;
                         applied += actions_for_email as u64;
                         if actions_for_email > 0 {
@@ -3296,22 +3513,25 @@ mod tests {
         let email = nuncio_core::model::Email {
             id: "msg-1".to_string(),
             account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
             subject: "s".to_string(),
             sender: "a@b.com".to_string(),
             recipient: "c@d.com".to_string(),
             received_at: original_secs,
-            read: false,
             body_plain: None,
             body_html: None,
             attachments: Vec::new(),
             message_id: None,
             content_hash: None,
-            remote_id: "remote-1".to_string(),
+        };
+        let placement = nuncio_core::model::Placement {
+            account_id: "acct-1".to_string(),
+            folder_id: "inbox".to_string(),
             uid_validity: "1".to_string(),
+            remote_id: "remote-1".to_string(),
+            read: false,
         };
 
-        let proto = map_email_to_proto(email);
+        let proto = map_email_to_proto((email, placement));
         let ts = proto.received_at.expect("received_at is always populated");
         assert_eq!(
             nuncio_proto::time::timestamp_to_unix_secs(&ts),
@@ -4482,29 +4702,72 @@ mod tests {
         SearchMessagesRequest, SendMessageRequest, SyncRequest,
     };
 
-    fn sample_email(
+    /// A message and the one mailbox occupancy the tests seed it into.
+    fn sample_placed(
         id: &str,
         folder_id: &str,
         subject: &str,
         body: &str,
-    ) -> nuncio_core::model::Email {
-        nuncio_core::model::Email {
-            id: id.to_string(),
-            account_id: "acct-mail-1".to_string(),
-            folder_id: folder_id.to_string(),
-            remote_id: id.to_string(),
-            uid_validity: "1".to_string(),
-            subject: subject.to_string(),
-            sender: "alice@nuncio.mx".to_string(),
-            recipient: "bob@nuncio.mx".to_string(),
-            received_at: 1_700_000_000,
-            read: false,
-            body_plain: Some(body.to_string()),
-            body_html: None,
-            attachments: Vec::new(),
-            message_id: None,
-            content_hash: None,
+    ) -> (nuncio_core::model::Email, nuncio_core::model::Placement) {
+        (
+            nuncio_core::model::Email {
+                id: id.to_string(),
+                account_id: "acct-mail-1".to_string(),
+                subject: subject.to_string(),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1_700_000_000,
+                body_plain: Some(body.to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
+            },
+            nuncio_core::model::Placement {
+                account_id: "acct-mail-1".to_string(),
+                folder_id: folder_id.to_string(),
+                uid_validity: "1".to_string(),
+                remote_id: id.to_string(),
+                read: false,
+            },
+        )
+    }
+
+    /// Persist a message into its occupancy the way a sync pass would, first
+    /// making sure the owning account row exists.
+    ///
+    /// The account row is not decoration: the `Mail` read RPCs carry no account
+    /// field and so merge across the configured accounts, which means mail
+    /// belonging to no account is unreachable through them. That is also true
+    /// in production -- mail only ever arrives for an account the daemon holds
+    /// a configuration for -- so seeding one keeps these tests on the real path.
+    async fn seed_message(
+        db: &DatabaseEngine,
+        email: &nuncio_core::model::Email,
+        placement: &nuncio_core::model::Placement,
+    ) {
+        let existing = db.list_accounts().await.expect("list accounts");
+        if !existing.iter().any(|a| a.id == placement.account_id) {
+            db.save_account(&nuncio_core::AccountConfig {
+                id: placement.account_id.clone(),
+                name: placement.account_id.clone(),
+                email_address: format!("{}@nuncio.mx", placement.account_id),
+                keyring_secret_key: format!("nuncio/{}", placement.account_id),
+                sync_interval_secs: 60,
+                transport: nuncio_core::Transport::Jmap(nuncio_core::JmapTransport {
+                    endpoint_host: "jmap.nuncio.mx".to_string(),
+                }),
+            })
+            .await
+            .expect("save the owning account");
         }
+        db.save_email_at(
+            email,
+            nuncio_core::model::IdentitySource::Surrogate,
+            placement,
+        )
+        .await
+        .expect("seed message");
     }
 
     /// Paging a folder larger than `page_size` across multiple pages via
@@ -4528,9 +4791,9 @@ mod tests {
             ("m7", 1_700_000_030),
         ];
         for (id, ts) in seed {
-            let mut email = sample_email(id, "inbox", "subject", "body");
+            let (mut email, placement) = sample_placed(id, "inbox", "subject", "body");
             email.received_at = ts;
-            db.save_email(&email).await.expect("seed message");
+            seed_message(&db, &email, &placement).await;
         }
 
         let event_bus = Arc::new(EventBus::new());
@@ -4805,22 +5068,16 @@ mod tests {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
             .expect("connect ephemeral test db");
-        db.save_email(&sample_email(
+        let (email_1, placement_1) = sample_placed(
             "msg-mail-1",
             "inbox",
             "Quarterly Roadmap",
             "Let's discuss the annual revenue forecast",
-        ))
-        .await
-        .expect("seed message 1");
-        db.save_email(&sample_email(
-            "msg-mail-2",
-            "inbox",
-            "Lunch Plans",
-            "Sandwiches at noon",
-        ))
-        .await
-        .expect("seed message 2");
+        );
+        seed_message(&db, &email_1, &placement_1).await;
+        let (email_2, placement_2) =
+            sample_placed("msg-mail-2", "inbox", "Lunch Plans", "Sandwiches at noon");
+        seed_message(&db, &email_2, &placement_2).await;
 
         let event_bus = Arc::new(EventBus::new());
         let mut events = event_bus.subscribe_events();
@@ -5169,12 +5426,17 @@ mod tests {
             total_messages: 1,
             unread_messages: 1,
         });
-        mock_backend.add_message(sample_email(
+        let (injected_email, injected_placement) = sample_placed(
             "msg-sync-injected-1",
             "inbox",
             "Injected Sync Subject",
             "Injected sync body",
-        ));
+        );
+        mock_backend.add_message(nuncio_mail::PlacedMessage {
+            email: injected_email,
+            source: nuncio_core::model::IdentitySource::Surrogate,
+            placement: injected_placement,
+        });
 
         let overrides = MailEngineOverrides {
             mail_backend: Some(Arc::new(mock_backend)),
@@ -5535,6 +5797,42 @@ mod tests {
     /// not just re-reading it back over `ListRules`); `ListRules` reflects
     /// the persisted rule; `DeleteRule` removes it AND reloads the engine
     /// back to empty.
+    /// Evaluate `engine` against a fixed sample message in a fixed INBOX
+    /// occupancy.
+    ///
+    /// Evaluation needs both halves now, because rules can ask where a message
+    /// sits; these tests only care whether the live rule set matched at all, so
+    /// the occupancy is a constant.
+    fn evaluate_sample_subject(
+        engine: &FilterEngine,
+        subject: &str,
+    ) -> Vec<(nuncio_filter::FilterRule, Vec<nuncio_filter::RuleAction>)> {
+        let email = nuncio_core::model::Email {
+            id: "msg-filters-1".to_string(),
+            account_id: "acct-1".to_string(),
+            subject: subject.to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1_700_000_000,
+            body_plain: Some("body".to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
+        };
+        let placement = nuncio_core::model::Placement {
+            account_id: "acct-1".to_string(),
+            folder_id: "inbox".to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: "1".to_string(),
+            read: false,
+        };
+        engine.evaluate(nuncio_filter::PlacedEmail {
+            email: &email,
+            placement: &placement,
+        })
+    }
+
     #[tokio::test]
     async fn create_list_and_delete_rule_round_trip_and_keep_the_live_engine_in_sync() {
         let (addr, _handle, _db, filter_engine, _dir) =
@@ -5544,28 +5842,8 @@ mod tests {
             .await
             .expect("client connects");
 
-        let sample_email = |subject: &str| nuncio_core::model::Email {
-            id: "msg-filters-1".to_string(),
-            account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
-            remote_id: "1".to_string(),
-            uid_validity: "1".to_string(),
-            subject: subject.to_string(),
-            sender: "alice@nuncio.mx".to_string(),
-            recipient: "bob@nuncio.mx".to_string(),
-            received_at: 1_700_000_000,
-            read: false,
-            body_plain: Some("body".to_string()),
-            body_html: None,
-            attachments: Vec::new(),
-            message_id: None,
-            content_hash: None,
-        };
-
         // Before creating anything, the live engine matches nothing.
-        assert!(filter_engine
-            .evaluate(&sample_email("Urgent Meeting"))
-            .is_empty());
+        assert!(evaluate_sample_subject(&filter_engine, "Urgent Meeting").is_empty());
 
         let create_response = client
             .create_rule(authed_bearer_request(CreateRuleRequest {
@@ -5587,7 +5865,7 @@ mod tests {
         // The live `FilterEngine`'s `ArcSwap` rule set was reloaded --
         // proven by evaluating the SAME instance the server holds, not a
         // fresh one.
-        let matches = filter_engine.evaluate(&sample_email("Urgent Meeting"));
+        let matches = evaluate_sample_subject(&filter_engine, "Urgent Meeting");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0.id, rule_id);
 
@@ -5620,9 +5898,7 @@ mod tests {
             .expect("list_rules succeeds")
             .into_inner();
         assert!(list_after_delete.rules.is_empty());
-        assert!(filter_engine
-            .evaluate(&sample_email("Urgent Meeting"))
-            .is_empty());
+        assert!(evaluate_sample_subject(&filter_engine, "Urgent Meeting").is_empty());
     }
 
     #[tokio::test]
@@ -5656,25 +5932,7 @@ mod tests {
             list_response.rules.is_empty(),
             "an invalid rule must never be persisted"
         );
-        assert!(filter_engine
-            .evaluate(&nuncio_core::model::Email {
-                id: "msg-1".to_string(),
-                account_id: "acct-1".to_string(),
-                folder_id: "inbox".to_string(),
-                remote_id: "1".to_string(),
-                uid_validity: "1".to_string(),
-                subject: "anything".to_string(),
-                sender: "a@b.com".to_string(),
-                recipient: "c@d.com".to_string(),
-                received_at: 0,
-                read: false,
-                body_plain: None,
-                body_html: None,
-                attachments: Vec::new(),
-                message_id: None,
-                content_hash: None,
-            })
-            .is_empty());
+        assert!(evaluate_sample_subject(&filter_engine, "anything").is_empty());
     }
 
     /// Two `CreateRule` calls with the SAME name AND the SAME NSQL text
@@ -5809,23 +6067,29 @@ mod tests {
     async fn preview_rule_dry_runs_against_a_stored_message_without_persisting() {
         let (addr, _handle, db, _engine, _dir) = spawn_filters_test_server("correct-token").await;
 
-        db.save_email(&nuncio_core::model::Email {
-            id: "msg-preview-1".to_string(),
-            account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
-            remote_id: "preview-1".to_string(),
-            uid_validity: "1".to_string(),
-            subject: "Urgent Board Meeting".to_string(),
-            sender: "alice@nuncio.mx".to_string(),
-            recipient: "bob@nuncio.mx".to_string(),
-            received_at: 1_700_000_000,
-            read: false,
-            body_plain: Some("Please review the attached deck".to_string()),
-            body_html: None,
-            attachments: Vec::new(),
-            message_id: None,
-            content_hash: None,
-        })
+        db.save_email_at(
+            &nuncio_core::model::Email {
+                id: "msg-preview-1".to_string(),
+                account_id: "acct-1".to_string(),
+                subject: "Urgent Board Meeting".to_string(),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1_700_000_000,
+                body_plain: Some("Please review the attached deck".to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
+            },
+            nuncio_core::model::IdentitySource::Surrogate,
+            &nuncio_core::model::Placement {
+                account_id: "acct-1".to_string(),
+                folder_id: "inbox".to_string(),
+                uid_validity: "1".to_string(),
+                remote_id: "preview-1".to_string(),
+                read: false,
+            },
+        )
         .await
         .expect("seed message");
 
@@ -5985,23 +6249,7 @@ mod tests {
         assert_eq!(list_response.rules[0].name, "Renamed");
 
         // The live `FilterEngine` was reloaded with the updated rule.
-        let matches = filter_engine.evaluate(&nuncio_core::model::Email {
-            id: "msg-1".to_string(),
-            account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
-            remote_id: "1".to_string(),
-            uid_validity: "1".to_string(),
-            subject: "Urgent Meeting".to_string(),
-            sender: "a@b.com".to_string(),
-            recipient: "c@d.com".to_string(),
-            received_at: 0,
-            read: false,
-            body_plain: None,
-            body_html: None,
-            attachments: Vec::new(),
-            message_id: None,
-            content_hash: None,
-        });
+        let matches = evaluate_sample_subject(&filter_engine, "Urgent Meeting");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0.id, rule_id);
     }
@@ -6168,23 +6416,7 @@ mod tests {
         assert_eq!(list_response.rules[0].nsql_text, SAMPLE_RULE_NSQL);
 
         // The live engine was reloaded to include the imported rule.
-        let matches = filter_engine.evaluate(&nuncio_core::model::Email {
-            id: "msg-1".to_string(),
-            account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
-            remote_id: "1".to_string(),
-            uid_validity: "1".to_string(),
-            subject: "Urgent Meeting".to_string(),
-            sender: "a@b.com".to_string(),
-            recipient: "c@d.com".to_string(),
-            received_at: 0,
-            read: false,
-            body_plain: None,
-            body_html: None,
-            attachments: Vec::new(),
-            message_id: None,
-            content_hash: None,
-        });
+        let matches = evaluate_sample_subject(&filter_engine, "Urgent Meeting");
         assert_eq!(matches.len(), 1);
     }
 
@@ -6290,22 +6522,20 @@ mod tests {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
             .expect("connect ephemeral test db");
-        db.save_email(&sample_email(
+        let (export_1, export_1_at) = sample_placed(
             "msg-export-1",
             "inbox",
             "Export Subject One",
             "Export body one",
-        ))
-        .await
-        .expect("seed message 1");
-        db.save_email(&sample_email(
+        );
+        seed_message(&db, &export_1, &export_1_at).await;
+        let (export_2, export_2_at) = sample_placed(
             "msg-export-2",
             "archive",
             "Export Subject Two",
             "Export body two",
-        ))
-        .await
-        .expect("seed message 2");
+        );
+        seed_message(&db, &export_2, &export_2_at).await;
 
         let event_bus = Arc::new(EventBus::new());
         let secrets = Arc::new(SecretManager::mock());
@@ -6355,12 +6585,16 @@ mod tests {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
             .expect("connect ephemeral test db");
-        let mut msg_a = sample_email("msg-acct-a", "inbox", "From Account A", "Body A");
+        let (mut msg_a, mut at_a) =
+            sample_placed("msg-acct-a", "inbox", "From Account A", "Body A");
         msg_a.account_id = "acct-a".to_string();
-        db.save_email(&msg_a).await.expect("seed account a message");
-        let mut msg_b = sample_email("msg-acct-b", "inbox", "From Account B", "Body B");
+        at_a.account_id = "acct-a".to_string();
+        seed_message(&db, &msg_a, &at_a).await;
+        let (mut msg_b, mut at_b) =
+            sample_placed("msg-acct-b", "inbox", "From Account B", "Body B");
         msg_b.account_id = "acct-b".to_string();
-        db.save_email(&msg_b).await.expect("seed account b message");
+        at_b.account_id = "acct-b".to_string();
+        seed_message(&db, &msg_b, &at_b).await;
 
         let event_bus = Arc::new(EventBus::new());
         let secrets = Arc::new(SecretManager::mock());

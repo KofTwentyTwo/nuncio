@@ -272,7 +272,7 @@ async fn execute_one(
 
     match mutation.mutation_type.as_str() {
         "MOVE" | "COPY" | "FLAG" | "UNFLAG" | "DELETE" => {
-            dispatch_mailbox_mutation(env, mutation, &email, &payload).await
+            dispatch_mailbox_mutation(db, env, mutation, &email, &payload).await
         }
         "FORWARD" => dispatch_forward(db, env, &email, &payload).await,
         "WEBHOOK" => dispatch_webhook(env, mutation, &email, &payload).await,
@@ -281,10 +281,20 @@ async fn execute_one(
 }
 
 /// Execute a mailbox-affecting mutation (move/copy/flag/unflag/delete) against
-/// the account's mail backend, recovering the remote addressing (protocol id +
-/// UIDVALIDITY scope) from the stored message row so the backend can enforce
-/// its UIDVALIDITY guard.
+/// the account's mail backend, recovering the remote addressing (folder,
+/// protocol id, UIDVALIDITY scope) from the message's stored placement so the
+/// backend can enforce its UIDVALIDITY guard.
+///
+/// The addressing now comes from a placement rather than the message row,
+/// because those coordinates are properties of a mailbox occupancy and a
+/// message can hold several. The outbox row records only the message key, so
+/// which occupancy the rule was evaluated against is not recoverable here: this
+/// addresses the first placement in the store's deterministic order and says so
+/// in the log when there is more than one. Carrying the originating placement on
+/// the outbox row is the real fix and belongs with the placement-aware wire
+/// surface, not here.
 async fn dispatch_mailbox_mutation(
+    db: &DatabaseEngine,
     env: &dyn RemoteExecutionEnv,
     mutation: &PendingRemoteMutation,
     email: &nuncio_core::model::Email,
@@ -313,20 +323,44 @@ async fn dispatch_mailbox_mutation(
         other => return Disposition::Permanent(format!("unexpected mailbox mutation '{other}'")),
     };
 
-    let backend = match env.mail_backend(&email.account_id).await {
+    // Recover the remote addressing from a stored placement rather than
+    // parsing it out of the opaque message key. The backend still
+    // SELECT-verifies the UIDVALIDITY before mutating.
+    let placements = match db.placements_of(&email.id).await {
+        Ok(placements) => placements,
+        Err(e) => {
+            return Disposition::Retry(format!("failed to resolve the message's placements: {e}"))
+        }
+    };
+    let Some(placement) = placements.first() else {
+        // No occupancy means no way to address the message on any server, and
+        // no retry can conjure one back.
+        return Disposition::Permanent(format!(
+            "message '{}' occupies no mailbox to address",
+            email.id
+        ));
+    };
+    if placements.len() > 1 {
+        tracing::warn!(
+            mutation_id = %mutation.id,
+            message_id = %email.id,
+            folder_id = %placement.folder_id,
+            placement_count = placements.len(),
+            "outbox: message occupies several mailboxes and the row does not record which one \
+             the rule matched; addressing the first"
+        );
+    }
+
+    let backend = match env.mail_backend(&placement.account_id).await {
         Ok(backend) => backend,
         Err(e) => return Disposition::Retry(format!("failed to build mail backend: {e}")),
     };
 
-    // Recover the remote addressing from the stored message row -- the
-    // protocol-native id and the UIDVALIDITY scope it was captured under --
-    // rather than parsing it out of the opaque surrogate id. The backend still
-    // SELECT-verifies the UIDVALIDITY before mutating.
     let spec = RemoteMutationSpec {
         message_id: email.id.clone(),
-        remote_id: email.remote_id.clone(),
-        folder_id: email.folder_id.clone(),
-        uid_validity: email.uid_validity.clone(),
+        remote_id: placement.remote_id.clone(),
+        folder_id: placement.folder_id.clone(),
+        uid_validity: placement.uid_validity.clone(),
         kind,
     };
 
@@ -563,7 +597,7 @@ mod tests {
     use super::*;
     use crate::lifecycle::{ShutdownController, ShutdownSignal};
     use crate::test_tracing::with_recorder;
-    use nuncio_core::model::Email;
+    use nuncio_core::model::{Email, IdentitySource, Placement};
     use nuncio_core::EventBus;
     use nuncio_filter::MutationPayload;
     use nuncio_mail::MockMailBackend;
@@ -617,19 +651,27 @@ mod tests {
         Email {
             id: "msg-outbox-log".to_string(),
             account_id: "acct-outbox-log".to_string(),
-            folder_id: "INBOX".to_string(),
-            remote_id: "77".to_string(),
-            uid_validity: "9".to_string(),
             subject: "Confidential outbox subject".to_string(),
             sender: "alice@example.com".to_string(),
             recipient: "owner@nuncio.mx".to_string(),
             received_at: 1_700_000_000,
-            read: false,
             body_plain: Some("secret outbox body".to_string()),
             body_html: None,
             attachments: Vec::new(),
             message_id: None,
             content_hash: None,
+        }
+    }
+
+    /// The one mailbox occupancy `sample_email` is stored in -- the addressing
+    /// the outbox recovers to build its `RemoteMutationSpec`.
+    fn sample_placement() -> Placement {
+        Placement {
+            account_id: "acct-outbox-log".to_string(),
+            folder_id: "INBOX".to_string(),
+            uid_validity: "9".to_string(),
+            remote_id: "77".to_string(),
+            read: false,
         }
     }
 
@@ -668,7 +710,13 @@ mod tests {
                 db.save_folder_sync_state("acct-outbox-log", "INBOX", "9:100")
                     .await
                     .expect("save folder checkpoint");
-                db.save_email(&sample_email()).await.expect("save email");
+                db.save_email_at(
+                    &sample_email(),
+                    IdentitySource::Surrogate,
+                    &sample_placement(),
+                )
+                .await
+                .expect("save email");
                 db.save_pending_mutation(&flag_mutation())
                     .await
                     .expect("save pending mutation");

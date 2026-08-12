@@ -31,10 +31,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use nuncio_core::model::{Email, Folder};
+use nuncio_core::model::{Email, Folder, IdentitySource, Placement};
 use nuncio_core::EventBus;
 use nuncio_filter::FilterEngine;
-use nuncio_mail::{MockMailBackend, MockMessageSender};
+use nuncio_mail::{MockMailBackend, MockMessageSender, PlacedMessage};
 use nuncio_proto::v1::event::Kind;
 use nuncio_proto::v1::{
     AccountConfig, AddAccountRequest, GetMessageRequest, ListAccountsRequest, ListMessagesRequest,
@@ -73,23 +73,31 @@ fn sample_account_config() -> AccountConfig {
     }
 }
 
-fn mock_inbound_email(id: &str, subject: &str, body: &str) -> Email {
-    Email {
-        id: id.to_string(),
-        account_id: ACCOUNT_ID.to_string(),
-        folder_id: "inbox".to_string(),
-        remote_id: id.to_string(),
-        uid_validity: "1".to_string(),
-        subject: subject.to_string(),
-        sender: "alice@nuncio.mx".to_string(),
-        recipient: ACCOUNT_EMAIL.to_string(),
-        received_at: 1_700_000_000,
-        read: false,
-        body_plain: Some(body.to_string()),
-        body_html: None,
-        attachments: Vec::new(),
-        message_id: None,
-        content_hash: None,
+/// One inbound message as a backend surfaces it: identity, the tier the key
+/// came from, and the INBOX occupancy this pass found it in.
+fn mock_inbound_email(id: &str, subject: &str, body: &str) -> PlacedMessage {
+    PlacedMessage {
+        email: Email {
+            id: id.to_string(),
+            account_id: ACCOUNT_ID.to_string(),
+            subject: subject.to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: ACCOUNT_EMAIL.to_string(),
+            received_at: 1_700_000_000,
+            body_plain: Some(body.to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
+        },
+        source: IdentitySource::Surrogate,
+        placement: Placement {
+            account_id: ACCOUNT_ID.to_string(),
+            folder_id: "inbox".to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: id.to_string(),
+            read: false,
+        },
     }
 }
 

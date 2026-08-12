@@ -27,10 +27,10 @@ use std::sync::{Arc, Mutex};
 
 use nuncio_cal::{CalDavAccountConfig, CalDavClient, CalendarBackend};
 use nuncio_contacts::{CardDavAccountConfig, CardDavClient, ContactsBackend};
-use nuncio_core::model::{Email, Folder};
+use nuncio_core::model::{Email, Folder, IdentitySource, Placement};
 use nuncio_core::EventBus;
 use nuncio_filter::{FilterEngine, NsqlParser, ValidationOptions, WebhookDispatcher};
-use nuncio_mail::{JmapEngine, MailBackend, MockMailBackend, MockMessageSender};
+use nuncio_mail::{JmapEngine, MailBackend, MockMailBackend, MockMessageSender, PlacedMessage};
 use nuncio_proto::v1::{
     AccountConfig, AddAccountRequest, GetStatusRequest, MarkReadRequest, SendMessageRequest,
     SyncRequest, TlsMode,
@@ -139,19 +139,35 @@ fn sentinel_inbound_email() -> Email {
     Email {
         id: "msg-canary-1".to_string(),
         account_id: ACCOUNT_ID.to_string(),
-        folder_id: "inbox".to_string(),
-        remote_id: "msg-canary-1".to_string(),
-        uid_validity: "1".to_string(),
         subject: SENTINEL_SUBJECT.to_string(),
         sender: SENTINEL_SENDER.to_string(),
         recipient: SENTINEL_RECIPIENT.to_string(),
         received_at: 1_700_000_000,
-        read: false,
         body_plain: Some(SENTINEL_BODY.to_string()),
         body_html: None,
         attachments: Vec::new(),
         message_id: None,
         content_hash: None,
+    }
+}
+
+/// The INBOX occupancy the sentinel message is found in.
+fn sentinel_placement() -> Placement {
+    Placement {
+        account_id: ACCOUNT_ID.to_string(),
+        folder_id: "inbox".to_string(),
+        uid_validity: "1".to_string(),
+        remote_id: "msg-canary-1".to_string(),
+        read: false,
+    }
+}
+
+/// The sentinel message as a backend would surface it.
+fn sentinel_placed_message() -> PlacedMessage {
+    PlacedMessage {
+        email: sentinel_inbound_email(),
+        source: IdentitySource::Surrogate,
+        placement: sentinel_placement(),
     }
 }
 
@@ -214,7 +230,7 @@ async fn drive_daemon() {
         total_messages: 1,
         unread_messages: 1,
     });
-    mock_backend.add_message(sentinel_inbound_email());
+    mock_backend.add_message(sentinel_placed_message());
     let mock_sender = MockMessageSender::new();
     let overrides = MailEngineOverrides {
         mail_backend: Some(Arc::new(mock_backend)),
@@ -309,7 +325,12 @@ async fn drive_filter_and_webhook() {
     )
     .expect("parse rule");
     let engine = FilterEngine::new(vec![rule]).expect("compile rule");
-    let matches = engine.evaluate(&sentinel_inbound_email());
+    let sentinel = sentinel_inbound_email();
+    let placement = sentinel_placement();
+    let matches = engine.evaluate(nuncio_filter::PlacedEmail {
+        email: &sentinel,
+        placement: &placement,
+    });
     assert_eq!(matches.len(), 1, "rule must fire on the sentinel message");
 
     let mock_server = MockServer::start().await;

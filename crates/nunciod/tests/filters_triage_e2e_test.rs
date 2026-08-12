@@ -3,7 +3,7 @@
 //! Boots a real `nunciod` daemon gRPC server (`nunciod::grpc::
 //! serve_on_listener`) on an ephemeral loopback port, backed by a real
 //! temp file-backed [`DatabaseEngine`] seeded directly via
-//! [`DatabaseEngine::save_email`] (standing in for messages that were synced
+//! [`DatabaseEngine::save_email_at`] (standing in for messages that were synced
 //! before the active rule set existed) and a live [`FilterEngine`] carrying
 //! a real persisted rule.
 //!
@@ -25,7 +25,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use nuncio_core::model::Email;
+use nuncio_core::model::{Email, IdentitySource, Placement};
 use nuncio_core::EventBus;
 use nuncio_filter::{FilterEngine, NsqlParser};
 use nuncio_proto::v1::filters_client::FiltersClient;
@@ -42,20 +42,50 @@ fn sample_email(id: &str, subject: &str) -> Email {
     Email {
         id: id.to_string(),
         account_id: ACCOUNT_ID.to_string(),
-        folder_id: "inbox".to_string(),
-        remote_id: id.to_string(),
-        uid_validity: "1".to_string(),
         subject: subject.to_string(),
         sender: "alice@nuncio.mx".to_string(),
         recipient: "triage-e2e@nuncio.mx".to_string(),
         received_at: 1_700_000_000,
-        read: false,
         body_plain: Some("body".to_string()),
         body_html: None,
         attachments: Vec::new(),
         message_id: None,
         content_hash: None,
     }
+}
+
+/// The INBOX occupancy a seeded message sits in. `id` doubles as the UID, so
+/// distinct messages occupy distinct rows.
+fn sample_placement(id: &str) -> Placement {
+    Placement {
+        account_id: ACCOUNT_ID.to_string(),
+        folder_id: "inbox".to_string(),
+        uid_validity: "1".to_string(),
+        remote_id: id.to_string(),
+        read: false,
+    }
+}
+
+/// Seed a message and its occupancy the way a sync pass would.
+async fn seed(db: &DatabaseEngine, id: &str, subject: &str) {
+    db.save_email_at(
+        &sample_email(id, subject),
+        IdentitySource::Surrogate,
+        &sample_placement(id),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("seed message '{id}': {e}"));
+}
+
+/// The read flag of a seeded message's single occupancy.
+async fn read_flag_of(db: &DatabaseEngine, id: &str) -> bool {
+    let placements = db.placements_of(id).await.expect("read placements");
+    assert_eq!(
+        placements.len(),
+        1,
+        "'{id}' should occupy exactly one folder"
+    );
+    placements[0].read
 }
 
 /// Boots the real daemon gRPC server (bearer-token authenticated) on an
@@ -145,15 +175,9 @@ async fn triage_applies_live_rule_retroactively_and_reports_real_cumulative_coun
     // Seed messages directly into the store, standing in for mail that was
     // synced BEFORE these rules existed -- exactly the scenario `Triage` is
     // for. Two match (one per rule), one does not.
-    db.save_email(&sample_email("m-urgent", "Urgent: server down"))
-        .await
-        .expect("seed urgent message");
-    db.save_email(&sample_email("m-archive", "Please Archive Me"))
-        .await
-        .expect("seed archive message");
-    db.save_email(&sample_email("m-plain", "Just saying hi"))
-        .await
-        .expect("seed non-matching message");
+    seed(&db, "m-urgent", "Urgent: server down").await;
+    seed(&db, "m-archive", "Please Archive Me").await;
+    seed(&db, "m-plain", "Just saying hi").await;
 
     let mut client = FiltersClient::connect(format!("http://{addr}"))
         .await
@@ -190,8 +214,10 @@ async fn triage_applies_live_rule_retroactively_and_reports_real_cumulative_coun
 
     // Real side effects, not a fabricated count: the MARK READ action
     // actually flipped the stored read flag...
-    let urgent = db.get_message("m-urgent").await.expect("get urgent");
-    assert!(urgent.read, "MARK READ must genuinely flip the read flag");
+    assert!(
+        read_flag_of(&db, "m-urgent").await,
+        "MARK READ must genuinely flip the occupancy's read flag"
+    );
 
     // ...and the MOVE TO action actually queued a real outbox mutation.
     let pending = db
@@ -205,8 +231,10 @@ async fn triage_applies_live_rule_retroactively_and_reports_real_cumulative_coun
     );
     assert_eq!(pending[0].message_id, "m-archive");
 
-    let plain = db.get_message("m-plain").await.expect("get plain");
-    assert!(!plain.read, "a non-matching message must be left untouched");
+    assert!(
+        !read_flag_of(&db, "m-plain").await,
+        "a non-matching message must be left untouched"
+    );
 }
 
 #[tokio::test]
@@ -221,12 +249,7 @@ async fn triage_streams_multiple_chunks_for_a_store_bigger_than_one_chunk() {
     // updates before the final `done: true` -- proof this is a real
     // multi-chunk stream, not one batch disguised as one.
     for i in 0..5 {
-        db.save_email(&sample_email(
-            &format!("m-{i:02}"),
-            &format!("Message number {i}"),
-        ))
-        .await
-        .expect("seed message");
+        seed(&db, &format!("m-{i:02}"), &format!("Message number {i}")).await;
     }
 
     let mut client = FiltersClient::connect(format!("http://{addr}"))

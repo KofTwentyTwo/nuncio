@@ -1,7 +1,7 @@
 //! Deterministic mock mail backend for offline testing and integration verification.
 
 use async_trait::async_trait;
-use nuncio_core::model::Folder;
+use nuncio_core::model::{Email, Folder, IdentitySource, Placement};
 use std::sync::{Arc, Mutex};
 
 use crate::backend::{
@@ -79,6 +79,71 @@ impl MockMailBackend {
         if let Ok(mut guard) = self.messages.lock() {
             guard.push(message);
         }
+    }
+
+    /// Account every message staged by [`Self::shared_message_in`] and
+    /// [`Self::with_same_message_in`] belongs to.
+    pub const SHARED_ACCOUNT_ID: &'static str = "acct-1";
+
+    /// The one derived message key every occupancy staged by
+    /// [`Self::shared_message_in`] carries, whatever folder it sits in.
+    pub const SHARED_MESSAGE_KEY: &'static str = "msg-shared-identity";
+
+    /// One occupancy of the single shared message, in `folder_id` under
+    /// `remote_id`.
+    ///
+    /// Identity is byte-identical across every folder -- that is the whole
+    /// point: a caller cannot tell a first arrival in a second mailbox from a
+    /// message it already stores unless it compares occupancies rather than
+    /// message keys.
+    pub fn shared_message_in(folder_id: &str, remote_id: &str) -> PlacedMessage {
+        PlacedMessage {
+            email: Email {
+                id: Self::SHARED_MESSAGE_KEY.to_string(),
+                account_id: Self::SHARED_ACCOUNT_ID.to_string(),
+                subject: "Shared across folders".to_string(),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1_700_000_000,
+                body_plain: Some("one message, several mailboxes".to_string()),
+                body_html: None,
+                message_id: Some("shared@nuncio.mx".to_string()),
+                content_hash: None,
+                attachments: Vec::new(),
+            },
+            // EmailId, not Surrogate: a folder-independent key is exactly what
+            // a server-assigned identity buys, and it is the tier under which
+            // one message legitimately reports from several mailboxes.
+            source: IdentitySource::EmailId,
+            placement: Placement {
+                account_id: Self::SHARED_ACCOUNT_ID.to_string(),
+                folder_id: folder_id.to_string(),
+                uid_validity: "1".to_string(),
+                remote_id: remote_id.to_string(),
+                read: false,
+            },
+        }
+    }
+
+    /// A backend serving `folders`, each holding the same message under its own
+    /// `remote_id` -- one identity, one occupancy per folder.
+    ///
+    /// Stages the folders as well as the messages, so a caller that enumerates
+    /// folders and then syncs each one sees every occupancy.
+    pub fn with_same_message_in(folders: &[&str]) -> Self {
+        let backend = Self::new();
+        for (index, folder_id) in folders.iter().enumerate() {
+            backend.add_folder(Folder {
+                id: (*folder_id).to_string(),
+                name: (*folder_id).to_string(),
+                total_messages: 1,
+                unread_messages: 1,
+            });
+            // A distinct UID per folder: UIDs are folder-scoped, so the same
+            // mail in two mailboxes is addressed by two different ones.
+            backend.add_message(Self::shared_message_in(folder_id, &(index + 1).to_string()));
+        }
+        backend
     }
 
     /// Every [`RemoteMutationSpec`] this mock's `apply_mutation` was called
@@ -250,7 +315,6 @@ impl MessageSender for MockMessageSender {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nuncio_core::model::{Email, IdentitySource, Placement};
 
     #[tokio::test]
     async fn mock_backend_folder_and_message_operations() {
@@ -305,6 +369,39 @@ mod tests {
         mock.set_should_fail(true);
         assert!(mock.sync_folders().await.is_err());
         assert!(mock.sync_messages("inbox", None).await.is_err());
+    }
+
+    /// The staging helper is only useful if it really produces one identity in
+    /// two places: same message key, different occupancies. If it ever drifted
+    /// into two keys, every test built on it would pass for the wrong reason.
+    #[tokio::test]
+    async fn with_same_message_in_stages_one_identity_across_every_folder() {
+        let mock = MockMailBackend::with_same_message_in(&["INBOX", "Archive"]);
+
+        let folders = mock.sync_folders().await.expect("sync folders succeeds");
+        let folder_ids: Vec<&str> = folders.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(folder_ids, vec!["INBOX", "Archive"]);
+
+        let inbox = mock
+            .sync_changes("INBOX", None)
+            .await
+            .expect("inbox pass succeeds");
+        let archive = mock
+            .sync_changes("Archive", None)
+            .await
+            .expect("archive pass succeeds");
+        assert_eq!(inbox.upserts.len(), 1);
+        assert_eq!(archive.upserts.len(), 1);
+
+        assert_eq!(
+            inbox.upserts[0].email.id, archive.upserts[0].email.id,
+            "both occupancies must carry the same derived message key"
+        );
+        assert_ne!(
+            inbox.upserts[0].placement.key(),
+            archive.upserts[0].placement.key(),
+            "the occupancies themselves must differ, or there is nothing to classify"
+        );
     }
 
     fn sample_outbound_message() -> OutboundMessage {
