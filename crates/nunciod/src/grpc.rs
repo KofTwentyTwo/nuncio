@@ -4798,9 +4798,9 @@ mod tests {
     /// Paging a folder larger than `page_size` across multiple pages via
     /// `next_page_token` must return every message EXACTLY ONCE, with no
     /// duplicates and no gaps, and in the stable newest-first keyset order
-    /// (`received_at DESC, id DESC`). Some messages deliberately share a
-    /// `received_at` so the `(received_at, id)` tiebreaker is exercised across
-    /// a page boundary.
+    /// (`received_at DESC, message_key DESC, uidvalidity DESC, uid DESC`).
+    /// Some messages deliberately share a `received_at` so the tiebreaker
+    /// fields are exercised across a page boundary.
     #[tokio::test]
     async fn list_messages_keyset_pagination_returns_every_message_once_no_gaps() {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
