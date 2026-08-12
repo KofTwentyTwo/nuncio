@@ -87,6 +87,13 @@ fn remote_action_tag(action: &RuleAction) -> Option<(&'static str, Option<String
 /// engineer ten times. The claim fails closed, so an unverifiable claim skips
 /// the actions rather than licensing them.
 ///
+/// The claim is spent the moment it is won, before the actions are known to
+/// have succeeded. A rule whose enqueue then fails is therefore not retried on
+/// a later pass. That is the deliberate trade: re-firing FORWARD and CALL
+/// WEBHOOK on a partial failure would re-deliver to a third party, and a
+/// duplicate mail cannot be un-received, while a dropped one is visible in the
+/// warning below and recoverable by hand.
+///
 /// The claim also subsumes the older "only call me for a new message" contract
 /// for re-arrivals of the same message. Callers should still gate on a genuinely
 /// new occupancy (see [`fetch_and_persist`]) -- the claim stops repeat *actions*,
@@ -332,33 +339,35 @@ async fn fetch_and_persist(
         // What a folder stops mentioning is an occupancy, never a message: the
         // same mail may still sit in another mailbox, and it goes only when its
         // last placement does -- which `delete_placements` decides, not this.
-        if let Some(acct) = account_id {
-            let mut gone: Vec<PlacementKey> = changes.removals;
+        //
+        // A `PlacementKey` names its own account, so an explicitly-reported
+        // removal is actionable with no ambient account context at all. Only
+        // the `present` diff needs one, because its other half is a lookup
+        // keyed by (account, folder).
+        let mut gone: Vec<PlacementKey> = changes.removals;
 
-            // `present` is the folder's complete contents when the pass was
-            // able to enumerate them. `None` and `Some(vec![])` are NOT the
-            // same: `None` means the pass was incremental and cannot speak to
-            // absence, and treating it as "nothing is present" would delete
-            // the folder.
-            if let Some(present) = changes.present {
-                let present: std::collections::HashSet<PlacementKey> =
-                    present.into_iter().collect();
-                let stored = db.placements_in_folder(acct, &folder.id).await?;
-                gone.extend(stored.into_iter().filter(|key| !present.contains(key)));
-            }
+        // `present` is the folder's complete contents when the pass was
+        // able to enumerate them. `None` and `Some(vec![])` are NOT the
+        // same: `None` means the pass was incremental and cannot speak to
+        // absence, and treating it as "nothing is present" would delete
+        // the folder.
+        if let (Some(acct), Some(present)) = (account_id, changes.present) {
+            let present: std::collections::HashSet<PlacementKey> = present.into_iter().collect();
+            let stored = db.placements_in_folder(acct, &folder.id).await?;
+            gone.extend(stored.into_iter().filter(|key| !present.contains(key)));
+        }
 
-            gone.sort_unstable();
-            gone.dedup();
-            if !gone.is_empty() {
-                let outcome = db.delete_placements(&gone).await?;
-                tracing::info!(
-                    account_id = %acct,
-                    folder_id = %folder.id,
-                    placements_removed = outcome.placements_removed,
-                    messages_reaped = outcome.messages_reaped,
-                    "removed placements that are no longer on the server"
-                );
-            }
+        gone.sort_unstable();
+        gone.dedup();
+        if !gone.is_empty() {
+            let outcome = db.delete_placements(&gone).await?;
+            tracing::info!(
+                account_id = ?account_id,
+                folder_id = %folder.id,
+                placements_removed = outcome.placements_removed,
+                messages_reaped = outcome.messages_reaped,
+                "removed placements that are no longer on the server"
+            );
         }
 
         // Persist the returned checkpoint only AFTER this folder's messages
@@ -1561,6 +1570,50 @@ mod tests {
         assert!(
             logs.is_empty(),
             "and nothing may be recorded as having fired"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_account_less_pass_still_applies_server_confirmed_removals() {
+        // A `PlacementKey` names its own account, so an explicitly-reported
+        // removal needs no ambient account context. Gating the whole removals
+        // block on `account_id.is_some()` would silently discard a VANISHED
+        // report on a mock-driven `SyncAll`, leaving a ghost the server has
+        // already told us is gone.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+        let filter_engine = empty_filter_engine();
+
+        let staged = mock_placed("m-vanished", "inbox", "Deleted elsewhere");
+        db.save_email_at(&staged.email, staged.source, &staged.placement)
+            .await
+            .expect("store the occupancy a prior pass left behind");
+
+        let mock = MockMailBackend::new();
+        mock.add_folder(Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 0,
+            unread_messages: 0,
+        });
+        mock.set_removals(vec![staged.placement.key()]);
+
+        // `None` account: the pass has nowhere to key a checkpoint and cannot
+        // run the `present` diff, but the removal is still actionable.
+        let synced = fetch_and_persist(&db, &event_bus, &mock, &filter_engine, None)
+            .await
+            .expect("sync succeeds");
+        assert_eq!(synced, 0, "nothing new arrived");
+
+        let placements = db
+            .placements_of("m-vanished")
+            .await
+            .expect("read the message's placements");
+        assert!(
+            placements.is_empty(),
+            "the server-confirmed removal must be applied without an account id"
         );
     }
 }

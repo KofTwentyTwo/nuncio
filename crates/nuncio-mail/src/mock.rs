@@ -1,7 +1,7 @@
 //! Deterministic mock mail backend for offline testing and integration verification.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Email, Folder, IdentitySource, Placement};
+use nuncio_core::model::{Email, Folder, IdentitySource, Placement, PlacementKey};
 use std::sync::{Arc, Mutex};
 
 use crate::backend::{
@@ -26,6 +26,10 @@ pub struct MockMailBackend {
     /// so a daemon E2E can prove the outbox executor genuinely invoked the
     /// backend op (not a fabricated completion).
     applied_mutations: Arc<Mutex<Vec<RemoteMutationSpec>>>,
+    /// Occupancies this mock reports as explicitly gone, the way QRESYNC
+    /// `VANISHED` does. Handed back on the pass for the folder each key names,
+    /// so a test can prove a caller acts on a server-confirmed removal.
+    removals: Arc<Mutex<Vec<PlacementKey>>>,
 }
 
 impl MockMailBackend {
@@ -55,6 +59,15 @@ impl MockMailBackend {
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default()
+    }
+
+    /// Stage occupancies this mock reports as explicitly gone, as a QRESYNC
+    /// `VANISHED` would. Each key is handed back on the pass for the folder it
+    /// names, so staging a removal for `Archive` does not leak into `INBOX`.
+    pub fn set_removals(&self, removals: Vec<PlacementKey>) {
+        if let Ok(mut guard) = self.removals.lock() {
+            *guard = removals;
+        }
     }
 
     /// Configure the mock to simulate network failure errors.
@@ -203,11 +216,25 @@ impl MailBackend for MockMailBackend {
             .map_err(|e| MailError::ParseFailed(e.to_string()))?
             .clone();
 
+        // Staged removals are scoped to the folder each key names, and are
+        // reported on both the full and the incremental pass -- a `VANISHED`
+        // report is exactly the kind of thing an incremental resync carries.
+        let removals: Vec<PlacementKey> = self
+            .removals
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?
+            .iter()
+            .filter(|key| key.folder_id == folder_id)
+            .cloned()
+            .collect();
+
         // Simulate a since_state-aware backend: with a prior checkpoint there
         // is nothing new to hand back, so the incremental fetch is genuinely
         // narrower (empty) rather than a full re-report of every message.
+        // `present` stays `None`: an incremental pass cannot speak to absence.
         if since_state.is_some() {
             return Ok(FolderChanges {
+                removals,
                 next_state: returned_state,
                 ..Default::default()
             });
@@ -228,7 +255,7 @@ impl MailBackend for MockMailBackend {
         let present = matches.iter().map(|m| m.placement.key()).collect();
         Ok(FolderChanges {
             upserts: matches,
-            removals: Vec::new(),
+            removals,
             present: Some(present),
             next_state: returned_state,
         })
