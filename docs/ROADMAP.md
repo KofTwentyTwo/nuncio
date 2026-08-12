@@ -104,7 +104,7 @@ part of the original M1–M7 numbering:
   `tls_mode_from_db` silent `ImplicitTls` fallback (#271), the
   `NaturalLanguageScheduler` that returns wrong times (#258), plus CLI and audit
   cleanups.
-- **WS-A … WS-F — the pre-freeze reshape** (22 closed / 44 open). Six tracks
+- **WS-A … WS-F — the pre-freeze reshape** (22 closed / 56 open). Six tracks
   that must land before `nuncio.v1` can be frozen: **WS-A** contract hardening
   (typed errors, `Timestamp`/`Duration` unification, keyset pagination, id
   conventions, enum hygiene, account transport `oneof`); **WS-B** mail model and
