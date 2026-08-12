@@ -520,10 +520,18 @@ message Attachment {
 // identifiers in hand-written Rust using this module.
 message Message {
   // Unique message identifier. OPAQUE and server-assigned: content-addressed
-  // from the message's strongest available identity, so it is independent of
-  // which folder the message currently occupies and survives a move. Never a
-  // raw upstream protocol id (e.g. an IMAP UID, which is only stable within a
+  // from the strongest identity the message's server offered. Never a raw
+  // upstream protocol id (e.g. an IMAP UID, which is only stable within a
   // single IMAP session and is NOT a durable cross-session identifier).
+  //
+  // Stability across a move depends on what the server offered. Where a
+  // server-assigned object id or a usable Message-ID was available, the id is
+  // folder-independent and survives a move between folders. Where none was --
+  // a message carrying no Message-ID, or one fetched headers-only -- the id
+  // falls back to a derivation that includes the folder, and moving such a
+  // message yields a different id. Clients MUST NOT assume an id outlives a
+  // move.
+  //
   // Clients MUST treat this as an opaque token -- pass it back verbatim in
   // later requests, but never parse, construct, or assume any structure in
   // its value.
