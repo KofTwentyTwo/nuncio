@@ -822,15 +822,21 @@ impl ImapEngine {
     /// exercise the multi-batch path with a small window instead of a huge
     /// fixture.
     ///
-    /// The sync runs in two phases so the transient working set stays bounded
-    /// regardless of mailbox size:
+    /// The sync runs in two phases:
     /// 1. A cheap enumeration ([`build_enumerate_command_query`]) reads every
     ///    in-range message's UID and `RFC822.SIZE` with NO body. Messages at or
     ///    below [`MAX_MESSAGE_BODY_BYTES`] are queued for a full-body fetch;
     ///    oversized ones are queued for a headers-only fetch and WARN-logged.
     /// 2. Each queue is drained in explicit UID-set batches of at most
-    ///    `batch_size`, so the full bodies held in memory at once never exceed
-    ///    one batch.
+    ///    `batch_size`, so a single `UID FETCH` request never asks the server
+    ///    for more than that many bodies at a time.
+    ///
+    /// Batching bounds the size of each *request*, not the memory this function
+    /// holds: the parsed messages accumulate into one `Vec` across every batch,
+    /// so the returned [`FolderChanges`] carries the whole in-range set and the
+    /// peak working set still scales with the mailbox. That is the shape a
+    /// caller receiving `FolderChanges` depends on, so anything downstream must
+    /// be sized for a whole folder rather than a batch.
     #[tracing::instrument(
         skip(self, session),
         fields(account_id = %self.account_id, folder_id = %folder_id),
@@ -1246,6 +1252,13 @@ impl ImapEngine {
     /// four loose arguments: they are already a single value at every call site,
     /// and spreading them out buys no clarity while pushing this function past
     /// the argument-count lint.
+    ///
+    /// In practice every IMAP call site passes `email_id: None` and
+    /// `gm_msgid: None` today, because the FETCH never asks for them, so this
+    /// engine reaches only the `Message-ID`+content tier or the surrogate. The
+    /// JMAP engine enters at the top tier, which means an IMAP-derived key and
+    /// a JMAP-derived key for the *same* message will not match. Syncing one
+    /// account over both engines does not converge on a shared identity yet.
     fn place(
         &self,
         folder_id: &str,
@@ -1294,8 +1307,16 @@ impl ImapEngine {
         // EMAILID (RFC 8474) and X-GM-MSGID are not requested by the current
         // FETCH, so identity rests on the Message-ID/content pair where the
         // message carried a Message-ID and on the folder-scoped surrogate
-        // otherwise. Adding those FETCH items lifts existing rows to a stronger
-        // tier on the next resync at no cost to this code path.
+        // otherwise.
+        //
+        // Adding those FETCH items is not a local change. Every already-stored
+        // message would derive a DIFFERENT key on its next resync, so each
+        // re-reported placement repoints to the new key -- and the old message
+        // row, now referenced by nothing, is never reaped. Its decrypted body
+        // stays in the plaintext FTS index forever, which is exactly the leak
+        // the reap on placement removal exists to prevent. The FETCH items can
+        // only be requested once the repoint path reaps the message it
+        // abandons; until then, requesting them leaks plaintext.
         if let Some(raw_bytes) = fetch_data.body() {
             let mut email = MimeParserAdapter::parse_mime(&self.account_id, raw_bytes)?;
             let (identity, placement) = self.place(

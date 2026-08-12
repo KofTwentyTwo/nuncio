@@ -349,6 +349,18 @@ impl Email {
     ///
     /// The surrogate tier is folder-scoped and therefore *not* stable across a
     /// move; it is the honest answer when the server offered nothing better.
+    ///
+    /// # Keys do not yet converge across engine types
+    ///
+    /// Precedence makes a key reproducible from the same inputs, not from the
+    /// same *message*. The IMAP engine does not currently request `EMAILID` or
+    /// `X-GM-MSGID`, so it can only ever reach the `Message-ID`+content tier or
+    /// the surrogate, while JMAP supplies a server id and enters at the top
+    /// tier. Two engines syncing one account therefore produce disjoint key
+    /// spaces: the same message is two identities, one per engine. This is a
+    /// known gap in the convergent multi-engine model, not a property to rely
+    /// on -- do not assume a key derived by one engine addresses the row
+    /// another engine wrote.
     pub fn derive_message_key(
         account_id: &str,
         remote: RemoteIdentity<'_>,

@@ -241,7 +241,7 @@ larger than M6. Status as of 2026-08-12:
 | **WS-F** Ops, usability & maintainability | 5 / 10 | CLI polish, `System.Backup`, and the `grpc.rs` (#333) / `DatabaseEngine` (#334) decompositions |
 | **OBS-1 … OBS-9** Observability | 9 / 0 | **COMPLETE.** Tracing subscriber, RPC spans + request-id, domain/lifecycle coverage, protocol instrumentation, `GetStatus`, CLI verbosity, redaction canary |
 
-WS-B and WS-C grew when [ADR 0002](adr/0002-multi-engine-sync-model.md) decided
+WS-B and WS-C grew when **ADR 0002** decided
 the convergent multi-engine sync model and broke it into #386–#397. Those are
 in flight, not closed: the message/placement identity split, Message-ID and
 content-hash capture, `user_version` gating, the raw IMAP command layer, the

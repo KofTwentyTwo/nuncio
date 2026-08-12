@@ -328,6 +328,20 @@ pub struct DeleteOutcome {
     pub messages_reaped: u64,
 }
 
+/// How many keys one generated `IN (...)` list may carry.
+///
+/// SQLite caps a statement's bind parameters at `SQLITE_MAX_VARIABLE_NUMBER`,
+/// 32766 in the bundled build. The widest key built here spends four
+/// parameters per entry (account, folder, uidvalidity, uid), so 4000 keys is
+/// 16000 parameters -- comfortably under the cap with room for the limit to
+/// halve, or for a future key to grow a fifth column, without silently
+/// becoming a runtime error again.
+///
+/// The cap is worth this margin because overrunning it is not a slow query but
+/// a hard failure of the whole statement: the enclosing folder sync aborts, no
+/// checkpoint is written, and every retry fails in exactly the same place.
+const MAX_KEYS_PER_IN_LIST: usize = 4_000;
+
 /// Serialize a [`nuncio_core::TlsMode`] to its stable on-disk `accounts`
 /// column form. Kept as a bare snake_case token (matching the column's
 /// `'implicit_tls'` default) rather than JSON, so a row inserted by the
@@ -2080,90 +2094,103 @@ impl DatabaseEngine {
             .collect())
     }
 
-    /// The subset of `keys` already stored, in one round trip.
+    /// The subset of `keys` already stored.
     ///
-    /// SQLite supports row-value `IN` lists, so the whole batch is one query
+    /// SQLite supports row-value `IN` lists, so a whole batch is one query
     /// rather than one existence check per placement. An empty slice
     /// short-circuits, since `IN ()` is not valid SQL.
+    ///
+    /// The batch is split internally at [`MAX_KEYS_PER_IN_LIST`] and the
+    /// results unioned, so callers may pass an arbitrarily large set: an entire
+    /// mailbox's worth of placements is exactly what a first sync produces, and
+    /// pushing the split onto callers means the ceiling is only ever one
+    /// forgetful caller away from aborting every retry of that sync
+    /// identically. Chunking here makes the limit unreachable from outside.
     pub async fn existing_placements(
         &self,
         keys: &[PlacementKey],
     ) -> Result<std::collections::HashSet<PlacementKey>, DatabaseError> {
-        if keys.is_empty() {
-            return Ok(std::collections::HashSet::new());
-        }
+        let mut found = std::collections::HashSet::new();
 
-        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "SELECT account_id, folder_id, uidvalidity, uid FROM placements
-             WHERE (account_id, folder_id, uidvalidity, uid) IN (",
-        );
-        for (index, key) in keys.iter().enumerate() {
-            if index > 0 {
+        for chunk in keys.chunks(MAX_KEYS_PER_IN_LIST) {
+            let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+                "SELECT account_id, folder_id, uidvalidity, uid FROM placements
+                 WHERE (account_id, folder_id, uidvalidity, uid) IN (",
+            );
+            for (index, key) in chunk.iter().enumerate() {
+                if index > 0 {
+                    builder.push(", ");
+                }
+                builder.push("(");
+                builder.push_bind(key.account_id.clone());
                 builder.push(", ");
+                builder.push_bind(key.folder_id.clone());
+                builder.push(", ");
+                builder.push_bind(key.uid_validity.clone());
+                builder.push(", ");
+                builder.push_bind(key.remote_id.clone());
+                builder.push(")");
             }
-            builder.push("(");
-            builder.push_bind(key.account_id.clone());
-            builder.push(", ");
-            builder.push_bind(key.folder_id.clone());
-            builder.push(", ");
-            builder.push_bind(key.uid_validity.clone());
-            builder.push(", ");
-            builder.push_bind(key.remote_id.clone());
             builder.push(")");
-        }
-        builder.push(")");
 
-        let rows: Vec<(String, String, String, String)> = builder
-            .build_query_as()
-            .fetch_all(&self.pool)
-            .await
-            .map_err(DatabaseError::Query)?;
+            let rows: Vec<(String, String, String, String)> = builder
+                .build_query_as()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
 
-        Ok(rows
-            .into_iter()
-            .map(
+            found.extend(rows.into_iter().map(
                 |(account_id, folder_id, uid_validity, remote_id)| PlacementKey {
                     account_id,
                     folder_id,
                     uid_validity,
                     remote_id,
                 },
-            )
-            .collect())
+            ));
+        }
+
+        Ok(found)
     }
 
     /// Return the subset of `keys` whose message identity is already present in the
-    /// `messages` table, as a single `SELECT message_key FROM messages WHERE message_key
-    /// IN (...)` query.
+    /// `messages` table, via `SELECT message_key FROM messages WHERE message_key
+    /// IN (...)`.
     ///
     /// Lets a caller classify a whole fetched batch as new-vs-seen with one round trip instead
     /// of one existence lookup per key. Answers a strictly different question from
     /// [`Self::existing_placements`]: a message already known from another folder is *not* new
     /// here, but its arrival in this folder still is. Passing an empty slice short-circuits to
     /// an empty set without querying at all, since `IN ()` is not valid SQL.
+    ///
+    /// Chunked at [`MAX_KEYS_PER_IN_LIST`] for the same reason as
+    /// [`Self::existing_placements`]: the bind-parameter ceiling is a property
+    /// of the statement, so the only place it can be enforced once and for all
+    /// is where the statement is built.
     pub async fn existing_message_ids(
         &self,
         keys: &[String],
     ) -> Result<std::collections::HashSet<String>, DatabaseError> {
-        if keys.is_empty() {
-            return Ok(std::collections::HashSet::new());
+        let mut found = std::collections::HashSet::new();
+
+        for chunk in keys.chunks(MAX_KEYS_PER_IN_LIST) {
+            let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> =
+                sqlx::QueryBuilder::new("SELECT message_key FROM messages WHERE message_key IN (");
+            let mut separated = builder.separated(", ");
+            for key in chunk {
+                separated.push_bind(key);
+            }
+            builder.push(")");
+
+            let rows: Vec<(String,)> = builder
+                .build_query_as()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+
+            found.extend(rows.into_iter().map(|(key,)| key));
         }
 
-        let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> =
-            sqlx::QueryBuilder::new("SELECT message_key FROM messages WHERE message_key IN (");
-        let mut separated = builder.separated(", ");
-        for key in keys {
-            separated.push_bind(key);
-        }
-        builder.push(")");
-
-        let rows: Vec<(String,)> = builder
-            .build_query_as()
-            .fetch_all(&self.pool)
-            .await
-            .map_err(DatabaseError::Query)?;
-
-        Ok(rows.into_iter().map(|(key,)| key).collect())
+        Ok(found)
     }
 
     /// Save a [`nuncio_core::model::CalendarEvent`] to SQLite (INSERT OR REPLACE).
@@ -5541,6 +5568,97 @@ mod tests {
             "a key that was never persisted must never be reported as known"
         );
         assert_eq!(known.len(), 1, "and the query must not echo its own input");
+    }
+
+    /// A first sync of a real mailbox hands `existing_placements` the entire
+    /// folder in one call. Each key spends four bind parameters, and SQLite
+    /// caps a statement at 32766 of them, so an unchunked `IN (...)` list dies
+    /// somewhere past 8191 keys -- and dies the same way on every retry, because
+    /// the folder sync aborts before writing a checkpoint. 10000 keys is
+    /// comfortably over that ceiling, and 6000 of them are really placed, so
+    /// this also fails if chunking loses or double-counts a chunk's results
+    /// rather than unioning them.
+    #[tokio::test]
+    async fn existing_placements_handles_a_batch_past_the_bind_parameter_ceiling() {
+        const PLACED: usize = 6_000;
+        const QUERIED: usize = 10_000;
+
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        // Insert the placement rows directly: this test is about the read
+        // path's statement size, and 6000 encrypt-and-commit round trips
+        // through `save_email_at` would test nothing extra at real cost.
+        let mut tx = engine.pool().begin().await.unwrap();
+        for uid in 0..PLACED {
+            sqlx::query(
+                "INSERT INTO placements
+                 (account_id, folder_id, uidvalidity, uid, message_key, read_flag)
+                 VALUES ('acct-1', 'INBOX', '42', ?, ?, 0)",
+            )
+            .bind(uid.to_string())
+            .bind(format!("key-{uid}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let keys: Vec<PlacementKey> = (0..QUERIED)
+            .map(|uid| PlacementKey {
+                account_id: "acct-1".into(),
+                folder_id: "INBOX".into(),
+                uid_validity: "42".into(),
+                remote_id: uid.to_string(),
+            })
+            .collect();
+
+        let found = engine.existing_placements(&keys).await.unwrap();
+
+        assert_eq!(
+            found.len(),
+            PLACED,
+            "every stored placement in the batch must be reported exactly once"
+        );
+        assert!(
+            found.contains(&keys[0]) && found.contains(&keys[PLACED - 1]),
+            "hits at both ends of the stored range must survive the split"
+        );
+        assert!(
+            !found.contains(&keys[PLACED]),
+            "and a key that was never placed must not be invented by the union"
+        );
+    }
+
+    /// The same ceiling in the one-parameter-per-key shape. 32766 parameters is
+    /// far away here, but the chunk boundary is not, and a batch that straddles
+    /// several chunks must still come back as one answer.
+    #[tokio::test]
+    async fn existing_message_ids_handles_a_batch_spanning_several_chunks() {
+        const QUERIED: usize = 10_000;
+        // Deliberately placed in different chunks of the split.
+        const STORED: [usize; 3] = [0, 5_000, 9_999];
+
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        for (nth, index) in STORED.iter().enumerate() {
+            let (email, placement) =
+                sample_message_and_placement(&format!("key-{index}"), "INBOX", &nth.to_string());
+            engine
+                .save_email_at(
+                    &email,
+                    nuncio_core::model::IdentitySource::EmailId,
+                    &placement,
+                )
+                .await
+                .unwrap();
+        }
+
+        let keys: Vec<String> = (0..QUERIED).map(|n| format!("key-{n}")).collect();
+        let found = engine.existing_message_ids(&keys).await.unwrap();
+
+        assert_eq!(found.len(), STORED.len(), "no chunk's result may be lost");
+        for index in STORED {
+            assert!(found.contains(&format!("key-{index}")));
+        }
     }
 
     /// `save_email_at` reads (the placement existence check) and then writes what
