@@ -107,6 +107,22 @@ pub trait RemoteExecutionEnv: Send + Sync {
         subject: &str,
         sender: &str,
     ) -> Result<u16, WebhookError>;
+
+    /// How long a single mutation may run before it is abandoned as a
+    /// retryable timeout. Production keeps [`PER_ITEM_EXECUTION_TIMEOUT`].
+    ///
+    /// Overridable so a test can pick a duration it can actually wait out in
+    /// real time. The alternative -- pausing the Tokio clock and letting
+    /// auto-advance jump the 30 seconds -- cannot be made reliable here,
+    /// because this executor performs real SQLite I/O on a blocking pool
+    /// within the same window. Auto-advance fires whenever the runtime looks
+    /// idle, and a paused clock also fires sqlx's own pool-acquire timeout
+    /// (30s by default -- the same duration), which turns a healthy query into
+    /// `PoolTimedOut` and makes this function return an all-zero summary. That
+    /// is precisely the shape the flaky CI failures took.
+    fn per_item_timeout(&self) -> Duration {
+        PER_ITEM_EXECUTION_TIMEOUT
+    }
 }
 
 /// The disposition of a single mutation attempt.
@@ -174,12 +190,13 @@ pub async fn execute_pending_mutations(
                 );
                 break;
             }
-            result = tokio::time::timeout(PER_ITEM_EXECUTION_TIMEOUT, execute_one(db, env, &item)) => result,
+            result = tokio::time::timeout(env.per_item_timeout(), execute_one(db, env, &item)) => result,
         };
         let disposition = match outcome {
             Ok(disposition) => disposition,
             Err(_elapsed) => Disposition::Retry(format!(
-                "mutation execution exceeded the {PER_ITEM_EXECUTION_TIMEOUT:?} timeout"
+                "mutation execution exceeded the {:?} timeout",
+                env.per_item_timeout()
             )),
         };
         let next_retry = item.retry_count + 1;
