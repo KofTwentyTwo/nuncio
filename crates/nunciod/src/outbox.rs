@@ -289,7 +289,7 @@ async fn execute_one(
 
     match mutation.mutation_type.as_str() {
         "MOVE" | "COPY" | "FLAG" | "UNFLAG" | "DELETE" => {
-            dispatch_mailbox_mutation(env, mutation, &email, &payload).await
+            dispatch_mailbox_mutation(db, env, mutation, &email, &payload).await
         }
         "FORWARD" => dispatch_forward(db, env, &email, &payload).await,
         "WEBHOOK" => dispatch_webhook(env, mutation, &email, &payload).await,
@@ -298,10 +298,30 @@ async fn execute_one(
 }
 
 /// Execute a mailbox-affecting mutation (move/copy/flag/unflag/delete) against
-/// the account's mail backend, recovering the remote addressing (protocol id +
-/// UIDVALIDITY scope) from the stored message row so the backend can enforce
-/// its UIDVALIDITY guard.
+/// the account's mail backend, recovering the remote addressing (folder,
+/// protocol id, UIDVALIDITY scope) from the message's stored placement so the
+/// backend can enforce its UIDVALIDITY guard.
+///
+/// The addressing comes from a placement rather than the message row, because
+/// those coordinates are properties of a mailbox occupancy and a message can
+/// hold several. The outbox row records only the message key, so which occupancy
+/// the rule matched is not recoverable here -- and when the message occupies
+/// more than one mailbox, this **refuses** rather than picking one.
+///
+/// Guessing is not the conservative option. A rule that matched the `INBOX`
+/// copy would `MOVE` or `DELETE` whichever copy happened to sort first, against
+/// mail the user never targeted and with no undo; Gmail labels make
+/// multi-placement ordinary rather than exotic. Unresolvable *addressing* is no
+/// more a licence to act than an unverifiable claim is in
+/// [`crate::sync::apply_filter_actions`]: refusing is inert and visible,
+/// guessing is destructive and irreversible.
+///
+/// The refusal is permanent, not retryable: nothing about a later attempt makes
+/// the outbox row remember a placement it never recorded. Carrying the
+/// originating placement on the row is the real fix, and belongs with the
+/// placement-aware wire surface.
 async fn dispatch_mailbox_mutation(
+    db: &DatabaseEngine,
     env: &dyn RemoteExecutionEnv,
     mutation: &PendingRemoteMutation,
     email: &nuncio_core::model::Email,
@@ -330,20 +350,56 @@ async fn dispatch_mailbox_mutation(
         other => return Disposition::Permanent(format!("unexpected mailbox mutation '{other}'")),
     };
 
-    let backend = match env.mail_backend(&email.account_id).await {
+    // Recover the remote addressing from a stored placement rather than
+    // parsing it out of the opaque message key. The backend still
+    // SELECT-verifies the UIDVALIDITY before mutating.
+    let placements = match db.placements_of(&email.id).await {
+        Ok(placements) => placements,
+        Err(e) => {
+            return Disposition::Retry(format!("failed to resolve the message's placements: {e}"))
+        }
+    };
+    let placement = match placements.as_slice() {
+        [only] => only,
+        [] => {
+            // No occupancy means no way to address the message on any server,
+            // and no retry can conjure one back.
+            return Disposition::Permanent(format!(
+                "message '{}' occupies no mailbox to address",
+                email.id
+            ));
+        }
+        several => {
+            let folders: Vec<&str> = several.iter().map(|p| p.folder_id.as_str()).collect();
+            tracing::warn!(
+                mutation_id = %mutation.id,
+                op = %mutation.mutation_type,
+                message_id = %email.id,
+                placement_count = several.len(),
+                "outbox: refusing an ambiguously-addressed mutation"
+            );
+            return Disposition::Permanent(format!(
+                "message '{}' occupies {} mailboxes ({}) and the outbox row does not record \
+                 which one rule '{}' matched; refusing to guess a {} target",
+                email.id,
+                several.len(),
+                folders.join(", "),
+                mutation.rule_id,
+                mutation.mutation_type
+            ));
+        }
+    };
+
+    let backend = match env.mail_backend(&placement.account_id).await {
         Ok(backend) => backend,
         Err(e) => return Disposition::Retry(format!("failed to build mail backend: {e}")),
     };
 
-    // Recover the remote addressing from the stored message row -- the
-    // protocol-native id and the UIDVALIDITY scope it was captured under --
-    // rather than parsing it out of the opaque surrogate id. The backend still
-    // SELECT-verifies the UIDVALIDITY before mutating.
     let spec = RemoteMutationSpec {
         message_id: email.id.clone(),
-        remote_id: email.remote_id.clone(),
-        folder_id: email.folder_id.clone(),
-        uid_validity: email.uid_validity.clone(),
+        remote_id: placement.remote_id.clone(),
+        folder_id: placement.folder_id.clone(),
+        uid_validity: placement.uid_validity.clone(),
         kind,
     };
 
@@ -580,7 +636,7 @@ mod tests {
     use super::*;
     use crate::lifecycle::{ShutdownController, ShutdownSignal};
     use crate::test_tracing::with_recorder;
-    use nuncio_core::model::Email;
+    use nuncio_core::model::{Email, IdentitySource, Placement};
     use nuncio_core::EventBus;
     use nuncio_filter::MutationPayload;
     use nuncio_mail::MockMailBackend;
@@ -634,17 +690,27 @@ mod tests {
         Email {
             id: "msg-outbox-log".to_string(),
             account_id: "acct-outbox-log".to_string(),
-            folder_id: "INBOX".to_string(),
-            remote_id: "77".to_string(),
-            uid_validity: "9".to_string(),
             subject: "Confidential outbox subject".to_string(),
             sender: "alice@example.com".to_string(),
             recipient: "owner@nuncio.mx".to_string(),
             received_at: 1_700_000_000,
-            read: false,
             body_plain: Some("secret outbox body".to_string()),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
+        }
+    }
+
+    /// The one mailbox occupancy `sample_email` is stored in -- the addressing
+    /// the outbox recovers to build its `RemoteMutationSpec`.
+    fn sample_placement() -> Placement {
+        Placement {
+            account_id: "acct-outbox-log".to_string(),
+            folder_id: "INBOX".to_string(),
+            uid_validity: "9".to_string(),
+            remote_id: "77".to_string(),
+            read: false,
         }
     }
 
@@ -683,7 +749,13 @@ mod tests {
                 db.save_folder_sync_state("acct-outbox-log", "INBOX", "9:100")
                     .await
                     .expect("save folder checkpoint");
-                db.save_email(&sample_email()).await.expect("save email");
+                db.save_email_at(
+                    &sample_email(),
+                    IdentitySource::Surrogate,
+                    &sample_placement(),
+                )
+                .await
+                .expect("save email");
                 db.save_pending_mutation(&flag_mutation())
                     .await
                     .expect("save pending mutation");
@@ -725,6 +797,107 @@ mod tests {
                 !value.contains("secret outbox body"),
                 "body leaked into telemetry: {value}"
             );
+        }
+    }
+
+    /// A second occupancy of `sample_email`, in a different mailbox -- an
+    /// ordinary Gmail label, or a `COPY` another client made.
+    fn second_placement() -> Placement {
+        Placement {
+            account_id: "acct-outbox-log".to_string(),
+            folder_id: "Archive".to_string(),
+            uid_validity: "9".to_string(),
+            remote_id: "78".to_string(),
+            read: false,
+        }
+    }
+
+    /// Seed the message into every given occupancy and dispatch one FLAG
+    /// mutation against it. Returns the honest disposition and every spec the
+    /// backend was actually asked to apply.
+    ///
+    /// Calls [`dispatch_mailbox_mutation`] rather than draining through
+    /// [`execute_pending_mutations`] deliberately. The drain's own
+    /// "attempting"/"completed" `tracing` callsites are what
+    /// `drain_logs_attempt_and_completion_without_leaking_message_content`
+    /// asserts on, and `tracing` caches callsite interest globally: a
+    /// concurrent test hitting those callsites with no recorder installed
+    /// caches them as uninteresting and makes that test fail. Addressing is
+    /// decided here anyway, so the narrower call is also the tighter assertion.
+    async fn dispatch_with_placements(
+        placements: &[Placement],
+    ) -> (Disposition, Vec<RemoteMutationSpec>) {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        for placement in placements {
+            db.save_email_at(&sample_email(), IdentitySource::Surrogate, placement)
+                .await
+                .expect("store the occupancy");
+        }
+
+        let backend = MockMailBackend::new();
+        let env = SucceedingEnv {
+            backend: backend.clone(),
+        };
+        let mutation = flag_mutation();
+        let payload =
+            serde_json::from_str::<MutationPayload>(&mutation.payload).expect("parse payload");
+        let disposition =
+            dispatch_mailbox_mutation(&db, &env, &mutation, &sample_email(), &payload).await;
+        (disposition, backend.applied_mutations())
+    }
+
+    /// The unambiguous case still works: exactly one occupancy, so the row's
+    /// target is fully determined and the mutation is addressed from it.
+    #[tokio::test]
+    async fn a_single_placement_mutation_is_addressed_from_that_placement() {
+        let (disposition, applied) = dispatch_with_placements(&[sample_placement()]).await;
+
+        assert!(
+            matches!(disposition, Disposition::Completed),
+            "a fully-addressed mutation must go through"
+        );
+        assert_eq!(applied.len(), 1, "the backend really was asked to act");
+        assert_eq!(applied[0].folder_id, "INBOX");
+        assert_eq!(applied[0].remote_id, "77");
+        assert_eq!(applied[0].uid_validity, "9");
+        assert_eq!(applied[0].message_id, "msg-outbox-log");
+    }
+
+    /// The ambiguous case refuses. The outbox row names only a message, so for
+    /// a message in two mailboxes there is no way to know which copy the rule
+    /// matched -- and a guessed MOVE or DELETE lands on mail the user never
+    /// targeted, with no undo.
+    #[tokio::test]
+    async fn a_multi_placement_mutation_is_refused_rather_than_guessed() {
+        let (disposition, applied) =
+            dispatch_with_placements(&[sample_placement(), second_placement()]).await;
+
+        assert!(
+            applied.is_empty(),
+            "an ambiguously-addressed mutation must never reach the server"
+        );
+        match disposition {
+            // Permanent, not Retry: no later attempt makes the outbox row
+            // remember a placement it never recorded.
+            Disposition::Permanent(reason) => {
+                assert!(
+                    reason.contains("INBOX") && reason.contains("Archive"),
+                    "the refusal must name the competing mailboxes: {reason}"
+                );
+                assert!(
+                    reason.contains("refusing"),
+                    "and say plainly that it refused: {reason}"
+                );
+            }
+            Disposition::Completed => panic!("expected a permanent refusal, got Completed"),
+            Disposition::Conflict(observed) => {
+                panic!("expected a permanent refusal, got Conflict({observed})")
+            }
+            Disposition::Retry(reason) => {
+                panic!("expected a permanent refusal, got Retry({reason})")
+            }
         }
     }
 }

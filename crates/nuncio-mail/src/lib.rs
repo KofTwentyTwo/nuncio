@@ -18,7 +18,7 @@ pub mod smtp;
 pub mod test_server;
 
 pub use backend::{
-    FolderChanges, MailBackend, MessageSender, MutationOutcome, OutboundMessage,
+    FolderChanges, MailBackend, MessageSender, MutationOutcome, OutboundMessage, PlacedMessage,
     RemoteMutationKind, RemoteMutationSpec,
 };
 pub use imap::{IdleSocketState, ImapDualSocketManager, ImapEngine};

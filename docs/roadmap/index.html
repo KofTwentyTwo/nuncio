@@ -280,11 +280,13 @@
         <p class="cbody">Opened after M5, when the reshape needed before an honest <code>v1</code> freeze proved larger
           than M6 alone. <b>M6.5</b> de-fabrication (3/11) removes the remaining silently-wrong paths: Contacts sync
           wiring (#255), namespace-aware DAV XML (#257), the TLS-mode fallback (#271), the NL scheduler (#258).
-          <b>WS-A … WS-F</b> (22/66) is the pre-freeze reshape: contract hardening (WS-A, <b>gates M7</b>), mail model
+          <b>WS-A … WS-F</b> (22/78) is the pre-freeze reshape: contract hardening (WS-A, <b>gates M7</b>), mail model
           &amp; mutations (WS-B), sync/push/lifecycle (WS-C), security to 9/10 (WS-D — SQLCipher #299, UDS &amp;
           named-pipe IPC #305, signed updates #300), calendar/contacts write-back &amp; search (WS-E), and ops,
           usability &amp; maintainability (WS-F — including the <code>grpc.rs</code> #333 and <code>DatabaseEngine</code>
-          #334 decompositions). <b>OBS-1 … OBS-9 is complete</b> (9/9, #357–#365): layered tracing subscriber, per-RPC
+          #334 decompositions). WS-B and WS-C grew when <b>ADR 0002</b> decided the convergent multi-engine sync
+          model and broke it into #386–#397; the message/placement identity split, change enumeration and verified
+          mutations are implemented and green on a branch, not yet merged. <b>OBS-1 … OBS-9 is complete</b> (9/9, #357–#365): layered tracing subscriber, per-RPC
           spans with request-id correlation, domain and lifecycle coverage, protocol instrumentation, a real
           <code>System.GetStatus</code>, CLI <code>-v</code>/<code>-vv</code> with typed errors, and a
           <code>Redacted&lt;T&gt;</code> policy with a no-secrets-in-logs canary.</p>

@@ -1,11 +1,12 @@
 //! Deterministic mock mail backend for offline testing and integration verification.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Email, Folder};
+use nuncio_core::model::{Email, Folder, IdentitySource, Placement, PlacementKey};
 use std::sync::{Arc, Mutex};
 
 use crate::backend::{
-    MailBackend, MessageSender, MutationOutcome, OutboundMessage, RemoteMutationSpec,
+    FolderChanges, MailBackend, MessageSender, MutationOutcome, OutboundMessage, PlacedMessage,
+    RemoteMutationSpec,
 };
 use crate::parser::MailError;
 
@@ -13,7 +14,7 @@ use crate::parser::MailError;
 #[derive(Debug, Clone, Default)]
 pub struct MockMailBackend {
     folders: Arc<Mutex<Vec<Folder>>>,
-    messages: Arc<Mutex<Vec<Email>>>,
+    messages: Arc<Mutex<Vec<PlacedMessage>>>,
     should_fail: Arc<Mutex<bool>>,
     /// Every `since_state` argument this mock's `sync_messages` was called
     /// with, in call order, so tests can prove a caller threads the returned
@@ -25,6 +26,10 @@ pub struct MockMailBackend {
     /// so a daemon E2E can prove the outbox executor genuinely invoked the
     /// backend op (not a fabricated completion).
     applied_mutations: Arc<Mutex<Vec<RemoteMutationSpec>>>,
+    /// Occupancies this mock reports as explicitly gone, the way QRESYNC
+    /// `VANISHED` does. Handed back on the pass for the folder each key names,
+    /// so a test can prove a caller acts on a server-confirmed removal.
+    removals: Arc<Mutex<Vec<PlacementKey>>>,
 }
 
 impl MockMailBackend {
@@ -56,6 +61,15 @@ impl MockMailBackend {
             .unwrap_or_default()
     }
 
+    /// Stage occupancies this mock reports as explicitly gone, as a QRESYNC
+    /// `VANISHED` would. Each key is handed back on the pass for the folder it
+    /// names, so staging a removal for `Archive` does not leak into `INBOX`.
+    pub fn set_removals(&self, removals: Vec<PlacementKey>) {
+        if let Ok(mut guard) = self.removals.lock() {
+            *guard = removals;
+        }
+    }
+
     /// Configure the mock to simulate network failure errors.
     pub fn set_should_fail(&self, fail: bool) {
         if let Ok(mut flag) = self.should_fail.lock() {
@@ -70,11 +84,79 @@ impl MockMailBackend {
         }
     }
 
-    /// Add a mock email message to the storage.
-    pub fn add_message(&self, email: Email) {
+    /// Add a mock message to the storage, as the occupancy a backend would
+    /// have found it in. Taking a [`PlacedMessage`] rather than a bare `Email`
+    /// lets a test stage the same message key in two folders and prove the
+    /// caller treats it as one message in two places.
+    pub fn add_message(&self, message: PlacedMessage) {
         if let Ok(mut guard) = self.messages.lock() {
-            guard.push(email);
+            guard.push(message);
         }
+    }
+
+    /// Account every message staged by [`Self::shared_message_in`] and
+    /// [`Self::with_same_message_in`] belongs to.
+    pub const SHARED_ACCOUNT_ID: &'static str = "acct-1";
+
+    /// The one derived message key every occupancy staged by
+    /// [`Self::shared_message_in`] carries, whatever folder it sits in.
+    pub const SHARED_MESSAGE_KEY: &'static str = "msg-shared-identity";
+
+    /// One occupancy of the single shared message, in `folder_id` under
+    /// `remote_id`.
+    ///
+    /// Identity is byte-identical across every folder -- that is the whole
+    /// point: a caller cannot tell a first arrival in a second mailbox from a
+    /// message it already stores unless it compares occupancies rather than
+    /// message keys.
+    pub fn shared_message_in(folder_id: &str, remote_id: &str) -> PlacedMessage {
+        PlacedMessage {
+            email: Email {
+                id: Self::SHARED_MESSAGE_KEY.to_string(),
+                account_id: Self::SHARED_ACCOUNT_ID.to_string(),
+                subject: "Shared across folders".to_string(),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1_700_000_000,
+                body_plain: Some("one message, several mailboxes".to_string()),
+                body_html: None,
+                message_id: Some("shared@nuncio.mx".to_string()),
+                content_hash: None,
+                attachments: Vec::new(),
+            },
+            // EmailId, not Surrogate: a folder-independent key is exactly what
+            // a server-assigned identity buys, and it is the tier under which
+            // one message legitimately reports from several mailboxes.
+            source: IdentitySource::EmailId,
+            placement: Placement {
+                account_id: Self::SHARED_ACCOUNT_ID.to_string(),
+                folder_id: folder_id.to_string(),
+                uid_validity: "1".to_string(),
+                remote_id: remote_id.to_string(),
+                read: false,
+            },
+        }
+    }
+
+    /// A backend serving `folders`, each holding the same message under its own
+    /// `remote_id` -- one identity, one occupancy per folder.
+    ///
+    /// Stages the folders as well as the messages, so a caller that enumerates
+    /// folders and then syncs each one sees every occupancy.
+    pub fn with_same_message_in(folders: &[&str]) -> Self {
+        let backend = Self::new();
+        for (index, folder_id) in folders.iter().enumerate() {
+            backend.add_folder(Folder {
+                id: (*folder_id).to_string(),
+                name: (*folder_id).to_string(),
+                total_messages: 1,
+                unread_messages: 1,
+            });
+            // A distinct UID per folder: UIDs are folder-scoped, so the same
+            // mail in two mailboxes is addressed by two different ones.
+            backend.add_message(Self::shared_message_in(folder_id, &(index + 1).to_string()));
+        }
+        backend
     }
 
     /// Every [`RemoteMutationSpec`] this mock's `apply_mutation` was called
@@ -112,7 +194,7 @@ impl MailBackend for MockMailBackend {
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<crate::backend::FolderChanges, MailError> {
+    ) -> Result<FolderChanges, MailError> {
         // Record the checkpoint arg before any early return, so even a failing
         // call is visible to a test asserting on how the caller resumes.
         if let Ok(mut calls) = self.since_state_calls.lock() {
@@ -134,11 +216,25 @@ impl MailBackend for MockMailBackend {
             .map_err(|e| MailError::ParseFailed(e.to_string()))?
             .clone();
 
+        // Staged removals are scoped to the folder each key names, and are
+        // reported on both the full and the incremental pass -- a `VANISHED`
+        // report is exactly the kind of thing an incremental resync carries.
+        let removals: Vec<PlacementKey> = self
+            .removals
+            .lock()
+            .map_err(|e| MailError::ParseFailed(e.to_string()))?
+            .iter()
+            .filter(|key| key.folder_id == folder_id)
+            .cloned()
+            .collect();
+
         // Simulate a since_state-aware backend: with a prior checkpoint there
         // is nothing new to hand back, so the incremental fetch is genuinely
         // narrower (empty) rather than a full re-report of every message.
+        // `present` stays `None`: an incremental pass cannot speak to absence.
         if since_state.is_some() {
-            return Ok(crate::backend::FolderChanges {
+            return Ok(FolderChanges {
+                removals,
                 next_state: returned_state,
                 ..Default::default()
             });
@@ -150,15 +246,16 @@ impl MailBackend for MockMailBackend {
             .map_err(|e| MailError::ParseFailed(e.to_string()))?;
         let matches: Vec<_> = messages
             .iter()
-            .filter(|m| m.folder_id == folder_id)
+            .filter(|m| m.placement.folder_id == folder_id)
             .cloned()
             .collect();
         // A full pass over the mock's store did see everything in the folder,
-        // so it can honestly report what is present.
-        let present = matches.iter().map(|m| m.id.clone()).collect();
-        Ok(crate::backend::FolderChanges {
+        // so it can honestly report what is present -- as occupancies, since
+        // that is what a folder can speak to.
+        let present = matches.iter().map(|m| m.placement.key()).collect();
+        Ok(FolderChanges {
             upserts: matches,
-            removals: Vec::new(),
+            removals,
             present: Some(present),
             next_state: returned_state,
         })
@@ -256,22 +353,30 @@ mod tests {
             unread_messages: 1,
         });
 
-        let email = Email {
-            id: "msg-mock-1".to_string(),
-            account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
-            remote_id: "1".to_string(),
-            uid_validity: "1".to_string(),
-            subject: "Mock Test".to_string(),
-            sender: "alice@nuncio.mx".to_string(),
-            recipient: "bob@nuncio.mx".to_string(),
-            received_at: 1700000000,
-            read: false,
-            body_plain: Some("Mock body".to_string()),
-            body_html: None,
-            attachments: Vec::new(),
+        let placed = PlacedMessage {
+            email: Email {
+                id: "msg-mock-1".to_string(),
+                account_id: "acct-1".to_string(),
+                subject: "Mock Test".to_string(),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1700000000,
+                body_plain: Some("Mock body".to_string()),
+                body_html: None,
+                attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
+            },
+            source: IdentitySource::Surrogate,
+            placement: Placement {
+                account_id: "acct-1".to_string(),
+                folder_id: "inbox".to_string(),
+                uid_validity: "1".to_string(),
+                remote_id: "1".to_string(),
+                read: false,
+            },
         };
-        mock.add_message(email.clone());
+        mock.add_message(placed.clone());
 
         let folders = mock.sync_folders().await.expect("sync folders succeeds");
         assert_eq!(folders.len(), 1);
@@ -281,12 +386,49 @@ mod tests {
             .await
             .expect("sync messages succeeds");
         assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0], placed,
+            "the mock must hand back exactly the placement it was staged with"
+        );
         assert_eq!(state, "mock-state-token-100");
 
         // Test error simulation
         mock.set_should_fail(true);
         assert!(mock.sync_folders().await.is_err());
         assert!(mock.sync_messages("inbox", None).await.is_err());
+    }
+
+    /// The staging helper is only useful if it really produces one identity in
+    /// two places: same message key, different occupancies. If it ever drifted
+    /// into two keys, every test built on it would pass for the wrong reason.
+    #[tokio::test]
+    async fn with_same_message_in_stages_one_identity_across_every_folder() {
+        let mock = MockMailBackend::with_same_message_in(&["INBOX", "Archive"]);
+
+        let folders = mock.sync_folders().await.expect("sync folders succeeds");
+        let folder_ids: Vec<&str> = folders.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(folder_ids, vec!["INBOX", "Archive"]);
+
+        let inbox = mock
+            .sync_changes("INBOX", None)
+            .await
+            .expect("inbox pass succeeds");
+        let archive = mock
+            .sync_changes("Archive", None)
+            .await
+            .expect("archive pass succeeds");
+        assert_eq!(inbox.upserts.len(), 1);
+        assert_eq!(archive.upserts.len(), 1);
+
+        assert_eq!(
+            inbox.upserts[0].email.id, archive.upserts[0].email.id,
+            "both occupancies must carry the same derived message key"
+        );
+        assert_ne!(
+            inbox.upserts[0].placement.key(),
+            archive.upserts[0].placement.key(),
+            "the occupancies themselves must differ, or there is nothing to classify"
+        );
     }
 
     fn sample_outbound_message() -> OutboundMessage {

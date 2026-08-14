@@ -104,7 +104,7 @@ part of the original M1–M7 numbering:
   `tls_mode_from_db` silent `ImplicitTls` fallback (#271), the
   `NaturalLanguageScheduler` that returns wrong times (#258), plus CLI and audit
   cleanups.
-- **WS-A … WS-F — the pre-freeze reshape** (22 closed / 44 open). Six tracks
+- **WS-A … WS-F — the pre-freeze reshape** (22 closed / 56 open). Six tracks
   that must land before `nuncio.v1` can be frozen: **WS-A** contract hardening
   (typed errors, `Timestamp`/`Duration` unification, keyset pagination, id
   conventions, enum hygiene, account transport `oneof`); **WS-B** mail model and
@@ -228,18 +228,28 @@ The engine becomes production-solid.
 ### M6.5, WS and OBS — the work between M6 and M7
 
 Opened after M5, when the reshape needed before an honest `v1` freeze proved
-larger than M6. Status as of 2026-08-07:
+larger than M6. Status as of 2026-08-12:
 
 | Track | Closed / Open | Scope |
 | :--- | :---: | :--- |
 | **M6.5** Feature completeness & de-fabrication | 3 / 8 | Remove the remaining fabricated or silently-wrong paths (Contacts sync wiring #255, DAV XML namespaces #257, TLS-mode fallback #271, NL scheduler #258) |
 | **WS-A** Contract hardening (pre-freeze reshape) | 6 / 3 | Typed errors, `Timestamp`/`Duration`, keyset pagination, id conventions, enum hygiene, account transport `oneof` — **gates M7** |
-| **WS-B** Mail model & mutations | 1 / 9 | Message identity, drafts, folder management, attachments on receive |
-| **WS-C** Sync, push & lifecycle | 4 / 4 | Autonomous scheduler, IMAP IDLE, resumable event stream, graceful shutdown |
+| **WS-B** Mail model & mutations | 1 / 14 | Message identity, drafts, folder management, attachments on receive |
+| **WS-C** Sync, push & lifecycle | 4 / 9 | Autonomous scheduler, IMAP IDLE, resumable event stream, graceful shutdown |
 | **WS-D** Security to 9/10 | 4 / 8 | Whole-DB SQLCipher (#299), UDS / named-pipe IPC (#305), signed updates (#300), HTML sanitization (#302) |
-| **WS-E** Calendar/Contacts write & Search | 2 / 10 | DAV write-back with conditional PUT/DELETE, recurrence editing, structured Search service |
+| **WS-E** Calendar/Contacts write & Search | 2 / 12 | DAV write-back with conditional PUT/DELETE, recurrence editing, structured Search service |
 | **WS-F** Ops, usability & maintainability | 5 / 10 | CLI polish, `System.Backup`, and the `grpc.rs` (#333) / `DatabaseEngine` (#334) decompositions |
 | **OBS-1 … OBS-9** Observability | 9 / 0 | **COMPLETE.** Tracing subscriber, RPC spans + request-id, domain/lifecycle coverage, protocol instrumentation, `GetStatus`, CLI verbosity, redaction canary |
+
+WS-B and WS-C grew when **ADR 0002** decided
+the convergent multi-engine sync model and broke it into #386–#397. Those are
+in flight, not closed: the message/placement identity split, Message-ID and
+content-hash capture, `user_version` gating, the raw IMAP command layer, the
+four-rung change enumeration ladder, and three-state verified mutations are all
+implemented and green on a branch, and the counts above move when it merges.
+Still open behind them: the mutation RPCs and durable conflict surface (#395),
+DAV href/ETag identity and `sync-collection` (#392, #393), the scheduler and
+rate limiting (#396), and the ≥3-engine convergence harness (#397).
 
 The OBS stories (#357–#365) were merged without a milestone assignment; the
 epic is complete regardless, and `docs/LOGGING.md` is its reference.

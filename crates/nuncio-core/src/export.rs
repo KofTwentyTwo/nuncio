@@ -87,10 +87,13 @@ impl ExportEngine {
             writer.write_all(from_line.as_bytes())?;
             total_bytes += from_line.len() as u64;
 
-            // Headers
+            // Headers. No X-Nuncio-Folder header: the folder is a property of
+            // a placement now, not of the message, so `Email` has none to
+            // name here. Restoring it would mean threading the relevant
+            // `Placement` into this function's signature.
             let headers = format!(
-                "Message-ID: <{}>\r\nFrom: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\nX-Nuncio-Account: {}\r\nX-Nuncio-Folder: {}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n",
-                email.id, email.sender, email.recipient, email.subject, date_str, email.account_id, email.folder_id
+                "Message-ID: <{}>\r\nFrom: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\nX-Nuncio-Account: {}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n",
+                email.id, email.sender, email.recipient, email.subject, date_str, email.account_id
             );
             writer.write_all(headers.as_bytes())?;
             total_bytes += headers.len() as u64;
@@ -184,32 +187,28 @@ mod tests {
             Email {
                 id: "msg-100".to_string(),
                 account_id: "acct-1".to_string(),
-                folder_id: "INBOX".to_string(),
-                remote_id: "100".to_string(),
-                uid_validity: "1".to_string(),
                 subject: "Test Subject 1".to_string(),
                 sender: "alice@nuncio.mx".to_string(),
                 recipient: "bob@nuncio.mx".to_string(),
                 received_at: 1700000000,
-                read: false,
                 body_plain: Some("Hello world body text".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
             },
             Email {
                 id: "msg-101".to_string(),
                 account_id: "acct-1".to_string(),
-                folder_id: "INBOX".to_string(),
-                remote_id: "101".to_string(),
-                uid_validity: "1".to_string(),
                 subject: "Test Subject 2".to_string(),
                 sender: "charlie@nuncio.mx".to_string(),
                 recipient: "bob@nuncio.mx".to_string(),
                 received_at: 1700000100,
-                read: true,
                 body_plain: Some("Second body text".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
             },
         ]
     }

@@ -12,7 +12,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use async_trait::async_trait;
-use nuncio_core::model::Email;
+use nuncio_core::model::{Email, IdentitySource, Placement};
 use nuncio_core::EventBus;
 use nuncio_filter::{FilterEngine, NsqlParser, ValidationOptions, WebhookDispatcher, WebhookError};
 use nuncio_mail::{
@@ -116,17 +116,28 @@ fn sample_email(subject: &str) -> Email {
     Email {
         id: "surrogate-inbox-42".to_string(),
         account_id: ACCOUNT_ID.to_string(),
-        folder_id: FOLDER_ID.to_string(),
-        remote_id: "42".to_string(),
-        uid_validity: "1".to_string(),
         subject: subject.to_string(),
         sender: "alice@nuncio.mx".to_string(),
         recipient: "owner@nuncio.mx".to_string(),
         received_at: 1_700_000_000,
-        read: false,
         body_plain: Some("original body".to_string()),
         body_html: None,
         attachments: Vec::new(),
+        message_id: None,
+        content_hash: None,
+    }
+}
+
+/// The mailbox occupancy the seeded message sits in. The outbox recovers its
+/// remote addressing from here now -- the UID and the UIDVALIDITY scope it was
+/// captured under are properties of the occupancy, not of the message.
+fn sample_placement(remote_id: &str) -> Placement {
+    Placement {
+        account_id: ACCOUNT_ID.to_string(),
+        folder_id: FOLDER_ID.to_string(),
+        uid_validity: "1".to_string(),
+        remote_id: remote_id.to_string(),
+        read: false,
     }
 }
 
@@ -142,11 +153,14 @@ async fn seed_and_enqueue(db: &DatabaseEngine, rule_nsql: &str, subject: &str) {
         .expect("save folder checkpoint");
 
     let email = sample_email(subject);
-    db.save_email(&email).await.expect("save email");
+    let placement = sample_placement("42");
+    db.save_email_at(&email, IdentitySource::Surrogate, &placement)
+        .await
+        .expect("save email");
 
     let rule = NsqlParser::parse_rule("Outbox Rule", 1, rule_nsql).expect("parse rule");
     let engine = FilterEngine::new(vec![rule]).expect("compile rule");
-    apply_filter_actions(db, &engine, &email).await;
+    apply_filter_actions(db, &engine, &email, &placement).await;
 
     let pending = db.list_pending_mutations(10).await.expect("list pending");
     assert_eq!(
@@ -173,14 +187,16 @@ async fn seed_and_enqueue_distinct(
         .await
         .expect("save folder checkpoint");
 
-    // `remote_id`/`uid_validity` (not just `id`) are part of the store's
-    // `messages` identity UNIQUE index -- leaving them at `sample_email`'s
-    // shared default would make this INSERT OR REPLACE the OTHER seeded
-    // message sharing that same remote identity out from under it.
+    // The occupancy needs its own UID as well as its own message key: the
+    // placements primary key is (account, folder, uidvalidity, uid), so
+    // leaving `remote_id` at the shared default would repoint the OTHER
+    // seeded message's occupancy at this message.
     let mut email = sample_email(subject);
     email.id = message_id.to_string();
-    email.remote_id = message_id.to_string();
-    db.save_email(&email).await.expect("save email");
+    let placement = sample_placement(message_id);
+    db.save_email_at(&email, IdentitySource::Surrogate, &placement)
+        .await
+        .expect("save email");
 
     let before = db
         .list_pending_mutations(100)
@@ -190,7 +206,7 @@ async fn seed_and_enqueue_distinct(
 
     let rule = NsqlParser::parse_rule("Outbox Rule", 1, rule_nsql).expect("parse rule");
     let engine = FilterEngine::new(vec![rule]).expect("compile rule");
-    apply_filter_actions(db, &engine, &email).await;
+    apply_filter_actions(db, &engine, &email, &placement).await;
 
     let after = db
         .list_pending_mutations(100)

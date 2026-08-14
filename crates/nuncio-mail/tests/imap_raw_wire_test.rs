@@ -11,6 +11,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use nuncio_core::model::PlacementKey;
 use nuncio_mail::imap_raw;
 use nuncio_mail::test_server::{MockImapServer, ServerProfile};
 
@@ -345,14 +346,17 @@ async fn every_rung_reports_a_message_that_disappeared() {
         let second = sync_folder(&server, Some(&first.next_state)).await;
 
         // However the rung learned it, the caller must end up able to identify
-        // the removed message and only that one.
-        let mut reported: Vec<String> = second.removals.clone();
+        // the occupancy that went and only that one. Absence is reported per
+        // mailbox, so what is compared is the placement each upsert was found
+        // under, not the message key -- the same message may still sit
+        // elsewhere and must not be swept up by this folder's silence.
+        let mut reported: Vec<PlacementKey> = second.removals.clone();
         if let Some(present) = &second.present {
             let stored_gone = first
                 .upserts
                 .iter()
-                .map(|e| e.id.clone())
-                .filter(|id| !present.contains(id));
+                .map(|e| e.placement.key())
+                .filter(|key| !present.contains(key));
             reported.extend(stored_gone);
         }
         reported.sort();
@@ -366,11 +370,16 @@ async fn every_rung_reports_a_message_that_disappeared() {
         let surviving = first
             .upserts
             .iter()
-            .find(|e| e.remote_id == keep.to_string())
+            .find(|e| e.placement.remote_id == keep.to_string())
             .expect("the kept message was in the first pass");
         assert!(
-            !reported.contains(&surviving.id),
+            !reported.contains(&surviving.placement.key()),
             "{profile:?}: the surviving message must not be reported gone"
+        );
+        assert_eq!(
+            reported[0].remote_id,
+            gone.to_string(),
+            "{profile:?}: the reported occupancy must be the expunged UID"
         );
     }
 }
@@ -474,9 +483,17 @@ async fn a_uidvalidity_change_refetches_rather_than_deleting_the_folder() {
         second.removals.is_empty(),
         "a renumbering is not a removal report"
     );
-    // The re-fetched message has a different surrogate, because UIDVALIDITY is
-    // part of identity -- so the caller replaces rather than merges.
-    assert_ne!(second.upserts[0].id, first.upserts[0].id);
+    // The re-fetched message lands under a new occupancy, because UIDVALIDITY
+    // is part of a placement key -- so the caller writes a new placement rather
+    // than updating the old one, and the stale UID never addresses live mail.
+    assert_ne!(
+        second.upserts[0].placement.uid_validity,
+        first.upserts[0].placement.uid_validity
+    );
+    assert_ne!(second.upserts[0].placement, first.upserts[0].placement);
+    // These two are also genuinely different messages, so their derived keys
+    // differ as well.
+    assert_ne!(second.upserts[0].email.id, first.upserts[0].email.id);
 }
 
 /// Build an engine pointed at the mock and apply one mutation through the

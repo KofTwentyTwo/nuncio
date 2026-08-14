@@ -357,17 +357,15 @@ mod tests {
         Email {
             id: "msg-1".to_string(),
             account_id: "acct-1".to_string(),
-            folder_id: "outbox".to_string(),
-            remote_id: "1".to_string(),
-            uid_validity: "1".to_string(),
             subject: "Status Update".to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
             received_at: 1700000000,
-            read: true,
             body_plain: Some("Plaintext status update".to_string()),
             body_html: None,
             attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
         }
     }
 

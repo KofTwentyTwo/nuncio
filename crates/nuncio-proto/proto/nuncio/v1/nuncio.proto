@@ -519,10 +519,19 @@ message Attachment {
 // (rather than `Email`) to avoid colliding with common generated-code
 // identifiers in hand-written Rust using this module.
 message Message {
-  // Unique message identifier. OPAQUE and server-assigned: a deterministic
-  // surrogate derived from the message's stable protocol identity, never a
-  // raw upstream protocol id (e.g. an IMAP UID, which is only stable within
-  // a single IMAP session and is NOT a durable cross-session identifier).
+  // Unique message identifier. OPAQUE and server-assigned: content-addressed
+  // from the strongest identity the message's server offered. Never a raw
+  // upstream protocol id (e.g. an IMAP UID, which is only stable within a
+  // single IMAP session and is NOT a durable cross-session identifier).
+  //
+  // Stability across a move depends on what the server offered. Where a
+  // server-assigned object id or a usable Message-ID was available, the id is
+  // folder-independent and survives a move between folders. Where none was --
+  // a message carrying no Message-ID, or one fetched headers-only -- the id
+  // falls back to a derivation that includes the folder, and moving such a
+  // message yields a different id. Clients MUST NOT assume an id outlives a
+  // move.
+  //
   // Clients MUST treat this as an opaque token -- pass it back verbatim in
   // later requests, but never parse, construct, or assume any structure in
   // its value.
@@ -530,6 +539,11 @@ message Message {
   // Account identifier owning the message.
   string account_id = 2;
   // Mailbox folder identifier (e.g. "inbox").
+  //
+  // A message can occupy several folders at once. This names the one the
+  // message was reached through: the requested folder for a listing, and the
+  // lowest-sorting folder id for a lookup by id. A field carrying the complete
+  // placement set is not yet part of this contract.
   string folder_id = 3;
   // Subject line.
   string subject = 4;
@@ -777,6 +791,13 @@ service Filters {
   // applied retroactively to mail that was synced before those rules
   // existed. Streams cumulative progress as it works, ending with a final
   // `done: true` message once the whole store has been scanned.
+  //
+  // Each (rule, message) pair fires at most once, ever -- the same claim
+  // ledger live sync uses, keyed by rule id and message id. This is not a
+  // repeatable rescan: running Triage again with the same rules finds
+  // nothing left to claim and reports `matched_count: 0`. Only messages
+  // stored since the last run, or rules created since then, produce further
+  // matches; editing an existing rule's contents does not reset its claims.
   rpc Triage(TriageRequest) returns (stream TriageProgress);
 }
 

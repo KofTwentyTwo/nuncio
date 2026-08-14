@@ -1,9 +1,27 @@
 //! Protocol-agnostic async mail backend trait definitions.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Attachment, Email, Folder};
+use nuncio_core::model::{Attachment, Email, Folder, IdentitySource, Placement, PlacementKey};
 
 use crate::parser::MailError;
+
+/// One message as a backend surfaced it: identity, content, and the mailbox
+/// occupancy it was found in.
+///
+/// Backends emit this rather than a bare [`Email`] because a fetch observes two
+/// separate facts at once: *which message this is* -- folder-independent, and
+/// the same in every mailbox that holds a copy -- and *where this pass found
+/// it*, which is per-mailbox and changes under a move. Collapsing them into one
+/// record is what made a moved message read as a new one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedMessage {
+    /// Identity and content. `email.id` is the derived message key.
+    pub email: Email,
+    /// Which precedence tier produced `email.id`.
+    pub source: IdentitySource,
+    /// The occupancy this fetch found it in.
+    pub placement: Placement,
+}
 
 /// The remote change a [`RemoteMutationSpec`] applies to one addressed message.
 ///
@@ -72,21 +90,28 @@ pub struct RemoteMutationSpec {
 /// or deleted by any other client -- another Nuncio daemon, a phone, webmail --
 /// simply stays in the local store forever. Expressing absence is the whole
 /// point of the type.
+///
+/// Absence is reported as [`PlacementKey`]s, not message keys, because what a
+/// folder stops mentioning is an *occupancy*. The same message may still sit in
+/// another mailbox, and deleting the message on the strength of one folder's
+/// silence would destroy a copy the user still has. A message goes only when
+/// its last placement does.
 #[derive(Debug, Default, Clone)]
 pub struct FolderChanges {
-    /// Messages to store, whether newly arrived or changed.
-    pub upserts: Vec<Email>,
-    /// Surrogate ids the server **explicitly reported as gone**, via QRESYNC
+    /// Messages to store, whether newly arrived or changed, each with the
+    /// occupancy this pass found it in.
+    pub upserts: Vec<PlacedMessage>,
+    /// Occupancies the server **explicitly reported as gone**, via QRESYNC
     /// `VANISHED`. Always safe to delete.
-    pub removals: Vec<String>,
-    /// Surrogate ids of everything the folder currently holds, when this pass
-    /// enumerated the complete UID set. The caller may delete anything it
-    /// stores for this folder that is absent from this list.
+    pub removals: Vec<PlacementKey>,
+    /// Every occupancy the folder currently holds, when this pass enumerated
+    /// the complete UID set. The caller may delete any placement it stores for
+    /// this folder that is absent from this list.
     ///
     /// `None` and `Some(vec![])` mean different things, and conflating them
     /// deletes a mailbox. `None` is "this pass was incremental and cannot
     /// speak to absence"; `Some(vec![])` is "the folder is genuinely empty".
-    pub present: Option<Vec<String>>,
+    pub present: Option<Vec<PlacementKey>>,
     /// The checkpoint to resume from next time.
     pub next_state: String,
 }
@@ -158,11 +183,16 @@ pub trait MailBackend: Send + Sync {
     ///
     /// Provided rather than required so no implementation can satisfy the
     /// trait by supplying this and quietly never reporting a removal.
+    ///
+    /// Every message comes back as a [`PlacedMessage`] so the caller can tell
+    /// a message it already stores in another folder from one it has never
+    /// seen: the derived key is the same in both folders, only the placement
+    /// differs.
     async fn sync_messages(
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<(Vec<PlacedMessage>, String), MailError> {
         let changes = self.sync_changes(folder_id, since_state).await?;
         Ok((changes.upserts, changes.next_state))
     }
