@@ -437,19 +437,30 @@ impl HangEnv {
 
 #[async_trait]
 impl RemoteExecutionEnv for HangEnv {
+    /// Short enough to wait out in real time, so these tests never pause the
+    /// Tokio clock. A paused clock auto-advances whenever the runtime looks
+    /// idle, and this executor does real SQLite I/O on a blocking pool in the
+    /// same window -- the advance also fires sqlx's 30s pool-acquire timer,
+    /// turning a healthy query into `PoolTimedOut` and the pass into an
+    /// all-zero summary. Generous enough to survive a loaded CI runner: the
+    /// hang it bounds is infinite, so a slow machine only makes the test
+    /// slower, never wrong.
+    fn per_item_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(250)
+    }
+
     async fn mail_backend(
         &self,
         account_id: &str,
     ) -> Result<Box<dyn MailBackend>, nunciod::outbox::OutboxExecuteError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call < self.hang_calls {
-            // A `tokio::time`-tracked sleep far longer than any per-item
-            // timeout under test -- NOT `std::future::pending`, which never
-            // registers with the time driver and so behaves unpredictably
-            // once `tokio::time::pause`'s auto-advance-on-idle interacts with
-            // real (non-timer) I/O elsewhere in the same test, like the
-            // SQLite pool's own connection bookkeeping. A real (virtual)
-            // sleep is what the timeout under test is meant to race against.
+            // Stands in for a remote operation that never answers. An hour is
+            // simply "longer than any timeout under test"; the executor
+            // abandons the attempt and drops this future, so nothing actually
+            // waits. A sleep rather than `std::future::pending` keeps the
+            // future registered with the time driver, which is the shape a
+            // real stalled network call has.
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         }
         self.inner.mail_backend(account_id).await
@@ -505,23 +516,9 @@ async fn a_hung_mutation_times_out_and_is_retried_never_completed() {
     )
     .await;
 
-    // Paused only AFTER setup, and this pass touches the database exactly
-    // ONCE (a single `get_message`) before the hang -- mixing
-    // `tokio::time::pause`'s auto-advance-on-idle with real (non-timer)
-    // background I/O is only safe when there is a single, already-in-flight
-    // real operation for the auto-advance to race past; see the sibling
-    // two-pass test below for why a SECOND real DB operation in the same
-    // paused pass is deliberately avoided.
-    tokio::time::pause();
     let env = HangEnv::new(usize::MAX);
     let (_shutdown_ctrl, mut shutdown) = no_shutdown();
     let summary = execute_pending_mutations(&db, &env, 10, &mut shutdown).await;
-    // Resume real time before any further DB access: `tokio::time::pause`'s
-    // auto-advance-on-idle only plays safely with the ONE real DB operation
-    // this pass performs (the `get_message` before the hang); a second real
-    // query made while still paused is what made the sibling two-pass test
-    // flaky before it was split across a resume point.
-    tokio::time::resume();
 
     // The hung item is NEVER marked completed -- it is a retryable timeout,
     // exactly like any other transient remote failure.
@@ -549,13 +546,6 @@ async fn a_timed_out_item_does_not_block_a_later_item_in_a_subsequent_pass() {
     let (db, _dir) = DatabaseEngine::connect_ephemeral().await.expect("db");
     seed_two_move_mutations(&db).await;
 
-    // First pass: bound to the FIRST (created-earliest) mutation only, so
-    // this pass's real DB work is a single `get_message` call before the
-    // hang, same as the sibling single-item timeout test. Real threaded
-    // SQLite I/O racing `tokio::time::pause`'s auto-advance is only
-    // exercised once per paused pass here -- see that test's comment for
-    // why a second real DB call in the SAME paused pass is unreliable.
-    tokio::time::pause();
     let env = HangEnv::new(usize::MAX);
     let (_shutdown_ctrl, mut shutdown) = no_shutdown();
     let first_pass = execute_pending_mutations(&db, &env, 1, &mut shutdown).await;
@@ -567,7 +557,6 @@ async fn a_timed_out_item_does_not_block_a_later_item_in_a_subsequent_pass() {
     // tick: the item that timed out in the first pass did not jam the queue
     // -- both it (now against a healthy backend) and the item queued behind
     // it are processed and genuinely complete.
-    tokio::time::resume();
     let normal_env = MockEnv::new();
     let (_shutdown_ctrl2, mut shutdown2) = no_shutdown();
     let second_pass = execute_pending_mutations(&db, &normal_env, 10, &mut shutdown2).await;
@@ -602,7 +591,6 @@ async fn shutdown_signal_interrupts_a_hung_item_instead_of_waiting_out_the_timeo
 
     // Paused only after setup -- see the comment on the sibling timeout test
     // for why pausing from the start would spuriously fail the DB pool.
-    tokio::time::pause();
 
     // Hangs on every call -- the shutdown signal, not the timeout, must be
     // what unblocks this drain pass.
@@ -614,7 +602,6 @@ async fn shutdown_signal_interrupts_a_hung_item_instead_of_waiting_out_the_timeo
     });
 
     let summary = execute_pending_mutations(&db, &env, 10, &mut shutdown).await;
-    tokio::time::resume();
 
     // The drain pass stopped on shutdown, well before the per-item timeout
     // would have elapsed -- the hung item is untouched: not completed, not

@@ -365,47 +365,13 @@ mod tests {
 
     #[test]
     fn get_or_create_key_bytes_logs_minting_without_leaking_the_key() {
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::fmt::MakeWriter;
-
-        #[derive(Clone, Default)]
-        struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-        impl std::io::Write for CapturedLogs {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0
-                    .lock()
-                    .expect("log buffer lock")
-                    .extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        impl<'a> MakeWriter<'a> for CapturedLogs {
-            type Writer = CapturedLogs;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
         let manager = SecretManager::mock();
-        let logs = CapturedLogs::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(logs.clone())
-            .with_ansi(false)
-            .finish();
-
-        let guard = tracing::subscriber::set_default(subscriber);
+        let logs = crate::test_tracing::capture_logs();
         let key = manager
             .get_or_create_key_bytes(WEBHOOK_SIGNING_KEY_ACCOUNT, 32)
             .expect("key provisioned from vault");
-        drop(guard);
 
-        let captured = String::from_utf8(logs.0.lock().expect("log buffer lock").clone())
-            .expect("captured log is valid utf8");
+        let captured = logs.text();
         assert!(
             captured.contains(WEBHOOK_SIGNING_KEY_ACCOUNT),
             "expected the key's purpose to be named in the INFO log, got: {captured}"
