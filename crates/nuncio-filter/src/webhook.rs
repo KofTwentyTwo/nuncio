@@ -189,9 +189,26 @@ impl WebhookDispatcher {
             mac.update(format!("{timestamp}.{payload_str}").as_bytes());
             let signature = hex::encode(mac.finalize().into_bytes());
 
+            // Stable across every retry of this rule/message pair, so a
+            // receiver can discard a redelivery caused by a lost response
+            // rather than acting twice. It is NOT yet stable across daemons:
+            // `rule_id` is random per daemon, so two daemons executing the
+            // same rule produce different keys. Single-owner filter execution
+            // is what prevents that case today; a rule key derived from the
+            // normalized NSQL would make it dedupable directly.
+            let idempotency_key = {
+                let mut hasher = <Sha256 as sha2::Digest>::new();
+                for field in [rule_id, message_id] {
+                    sha2::Digest::update(&mut hasher, (field.len() as u64).to_le_bytes());
+                    sha2::Digest::update(&mut hasher, field.as_bytes());
+                }
+                hex::encode(sha2::Digest::finalize(hasher))
+            };
+
             let send_result = client
                 .post(url)
                 .header("Content-Type", "application/json")
+                .header("Idempotency-Key", &idempotency_key)
                 .header(
                     "X-Nuncio-Signature",
                     format!("t={timestamp},v1={signature}"),

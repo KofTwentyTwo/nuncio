@@ -101,6 +101,7 @@ fn sample_account() -> nuncio_core::AccountConfig {
         email_address: "owner@nuncio.mx".to_string(),
         keyring_secret_key: format!("nuncio/{ACCOUNT_ID}"),
         sync_interval_secs: 60,
+        filters_enabled: false,
         transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
             imap_host: "imap.nuncio.mx".to_string(),
             imap_port: 993,

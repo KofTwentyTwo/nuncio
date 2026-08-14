@@ -806,6 +806,7 @@ mod tests {
             email_address: format!("{id}@nuncio.mx"),
             keyring_secret_key: format!("nuncio/{id}"),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: Transport::Jmap(JmapTransport {
                 endpoint_host: "jmap.nuncio.mx".to_string(),
             }),

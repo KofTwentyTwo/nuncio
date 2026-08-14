@@ -154,6 +154,21 @@ pub struct AccountConfig {
     pub keyring_secret_key: String,
     /// Background sync polling interval in seconds (minimum 10s).
     pub sync_interval_secs: u64,
+    /// Whether this daemon executes filter rules for this account.
+    ///
+    /// **Defaults to `false`**, which is the conservative answer to a problem
+    /// the engine cannot solve on its own. Every daemon syncing an account
+    /// decides independently that a message is new, so every daemon fires the
+    /// same rules against it. `MOVE`/`COPY`/`FLAG` survive that -- ten moves
+    /// converge on one outcome -- but `FORWARD` and `CALL WEBHOOK` land on a
+    /// third party with no shared state to compare against, so N daemons send
+    /// N forwards and N webhook calls.
+    ///
+    /// Enabling this on exactly one daemon per account makes filter execution
+    /// single-owner. It is a deliberate, documented limitation rather than a
+    /// silent duplication bug; a server-side claim is the eventual fix where
+    /// the server supports one.
+    pub filters_enabled: bool,
     /// The account's single transport.
     pub transport: Transport,
 }
@@ -343,6 +358,7 @@ mod tests {
             email_address: "user@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-123".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: Transport::ImapSmtp(valid_imap_smtp_transport()),
         }
     }
@@ -354,6 +370,7 @@ mod tests {
             email_address: "user@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-jmap-1".to_string(),
             sync_interval_secs: 60,
+            filters_enabled: false,
             transport: Transport::Jmap(JmapTransport {
                 endpoint_host: "jmap.nuncio.mx".to_string(),
             }),
@@ -367,6 +384,7 @@ mod tests {
             email_address: "user@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-cal-1".to_string(),
             sync_interval_secs: 300,
+            filters_enabled: false,
             transport: Transport::Dav(DavTransport {
                 collection_url: "https://caldav.example.com/calendars/user/work/".to_string(),
             }),

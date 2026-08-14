@@ -453,6 +453,13 @@ impl SqliteRecoveryEngine {
                             email_address,
                             keyring_secret_key,
                             sync_interval_secs: sync_interval_secs as u64,
+                            // Salvage deliberately does not recover this flag.
+                            // The column may be among what the corruption took,
+                            // and re-enabling filter execution on a guess would
+                            // start forwarding mail from a daemon the user never
+                            // chose as the owner. Off is recoverable by one
+                            // setting; wrongly on is not recoverable at all.
+                            filters_enabled: false,
                             transport,
                         }
                     },
@@ -618,6 +625,7 @@ mod tests {
                 email_address: "work@nuncio.mx".to_string(),
                 keyring_secret_key: "nuncio/acct-test-1".to_string(),
                 sync_interval_secs: 60,
+                filters_enabled: false,
                 transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                     imap_host: "imap.nuncio.mx".to_string(),
                     imap_port: 993,
@@ -679,6 +687,7 @@ mod tests {
                 email_address: "salvage@nuncio.mx".to_string(),
                 keyring_secret_key: "nuncio/acct-salvage-1".to_string(),
                 sync_interval_secs: 60,
+                filters_enabled: false,
                 transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                     imap_host: "imap.nuncio.mx".to_string(),
                     imap_port: 993,
@@ -816,6 +825,7 @@ mod tests {
                 email_address: "starttls@nuncio.mx".to_string(),
                 keyring_secret_key: "nuncio/acct-starttls-1".to_string(),
                 sync_interval_secs: 60,
+                filters_enabled: false,
                 transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                     imap_host: "imap.nuncio.mx".to_string(),
                     imap_port: 143,
