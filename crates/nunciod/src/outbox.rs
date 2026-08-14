@@ -892,6 +892,15 @@ mod tests {
     async fn dispatch_with_placements(
         placements: &[Placement],
     ) -> (Disposition, Vec<RemoteMutationSpec>) {
+        dispatch_with_placements_naming(placements, None).await
+    }
+
+    /// As [`dispatch_with_placements`], but with the queued row's payload
+    /// naming `named` as the occupancy the intent was formed against.
+    async fn dispatch_with_placements_naming(
+        placements: &[Placement],
+        named: Option<nuncio_core::model::PlacementKey>,
+    ) -> (Disposition, Vec<RemoteMutationSpec>) {
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
             .expect("ephemeral db");
@@ -905,7 +914,15 @@ mod tests {
         let env = SucceedingEnv {
             backend: backend.clone(),
         };
-        let mutation = flag_mutation();
+        let mut mutation = flag_mutation();
+        if named.is_some() {
+            mutation.payload = serde_json::to_string(&MutationPayload {
+                action_type: mutation.mutation_type.clone(),
+                target: None,
+                placement: named,
+            })
+            .expect("serialize payload");
+        }
         let payload =
             serde_json::from_str::<MutationPayload>(&mutation.payload).expect("parse payload");
         let disposition =
@@ -964,5 +981,32 @@ mod tests {
                 panic!("expected a permanent refusal, got Retry({reason})")
             }
         }
+    }
+
+    /// The same two-mailbox message stops being ambiguous once the queued row
+    /// records which occupancy the intent was formed against: there is nothing
+    /// left to guess, so the mutation is addressed at exactly that copy --
+    /// including when it is not the one a single-placement inference would have
+    /// reached.
+    #[tokio::test]
+    async fn a_named_placement_addresses_that_occupancy_rather_than_being_refused() {
+        let (disposition, applied) = dispatch_with_placements_naming(
+            &[sample_placement(), second_placement()],
+            Some(second_placement().key()),
+        )
+        .await;
+
+        assert!(
+            matches!(disposition, Disposition::Completed),
+            "a row that names its occupancy is fully addressed, not ambiguous"
+        );
+        assert_eq!(applied.len(), 1, "the backend really was asked to act");
+        assert_eq!(
+            applied[0].folder_id, "Archive",
+            "the named occupancy is the one acted on, not the other copy"
+        );
+        assert_eq!(applied[0].remote_id, "78");
+        assert_eq!(applied[0].uid_validity, "9");
+        assert_eq!(applied[0].message_id, "msg-outbox-log");
     }
 }
