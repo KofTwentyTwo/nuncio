@@ -1,6 +1,7 @@
 //! Transactional Outbox Pattern for Remote IMAP/JMAP Mutations.
 
 use crate::ast::PendingRemoteMutation;
+use nuncio_core::model::PlacementKey;
 use serde::{Deserialize, Serialize};
 
 /// Payload details stored for pending remote mutation.
@@ -10,6 +11,17 @@ pub struct MutationPayload {
     pub action_type: String,
     /// Target parameter (e.g. folder name, target email address).
     pub target: Option<String>,
+    /// The mailbox occupancy this mutation was formed against.
+    ///
+    /// Message identity is content-addressed and folder-independent, so a single
+    /// message can occupy several mailboxes at once (Gmail labels make that
+    /// ordinary). `MOVE` and `DELETE` act on *one* occupancy, and acting on the
+    /// wrong one is destructive and irreversible, so the caller that formed the
+    /// intent records which occupancy it meant. `None` preserves the older
+    /// rows' meaning -- "unrecorded" -- which the executor may resolve only when
+    /// the message occupies exactly one mailbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementKey>,
 }
 
 /// Transactional outbox helper managing retry backoffs and mutation payloads.
@@ -31,17 +43,33 @@ impl OutboxManager {
         base + jitter
     }
 
-    /// Construct a new `PendingRemoteMutation` record.
+    /// Construct a new `PendingRemoteMutation` record whose target occupancy is
+    /// left unrecorded. The executor may still address it when the message
+    /// occupies exactly one mailbox, and refuses when it occupies several.
     pub fn create_mutation(
         rule_id: impl Into<String>,
         message_id: impl Into<String>,
         action_type: impl Into<String>,
         target: Option<String>,
     ) -> PendingRemoteMutation {
+        Self::create_mutation_at(rule_id, message_id, action_type, target, None)
+    }
+
+    /// Construct a new `PendingRemoteMutation` record that names the mailbox
+    /// occupancy it was formed against, so a message occupying several mailboxes
+    /// is still unambiguously addressable.
+    pub fn create_mutation_at(
+        rule_id: impl Into<String>,
+        message_id: impl Into<String>,
+        action_type: impl Into<String>,
+        target: Option<String>,
+        placement: Option<PlacementKey>,
+    ) -> PendingRemoteMutation {
         let action_str = action_type.into();
         let payload_struct = MutationPayload {
             action_type: action_str.clone(),
             target,
+            placement,
         };
         let payload_json = serde_json::to_string(&payload_struct).unwrap_or_default();
         let now = chrono::Utc::now().timestamp();

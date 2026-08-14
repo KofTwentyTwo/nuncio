@@ -183,6 +183,38 @@ pub struct PlacementKey {
     pub remote_id: String,
 }
 
+/// A mutation the server refused because another client had already changed the
+/// message, recorded as durable state rather than as a passing notification.
+///
+/// A conflict is raised only on positive evidence from the server; an
+/// unverifiable outcome is never one. Because the intent was formed against
+/// state that no longer exists, a human has to decide what happens next, and
+/// that decision may come long after the event. The event stream is a lossy
+/// broadcast -- it drops on lag and carries no sequence number to resume from --
+/// so it can only ever be an optimisation over a queryable table, never the
+/// record itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationConflict {
+    /// Stable identifier of this conflict record.
+    pub id: String,
+    /// The outbox mutation that conflicted.
+    pub mutation_id: String,
+    /// Content-addressed key of the message the mutation targeted.
+    pub message_id: String,
+    /// The operation that was refused (`MOVE`, `DELETE`, `FLAG`, ...).
+    pub mutation_type: String,
+    /// The occupancy the mutation was aimed at, when the row recorded one.
+    pub placement: Option<PlacementKey>,
+    /// The server's positive evidence that another client changed the message.
+    pub observed: String,
+    /// Unix timestamp (seconds) when the conflict was detected.
+    pub detected_at: i64,
+    /// Unix timestamp (seconds) when a human resolved it, if they have.
+    pub resolved_at: Option<i64>,
+    /// Free-form note recording how the conflict was resolved.
+    pub resolution: Option<String>,
+}
+
 impl Placement {
     /// The addressing coordinates of this occupancy, dropping the read flag.
     pub fn key(&self) -> PlacementKey {

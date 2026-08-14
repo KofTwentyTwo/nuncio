@@ -11,6 +11,64 @@ use zeroize::Zeroizing;
 /// Raw row shape for a pending remote mutation record fetched from SQLite.
 type PendingMutationRow = (String, String, String, String, String, String, i64, i64);
 
+/// `mutation_conflicts` row: id, mutation_id, message_id, mutation_type, then the
+/// four nullable placement coordinates, observed evidence, and resolution state.
+type ConflictRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    i64,
+    Option<i64>,
+    Option<String>,
+);
+
+/// Rebuild a conflict from its row, reassembling the placement only when all
+/// four coordinates are present -- a partial placement addresses nothing.
+fn conflict_from_row(row: ConflictRow) -> nuncio_core::model::MutationConflict {
+    let (
+        id,
+        mutation_id,
+        message_id,
+        mutation_type,
+        account_id,
+        folder_id,
+        uid_validity,
+        remote_id,
+        observed,
+        detected_at,
+        resolved_at,
+        resolution,
+    ) = row;
+    let placement = match (account_id, folder_id, uid_validity, remote_id) {
+        (Some(account_id), Some(folder_id), Some(uid_validity), Some(remote_id)) => {
+            Some(nuncio_core::model::PlacementKey {
+                account_id,
+                folder_id,
+                uid_validity,
+                remote_id,
+            })
+        }
+        _ => None,
+    };
+    nuncio_core::model::MutationConflict {
+        id,
+        mutation_id,
+        message_id,
+        mutation_type,
+        placement,
+        observed,
+        detected_at,
+        resolved_at,
+        resolution,
+    }
+}
+
 /// Database errors emitted by `nuncio-store`.
 #[derive(Error, Debug)]
 pub enum DatabaseError {
@@ -927,6 +985,21 @@ impl DatabaseEngine {
                 status TEXT NOT NULL DEFAULT 'pending',
                 retry_count INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mutation_conflicts (
+                id TEXT PRIMARY KEY NOT NULL,
+                mutation_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                mutation_type TEXT NOT NULL,
+                account_id TEXT,
+                folder_id TEXT,
+                uidvalidity TEXT,
+                uid TEXT,
+                observed TEXT NOT NULL,
+                detected_at INTEGER NOT NULL,
+                resolved_at INTEGER,
+                resolution TEXT
             );
 
             CREATE TABLE IF NOT EXISTS filter_execution_logs (
@@ -2678,6 +2751,103 @@ impl DatabaseEngine {
             .await
             .map_err(DatabaseError::Query)?;
         Ok(())
+    }
+
+    /// Record a mutation conflict as durable, queryable state.
+    ///
+    /// `INSERT OR REPLACE` keyed on the conflict id makes a re-record of the
+    /// same conflict idempotent, so a drain pass that is retried after a crash
+    /// cannot multiply one refusal into several rows a human has to dismiss.
+    pub async fn record_conflict(
+        &self,
+        conflict: &nuncio_core::model::MutationConflict,
+    ) -> Result<(), DatabaseError> {
+        let placement = conflict.placement.as_ref();
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO mutation_conflicts
+            (id, mutation_id, message_id, mutation_type, account_id, folder_id,
+             uidvalidity, uid, observed, detected_at, resolved_at, resolution)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&conflict.id)
+        .bind(&conflict.mutation_id)
+        .bind(&conflict.message_id)
+        .bind(&conflict.mutation_type)
+        .bind(placement.map(|p| p.account_id.clone()))
+        .bind(placement.map(|p| p.folder_id.clone()))
+        .bind(placement.map(|p| p.uid_validity.clone()))
+        .bind(placement.map(|p| p.remote_id.clone()))
+        .bind(&conflict.observed)
+        .bind(conflict.detected_at)
+        .bind(conflict.resolved_at)
+        .bind(conflict.resolution.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+        Ok(())
+    }
+
+    /// List recorded mutation conflicts, newest first.
+    ///
+    /// Resolved conflicts stay in the table -- they are the audit trail of what
+    /// a human decided -- so they are only returned when explicitly asked for.
+    pub async fn list_conflicts(
+        &self,
+        include_resolved: bool,
+        limit: usize,
+    ) -> Result<Vec<nuncio_core::model::MutationConflict>, DatabaseError> {
+        let sql = if include_resolved {
+            r#"
+            SELECT id, mutation_id, message_id, mutation_type, account_id, folder_id,
+                   uidvalidity, uid, observed, detected_at, resolved_at, resolution
+            FROM mutation_conflicts
+            ORDER BY detected_at DESC, id ASC
+            LIMIT ?
+            "#
+        } else {
+            r#"
+            SELECT id, mutation_id, message_id, mutation_type, account_id, folder_id,
+                   uidvalidity, uid, observed, detected_at, resolved_at, resolution
+            FROM mutation_conflicts
+            WHERE resolved_at IS NULL
+            ORDER BY detected_at DESC, id ASC
+            LIMIT ?
+            "#
+        };
+        let rows: Vec<ConflictRow> = sqlx::query_as(sql)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        Ok(rows.into_iter().map(conflict_from_row).collect())
+    }
+
+    /// Mark a conflict resolved. Returns `false` when no such unresolved
+    /// conflict exists, so a caller can tell "already handled" from "applied"
+    /// instead of reporting a success that never happened.
+    pub async fn resolve_conflict(
+        &self,
+        id: &str,
+        resolution: &str,
+        resolved_at: i64,
+    ) -> Result<bool, DatabaseError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE mutation_conflicts
+            SET resolved_at = ?, resolution = ?
+            WHERE id = ? AND resolved_at IS NULL
+            "#,
+        )
+        .bind(resolved_at)
+        .bind(resolution)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(DatabaseError::Query)?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Save a [`nuncio_filter::PendingRemoteMutation`] outbox record.

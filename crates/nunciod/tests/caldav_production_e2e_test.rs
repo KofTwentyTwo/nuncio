@@ -159,6 +159,7 @@ async fn caldav_production_sync_builds_real_client_and_persists_events() {
                 email_address: ACCOUNT_EMAIL.to_string(),
                 keyring_secret_key: KEYRING_KEY.to_string(),
                 sync_interval: Some(nuncio_proto::time::duration_from_secs(300)),
+                filters_enabled: false,
                 transport: Some(nuncio_proto::v1::account_config::Transport::Dav(
                     nuncio_proto::v1::DavTransport {
                         collection_url: collection_url.clone(),

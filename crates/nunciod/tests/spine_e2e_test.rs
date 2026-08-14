@@ -60,6 +60,7 @@ fn sample_account_config() -> AccountConfig {
         email_address: ACCOUNT_EMAIL.to_string(),
         keyring_secret_key: KEYRING_KEY.to_string(),
         sync_interval: Some(nuncio_proto::time::duration_from_secs(60)),
+        filters_enabled: false,
         transport: Some(nuncio_proto::v1::account_config::Transport::ImapSmtp(
             nuncio_proto::v1::ImapSmtpTransport {
                 imap_host: "imap.nuncio.mx".to_string(),
