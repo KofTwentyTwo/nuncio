@@ -727,6 +727,21 @@ impl DatabaseEngine {
     /// fired the rule again. `INSERT ... ON CONFLICT DO NOTHING` makes winning
     /// the claim a single atomic statement, so two passes racing over the same
     /// message cannot both act.
+    ///
+    /// A claim outlives the message it was made against. Nothing reaps
+    /// `filter_fired` when the last placement goes, so a message deleted and
+    /// later re-delivered byte for byte will not fire its rules a second time.
+    /// That is deliberate: reaping alongside the message would hand a remote
+    /// party a way to re-trigger third-party side effects at will -- a
+    /// mailing-list message deleted and re-sent would `FORWARD` again -- and
+    /// under content-addressed identity an identical redelivery genuinely *is*
+    /// the same message, so declining to re-fire is the honest reading. The
+    /// failure this leaves open ("a rule that should have fired again did not")
+    /// is the safe direction for actions that reach outside the mailbox.
+    ///
+    /// The cost is a table that only grows, bounded by rules x messages ever
+    /// seen at roughly 150 bytes a row, and cleared only when an identity
+    /// schema bump resets `user_version` and rebuilds the derived tables.
     pub async fn claim_filter_fire(
         &self,
         rule_id: &str,
@@ -1446,18 +1461,22 @@ impl DatabaseEngine {
         // an upsert, so after the fact there is no way to tell an inserted
         // placement from an updated one -- and the caller needs that distinction
         // to decide whether this is a first arrival worth filtering.
-        let (already_placed,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM placements
+        // The occupant's key is read, not just its existence, because the upsert below may
+        // repoint this slot at a different message and the previous key is unrecoverable
+        // afterwards.
+        let occupant: Option<(String,)> = sqlx::query_as(
+            "SELECT message_key FROM placements
              WHERE account_id = ? AND folder_id = ? AND uidvalidity = ? AND uid = ?",
         )
         .bind(&placement.account_id)
         .bind(&placement.folder_id)
         .bind(&placement.uid_validity)
         .bind(&placement.remote_id)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(DatabaseError::Query)?;
-        let placement_is_new = already_placed == 0;
+        let placement_is_new = occupant.is_none();
+        let displaced_key = occupant.map(|(key,)| key).filter(|key| *key != email.id);
 
         let inserted = sqlx::query(
             r#"
@@ -1520,6 +1539,24 @@ impl DatabaseEngine {
         .execute(&mut *tx)
         .await
         .map_err(DatabaseError::Query)?;
+
+        // Repointing a slot at a different message drops the displaced message's placement
+        // without it ever passing through [`Self::delete_placements`]. If that was its last
+        // one, nothing else will ever delete it -- and its decrypted body would stay readable
+        // in `messages_fts` forever, since only the `messages_ad` trigger clears that index.
+        // Reap it here on exactly the terms `delete_placements` uses: gone only when nothing
+        // points at it any more.
+        if let Some(displaced_key) = displaced_key {
+            sqlx::query(
+                "DELETE FROM messages WHERE message_key = ?
+                 AND NOT EXISTS (SELECT 1 FROM placements WHERE message_key = ?)",
+            )
+            .bind(&displaced_key)
+            .bind(&displaced_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(DatabaseError::Query)?;
+        }
 
         tx.commit().await.map_err(DatabaseError::Query)?;
 
@@ -5053,6 +5090,90 @@ mod tests {
             "an orphaned FTS row would leave the plaintext body readable to anyone \
              with filesystem access after the message itself was deleted"
         );
+    }
+
+    #[tokio::test]
+    async fn repointing_a_slot_reaps_the_displaced_message_and_its_plaintext_index() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (first, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        engine
+            .save_email_at(&first, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+
+        // The same mailbox slot re-saved under a different identity. The displaced
+        // message never passes through `delete_placements`, so this write is its only
+        // chance to be reaped.
+        let (second, _) = sample_message_and_placement("key-2", "INBOX", "5");
+        engine
+            .save_email_at(&second, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+
+        engine
+            .get_message("key-1")
+            .await
+            .expect_err("the displaced message has no placements left");
+        let (fts,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages_fts WHERE message_key = 'key-1'")
+                .fetch_one(engine.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            fts, 0,
+            "a repoint that strands a message must not leave its decrypted body \
+             readable in the FTS index"
+        );
+
+        engine
+            .get_message("key-2")
+            .await
+            .expect("the message that took the slot must survive");
+        let placements = engine.placements_of("key-2").await.unwrap();
+        assert_eq!(placements.len(), 1, "the slot holds exactly one occupant");
+    }
+
+    #[tokio::test]
+    async fn repointing_a_slot_keeps_a_displaced_message_that_still_lives_elsewhere() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        let (first, inbox) = sample_message_and_placement("key-1", "INBOX", "5");
+        let archive = nuncio_core::model::Placement {
+            folder_id: "Archive".into(),
+            remote_id: "9".into(),
+            ..inbox.clone()
+        };
+        engine
+            .save_email_at(&first, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+        engine
+            .save_email_at(
+                &first,
+                nuncio_core::model::IdentitySource::EmailId,
+                &archive,
+            )
+            .await
+            .unwrap();
+
+        let (second, _) = sample_message_and_placement("key-2", "INBOX", "5");
+        engine
+            .save_email_at(&second, nuncio_core::model::IdentitySource::EmailId, &inbox)
+            .await
+            .unwrap();
+
+        engine
+            .get_message("key-1")
+            .await
+            .expect("the displaced message still lives in Archive");
+        let (fts,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages_fts WHERE message_key = 'key-1'")
+                .fetch_one(engine.pool())
+                .await
+                .unwrap();
+        assert_eq!(fts, 1, "search must still find a message that still exists");
+        let placements = engine.placements_of("key-1").await.unwrap();
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].folder_id, "Archive");
     }
 
     #[tokio::test]

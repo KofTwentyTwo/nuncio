@@ -87,10 +87,15 @@ impl ExportEngine {
             writer.write_all(from_line.as_bytes())?;
             total_bytes += from_line.len() as u64;
 
-            // Headers. No X-Nuncio-Folder header: the folder is a property of
-            // a placement now, not of the message, so `Email` has none to
-            // name here. Restoring it would mean threading the relevant
-            // `Placement` into this function's signature.
+            // Headers. `X-Nuncio-Folder` is permanently gone, not pending: a
+            // message's folder is a property of a placement, and a message may
+            // hold several at once (the same message filed in INBOX and in
+            // Archive is one message, not two). A single header could therefore
+            // only ever name one of them, which would be a wrong answer dressed
+            // as an authoritative one -- and MBOX has no way to spell "these
+            // several". Callers that need occupancy read it from the store,
+            // where it is complete. `X-Nuncio-Account` stays because an account
+            // *is* single-valued on the message.
             let headers = format!(
                 "Message-ID: <{}>\r\nFrom: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\nX-Nuncio-Account: {}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n",
                 email.id, email.sender, email.recipient, email.subject, date_str, email.account_id

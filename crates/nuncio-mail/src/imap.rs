@@ -798,7 +798,7 @@ impl ImapEngine {
     /// returned checkpoint is derived from real server state -- the mailbox's
     /// UIDVALIDITY plus its `UIDNEXT` (or one past the highest UID actually
     /// seen) after selecting the folder -- never from a synthetic counter.
-    pub async fn sync_folder_messages_with_session<S>(
+    pub async fn sync_folder_changes_with_session<S>(
         &self,
         folder_id: &str,
         since_state: Option<&str>,
@@ -807,7 +807,7 @@ impl ImapEngine {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
-        self.sync_folder_messages_batched(
+        self.sync_folder_changes_batched(
             folder_id,
             since_state,
             session,
@@ -842,7 +842,7 @@ impl ImapEngine {
         fields(account_id = %self.account_id, folder_id = %folder_id),
         err
     )]
-    async fn sync_folder_messages_batched<S>(
+    async fn sync_folder_changes_batched<S>(
         &self,
         folder_id: &str,
         since_state: Option<&str>,
@@ -923,6 +923,14 @@ impl ImapEngine {
                 drive_fetch_stream(&mut fetch_stream, folder_id, emails.len()).await?
             };
             for item in &items {
+                // The enumeration pass rejected UID-less items; a response to a
+                // `UID FETCH` must carry one (RFC 3501 section 6.4.8), so this
+                // only fires for a non-conforming server. Recording it anyway
+                // would write a placement at the meaningless UID 0.
+                if item.uid.filter(|u| *u >= 1).is_none() {
+                    skipped_no_uid += 1;
+                    continue;
+                }
                 emails.push(self.build_email_from_fetch(folder_id, server_uid_validity, item)?);
             }
         }
@@ -945,6 +953,12 @@ impl ImapEngine {
                 drive_fetch_stream(&mut fetch_stream, folder_id, emails.len()).await?
             };
             for item in &items {
+                // Same guard as the body pass: an item with no UID cannot be
+                // placed, and UID 0 is not an address.
+                if item.uid.filter(|u| *u >= 1).is_none() {
+                    skipped_no_uid += 1;
+                    continue;
+                }
                 emails.push(self.build_headers_only_email(folder_id, server_uid_validity, item));
             }
         }
@@ -1497,8 +1511,8 @@ impl ImapEngine {
     /// Fetch a folder's messages over a freshly authenticated session,
     /// honoring `since_state` for an incremental fetch and returning the new
     /// sync checkpoint alongside the messages. See
-    /// [`Self::sync_folder_messages_with_session`] for the checkpoint model.
-    pub async fn sync_folder_messages(
+    /// [`Self::sync_folder_changes_with_session`] for the checkpoint model.
+    pub async fn sync_folder_changes(
         &self,
         folder_id: &str,
         since_state: Option<&str>,
@@ -1517,7 +1531,7 @@ impl ImapEngine {
             .connect_session(username, password)
             .await?;
         let result = self
-            .sync_folder_messages_with_session(folder_id, since_state, &mut session)
+            .sync_folder_changes_with_session(folder_id, since_state, &mut session)
             .await;
         let _ = session.logout().await;
         result
@@ -1971,7 +1985,7 @@ impl MailBackend for ImapEngine {
         folder_id: &str,
         since_state: Option<&str>,
     ) -> Result<FolderChanges, MailError> {
-        self.sync_folder_messages(folder_id, since_state).await
+        self.sync_folder_changes(folder_id, since_state).await
     }
 
     async fn apply_mutation(
@@ -2327,7 +2341,7 @@ mod tests {
         // First sync: no checkpoint -> full history; returns
         // "{uidvalidity}:{uidnext}" from real server state.
         let first_pass = engine
-            .sync_folder_messages_with_session("INBOX", None, &mut session)
+            .sync_folder_changes_with_session("INBOX", None, &mut session)
             .await
             .expect("first sync succeeds");
         let (first, checkpoint) = (first_pass.upserts, first_pass.next_state);
@@ -2337,7 +2351,7 @@ mod tests {
         // Second sync: feed back the checkpoint; UIDVALIDITY still matches
         // (1), so the fetch is narrowed.
         let __changes = engine
-            .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
+            .sync_folder_changes_with_session("INBOX", Some(&checkpoint), &mut session)
             .await
             .expect("second sync succeeds");
         let (_second, checkpoint2) = (__changes.upserts, __changes.next_state);
@@ -2416,7 +2430,7 @@ mod tests {
         }
     }
 
-    /// Drive `sync_folder_messages_batched` over a scripted, in-memory IMAP
+    /// Drive `sync_folder_changes_batched` over a scripted, in-memory IMAP
     /// server that serves a fixed set of `(uid, size)` messages. The server
     /// answers the enumeration pass (UID + RFC822.SIZE), full-body batches
     /// (`BODY[]`), and headers-only batches (`BODY[HEADER]`) from the fixture,
@@ -2522,7 +2536,7 @@ mod tests {
             .expect("scripted login succeeds");
         let engine = ImapEngine::new("acct-1", "example.test", 993);
         let changes = engine
-            .sync_folder_messages_batched("INBOX", since_state.as_deref(), &mut session, batch_size)
+            .sync_folder_changes_batched("INBOX", since_state.as_deref(), &mut session, batch_size)
             .await
             .expect("batched sync succeeds");
         drop(session);
@@ -2779,7 +2793,7 @@ mod tests {
 
         // First sync under UIDVALIDITY 1 stores "1:105".
         let __changes = engine
-            .sync_folder_messages_with_session("INBOX", None, &mut session)
+            .sync_folder_changes_with_session("INBOX", None, &mut session)
             .await
             .expect("first sync succeeds");
         let (_first, checkpoint) = (__changes.upserts, __changes.next_state);
@@ -2789,7 +2803,7 @@ mod tests {
         // is stale, so the fetch MUST be a full `1:*`, and the checkpoint is
         // rewritten under the new UIDVALIDITY.
         let __changes = engine
-            .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
+            .sync_folder_changes_with_session("INBOX", Some(&checkpoint), &mut session)
             .await
             .expect("second sync succeeds");
         let (_second, checkpoint2) = (__changes.upserts, __changes.next_state);
@@ -2873,7 +2887,7 @@ mod tests {
         // elapsed time despite the 60s virtual timeout expiring.
         let started = std::time::Instant::now();
         let err = engine
-            .sync_folder_messages_with_session("INBOX", None, &mut session)
+            .sync_folder_changes_with_session("INBOX", None, &mut session)
             .await
             .expect_err("a never-responding FETCH must surface an error");
         assert!(
@@ -3428,7 +3442,7 @@ mod tests {
         let engine = ImapEngine::new("acct-completion", "example.test", 993);
 
         let __changes = engine
-            .sync_folder_messages_with_session("INBOX", None, &mut session)
+            .sync_folder_changes_with_session("INBOX", None, &mut session)
             .await
             .expect("sync succeeds");
         let (emails, _checkpoint) = (__changes.upserts, __changes.next_state);
@@ -3576,7 +3590,7 @@ mod tests {
             .expect("scripted login succeeds");
         let engine = ImapEngine::new("acct-1", "example.test", 993);
         let changes = engine
-            .sync_folder_messages_batched(folder_id, None, &mut session, 8)
+            .sync_folder_changes_batched(folder_id, None, &mut session, 8)
             .await
             .expect("scripted sync succeeds");
         drop(session);
