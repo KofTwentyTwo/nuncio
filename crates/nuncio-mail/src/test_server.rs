@@ -742,9 +742,15 @@ fn handle_uid_store(
     Reply::open(out)
 }
 
-/// Extract flag atoms from the parenthesised argument of a STORE.
+/// Extract flag atoms from the parenthesised flag list of a STORE.
+///
+/// Takes the **last** parenthesised group, not the first: a conditional store
+/// is `UID STORE <set> (UNCHANGEDSINCE <n>) +FLAGS.SILENT (<flags>)`, so
+/// reading the first group silently applies `UNCHANGEDSINCE` and the
+/// mod-sequence as though they were flag names. The flag list is always the
+/// final argument of a STORE.
 fn parse_flag_list(line: &str) -> Vec<String> {
-    let Some(open) = line.find('(') else {
+    let Some(open) = line.rfind('(') else {
         return Vec::new();
     };
     let Some(close) = line[open..].find(')') else {
