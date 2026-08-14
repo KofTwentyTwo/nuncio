@@ -940,10 +940,10 @@ mod tests {
         assert_eq!(synced, 1);
 
         // The message persists under an opaque surrogate id; it is recovered by
-        // folder, and its protocol-native JMAP object id round-trips in
-        // `remote_id`.
+        // the mailbox it was actually synced from, and its protocol-native JMAP
+        // object id round-trips in `remote_id`.
         let persisted = db
-            .list_messages("acct-jmap-real-1", "inbox", 10)
+            .list_messages("acct-jmap-real-1", "jmap-inbox", 10)
             .await
             .expect("jmap message persisted");
         assert_eq!(persisted.len(), 1);

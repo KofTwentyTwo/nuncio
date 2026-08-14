@@ -1,7 +1,7 @@
 //! JMAP (RFC 8620 / RFC 8621) protocol engine, session discovery, and differential update parser.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Email, Folder, Placement, RemoteIdentity};
+use nuncio_core::model::{Email, Folder, Placement, PlacementKey, RemoteIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -18,6 +18,47 @@ use crate::parser::MailError;
 /// non-numeric value as "no validity to compare" and is never engaged for a
 /// JMAP mutation, which addresses messages by object id.
 const JMAP_UID_VALIDITY_SENTINEL: &str = "jmap";
+
+/// Scheme tag prefixing every folder checkpoint this engine writes:
+/// `"v1:jmapstate:{state}"`.
+///
+/// A JMAP state string is an opaque server token (RFC 8620 section 1.6.2) with
+/// no self-describing shape, so a stored checkpoint that carries no scheme
+/// cannot be told apart from one written by a different protocol engine or a
+/// different meaning of the same field. Tagging makes an unrecognised token
+/// resolve to a full re-enumeration instead of being handed to `Email/changes`
+/// as a `sinceState` it never came from -- over-fetching is recoverable,
+/// resuming from a token the server reads differently is not.
+const JMAP_STATE_SCHEME: &str = "v1:jmapstate";
+
+/// Separator between the scheme tag and the opaque state it wraps. The state
+/// itself may contain further separators, so only the first one is structural.
+const JMAP_STATE_DELIM: char = ':';
+
+/// Ceiling on `Email/changes` pages followed in one pass.
+///
+/// `hasMoreChanges` is a server-driven loop, and a server that answers `true`
+/// forever -- or returns a `newState` that never advances -- would otherwise
+/// pin the sync task in place. The bound is far above any real paging depth, so
+/// hitting it means the server is misbehaving and the pass says so rather than
+/// spinning.
+const MAX_CHANGES_PAGES: usize = 256;
+
+/// Wrap an opaque JMAP state token in this build's checkpoint scheme.
+fn encode_jmap_checkpoint(state: &str) -> String {
+    format!("{JMAP_STATE_SCHEME}{JMAP_STATE_DELIM}{state}")
+}
+
+/// Recover the opaque JMAP state from a stored checkpoint, or `None` when the
+/// token carries no scheme this build recognises. Only the scheme's own
+/// delimiter is consumed; the remainder is the server's token verbatim.
+fn parse_jmap_checkpoint(raw: &str) -> Option<&str> {
+    let state = raw
+        .trim()
+        .strip_prefix(JMAP_STATE_SCHEME)?
+        .strip_prefix(JMAP_STATE_DELIM)?;
+    (!state.is_empty()).then_some(state)
+}
 
 /// JMAP Session Object (RFC 8620 Section 2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,18 +95,44 @@ pub struct JmapEmailGetResponse {
     pub list: Vec<JmapEmail>,
 }
 
-/// JMAP `Email/changes` response payload wrapper.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One page of a JMAP `Email/changes` response (RFC 8621 section 4.2, over the
+/// RFC 8620 section 5.2 core method).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JmapEmailChangesResponse {
     /// Old state token queried against.
+    #[serde(default)]
     pub old_state: String,
-    /// New state token after differential sync.
+    /// New state token after this page of changes.
     pub new_state: String,
-    /// List of created or updated email IDs.
+    /// Ids of objects created since `oldState`.
+    #[serde(default)]
+    pub created: Vec<String>,
+    /// Ids of objects updated since `oldState`.
+    #[serde(default)]
     pub updated: Vec<String>,
-    /// List of destroyed/deleted email IDs.
+    /// Ids of objects destroyed since `oldState`.
+    #[serde(default)]
     pub destroyed: Vec<String>,
+    /// Whether the server truncated this page. When `true`, `newState` is an
+    /// intermediate checkpoint and the caller must ask again from it.
+    #[serde(default)]
+    pub has_more_changes: bool,
+}
+
+/// What an `Email/changes` call established.
+///
+/// The `cannotCalculateChanges` arm is a first-class outcome rather than an
+/// error: RFC 8620 section 5.2 defines it as the server declining to compute a
+/// delta from the given state (the state is too old, or the server never kept
+/// enough history), and the prescribed response is to re-enumerate rather than
+/// to fail the sync.
+#[derive(Debug, Clone)]
+pub enum EmailChangesPage {
+    /// The server answered with a page of changes.
+    Changes(JmapEmailChangesResponse),
+    /// The server cannot compute a delta from the supplied `sinceState`.
+    CannotCalculateChanges,
 }
 
 /// JMAP `Email/query` response payload wrapper (RFC 8620 Section 5.5), narrowed
@@ -99,6 +166,16 @@ pub struct JmapEmail {
     /// than one `Message-ID` header. The first entry is the one used.
     #[serde(default)]
     pub message_id: Option<Vec<String>>,
+    /// Mailboxes this message currently belongs to, as `{mailboxId: true}`
+    /// (RFC 8621 section 4.1.1). JMAP models mailbox membership as a set, so
+    /// this is the only thing that says which folders a message is placed in --
+    /// and, for a message the server reports as changed, whether it is still
+    /// placed in the folder being synced at all.
+    ///
+    /// `None` means the property was not requested or not returned, which is
+    /// "unknown membership", never "belongs to nothing".
+    #[serde(default)]
+    pub mailbox_ids: Option<std::collections::HashMap<String, bool>>,
 }
 
 /// JMAP email address object.
@@ -191,7 +268,10 @@ impl JmapEngine {
                     {
                         "accountId": account_id,
                         "ids": ids,
-                        "properties": ["id", "subject", "from", "to", "receivedAt", "isUnread", "bodySnippet", "messageId"]
+                        // `mailboxIds` is requested because a changed message's
+                        // folder membership is what decides whether this pass
+                        // places it or reconciles it away.
+                        "properties": ["id", "subject", "from", "to", "receivedAt", "isUnread", "bodySnippet", "messageId", "mailboxIds"]
                     },
                     "c1"
                 ]
@@ -377,6 +457,24 @@ impl JmapEngine {
         &self,
         raw_json: &str,
     ) -> Result<(Vec<PlacedMessage>, String), MailError> {
+        self.parse_email_get_response_in_folder(raw_json, "inbox")
+    }
+
+    /// Parse a raw JMAP `Email/get` JSON response payload into the occupancies
+    /// it establishes for `folder_id`, plus the account's Email state string.
+    ///
+    /// A returned message whose `mailboxIds` is present and does NOT name
+    /// `folder_id` is dropped rather than placed: `Email/changes` is
+    /// account-wide (RFC 8621 section 4.2 offers no mailbox filter), so a
+    /// folder pass sees ids that belong to other mailboxes, and placing them
+    /// here would invent an occupancy the server never reported. Membership
+    /// that the server did not return at all is left alone -- unknown is not
+    /// absent.
+    fn parse_email_get_response_in_folder(
+        &self,
+        raw_json: &str,
+        folder_id: &str,
+    ) -> Result<(Vec<PlacedMessage>, String), MailError> {
         let val: Value = serde_json::from_str(raw_json)
             .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
         let payload = Self::extract_method_response_payload(&val)?;
@@ -386,6 +484,10 @@ impl JmapEngine {
         let emails = resp
             .list
             .into_iter()
+            .filter(|item| match &item.mailbox_ids {
+                Some(ids) => ids.get(folder_id).copied().unwrap_or(false),
+                None => true,
+            })
             .map(|item| {
                 let sender = item
                     .from
@@ -401,7 +503,7 @@ impl JmapEngine {
                     .map(|a| a.email.clone())
                     .unwrap_or_else(|| "me@nuncio.mx".to_string());
 
-                let folder_id = "inbox".to_string();
+                let folder_id = folder_id.to_string();
                 let remote_id = item.id;
                 let message_id = item
                     .message_id
@@ -461,18 +563,31 @@ impl JmapEngine {
         Ok((emails, resp.state))
     }
 
-    /// Parse raw JMAP `Email/changes` JSON response payload.
-    pub fn parse_email_changes_response(
-        &self,
-        raw_json: &str,
-    ) -> Result<(Vec<String>, Vec<String>, String), MailError> {
+    /// Parse one raw JMAP `Email/changes` JSON response payload.
+    ///
+    /// A method-level error carries a `type` (RFC 8620 section 3.6.2), which a
+    /// successful `Email/changes` payload never does, so the discriminator
+    /// works whether the caller hands over the full `methodResponses` envelope
+    /// or a bare payload. `cannotCalculateChanges` is returned as an outcome so
+    /// the caller can fall back to a full enumeration; any other error type is
+    /// a genuine failure and surfaces as one.
+    pub fn parse_email_changes_response(raw_json: &str) -> Result<EmailChangesPage, MailError> {
         let val: Value = serde_json::from_str(raw_json)
             .map_err(|e| MailError::ParseFailed(format!("invalid JMAP JSON response: {e}")))?;
         let payload = Self::extract_method_response_payload(&val)?;
+
+        if let Some(error_type) = payload.get("type").and_then(|v| v.as_str()) {
+            if error_type == "cannotCalculateChanges" {
+                return Ok(EmailChangesPage::CannotCalculateChanges);
+            }
+            return Err(MailError::OperationFailed(format!(
+                "JMAP Email/changes failed with error type '{error_type}'"
+            )));
+        }
+
         let resp: JmapEmailChangesResponse = serde_json::from_value(payload)
             .map_err(|e| MailError::ParseFailed(format!("invalid Email/changes payload: {e}")))?;
-
-        Ok((resp.updated, resp.destroyed, resp.new_state))
+        Ok(EmailChangesPage::Changes(resp))
     }
 
     /// Parse raw JMAP `Email/query` JSON response payload into a matched id list.
@@ -556,6 +671,202 @@ impl JmapEngine {
             .cloned()
             .unwrap_or_else(|| self.account_id.clone())
     }
+
+    /// Address one occupancy of `remote_id` in `folder_id`. JMAP has no
+    /// UIDVALIDITY, so the sentinel stands in for that half of the key.
+    fn placement_key(&self, folder_id: &str, remote_id: &str) -> PlacementKey {
+        PlacementKey {
+            account_id: self.account_id.clone(),
+            folder_id: folder_id.to_string(),
+            uid_validity: JMAP_UID_VALIDITY_SENTINEL.to_string(),
+            remote_id: remote_id.to_string(),
+        }
+    }
+
+    /// Follow `Email/changes` from `since_state` until the server stops setting
+    /// `hasMoreChanges`, accumulating every page.
+    ///
+    /// Returns `None` when the server answered `cannotCalculateChanges`, which
+    /// is the caller's cue to re-enumerate instead of failing. Stopping at the
+    /// first page would silently drop every change past the server's page
+    /// limit, so the loop is the contract, not an optimisation.
+    async fn collect_email_changes(
+        &self,
+        api_url: &str,
+        jmap_account_id: &str,
+        since_state: &str,
+    ) -> Result<Option<EmailChangeSet>, MailError> {
+        let mut accumulated = EmailChangeSet {
+            changed: Vec::new(),
+            destroyed: Vec::new(),
+            new_state: since_state.to_string(),
+        };
+        let mut seen_changed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_destroyed: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut cursor = since_state.to_string();
+
+        for _ in 0..MAX_CHANGES_PAGES {
+            let request = Self::build_email_changes_request(jmap_account_id, &cursor);
+            let raw = self.post_jmap(api_url, &request).await?;
+            let page = match Self::parse_email_changes_response(&raw)? {
+                EmailChangesPage::CannotCalculateChanges => return Ok(None),
+                EmailChangesPage::Changes(page) => page,
+            };
+
+            for id in page.created.into_iter().chain(page.updated) {
+                if seen_changed.insert(id.clone()) {
+                    accumulated.changed.push(id);
+                }
+            }
+            for id in page.destroyed {
+                if seen_destroyed.insert(id.clone()) {
+                    accumulated.destroyed.push(id);
+                }
+            }
+            accumulated.new_state = page.new_state.clone();
+
+            if !page.has_more_changes {
+                // A message created and then destroyed within the same window
+                // appears in both lists; it is gone, so absence wins.
+                accumulated
+                    .changed
+                    .retain(|id| !seen_destroyed.contains(id));
+                return Ok(Some(accumulated));
+            }
+            if page.new_state == cursor {
+                return Err(MailError::OperationFailed(
+                    "JMAP Email/changes reported more changes without advancing newState"
+                        .to_string(),
+                ));
+            }
+            cursor = page.new_state;
+        }
+
+        Err(MailError::OperationFailed(format!(
+            "JMAP Email/changes did not converge within {MAX_CHANGES_PAGES} pages"
+        )))
+    }
+
+    /// Enumerate a folder in full: every message it currently holds, and a
+    /// `present` set that says so.
+    ///
+    /// This is the only pass entitled to report presence, because it is the
+    /// only one that genuinely looked at the whole mailbox.
+    async fn full_folder_enumeration(
+        &self,
+        api_url: &str,
+        jmap_account_id: &str,
+        folder_id: &str,
+    ) -> Result<FolderChanges, MailError> {
+        let query_request = Self::build_email_query_request(jmap_account_id, folder_id);
+        let query_raw = self.post_jmap(api_url, &query_request).await?;
+        let ids = Self::parse_email_query_response(&query_raw)?;
+
+        let get_request = Self::build_email_get_request(jmap_account_id, Some(ids));
+        let get_raw = self.post_jmap(api_url, &get_request).await?;
+        let (emails, state) = self.parse_email_get_response_in_folder(&get_raw, folder_id)?;
+
+        let present: Vec<PlacementKey> = emails.iter().map(|m| m.placement.key()).collect();
+
+        tracing::info!(
+            account_id = %self.account_id,
+            folder_id,
+            fetched = emails.len(),
+            "jmap full folder enumeration complete"
+        );
+
+        Ok(FolderChanges {
+            upserts: emails,
+            // Everything absent is expressed through `present`; a full pass has
+            // no separate report of removals to make.
+            removals: Vec::new(),
+            present: Some(present),
+            next_state: encode_jmap_checkpoint(&state),
+        })
+    }
+
+    /// Enumerate one folder's changes since `since_state` via `Email/changes`.
+    ///
+    /// Returns `None` when the server cannot compute the delta, so the caller
+    /// can fall back to a full enumeration.
+    async fn incremental_folder_pass(
+        &self,
+        api_url: &str,
+        jmap_account_id: &str,
+        folder_id: &str,
+        since_state: &str,
+    ) -> Result<Option<FolderChanges>, MailError> {
+        let Some(changes) = self
+            .collect_email_changes(api_url, jmap_account_id, since_state)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let upserts = if changes.changed.is_empty() {
+            Vec::new()
+        } else {
+            let get_request =
+                Self::build_email_get_request(jmap_account_id, Some(changes.changed.clone()));
+            let get_raw = self.post_jmap(api_url, &get_request).await?;
+            let (emails, _state) = self.parse_email_get_response_in_folder(&get_raw, folder_id)?;
+            emails
+        };
+
+        // Destruction is account-wide, so a destroyed id takes its occupancy
+        // here with it. A changed id that came back placed somewhere other than
+        // this folder -- or did not come back at all, having been destroyed
+        // between the two calls -- has left this folder, and its occupancy goes
+        // too. The message itself survives as long as another placement does;
+        // that is the caller's decision, not this one's.
+        let placed: std::collections::HashSet<&str> = upserts
+            .iter()
+            .map(|m| m.placement.remote_id.as_str())
+            .collect();
+        let removals: Vec<PlacementKey> = changes
+            .destroyed
+            .iter()
+            .map(String::as_str)
+            .chain(
+                changes
+                    .changed
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| !placed.contains(id)),
+            )
+            .map(|id| self.placement_key(folder_id, id))
+            .collect();
+
+        tracing::info!(
+            account_id = %self.account_id,
+            folder_id,
+            fetched = upserts.len(),
+            removed = removals.len(),
+            "jmap incremental folder sync complete"
+        );
+
+        Ok(Some(FolderChanges {
+            upserts,
+            removals,
+            // An `Email/changes` pass sees only what moved. It never enumerates
+            // the mailbox, so it cannot speak to absence beyond what the server
+            // explicitly reported, and claiming otherwise would delete every
+            // message that simply did not change.
+            present: None,
+            next_state: encode_jmap_checkpoint(&changes.new_state),
+        }))
+    }
+}
+
+/// Every `Email/changes` page for one pass, collapsed.
+struct EmailChangeSet {
+    /// Created and updated ids, deduplicated, in first-seen order.
+    changed: Vec<String>,
+    /// Destroyed ids, deduplicated, in first-seen order.
+    destroyed: Vec<String>,
+    /// The final `newState`, once the server stopped paging.
+    new_state: String,
 }
 
 #[async_trait]
@@ -593,14 +904,14 @@ impl MailBackend for JmapEngine {
     }
 
     #[tracing::instrument(
-        skip(self, _since_state),
+        skip(self, since_state),
         fields(account_id = %self.account_id, folder_id = %folder_id),
         err
     )]
     async fn sync_changes(
         &self,
         folder_id: &str,
-        _since_state: Option<&str>,
+        since_state: Option<&str>,
     ) -> Result<FolderChanges, MailError> {
         if !self.has_credentials() {
             return Err(MailError::AuthError(
@@ -610,31 +921,25 @@ impl MailBackend for JmapEngine {
         let session = self.discover_session().await?;
         let account_id = self.resolve_account_id(&session);
 
-        let query_request = Self::build_email_query_request(&account_id, folder_id);
-        let query_raw = self.post_jmap(&session.api_url, &query_request).await?;
-        let ids = Self::parse_email_query_response(&query_raw)?;
+        // A checkpoint this build wrote resumes differentially. Anything else
+        // -- absent, or carrying no scheme this build recognises -- enumerates
+        // the folder in full, which is always safe.
+        if let Some(state) = since_state.and_then(parse_jmap_checkpoint) {
+            if let Some(changes) = self
+                .incremental_folder_pass(&session.api_url, &account_id, folder_id, state)
+                .await?
+            {
+                return Ok(changes);
+            }
+            tracing::info!(
+                account_id = %self.account_id,
+                folder_id,
+                "jmap server cannot calculate changes from the stored state; re-enumerating"
+            );
+        }
 
-        let get_request = Self::build_email_get_request(&account_id, Some(ids));
-        let get_raw = self.post_jmap(&session.api_url, &get_request).await?;
-        let (emails, state) = self.parse_email_get_response(&get_raw)?;
-
-        tracing::info!(
-            account_id = %self.account_id,
-            folder_id,
-            fetched = emails.len(),
-            "jmap message sync complete"
-        );
-
-        Ok(FolderChanges {
-            upserts: emails,
-            removals: Vec::new(),
-            // `Email/query` was filtered to one mailbox, but this engine does
-            // not yet use `Email/changes`, so it cannot claim to have seen the
-            // complete set. Reporting `None` keeps the caller from deleting
-            // anything on the strength of a partial view.
-            present: None,
-            next_state: state,
-        })
+        self.full_folder_enumeration(&session.api_url, &account_id, folder_id)
+            .await
     }
 
     #[tracing::instrument(skip(self), fields(account_id = %self.account_id), err)]
@@ -743,19 +1048,84 @@ mod tests {
 
     #[test]
     fn parse_email_changes_response_valid_payload() {
-        let engine = JmapEngine::new("acct-1");
         let raw = r#"{
             "oldState": "s-1",
             "newState": "s-2",
+            "created": ["msg-12"],
             "updated": ["msg-10", "msg-11"],
-            "destroyed": ["msg-5"]
+            "destroyed": ["msg-5"],
+            "hasMoreChanges": true
         }"#;
-        let (updated, destroyed, new_state) = engine
-            .parse_email_changes_response(raw)
-            .expect("parse changes");
-        assert_eq!(updated.len(), 2);
-        assert_eq!(destroyed.len(), 1);
-        assert_eq!(new_state, "s-2");
+        let EmailChangesPage::Changes(page) =
+            JmapEngine::parse_email_changes_response(raw).expect("parse changes")
+        else {
+            panic!("a well-formed page must not read as cannotCalculateChanges");
+        };
+        assert_eq!(page.created, vec!["msg-12".to_string()]);
+        assert_eq!(page.updated.len(), 2);
+        assert_eq!(page.destroyed.len(), 1);
+        assert_eq!(page.new_state, "s-2");
+        assert!(page.has_more_changes);
+    }
+
+    /// `cannotCalculateChanges` is an outcome, not a failure: RFC 8620 s5.2
+    /// defines it as "re-enumerate", so it must not surface as an error that
+    /// aborts the sync. Any other method error still must.
+    #[test]
+    fn parse_email_changes_response_distinguishes_cannot_calculate_from_failure() {
+        let raw = r#"{"methodResponses":[["error",{"type":"cannotCalculateChanges"},"c1"]]}"#;
+        assert!(matches!(
+            JmapEngine::parse_email_changes_response(raw),
+            Ok(EmailChangesPage::CannotCalculateChanges)
+        ));
+
+        let failed = r#"{"methodResponses":[["error",{"type":"serverFail"},"c1"]]}"#;
+        assert!(JmapEngine::parse_email_changes_response(failed).is_err());
+    }
+
+    #[test]
+    fn jmap_checkpoints_round_trip_through_their_scheme() {
+        // A JMAP state is opaque and may itself contain the delimiter, so only
+        // the scheme's own separator is structural.
+        let encoded = encode_jmap_checkpoint("state:with:colons");
+        assert_eq!(encoded, "v1:jmapstate:state:with:colons");
+        assert_eq!(parse_jmap_checkpoint(&encoded), Some("state:with:colons"));
+    }
+
+    #[test]
+    fn an_untagged_or_unknown_scheme_checkpoint_is_not_interpreted() {
+        // A bare token written before tagging existed, or one from another
+        // scheme, must resolve to a full re-enumeration rather than being
+        // handed to the server as a sinceState it never issued.
+        assert_eq!(parse_jmap_checkpoint("sync-state-900"), None);
+        assert_eq!(parse_jmap_checkpoint("v1:uidnext:42:105"), None);
+        assert_eq!(parse_jmap_checkpoint("v1:jmapstate:"), None);
+    }
+
+    #[test]
+    fn parse_email_get_response_drops_messages_placed_in_another_mailbox() {
+        // `Email/changes` is account-wide, so a folder pass sees ids that
+        // belong elsewhere. Membership the server did return is authoritative;
+        // membership it never returned is unknown, not absent.
+        let raw = r#"{
+            "methodResponses": [
+                ["Email/get", {"state": "s-1", "list": [
+                    {"id": "m-here", "mailboxIds": {"mb-inbox": true}},
+                    {"id": "m-elsewhere", "mailboxIds": {"mb-archive": true}},
+                    {"id": "m-unknown"}
+                ]}, "c1"]
+            ]
+        }"#;
+        let engine = JmapEngine::new("acct-1");
+        let (emails, _state) = engine
+            .parse_email_get_response_in_folder(raw, "mb-inbox")
+            .expect("parse get");
+        let ids: Vec<&str> = emails
+            .iter()
+            .map(|m| m.placement.remote_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["m-here", "m-unknown"]);
+        assert_eq!(emails[0].placement.folder_id, "mb-inbox");
     }
 
     #[test]
