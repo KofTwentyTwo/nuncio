@@ -9,6 +9,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes `test_server`, a stateful loopback IMAP server, to dependent crates'
+# test suites. Never enabled in a production build.
+test-support = []
+
 [dependencies]
 nuncio-core = { path = "../nuncio-core" }
 tokio.workspace = true
