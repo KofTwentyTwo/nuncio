@@ -29,6 +29,22 @@ pub enum DatabaseError {
     /// Recovery salvage operation failed.
     #[error("database recovery error: {0}")]
     RecoveryFailed(String),
+    /// The database was written by a newer binary than this one.
+    ///
+    /// Fail-closed: the schema is built from `CREATE TABLE IF NOT EXISTS`, so
+    /// an older binary would otherwise open a newer database successfully and
+    /// write the old model into it, leaving two mutually invisible truths in
+    /// one file. There is no safe way to continue.
+    #[error(
+        "database identity schema v{on_disk} is newer than this build supports (v{supported}); \
+         upgrade nunciod rather than running an older binary against it"
+    )]
+    SchemaTooNew {
+        /// The generation recorded in the database's `user_version`.
+        on_disk: i64,
+        /// The newest generation this binary understands.
+        supported: i64,
+    },
     /// Audit chain verification failed.
     #[error("audit chain integrity error: {0}")]
     ChainIntegrityFailed(String),
@@ -496,6 +512,102 @@ impl DatabaseEngine {
         &self.pool
     }
 
+    /// The identity-schema generation this binary understands.
+    ///
+    /// Distinct from the additive column migrations elsewhere in this module.
+    /// Those add nullable columns and leave every stored row meaningful. This
+    /// counter tracks changes to what a stored message *is* -- how it is keyed
+    /// and what a sync checkpoint means -- where old rows cannot be reinterpreted
+    /// under the new model at all.
+    ///
+    /// Bump this only for a change of that kind, and only together with the
+    /// reset it implies (see [`DatabaseEngine::reconcile_schema_version`]).
+    pub const IDENTITY_SCHEMA_VERSION: i64 = 1;
+
+    /// Reconcile the on-disk identity-schema generation with this binary's.
+    ///
+    /// Three outcomes:
+    ///
+    /// - **Same version** (and the common case): nothing happens.
+    /// - **Database older**: the cached message store is rebuilt and the account
+    ///   re-syncs from the server. Accounts, credentials and filter rules are
+    ///   preserved; cached mail, sync checkpoints and the execution ledger are
+    ///   not. This is deliberate and pre-release only -- see ADR 0002. Message
+    ///   identity cannot be recomputed for rows already stored, so the
+    ///   alternative is a permanently two-tier store in which old messages are
+    ///   invisible to every guarantee the new model provides. The server holds
+    ///   the authoritative copy either way.
+    /// - **Database newer**: refuse to open. A `CREATE TABLE IF NOT EXISTS`
+    ///   schema means an older binary can open a newer database and quietly
+    ///   write the old model into it, leaving two mutually invisible truths in
+    ///   one file. Failing loudly is the only way that does not corrupt.
+    pub async fn reconcile_schema_version(&self) -> Result<(), DatabaseError> {
+        let (on_disk,): (i64,) = sqlx::query_as("PRAGMA user_version")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+
+        if on_disk > Self::IDENTITY_SCHEMA_VERSION {
+            return Err(DatabaseError::SchemaTooNew {
+                on_disk,
+                supported: Self::IDENTITY_SCHEMA_VERSION,
+            });
+        }
+
+        // 0 is both "brand new database" and "predates this counter". Neither
+        // has anything worth preserving that a re-sync will not restore, and
+        // the reset is a no-op on an empty store.
+        if on_disk < Self::IDENTITY_SCHEMA_VERSION {
+            if on_disk > 0 {
+                tracing::warn!(
+                    on_disk,
+                    supported = Self::IDENTITY_SCHEMA_VERSION,
+                    "message identity schema changed: rebuilding the cached message store; \
+                     accounts and rules are preserved and mail will re-sync from the server"
+                );
+            }
+            self.reset_cached_message_store().await?;
+            sqlx::query(&format!(
+                "PRAGMA user_version = {}",
+                Self::IDENTITY_SCHEMA_VERSION
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(DatabaseError::Query)?;
+        }
+
+        Ok(())
+    }
+
+    /// Drop everything derived from the server, keeping everything the user
+    /// configured.
+    ///
+    /// Cleared: messages and their FTS index, per-folder sync checkpoints, and
+    /// the filter execution ledger. The ledger goes because its hash chain is
+    /// keyed on message ids that will no longer resolve, and a chain pointing
+    /// at absent rows has no audit value -- reinitialising it is more honest
+    /// than carrying a permanently mixed-namespace log.
+    ///
+    /// Kept: accounts, credentials (which live in the OS keyring regardless),
+    /// filter rules, and the WORM audit records, whose triggers forbid deletion
+    /// and whose entries do not reference message identity.
+    async fn reset_cached_message_store(&self) -> Result<(), DatabaseError> {
+        let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
+        for statement in [
+            "DELETE FROM messages",
+            "DELETE FROM messages_fts",
+            "DELETE FROM folder_sync_state",
+            "DELETE FROM filter_execution_logs",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut *tx)
+                .await
+                .map_err(DatabaseError::Query)?;
+        }
+        tx.commit().await.map_err(DatabaseError::Query)?;
+        Ok(())
+    }
+
     /// Execute initial database migrations creating core envelope tables.
     pub async fn migrate(&self) -> Result<(), DatabaseError> {
         sqlx::query(
@@ -750,6 +862,12 @@ impl DatabaseEngine {
         // The statements above create the schema in full, so there is nothing to
         // upgrade: every column this engine reads is declared in its own
         // `CREATE TABLE IF NOT EXISTS`. Databases are created, never migrated.
+        //
+        // Reconciling the identity-schema generation is a different question and
+        // still applies: it asks whether a store was written under a model this
+        // binary can still interpret, and rebuilds (or refuses) accordingly.
+        // Runs after the tables exist, since the rebuild deletes from them.
+        self.reconcile_schema_version().await?;
         self.backfill_message_fts().await?;
 
         Ok(())
@@ -1374,6 +1492,51 @@ impl DatabaseEngine {
     /// Lets a caller classify a whole fetched batch as new-vs-seen with one round trip instead
     /// of one existence lookup per id. Passing an empty slice short-circuits to an empty set
     /// without querying at all, since `IN ()` is not valid SQL.
+    /// Every message id currently stored for one folder of one account.
+    ///
+    /// The local half of a UID-set diff: a sync that enumerated the folder's
+    /// complete contents can subtract what the server reported from this to
+    /// find what disappeared. Scoped by account as well as folder because
+    /// folder ids are not globally unique -- two accounts both have an
+    /// `INBOX`, and diffing across them would delete one account's mail
+    /// because the other's server did not mention it.
+    pub async fn message_ids_in_folder(
+        &self,
+        account_id: &str,
+        folder_id: &str,
+    ) -> Result<Vec<String>, DatabaseError> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM messages WHERE account_id = ? AND folder_id = ?")
+                .bind(account_id)
+                .bind(folder_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Delete stored messages by id, returning how many rows went.
+    ///
+    /// The FTS index follows via the `messages_ad` trigger, so a deleted
+    /// message cannot survive as a searchable plaintext orphan.
+    pub async fn delete_messages(&self, ids: &[String]) -> Result<u64, DatabaseError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.pool.begin().await.map_err(DatabaseError::Query)?;
+        let mut deleted = 0u64;
+        for id in ids {
+            let result = sqlx::query("DELETE FROM messages WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(DatabaseError::Query)?;
+            deleted += result.rows_affected();
+        }
+        tx.commit().await.map_err(DatabaseError::Query)?;
+        Ok(deleted)
+    }
+
     pub async fn existing_message_ids(
         &self,
         ids: &[String],
@@ -3866,6 +4029,104 @@ mod tests {
         assert_eq!(fetched.remote_id, "5");
         assert_eq!(fetched.uid_validity, "42");
         assert_eq!(fetched.folder_id, "INBOX");
+    }
+
+    #[tokio::test]
+    async fn opening_a_newer_database_fails_closed_instead_of_writing_the_old_model() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        sqlx::query(&format!(
+            "PRAGMA user_version = {}",
+            DatabaseEngine::IDENTITY_SCHEMA_VERSION + 1
+        ))
+        .execute(engine.pool())
+        .await
+        .unwrap();
+
+        let err = engine
+            .reconcile_schema_version()
+            .await
+            .expect_err("a database from a newer build must not be opened");
+        assert!(
+            matches!(err, DatabaseError::SchemaTooNew { .. }),
+            "got {err:?}"
+        );
+        // The schema is CREATE TABLE IF NOT EXISTS, so without this an older
+        // binary opens a newer database happily and writes the old model into
+        // it, leaving two mutually invisible truths in one file.
+        assert!(err.to_string().contains("newer than this build supports"));
+    }
+
+    #[tokio::test]
+    async fn an_identity_schema_bump_rebuilds_cached_mail_and_keeps_configuration() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let account = nuncio_core::AccountConfig {
+            id: "acct-reset".to_string(),
+            name: "Reset Account".to_string(),
+            email_address: "reset@nuncio.mx".to_string(),
+            keyring_secret_key: "nuncio/acct-reset".to_string(),
+            sync_interval_secs: 60,
+            transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                imap_host: "imap.nuncio.mx".to_string(),
+                imap_port: 993,
+                imap_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+                smtp_host: "smtp.nuncio.mx".to_string(),
+                smtp_port: 465,
+                smtp_tls_mode: nuncio_core::TlsMode::ImplicitTls,
+            }),
+        };
+        engine.save_account(&account).await.expect("save account");
+        engine
+            .save_email(&synced_email("acct-reset", "INBOX", "42", "7"))
+            .await
+            .expect("save email");
+        engine
+            .save_folder_sync_state("acct-reset", "INBOX", "v1:uidnext:42:8")
+            .await
+            .expect("save checkpoint");
+
+        // Pretend this store was written by the previous identity generation.
+        sqlx::query("PRAGMA user_version = 0")
+            .execute(engine.pool())
+            .await
+            .unwrap();
+
+        engine
+            .reconcile_schema_version()
+            .await
+            .expect("an older store is rebuilt, not rejected");
+
+        // Server-derived state goes: it cannot be reinterpreted under a new
+        // identity model, and the server holds the authoritative copy.
+        let (message_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages")
+            .fetch_one(engine.pool())
+            .await
+            .unwrap();
+        assert_eq!(message_count, 0, "cached mail must be rebuilt");
+        assert_eq!(
+            engine
+                .get_folder_sync_state("acct-reset", "INBOX")
+                .await
+                .unwrap(),
+            None,
+            "a checkpoint must not survive an identity change"
+        );
+
+        // Everything the user configured survives.
+        let accounts = engine.list_accounts().await.expect("list accounts");
+        assert_eq!(accounts.len(), 1, "accounts must be preserved");
+        assert_eq!(accounts[0].id, "acct-reset");
+
+        // The version is recorded, so the next open is a no-op.
+        let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+            .fetch_one(engine.pool())
+            .await
+            .unwrap();
+        assert_eq!(version, DatabaseEngine::IDENTITY_SCHEMA_VERSION);
+        engine
+            .reconcile_schema_version()
+            .await
+            .expect("re-running at the current version is a no-op");
     }
 
     fn export_test_email(id: &str, account_id: &str, folder_id: &str) -> nuncio_core::model::Email {

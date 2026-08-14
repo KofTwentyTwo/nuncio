@@ -42,6 +42,14 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::parser::MailError;
 
+/// Bounded wait for any single response line.
+///
+/// A server that accepts a command and then stops answering must surface as a
+/// stall, not as a sync that never returns. Mirrors the per-item FETCH timeout
+/// the typed path already applies -- an unbounded read here would reintroduce
+/// exactly the hang that bounded it.
+const RESPONSE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A `COPYUID` response code (RFC 4315 section 3): the destination mailbox's
 /// UIDVALIDITY, the source UIDs, and the UIDs they became.
 ///
@@ -84,6 +92,8 @@ pub struct RawExchange {
     pub highest_modseq: Option<u64>,
     /// UIDVALIDITY, from an untagged `OK` during `SELECT`.
     pub uid_validity: Option<u32>,
+    /// UIDNEXT, from an untagged `OK` during `SELECT`.
+    pub uid_next: Option<u32>,
 }
 
 impl RawExchange {
@@ -170,9 +180,13 @@ where
     let mut exchange = RawExchange::default();
 
     loop {
-        let response = session
-            .read_response()
+        let response = tokio::time::timeout(RESPONSE_READ_TIMEOUT, session.read_response())
             .await
+            .map_err(|_| {
+                MailError::FetchStalled(format!(
+                    "no response to '{command}' within {RESPONSE_READ_TIMEOUT:?}"
+                ))
+            })?
             .map_err(|e| MailError::ImapError(format!("reading response to '{command}': {e}")))?
             .ok_or_else(|| {
                 MailError::ImapError(format!("connection closed before '{command}' completed"))
@@ -232,6 +246,7 @@ fn absorb_code(exchange: &mut RawExchange, code: Option<&ResponseCode<'_>>) {
         }
         Some(ResponseCode::HighestModSeq(modseq)) => exchange.highest_modseq = Some(*modseq),
         Some(ResponseCode::UidValidity(validity)) => exchange.uid_validity = Some(*validity),
+        Some(ResponseCode::UidNext(uid_next)) => exchange.uid_next = Some(*uid_next),
         _ => {}
     }
 }

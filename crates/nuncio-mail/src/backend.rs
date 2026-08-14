@@ -65,19 +65,63 @@ pub struct RemoteMutationSpec {
     pub kind: RemoteMutationKind,
 }
 
+/// What one folder-sync pass observed on the server.
+///
+/// The reason this is not just a list of messages: a sync that can only report
+/// what *is* there can never report what stopped being there. A message moved
+/// or deleted by any other client -- another Nuncio daemon, a phone, webmail --
+/// simply stays in the local store forever. Expressing absence is the whole
+/// point of the type.
+#[derive(Debug, Default, Clone)]
+pub struct FolderChanges {
+    /// Messages to store, whether newly arrived or changed.
+    pub upserts: Vec<Email>,
+    /// Surrogate ids the server **explicitly reported as gone**, via QRESYNC
+    /// `VANISHED`. Always safe to delete.
+    pub removals: Vec<String>,
+    /// Surrogate ids of everything the folder currently holds, when this pass
+    /// enumerated the complete UID set. The caller may delete anything it
+    /// stores for this folder that is absent from this list.
+    ///
+    /// `None` and `Some(vec![])` mean different things, and conflating them
+    /// deletes a mailbox. `None` is "this pass was incremental and cannot
+    /// speak to absence"; `Some(vec![])` is "the folder is genuinely empty".
+    pub present: Option<Vec<String>>,
+    /// The checkpoint to resume from next time.
+    pub next_state: String,
+}
+
 /// Protocol-agnostic mail backend engine trait implemented by JMAP and IMAP engines.
 #[async_trait]
 pub trait MailBackend: Send + Sync {
     /// Synchronize and list available mailbox folders.
     async fn sync_folders(&self) -> Result<Vec<Folder>, MailError>;
 
-    /// Synchronize message envelopes for a specific folder since a checkpoint state.
-    /// Returns the updated email list and the new server state checkpoint.
+    /// Enumerate what changed in a folder since `since_state`.
+    ///
+    /// Replaces a fetch-only sync: implementations must report removals when
+    /// the protocol can express them, and must say honestly (via
+    /// [`FolderChanges::present`]) whether the pass was able to observe
+    /// absence at all.
+    async fn sync_changes(
+        &self,
+        folder_id: &str,
+        since_state: Option<&str>,
+    ) -> Result<FolderChanges, MailError>;
+
+    /// Fetch-only view of [`MailBackend::sync_changes`], for callers that
+    /// genuinely only want the messages.
+    ///
+    /// Provided rather than required so no implementation can satisfy the
+    /// trait by supplying this and quietly never reporting a removal.
     async fn sync_messages(
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError>;
+    ) -> Result<(Vec<Email>, String), MailError> {
+        let changes = self.sync_changes(folder_id, since_state).await?;
+        Ok((changes.upserts, changes.next_state))
+    }
 
     /// Apply a remote mutation (move/copy/flag/delete) to a single message
     /// against the real server. MUST return `Ok(())` only when the server
