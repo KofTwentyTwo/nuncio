@@ -8,6 +8,8 @@ pub mod codegen;
 pub mod engine;
 pub mod outbox;
 pub mod parser;
+#[cfg(test)]
+mod test_tracing;
 pub mod validator;
 pub mod webhook;
 
