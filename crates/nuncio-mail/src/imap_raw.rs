@@ -1,8 +1,8 @@
 //! Raw IMAP command layer: the responses `async-imap`'s typed API discards.
 //!
-//! The engine needs four things the typed client cannot express, and all four
-//! decide whether a sync saw everything or whether a mutation actually
-//! happened:
+//! The engine needs five things the typed client cannot express, and they all
+//! decide whether a sync saw everything, whether a mutation actually happened,
+//! or whether two engines can agree on what a message *is*:
 //!
 //! | Needed | Why the typed API cannot give it |
 //! | --- | --- |
@@ -10,6 +10,7 @@
 //! | `SELECT (QRESYNC …)` | no such method, and `select()`'s parser drops `VANISHED` |
 //! | `COPYUID` | `uid_copy`/`uid_mv` return `Result<()>`; the tagged response *code* is discarded |
 //! | `[MODIFIED …]` | same discard, and `imap-proto` has no `ResponseCode` variant for it at all |
+//! | `EMAILID` | `imap-proto` cannot *parse* it, and failing to parse kills the connection -- see [`uid_fetch_email_ids`] |
 //!
 //! ## Why this is hand-rolled rather than a fork
 //!
@@ -32,13 +33,15 @@
 //! against a server that emits the real syntax, and the alternative is having
 //! no conflict detection at all.
 
+use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_imap::Session;
 // Reached through `async-imap`'s re-export rather than a direct dependency,
 // so the parser types can never version-skew against the client using them.
 use async_imap::imap_proto::{Response, ResponseCode, Status, UidSetMember};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::parser::MailError;
 
@@ -386,9 +389,325 @@ where
     Ok(exchange)
 }
 
+/// Upper bound on the bytes one raw exchange will accumulate before giving up.
+///
+/// The raw reader has no framing beyond "a line beginning with our tag", so a
+/// server that answers with an endless stream and never completes the command
+/// would otherwise grow this buffer without limit. One `EMAILID` line is a few
+/// dozen bytes and a batch is capped at a few hundred messages, so this is
+/// orders of magnitude above any legitimate reply.
+const MAX_RAW_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Tag prefix for commands this module writes straight to the transport.
+///
+/// `async-imap` allocates its own tags from an `IdGenerator` that emits
+/// `format!("A{:04}", n % 10_000)` -- always the letter `A` followed by four
+/// decimal digits. A tag starting with `NX` therefore cannot collide with one
+/// the typed client will ever issue, no matter how many commands a session
+/// runs or how often the generator wraps. Colliding would be worse than
+/// untidy: two commands sharing a tag makes each one's completion look like
+/// the other's, and a reader would stop at the wrong response.
+const RAW_TAG_PREFIX: &str = "NX";
+
+/// Sequence behind [`RAW_TAG_PREFIX`]. Process-wide rather than per-session
+/// because it costs nothing and makes a tag unique in a packet capture across
+/// every connection, which is the only thing anyone reads these tags for.
+static RAW_TAG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_raw_tag() -> String {
+    let n = RAW_TAG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{RAW_TAG_PREFIX}{n}")
+}
+
+/// `UID FETCH <set> (UID EMAILID)` (RFC 8474 section 5.2), read straight off
+/// the transport, returning `uid -> EMAILID`.
+///
+/// # Why this bypasses the client entirely
+///
+/// `imap-proto` 0.16.7 cannot parse `EMAILID`: its `msg_att` parser is a closed
+/// `alt(...)` of known attributes with no catch-all, so an `EMAILID` item is a
+/// hard nom error rather than an unknown-but-tolerated one. `async-imap`'s
+/// decoder turns any non-`Incomplete` parse error into a fatal `io::Error` and
+/// then latches `read_closed`, after which the stream yields `None` forever --
+/// the session is dead, not degraded. So `EMAILID` must never reach
+/// `parse_response`, which rules out `Session::uid_fetch` **and**
+/// [`run_collected`], since the latter reads through `Session::read_response`
+/// and therefore through the same decoder.
+///
+/// What is left is the transport underneath: `Session` exposes `&mut T`
+/// (`AsMut`, and `Connection::get_mut` through `Deref`), so the command is
+/// written and its reply scanned here, by hand, and no byte of it is offered
+/// to nom.
+///
+/// # The two conditions this is only correct under
+///
+/// 1. **The client's read buffer must be empty.** `ImapStream` owns a buffer
+///    that can hold bytes already pulled off the socket. Raw reads bypass it,
+///    so anything sitting there is invisible to this scanner. Call this only
+///    at a quiescent point -- immediately after a previous command's *tagged*
+///    completion has been read -- and never interleaved with an in-flight
+///    typed command or a live response stream.
+/// 2. **The tag must not collide** with the client's own. See
+///    [`RAW_TAG_PREFIX`].
+///
+/// # Degrading rather than failing
+///
+/// A tagged `NO`/`BAD` yields an empty map, not an error. The object id is an
+/// identity *upgrade*: without it a message still syncs under the
+/// `Message-ID`+content tier or the surrogate, so a server that advertises
+/// `OBJECTID` and then refuses the fetch must cost the sync precision, never
+/// the mail. A stalled read is different and does surface, because a server
+/// that stopped answering mid-command has left the session unusable.
+pub async fn uid_fetch_email_ids<S>(
+    session: &mut Session<S>,
+    uid_set: &str,
+) -> Result<BTreeMap<u32, String>, MailError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+{
+    if uid_set.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let tag = next_raw_tag();
+    let command = format!("{tag} UID FETCH {uid_set} (UID EMAILID)\r\n");
+
+    let stream: &mut S = session.as_mut();
+    stream
+        .write_all(command.as_bytes())
+        .await
+        .map_err(|e| MailError::ImapError(format!("failed to issue '{command:?}': {e}")))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| MailError::ImapError(format!("failed to flush '{command:?}': {e}")))?;
+
+    let (lines, tagged) = read_until_tagged(stream, &tag).await?;
+
+    if !tagged_is_ok(&tagged) {
+        tracing::warn!(
+            response = %tagged,
+            "server refused UID FETCH (UID EMAILID) despite advertising OBJECTID; \
+             this pass identifies its messages by a weaker tier"
+        );
+        return Ok(BTreeMap::new());
+    }
+
+    let mut ids = BTreeMap::new();
+    for line in &lines {
+        if let Some((uid, email_id)) = parse_email_id_line(line) {
+            ids.insert(uid, email_id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Read complete CRLF-terminated lines until one begins with `tag`, returning
+/// the lines before it and the tagged line itself.
+///
+/// Line-oriented scanning is sound *for this command only*: an `EMAILID`
+/// response carries no literal (`{n}`) section, so no line body can contain an
+/// embedded CRLF. It must not be reused for a command whose reply can carry
+/// literals -- a body fetch -- without adding literal handling.
+async fn read_until_tagged<S>(stream: &mut S, tag: &str) -> Result<(Vec<String>, String), MailError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut scanned = 0usize;
+    let mut lines: Vec<String> = Vec::new();
+    let tag_prefix = format!("{tag} ");
+
+    loop {
+        let read = tokio::time::timeout(RESPONSE_READ_TIMEOUT, stream.read(&mut chunk))
+            .await
+            .map_err(|_| {
+                MailError::FetchStalled(format!(
+                    "no response to raw '{tag}' within {RESPONSE_READ_TIMEOUT:?}"
+                ))
+            })?
+            .map_err(|e| MailError::ImapError(format!("reading response to raw '{tag}': {e}")))?;
+        if read == 0 {
+            return Err(MailError::ImapError(format!(
+                "connection closed before raw '{tag}' completed"
+            )));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > MAX_RAW_RESPONSE_BYTES {
+            return Err(MailError::ImapError(format!(
+                "raw '{tag}' response exceeded {MAX_RAW_RESPONSE_BYTES} bytes without completing"
+            )));
+        }
+
+        // Consume every line that is now complete. `scanned` marks how far the
+        // buffer has already been split, so a reply arriving in many chunks is
+        // not re-scanned from the start each time.
+        while let Some(offset) = buffer[scanned..].iter().position(|b| *b == b'\n') {
+            let end = scanned + offset;
+            let line = String::from_utf8_lossy(&buffer[scanned..end])
+                .trim_end_matches('\r')
+                .to_string();
+            scanned = end + 1;
+            if line.starts_with(&tag_prefix) {
+                return Ok((lines, line));
+            }
+            lines.push(line);
+        }
+    }
+}
+
+/// Whether a tagged completion line reports `OK`.
+fn tagged_is_ok(tagged: &str) -> bool {
+    tagged
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|status| status.eq_ignore_ascii_case("OK"))
+}
+
+/// Pull `(uid, EMAILID)` out of one untagged `FETCH` line.
+///
+/// Both wire spellings are accepted. RFC 8474 section 5.2 defines the response
+/// as `"EMAILID" SP "(" objectid ")"`, but the bare `EMAILID <objectid>` form
+/// is what a hand-rolled scanner meets often enough that rejecting it would
+/// mean silently dropping to a weaker identity tier against a server that
+/// answered the question correctly enough.
+///
+/// Returns `None` for anything that is not an untagged `FETCH` carrying both a
+/// UID and a non-empty object id -- there is nothing to key on without both.
+fn parse_email_id_line(line: &str) -> Option<(u32, String)> {
+    let upper = line.to_ascii_uppercase();
+    if !upper.starts_with("* ") || !upper.contains(" FETCH ") {
+        return None;
+    }
+    // `to_ascii_uppercase` is byte-length preserving, so offsets found in the
+    // uppercased copy index the original exactly. Item *names* are
+    // case-insensitive (RFC 3501 section 9); an object id is not, so the value
+    // is always taken from the original line.
+    let uid = find_item_value(&upper, line, "UID ")?.parse::<u32>().ok()?;
+    let email_id = find_item_value(&upper, line, "EMAILID ")?;
+    let email_id = email_id
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim_matches('"')
+        .to_string();
+    if email_id.is_empty() {
+        return None;
+    }
+    Some((uid, email_id))
+}
+
+/// The token following FETCH item `name` in `line`, located via its uppercased
+/// twin `upper`.
+///
+/// The name must sit on a token boundary, so `UID ` never matches the tail of
+/// another attribute name. A parenthesised value is returned whole, brackets
+/// included, for the caller to strip.
+fn find_item_value(upper: &str, line: &str, name: &str) -> Option<String> {
+    let mut from = 0usize;
+    loop {
+        let at = from + upper[from..].find(name)?;
+        let boundary = at == 0
+            || upper[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c == '(' || c == ' ');
+        if boundary {
+            let value_start = at + name.len();
+            let rest = &line[value_start..];
+            let end = if rest.starts_with('(') {
+                rest.find(')').map_or(rest.len(), |i| i + 1)
+            } else {
+                rest.find([' ', ')']).unwrap_or(rest.len())
+            };
+            let value = rest[..end].trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        from = at + name.len();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_object_id_is_read_from_both_wire_spellings() {
+        // RFC 8474 5.2 parenthesises the id; the bare form appears in the wild.
+        // Both must key the same message, or which spelling a server chose
+        // would decide whether identity converges.
+        assert_eq!(
+            parse_email_id_line("* 1 FETCH (UID 7 EMAILID (M00000001))"),
+            Some((7, "M00000001".to_string()))
+        );
+        assert_eq!(
+            parse_email_id_line("* 1 FETCH (UID 7 EMAILID M00000001)"),
+            Some((7, "M00000001".to_string()))
+        );
+        // Item names are case-insensitive; the id itself is not.
+        assert_eq!(
+            parse_email_id_line("* 1 fetch (uid 7 emailid (Mixed-Case_01))"),
+            Some((7, "Mixed-Case_01".to_string()))
+        );
+        // Order is not fixed, and other attributes may sit between them.
+        assert_eq!(
+            parse_email_id_line("* 3 FETCH (EMAILID (M9) FLAGS (\\Seen) UID 12)"),
+            Some((12, "M9".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_line_missing_either_half_yields_nothing() {
+        // Half an answer is not a weaker identity, it is no identity: without
+        // the UID there is nothing to attach the id to, and without the id
+        // there is nothing to attach.
+        assert_eq!(
+            parse_email_id_line("* 1 FETCH (UID 7 FLAGS (\\Seen))"),
+            None
+        );
+        assert_eq!(parse_email_id_line("* 1 FETCH (EMAILID (M1))"), None);
+        assert_eq!(parse_email_id_line("* 1 FETCH (UID 7 EMAILID ())"), None);
+        assert_eq!(parse_email_id_line("NX0 OK UID FETCH completed"), None);
+        assert_eq!(parse_email_id_line("* 4 EXPUNGE"), None);
+    }
+
+    #[test]
+    fn an_item_name_is_only_matched_on_a_token_boundary() {
+        // RFC 8474 defines THREADID alongside EMAILID, so a line carrying both
+        // is ordinary. Every occurrence of `ID ` in it is the tail of a longer
+        // attribute name; without the boundary rule a search would read
+        // THREADID's value as the item's own and key the message on it.
+        let line = "* 1 FETCH (THREADID (T1) EMAILID (M1) UID 7)";
+        let upper = line.to_ascii_uppercase();
+        assert_eq!(find_item_value(&upper, line, "ID "), None);
+        assert_eq!(
+            find_item_value(&upper, line, "EMAILID "),
+            Some("(M1)".to_string())
+        );
+        assert_eq!(find_item_value(&upper, line, "UID "), Some("7".to_string()));
+        assert_eq!(parse_email_id_line(line), Some((7, "M1".to_string())));
+    }
+
+    #[test]
+    fn only_a_tagged_ok_counts_as_a_usable_answer() {
+        assert!(tagged_is_ok("NX7 OK UID FETCH completed"));
+        assert!(tagged_is_ok("NX7 ok uid fetch completed"));
+        assert!(!tagged_is_ok("NX7 NO server does not do that"));
+        assert!(!tagged_is_ok("NX7 BAD unknown item"));
+        assert!(!tagged_is_ok("NX7"));
+    }
+
+    #[test]
+    fn raw_tags_can_never_collide_with_the_clients_own() {
+        // async-imap's IdGenerator emits `A` + four digits and wraps at 10_000,
+        // so a shared tag is only impossible if the prefix differs.
+        let tag = next_raw_tag();
+        assert!(tag.starts_with(RAW_TAG_PREFIX));
+        assert_ne!(&tag[..1], "A");
+        assert_ne!(next_raw_tag(), tag, "each raw command gets its own tag");
+    }
 
     #[test]
     fn modified_response_code_is_recovered_from_the_tagged_text() {

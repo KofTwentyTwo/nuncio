@@ -13,7 +13,7 @@
 
 use nuncio_core::model::PlacementKey;
 use nuncio_mail::imap_raw;
-use nuncio_mail::test_server::{MockImapServer, ServerProfile};
+use nuncio_mail::test_server::{IdentityExtensions, MockImapServer, ObjectIds, ServerProfile};
 
 /// Connect the real client to the mock server and authenticate.
 async fn login(
@@ -299,6 +299,89 @@ async fn a_qresync_select_without_enable_is_refused() {
         err.to_string().contains("refused"),
         "the refusal must be surfaced, got: {err}"
     );
+}
+
+#[tokio::test]
+async fn object_ids_are_read_off_the_transport_and_the_session_survives_it() {
+    // The whole reason this bypasses the client: `imap-proto` has no parser arm
+    // for EMAILID, and `async-imap` turns a parse error into a fatal I/O error
+    // that latches the stream closed. So the test that matters is not only that
+    // the ids come back, but that the *typed* client still works afterwards --
+    // proving the raw exchange left the connection and the client's read buffer
+    // in a state the next command can use.
+    let server =
+        MockImapServer::start_with_identity(ServerProfile::Qresync, IdentityExtensions::objectid())
+            .await
+            .expect("server starts");
+    server.create_mailbox("INBOX");
+    let first = server.append_message_with_object_ids(
+        "INBOX",
+        "Subject: one\r\n\r\nx",
+        &[],
+        ObjectIds {
+            email_id: "M-first".to_string(),
+            gm_msgid: 11,
+        },
+    );
+    let second = server.append_message_with_object_ids(
+        "INBOX",
+        "Subject: two\r\n\r\nx",
+        &[],
+        ObjectIds {
+            email_id: "M-second".to_string(),
+            gm_msgid: 12,
+        },
+    );
+
+    let mut session = login(&server).await;
+    imap_raw::run_collected(&mut session, "SELECT INBOX")
+        .await
+        .expect("select");
+
+    let ids = imap_raw::uid_fetch_email_ids(&mut session, &format!("{first},{second}"))
+        .await
+        .expect("the raw EMAILID fetch succeeds");
+
+    assert_eq!(ids.get(&first).map(String::as_str), Some("M-first"));
+    assert_eq!(ids.get(&second).map(String::as_str), Some("M-second"));
+
+    // The session is still alive: a typed command after the raw exchange must
+    // still see the mailbox.
+    let after = imap_raw::run_collected(&mut session, "UID FETCH 1:* (UID)")
+        .await
+        .expect("the session survives the raw exchange");
+    assert_eq!(after.fetched_uids, vec![first, second]);
+}
+
+#[tokio::test]
+async fn a_refused_object_id_fetch_costs_precision_not_the_sync() {
+    // A server that rejects the item leaves the message identifiable by a
+    // weaker tier. Erroring here would fail an entire folder sync over an
+    // identity *upgrade*, which is the wrong trade in both directions.
+    let server = MockImapServer::start(ServerProfile::Qresync)
+        .await
+        .expect("server starts");
+    server.create_mailbox("INBOX");
+    let uid = server.append_message("INBOX", "Subject: one\r\n\r\nx", &[]);
+
+    let mut session = login(&server).await;
+    imap_raw::run_collected(&mut session, "SELECT INBOX")
+        .await
+        .expect("select");
+
+    let ids = imap_raw::uid_fetch_email_ids(&mut session, &uid.to_string())
+        .await
+        .expect("a BAD answer is not a transport failure");
+    assert!(
+        ids.is_empty(),
+        "nothing was learned, and that is the answer"
+    );
+
+    // And the connection is still usable, which a `BAD` must not change.
+    let after = imap_raw::run_collected(&mut session, "UID FETCH 1:* (UID)")
+        .await
+        .expect("the session survives a refusal");
+    assert_eq!(after.fetched_uids, vec![uid]);
 }
 
 /// Drive a real folder sync against the mock and return what it observed.

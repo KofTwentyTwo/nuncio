@@ -350,17 +350,30 @@ impl Email {
     /// The surrogate tier is folder-scoped and therefore *not* stable across a
     /// move; it is the honest answer when the server offered nothing better.
     ///
-    /// # Keys do not yet converge across engine types
+    /// # What convergence across engine types does and does not follow from
     ///
     /// Precedence makes a key reproducible from the same inputs, not from the
-    /// same *message*. The IMAP engine does not currently request `EMAILID` or
-    /// `X-GM-MSGID`, so it can only ever reach the `Message-ID`+content tier or
-    /// the surrogate, while JMAP supplies a server id and enters at the top
-    /// tier. Two engines syncing one account therefore produce disjoint key
-    /// spaces: the same message is two identities, one per engine. This is a
-    /// known gap in the convergent multi-engine model, not a property to rely
-    /// on -- do not assume a key derived by one engine addresses the row
-    /// another engine wrote.
+    /// same *message*. Two engines converge exactly when they enter at the same
+    /// tier with the same value.
+    ///
+    /// They do when the server publishes a stable object id and both engines
+    /// ask for it. The IMAP engine requests RFC 8474 `EMAILID` from an
+    /// `OBJECTID` server and `X-GM-MSGID` from an `X-GM-EXT-1` one, and JMAP's
+    /// Email object id is the same identifier RFC 8474 exposes to IMAP -- so
+    /// one message synced through both protocols yields one key. That is the
+    /// whole point of the OBJECTID extension.
+    ///
+    /// They do not when the server offers neither. IMAP then falls to the
+    /// `Message-ID`+content tier or the surrogate, both derived from what the
+    /// message or the mailbox happened to contain, while a JMAP engine against
+    /// the same account still enters at the top tier from a server-assigned id.
+    /// Those key spaces are disjoint, and no comparison across them means
+    /// anything. The surrogate additionally is not stable across a *move*, even
+    /// within one engine.
+    ///
+    /// Object ids are also only comparable within one account on one server:
+    /// RFC 8474 section 4 scopes uniqueness that way, which is why every tier
+    /// here is account-scoped.
     pub fn derive_message_key(
         account_id: &str,
         remote: RemoteIdentity<'_>,

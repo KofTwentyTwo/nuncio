@@ -628,7 +628,17 @@ impl DatabaseEngine {
     ///
     /// Bump this only for a change of that kind, and only together with the
     /// reset it implies (see [`DatabaseEngine::reconcile_schema_version`]).
-    pub const IDENTITY_SCHEMA_VERSION: i64 = 2;
+    ///
+    /// Generation 3 is where the IMAP engine began asking for RFC 8474
+    /// `EMAILID` and `X-GM-MSGID`. Every message a capable server holds now
+    /// derives its key from a stronger identity tier, so no key stored under
+    /// generation 2 still names the message it named. Letting that happen a row
+    /// at a time -- as each resync repointed a placement -- would work, but the
+    /// repoint reap is a safety net against stranded plaintext, not a migration
+    /// mechanism, and it would leave the store in two identity models for as
+    /// long as any folder went unsynced. Rebuilding once is the honest form of
+    /// the same change.
+    pub const IDENTITY_SCHEMA_VERSION: i64 = 3;
 
     /// Reconcile the on-disk identity-schema generation with this binary's.
     ///
