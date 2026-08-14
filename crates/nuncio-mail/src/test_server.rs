@@ -48,27 +48,63 @@ pub enum ServerProfile {
 }
 
 impl ServerProfile {
-    /// The `CAPABILITY` atom list for this profile. `UIDPLUS` and `MOVE` are
-    /// advertised by all three because every profile we model supports them.
-    fn capability_line(self) -> String {
-        let mut caps = vec!["IMAP4rev1", "UIDPLUS", "MOVE", "ENABLE", "LIST-STATUS"];
-        match self {
-            ServerProfile::Basic => {}
-            ServerProfile::Condstore => caps.push("CONDSTORE"),
-            ServerProfile::Qresync => {
-                caps.push("CONDSTORE");
-                caps.push("QRESYNC");
-            }
-        }
-        caps.join(" ")
-    }
-
     fn supports_condstore(self) -> bool {
         matches!(self, ServerProfile::Condstore | ServerProfile::Qresync)
     }
 
     fn supports_qresync(self) -> bool {
         matches!(self, ServerProfile::Qresync)
+    }
+}
+
+/// Which server-assigned message-id extensions this server publishes.
+///
+/// Independent of [`ServerProfile`] because the two axes genuinely are
+/// independent in the field: Gmail advertises `X-GM-EXT-1` with CONDSTORE and
+/// no QRESYNC, Fastmail advertises `OBJECTID` with QRESYNC, and Exchange
+/// advertises neither. Selectable per instance so a test can pin the
+/// behaviour of a server that offers *nothing*, which is the case that must
+/// stay byte-identical to how the engine behaved before object ids existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentityExtensions {
+    /// RFC 8474 `OBJECTID`, so `EMAILID` is served when asked for.
+    pub objectid: bool,
+    /// Gmail's `X-GM-EXT-1`, so `X-GM-MSGID` is served when asked for.
+    pub gmail: bool,
+}
+
+impl IdentityExtensions {
+    /// A server that publishes no stable message id at all.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// RFC 8474 only.
+    pub fn objectid() -> Self {
+        Self {
+            objectid: true,
+            gmail: false,
+        }
+    }
+
+    /// Gmail's vendor extension only, which is what Gmail itself does.
+    pub fn gmail() -> Self {
+        Self {
+            objectid: false,
+            gmail: true,
+        }
+    }
+
+    /// The `CAPABILITY` atoms these extensions contribute.
+    fn atoms(self) -> Vec<&'static str> {
+        let mut atoms = Vec::new();
+        if self.objectid {
+            atoms.push("OBJECTID");
+        }
+        if self.gmail {
+            atoms.push("X-GM-EXT-1");
+        }
+        atoms
     }
 }
 
@@ -80,6 +116,23 @@ pub struct MockMessage {
     pub flags: BTreeSet<String>,
     /// Full RFC822 octets served for `BODY[]`.
     pub body: String,
+    /// The server-assigned ids this message keeps wherever it sits.
+    pub object_ids: ObjectIds,
+}
+
+/// The message-level ids a server assigns once and reports identically from
+/// every mailbox holding the message.
+///
+/// That invariant is the entire point of RFC 8474: a UID is per-mailbox, an
+/// `EMAILID` is not, so a copy in a second folder reports the same one. A mock
+/// that minted a fresh id per placement would model a server that does not
+/// exist and would let a broken client pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectIds {
+    /// RFC 8474 `EMAILID`.
+    pub email_id: String,
+    /// Gmail `X-GM-MSGID`, a 64-bit integer on the wire.
+    pub gm_msgid: u64,
 }
 
 /// A mailbox: its UID space, its mod-sequence, and the tombstones needed to
@@ -113,7 +166,7 @@ impl MockMailbox {
         self.highest_modseq
     }
 
-    fn append(&mut self, body: &str, flags: &[&str]) -> u32 {
+    fn append(&mut self, body: &str, flags: &[&str], object_ids: ObjectIds) -> u32 {
         let uid = self.uid_next;
         self.uid_next += 1;
         let modseq = self.next_modseq();
@@ -122,6 +175,7 @@ impl MockMailbox {
             modseq,
             flags: flags.iter().map(|f| (*f).to_string()).collect(),
             body: body.to_string(),
+            object_ids,
         });
         uid
     }
@@ -150,21 +204,57 @@ impl MockMailbox {
 #[derive(Debug)]
 pub struct ServerState {
     pub profile: ServerProfile,
+    /// Which server-assigned id extensions this instance publishes.
+    pub extensions: IdentityExtensions,
     pub mailboxes: BTreeMap<String, MockMailbox>,
     /// Every command line received, across all connections, in arrival order.
     /// Tests assert on this to prove *which* protocol path ran -- e.g. that a
     /// second sync narrowed its FETCH rather than re-fetching everything.
     pub commands: Vec<String>,
     next_uid_validity: u32,
+    next_object_id: u64,
 }
 
 impl ServerState {
-    fn new(profile: ServerProfile) -> Self {
+    fn new(profile: ServerProfile, extensions: IdentityExtensions) -> Self {
         Self {
             profile,
+            extensions,
             mailboxes: BTreeMap::new(),
             commands: Vec::new(),
             next_uid_validity: 1000,
+            next_object_id: 1,
+        }
+    }
+
+    /// The `CAPABILITY` atom list. `UIDPLUS` and `MOVE` are advertised by every
+    /// profile because every server we model supports them; the sync-ladder and
+    /// identity atoms are what varies.
+    fn capability_line(&self) -> String {
+        let mut caps = vec!["IMAP4rev1", "UIDPLUS", "MOVE", "ENABLE", "LIST-STATUS"];
+        match self.profile {
+            ServerProfile::Basic => {}
+            ServerProfile::Condstore => caps.push("CONDSTORE"),
+            ServerProfile::Qresync => {
+                caps.push("CONDSTORE");
+                caps.push("QRESYNC");
+            }
+        }
+        caps.extend(self.extensions.atoms());
+        caps.join(" ")
+    }
+
+    /// Mint the ids for a message the test did not name explicitly.
+    fn mint_object_ids(&mut self) -> ObjectIds {
+        let n = self.next_object_id;
+        self.next_object_id += 1;
+        ObjectIds {
+            // RFC 8474 section 4 restricts an objectid to 1*255 of
+            // ALPHA/DIGIT/`_`/`-`, so this shape is representative rather than
+            // decorative -- a scanner that mishandles it mishandles the real
+            // thing.
+            email_id: format!("M{n:08}"),
+            gm_msgid: 1_278_455_344_230_334_000 + n,
         }
     }
 }
@@ -195,11 +285,20 @@ fn lock_state(state: &Arc<Mutex<ServerState>>) -> MutexGuard<'_, ServerState> {
 }
 
 impl MockImapServer {
-    /// Bind an ephemeral loopback port and start accepting connections.
+    /// Bind an ephemeral loopback port and start accepting connections, with
+    /// no server-assigned message-id extensions.
     pub async fn start(profile: ServerProfile) -> std::io::Result<Self> {
+        Self::start_with_identity(profile, IdentityExtensions::none()).await
+    }
+
+    /// As [`Self::start`], additionally publishing `extensions`.
+    pub async fn start_with_identity(
+        profile: ServerProfile,
+        extensions: IdentityExtensions,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let state = Arc::new(Mutex::new(ServerState::new(profile)));
+        let state = Arc::new(Mutex::new(ServerState::new(profile, extensions)));
 
         let accept_state = Arc::clone(&state);
         let accept_task = tokio::spawn(async move {
@@ -241,8 +340,26 @@ impl MockImapServer {
             .insert(name.to_string(), MockMailbox::new(uid_validity));
     }
 
-    /// Append a message, creating the mailbox if absent. Returns its UID.
+    /// Append a message under freshly minted object ids, creating the mailbox
+    /// if absent. Returns its UID.
     pub fn append_message(&self, mailbox: &str, body: &str, flags: &[&str]) -> u32 {
+        let ids = lock_state(&self.state).mint_object_ids();
+        self.append_message_with_object_ids(mailbox, body, flags, ids)
+    }
+
+    /// Append a message under *given* object ids.
+    ///
+    /// This is how a test puts the same message in two mailboxes: a real
+    /// OBJECTID server reports one `EMAILID` for both copies, and only that
+    /// makes the cross-folder identity claim testable. Passing distinct ids to
+    /// two appends models two genuinely different messages.
+    pub fn append_message_with_object_ids(
+        &self,
+        mailbox: &str,
+        body: &str,
+        flags: &[&str],
+        object_ids: ObjectIds,
+    ) -> u32 {
         let mut state = lock_state(&self.state);
         let uid_validity = state.next_uid_validity;
         let entry = state.mailboxes.entry(mailbox.to_string());
@@ -251,11 +368,22 @@ impl MockImapServer {
             MockMailbox::new(uid_validity)
         });
         let fresh = mailbox.uid_next == 1 && mailbox.messages.is_empty();
-        let uid = mailbox.append(body, flags);
+        let uid = mailbox.append(body, flags, object_ids);
         if fresh {
             state.next_uid_validity += 1;
         }
         uid
+    }
+
+    /// The object ids the server assigned to `uid` in `mailbox`.
+    pub fn object_ids(&self, mailbox: &str, uid: u32) -> Option<ObjectIds> {
+        let state = lock_state(&self.state);
+        state.mailboxes.get(mailbox).and_then(|mb| {
+            mb.messages
+                .iter()
+                .find(|m| m.uid == uid)
+                .map(|m| m.object_ids.clone())
+        })
     }
 
     /// Simulate another client removing a message -- the case a forward-only
@@ -331,7 +459,7 @@ async fn handle_connection(
         let st = lock_state(&state);
         format!(
             "* OK [CAPABILITY {}] Nuncio mock IMAP ready\r\n",
-            st.profile.capability_line()
+            st.capability_line()
         )
     };
     socket.write_all(greeting.as_bytes()).await?;
@@ -381,11 +509,11 @@ fn dispatch(line: &str, session: &mut Session, st: &mut ServerState) -> Reply {
     match command.as_str() {
         "CAPABILITY" => Reply::open(format!(
             "* CAPABILITY {}\r\n{tag} OK CAPABILITY completed\r\n",
-            st.profile.capability_line()
+            st.capability_line()
         )),
         "LOGIN" => Reply::open(format!(
             "{tag} OK [CAPABILITY {}] Logged in\r\n",
-            st.profile.capability_line()
+            st.capability_line()
         )),
         "ENABLE" => handle_enable(&tag, &rest, session, st),
         "NOOP" => Reply::open(format!("{tag} OK NOOP completed\r\n")),
@@ -499,7 +627,7 @@ fn handle_select(
                 out.push_str(&format!("* VANISHED (EARLIER) {}\r\n", gone.join(",")));
             }
             for msg in mb.messages.iter().filter(|m| m.modseq > since) {
-                out.push_str(&fetch_line(mb, msg, false));
+                out.push_str(&fetch_line(mb, msg, FetchItems::none()));
             }
         }
     }
@@ -576,7 +704,39 @@ fn format_flags(flags: &BTreeSet<String>) -> String {
     flags.iter().cloned().collect::<Vec<_>>().join(" ")
 }
 
-fn fetch_line(mb: &MockMailbox, msg: &MockMessage, include_body: bool) -> String {
+/// Which optional items a `FETCH` reply should carry.
+///
+/// A server returns what was asked for. That is not pedantry here: `EMAILID`
+/// is unparseable by the client's own parser, so serving it unasked would kill
+/// every connection that ran a typed fetch -- exactly the failure the raw
+/// layer exists to route around.
+#[derive(Debug, Clone, Copy, Default)]
+struct FetchItems {
+    body: bool,
+    email_id: bool,
+    gm_msgid: bool,
+}
+
+impl FetchItems {
+    /// Read the request off the command line, honouring what this server
+    /// actually advertised: an item the client asked for without the
+    /// capability is simply not served.
+    fn requested(upper: &str, extensions: IdentityExtensions) -> Self {
+        Self {
+            body: upper.contains("BODY[]") || upper.contains("RFC822"),
+            email_id: extensions.objectid && upper.contains("EMAILID"),
+            gm_msgid: extensions.gmail && upper.contains("X-GM-MSGID"),
+        }
+    }
+
+    /// The shape a non-FETCH path (a QRESYNC `SELECT`, a non-silent `STORE`)
+    /// volunteers: flags and mod-sequence only.
+    fn none() -> Self {
+        Self::default()
+    }
+}
+
+fn fetch_line(mb: &MockMailbox, msg: &MockMessage, items_wanted: FetchItems) -> String {
     let seq = mb.seq_of(msg.uid);
     let mut items = format!(
         "UID {} FLAGS ({}) MODSEQ ({})",
@@ -584,7 +744,14 @@ fn fetch_line(mb: &MockMailbox, msg: &MockMessage, include_body: bool) -> String
         format_flags(&msg.flags),
         msg.modseq
     );
-    if include_body {
+    if items_wanted.email_id {
+        // RFC 8474 section 5.2 parenthesises the value.
+        items.push_str(&format!(" EMAILID ({})", msg.object_ids.email_id));
+    }
+    if items_wanted.gm_msgid {
+        items.push_str(&format!(" X-GM-MSGID {}", msg.object_ids.gm_msgid));
+    }
+    if items_wanted.body {
         items.push_str(&format!(" BODY[] {{{}}}\r\n{}", msg.body.len(), msg.body));
     }
     format!("* {seq} FETCH ({items})\r\n")
@@ -598,6 +765,7 @@ fn handle_uid_fetch(
     st: &mut ServerState,
 ) -> Reply {
     let condstore = st.profile.supports_condstore();
+    let extensions = st.extensions;
     let Some(mb) = st.mailboxes.get(selected) else {
         return Reply::open(format!("{tag} NO mailbox vanished\r\n"));
     };
@@ -606,7 +774,14 @@ fn handle_uid_fetch(
     };
 
     let upper = line.to_ascii_uppercase();
-    let include_body = upper.contains("BODY[]") || upper.contains("RFC822");
+    // An unrecognised FETCH item is a syntax error (RFC 3501 section 6.4.5), so
+    // a server that never advertised OBJECTID rejects the whole command rather
+    // than quietly answering without the item. Modelling that is what makes the
+    // client's capability gate load-bearing instead of decorative.
+    if upper.contains("EMAILID") && !extensions.objectid {
+        return Reply::open(format!("{tag} BAD unknown FETCH item EMAILID\r\n"));
+    }
+    let items_wanted = FetchItems::requested(&upper, extensions);
     let changed_since = if condstore {
         parse_changed_since(&upper)
     } else {
@@ -623,7 +798,7 @@ fn handle_uid_fetch(
                 continue;
             }
         }
-        out.push_str(&fetch_line(mb, msg, include_body));
+        out.push_str(&fetch_line(mb, msg, items_wanted));
     }
 
     // RFC 7162 3.2.6: with CHANGEDSINCE ... VANISHED the server reports
@@ -724,7 +899,7 @@ fn handle_uid_store(
     if !silent {
         for uid in &touched {
             if let Some(msg) = mb.messages.iter().find(|m| m.uid == *uid) {
-                out.push_str(&fetch_line(mb, msg, false));
+                out.push_str(&fetch_line(mb, msg, FetchItems::none()));
             }
         }
     }
@@ -784,11 +959,14 @@ fn handle_uid_copy(
         };
         let present: Vec<u32> = mb.messages.iter().map(|m| m.uid).collect();
         let uids = expand_uid_set(spec, &present, mb.uid_next);
-        let bodies: Vec<(u32, String, BTreeSet<String>)> = mb
+        // The copies keep the source's object ids. RFC 8474 section 4 makes
+        // EMAILID a property of the message, so a server that minted a new one
+        // per mailbox would be reporting two messages where there is one.
+        let bodies: Vec<(String, BTreeSet<String>, ObjectIds)> = mb
             .messages
             .iter()
             .filter(|m| uids.contains(&m.uid))
-            .map(|m| (m.uid, m.body.clone(), m.flags.clone()))
+            .map(|m| (m.body.clone(), m.flags.clone(), m.object_ids.clone()))
             .collect();
         (uids, mb.uid_validity, bodies)
     };
@@ -806,9 +984,9 @@ fn handle_uid_copy(
         let Some(dst) = st.mailboxes.get_mut(&dest) else {
             return Reply::open(format!("{tag} NO destination vanished\r\n"));
         };
-        for (_, body, flags) in &bodies {
+        for (body, flags, object_ids) in &bodies {
             let refs: Vec<&str> = flags.iter().map(String::as_str).collect();
-            dest_uids.push(dst.append(body, &refs));
+            dest_uids.push(dst.append(body, &refs, object_ids.clone()));
         }
         dst.uid_validity
     };

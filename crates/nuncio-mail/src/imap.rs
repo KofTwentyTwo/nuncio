@@ -175,6 +175,13 @@ pub(crate) struct MailboxSyncCapabilities {
     /// `NOMODSEQ` has no mod-sequences to compare against no matter what the
     /// server advertises.
     pub mailbox_has_modseq: bool,
+    /// Server advertises `OBJECTID` (RFC 8474), so `EMAILID` may be asked for.
+    /// Asking a server that did not advertise it is not merely rude: an
+    /// unrecognised FETCH item is answered `BAD`, costing a round trip per
+    /// batch to learn nothing.
+    pub objectid: bool,
+    /// Server advertises `X-GM-EXT-1`, so `X-GM-MSGID` may be asked for.
+    pub gmail_extensions: bool,
 }
 
 /// One folder-sync pass, resolved before any body is fetched.
@@ -182,6 +189,11 @@ pub(crate) struct MailboxSyncCapabilities {
 pub(crate) struct FolderSyncPlan {
     /// The mechanism this pass negotiated.
     pub rung: SyncRung,
+    /// What the negotiation found the server able to do. Carried past the
+    /// planning stage because the identity extensions decide what the *fetch*
+    /// asks for, and a fetch that asks for an unadvertised item is answered
+    /// `BAD`.
+    pub caps: MailboxSyncCapabilities,
     pub uid_validity: Option<u32>,
     pub uid_next: Option<u32>,
     pub highest_modseq: Option<u64>,
@@ -324,6 +336,24 @@ pub fn build_tls_connector() -> Result<TlsConnector, MailError> {
 /// Helper function to build the IMAP fetch command query parameter string.
 pub fn build_fetch_command_query() -> &'static str {
     "(FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODY.PEEK[])"
+}
+
+/// Add `X-GM-MSGID` to a FETCH item list when, and only when, the server
+/// advertised `X-GM-EXT-1`.
+///
+/// Gmail's message id is the second identity tier, and unlike RFC 8474's
+/// `EMAILID` it can be asked for through the typed client: `imap-proto` parses
+/// the attribute and `Fetch::gmail_msg_id` reads it back. So it rides along on
+/// the fetch the sync already issues and costs no extra round trip.
+///
+/// A server that advertises nothing gets a query byte-identical to the one it
+/// got before this existed. That is the point: capability negotiation must not
+/// change what an unextended server sees.
+fn with_gmail_msgid(items: &str, advertised: bool) -> String {
+    match items.strip_suffix(')').filter(|_| advertised) {
+        Some(head) => format!("{head} X-GM-MSGID)"),
+        None => items.to_string(),
+    }
 }
 
 /// The `UID FETCH` query for the cheap enumeration pass: UID plus `RFC822.SIZE`
@@ -906,15 +936,24 @@ impl ImapEngine {
         drop(enumeration);
 
         let mut emails = Vec::new();
+        let body_query = with_gmail_msgid(build_fetch_command_query(), plan.caps.gmail_extensions);
+        let header_query = with_gmail_msgid(
+            build_headers_only_command_query(),
+            plan.caps.gmail_extensions,
+        );
 
         // Phase 2a: normal messages -- full bodies, in bounded UID-set batches.
         for chunk in body_uids.chunks(batch_size) {
             let set = join_uid_batch(chunk);
+            // Read the batch's object ids first. It has to be its own command:
+            // `EMAILID` cannot ride on the body fetch, because that response
+            // goes through a parser which treats the item as a fatal error.
+            // Issuing it here is also what keeps the raw layer's precondition
+            // true -- the last thing on this connection was a tagged
+            // completion, so the client holds no buffered bytes.
+            let object_ids = self.fetch_object_ids(session, plan.caps, &set).await?;
             let items = {
-                let mut fetch_stream = session
-                    .uid_fetch(&set, build_fetch_command_query())
-                    .await
-                    .map_err(|e| {
+                let mut fetch_stream = session.uid_fetch(&set, &body_query).await.map_err(|e| {
                     MailError::ImapError(format!(
                         "UID FETCH failed for folder '{}': {}",
                         folder_id, e
@@ -927,11 +966,16 @@ impl ImapEngine {
                 // `UID FETCH` must carry one (RFC 3501 section 6.4.8), so this
                 // only fires for a non-conforming server. Recording it anyway
                 // would write a placement at the meaningless UID 0.
-                if item.uid.filter(|u| *u >= 1).is_none() {
+                let Some(uid) = item.uid.filter(|u| *u >= 1) else {
                     skipped_no_uid += 1;
                     continue;
-                }
-                emails.push(self.build_email_from_fetch(folder_id, server_uid_validity, item)?);
+                };
+                emails.push(self.build_email_from_fetch(
+                    folder_id,
+                    server_uid_validity,
+                    item,
+                    object_ids.get(&uid).map(String::as_str),
+                )?);
             }
         }
 
@@ -940,11 +984,13 @@ impl ImapEngine {
         // buffer an unbounded number of header fetches at once.
         for chunk in oversized_uids.chunks(batch_size) {
             let set = join_uid_batch(chunk);
+            // An oversized message needs the object id most: its body is never
+            // fetched, so there is no content hash and the alternative is the
+            // folder-scoped surrogate.
+            let object_ids = self.fetch_object_ids(session, plan.caps, &set).await?;
             let items = {
-                let mut fetch_stream = session
-                    .uid_fetch(&set, build_headers_only_command_query())
-                    .await
-                    .map_err(|e| {
+                let mut fetch_stream =
+                    session.uid_fetch(&set, &header_query).await.map_err(|e| {
                         MailError::ImapError(format!(
                             "UID FETCH (headers) failed for folder '{}': {}",
                             folder_id, e
@@ -955,11 +1001,16 @@ impl ImapEngine {
             for item in &items {
                 // Same guard as the body pass: an item with no UID cannot be
                 // placed, and UID 0 is not an address.
-                if item.uid.filter(|u| *u >= 1).is_none() {
+                let Some(uid) = item.uid.filter(|u| *u >= 1) else {
                     skipped_no_uid += 1;
                     continue;
-                }
-                emails.push(self.build_headers_only_email(folder_id, server_uid_validity, item));
+                };
+                emails.push(self.build_headers_only_email(
+                    folder_id,
+                    server_uid_validity,
+                    item,
+                    object_ids.get(&uid).map(String::as_str),
+                ));
             }
         }
 
@@ -1067,12 +1118,19 @@ impl ImapEngine {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
-        let (has_qresync, has_condstore) = {
+        let (has_qresync, has_condstore, has_objectid, has_gmail) = {
             let caps = session
                 .capabilities()
                 .await
                 .map_err(|e| MailError::ImapError(format!("CAPABILITY query failed: {e}")))?;
-            (caps.has_str("QRESYNC"), caps.has_str("CONDSTORE"))
+            (
+                caps.has_str("QRESYNC"),
+                caps.has_str("CONDSTORE"),
+                // RFC 8474 names the capability OBJECTID; EMAILID is the FETCH
+                // item it brings, and asking for it otherwise earns a BAD.
+                caps.has_str("OBJECTID"),
+                caps.has_str("X-GM-EXT-1"),
+            )
         };
 
         let checkpoint = since_state.and_then(parse_checkpoint);
@@ -1127,6 +1185,8 @@ impl ImapEngine {
             qresync_enabled,
             condstore: has_condstore,
             mailbox_has_modseq: selected.highest_modseq.is_some(),
+            objectid: has_objectid,
+            gmail_extensions: has_gmail,
         };
         let mut rung = choose_rung(checkpoint, selected.uid_validity, caps);
         // The QRESYNC SELECT was issued optimistically; if the server answered
@@ -1144,6 +1204,7 @@ impl ImapEngine {
 
         let mut plan = FolderSyncPlan {
             rung,
+            caps,
             uid_validity: selected.uid_validity,
             uid_next: selected.uid_next,
             highest_modseq: selected.highest_modseq,
@@ -1200,6 +1261,29 @@ impl ImapEngine {
         }
 
         Ok(plan)
+    }
+
+    /// The batch's `uid -> EMAILID` map, or an empty one when the server never
+    /// advertised RFC 8474 `OBJECTID`.
+    ///
+    /// The capability gate is the whole reason this is a separate method: a
+    /// server without `OBJECTID` must see exactly the traffic it saw before
+    /// object ids existed -- no extra command, no extra round trip -- and a
+    /// server that has it must be asked through the raw layer rather than the
+    /// typed client, which cannot parse the reply without dying.
+    async fn fetch_object_ids<S>(
+        &self,
+        session: &mut async_imap::Session<S>,
+        caps: MailboxSyncCapabilities,
+        uid_set: &str,
+    ) -> Result<std::collections::BTreeMap<u32, String>, MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
+        if !caps.objectid {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        crate::imap_raw::uid_fetch_email_ids(session, uid_set).await
     }
 
     /// List the folder's UIDs, optionally narrowed to those changed since
@@ -1267,12 +1351,15 @@ impl ImapEngine {
     /// and spreading them out buys no clarity while pushing this function past
     /// the argument-count lint.
     ///
-    /// In practice every IMAP call site passes `email_id: None` and
-    /// `gm_msgid: None` today, because the FETCH never asks for them, so this
-    /// engine reaches only the `Message-ID`+content tier or the surrogate. The
-    /// JMAP engine enters at the top tier, which means an IMAP-derived key and
-    /// a JMAP-derived key for the *same* message will not match. Syncing one
-    /// account over both engines does not converge on a shared identity yet.
+    /// Both server-assigned tiers are reachable from here. `EMAILID` comes from
+    /// a raw `UID FETCH` issued only against an `OBJECTID` server
+    /// ([`crate::imap_raw::uid_fetch_email_ids`]) and `X-GM-MSGID` from the
+    /// typed fetch against an `X-GM-EXT-1` server, so an IMAP-derived key and a
+    /// JMAP-derived key for the same message on a server that publishes object
+    /// ids through both protocols are the same key -- which is what RFC 8474
+    /// exists to make possible. Against a server that advertises neither, this
+    /// engine still lands on the `Message-ID`+content tier or the surrogate,
+    /// and those do not converge with a JMAP engine's server-assigned ids.
     fn place(
         &self,
         folder_id: &str,
@@ -1298,11 +1385,16 @@ impl ImapEngine {
     /// when it does not (a server that returned only the ENVELOPE), a minimal
     /// record is synthesised from the envelope so the message is still surfaced
     /// honestly.
+    ///
+    /// `email_id` is this UID's RFC 8474 object id when the folder pass read
+    /// one; `X-GM-MSGID` is read from the item itself, since the typed parser
+    /// understands that attribute and the raw layer never needs to see it.
     fn build_email_from_fetch(
         &self,
         folder_id: &str,
         server_uid_validity: Option<u32>,
         fetch_data: &async_imap::types::Fetch,
+        email_id: Option<&str>,
     ) -> Result<PlacedMessage, MailError> {
         let uid_num = fetch_data.uid.unwrap_or(0);
         // The message is addressed on the wire by its UID within the folder's
@@ -1318,19 +1410,11 @@ impl ImapEngine {
             .flags()
             .any(|flag| matches!(flag, async_imap::types::Flag::Seen));
 
-        // EMAILID (RFC 8474) and X-GM-MSGID are not requested by the current
-        // FETCH, so identity rests on the Message-ID/content pair where the
-        // message carried a Message-ID and on the folder-scoped surrogate
-        // otherwise.
-        //
-        // Adding those FETCH items is not a local change. Every already-stored
-        // message would derive a DIFFERENT key on its next resync, so each
-        // re-reported placement repoints to the new key -- and the old message
-        // row, now referenced by nothing, is never reaped. Its decrypted body
-        // stays in the plaintext FTS index forever, which is exactly the leak
-        // the reap on placement removal exists to prevent. The FETCH items can
-        // only be requested once the repoint path reaps the message it
-        // abandons; until then, requesting them leaks plaintext.
+        // Gmail's id is a 64-bit integer on the wire; it is rendered decimal
+        // here because identity inputs are hashed as strings and the rendering
+        // has to be the one every engine would produce from the same number.
+        let gm_msgid = fetch_data.gmail_msg_id().map(u64::to_string);
+
         if let Some(raw_bytes) = fetch_data.body() {
             let mut email = MimeParserAdapter::parse_mime(&self.account_id, raw_bytes)?;
             let (identity, placement) = self.place(
@@ -1338,8 +1422,8 @@ impl ImapEngine {
                 &uid_validity,
                 &remote_id,
                 RemoteIdentity {
-                    email_id: None,
-                    gm_msgid: None,
+                    email_id,
+                    gm_msgid: gm_msgid.as_deref(),
                     message_id: email.message_id.as_deref(),
                     content_hash: email.content_hash.as_deref(),
                 },
@@ -1383,16 +1467,16 @@ impl ImapEngine {
             .and_then(|raw| Email::normalize_message_id(&String::from_utf8_lossy(raw)));
 
         // With no octets there is no content hash, and the `Message-ID` alone
-        // is never enough to key on, so this path lands on the surrogate tier.
-        // That is the honest answer: nothing was fetched that could prove two
-        // folders hold the same message.
+        // is never enough to key on, so absent a server-assigned id this path
+        // lands on the surrogate tier. That is the honest answer: nothing was
+        // fetched that could prove two folders hold the same message.
         let (identity, placement) = self.place(
             folder_id,
             &uid_validity,
             &remote_id,
             RemoteIdentity {
-                email_id: None,
-                gm_msgid: None,
+                email_id,
+                gm_msgid: gm_msgid.as_deref(),
                 message_id: message_id.as_deref(),
                 content_hash: None,
             },
@@ -1429,6 +1513,7 @@ impl ImapEngine {
         folder_id: &str,
         server_uid_validity: Option<u32>,
         fetch_data: &async_imap::types::Fetch,
+        email_id: Option<&str>,
     ) -> PlacedMessage {
         let uid_num = fetch_data.uid.unwrap_or(0);
         let remote_id = uid_num.to_string();
@@ -1438,6 +1523,7 @@ impl ImapEngine {
         let is_read = fetch_data
             .flags()
             .any(|flag| matches!(flag, async_imap::types::Flag::Seen));
+        let gm_msgid = fetch_data.gmail_msg_id().map(u64::to_string);
 
         if let Some(header_bytes) = fetch_data.header() {
             if let Ok(mut email) = MimeParserAdapter::parse_mime(&self.account_id, header_bytes) {
@@ -1452,16 +1538,17 @@ impl ImapEngine {
                 // something else, so drop it; the `Message-ID` it recovered
                 // from those headers is still correct and is kept. Dropping it
                 // also costs this message the content tier -- a `Message-ID`
-                // never keys on its own -- so an oversized message identifies
-                // by its folder-scoped surrogate until the octets are fetched.
+                // never keys on its own -- so absent a server-assigned id an
+                // oversized message identifies by its folder-scoped surrogate
+                // until the octets are fetched.
                 email.content_hash = None;
                 let (identity, placement) = self.place(
                     folder_id,
                     &uid_validity,
                     &remote_id,
                     RemoteIdentity {
-                        email_id: None,
-                        gm_msgid: None,
+                        email_id,
+                        gm_msgid: gm_msgid.as_deref(),
                         message_id: email.message_id.as_deref(),
                         content_hash: None,
                     },
@@ -1479,13 +1566,17 @@ impl ImapEngine {
         // No usable header section: fall back to whatever the envelope offers.
         // `build_email_from_fetch` cannot error on this path (no body to parse),
         // but if it ever did, surface a minimal honest record rather than panic.
-        self.build_email_from_fetch(folder_id, server_uid_validity, fetch_data)
+        self.build_email_from_fetch(folder_id, server_uid_validity, fetch_data, email_id)
             .unwrap_or_else(|_| {
                 let (identity, placement) = self.place(
                     folder_id,
                     &uid_validity,
                     &remote_id,
-                    RemoteIdentity::default(),
+                    RemoteIdentity {
+                        email_id,
+                        gm_msgid: gm_msgid.as_deref(),
+                        ..RemoteIdentity::default()
+                    },
                     is_read,
                 );
                 PlacedMessage {
@@ -2141,6 +2232,10 @@ mod tests {
             qresync_enabled: true,
             condstore: true,
             mailbox_has_modseq: true,
+            // The identity extensions decide what a FETCH asks for, never
+            // which rung a pass runs on; they are set for completeness.
+            objectid: true,
+            gmail_extensions: true,
         }
     }
 
@@ -2217,7 +2312,8 @@ mod tests {
                 MailboxSyncCapabilities {
                     qresync_enabled: false,
                     condstore: true,
-                    mailbox_has_modseq: true
+                    mailbox_has_modseq: true,
+                    ..MailboxSyncCapabilities::default()
                 }
             ),
             SyncRung::Condstore
@@ -2231,7 +2327,8 @@ mod tests {
                 MailboxSyncCapabilities {
                     qresync_enabled: false,
                     condstore: false,
-                    mailbox_has_modseq: false
+                    mailbox_has_modseq: false,
+                    ..MailboxSyncCapabilities::default()
                 }
             ),
             SyncRung::UidSetDiff
@@ -2247,7 +2344,8 @@ mod tests {
                 MailboxSyncCapabilities {
                     qresync_enabled: true,
                     condstore: true,
-                    mailbox_has_modseq: false
+                    mailbox_has_modseq: false,
+                    ..MailboxSyncCapabilities::default()
                 }
             ),
             SyncRung::Full

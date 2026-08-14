@@ -175,6 +175,24 @@ sound without a sequence number and resumption.
 Precedence: `EMAILID` (RFC 8474 OBJECTID) → `X-GM-MSGID` → `(account_id,
 normalized Message-ID, content_hash)` → `(account, folder, uidvalidity, uid)`.
 
+**Both engines negotiate the top two tiers, so keys converge exactly where the
+server publishes an object id.** The IMAP engine requests `EMAILID` from a
+server advertising `OBJECTID` and `X-GM-MSGID` from one advertising
+`X-GM-EXT-1`; JMAP's Email object id is the same identifier RFC 8474 exposes to
+IMAP. One message synced over both protocols therefore lands on one key, which
+is what makes the multi-engine model's identity claim true across protocols and
+not only within one.
+
+Be precise about where it stops. Against a server advertising neither
+extension, IMAP reaches only the Message-ID+content tier or the folder-scoped
+surrogate, while a JMAP engine on the same account still enters at the top tier
+from a server-assigned id — those key spaces are disjoint and cross-engine
+comparison means nothing there. Object ids are unique within one account on one
+server (RFC 8474 §4), never globally, which is why every tier is
+account-scoped. And `EMAILID` cannot be requested through the typed IMAP client
+at all: `imap-proto` has no parser arm for the attribute and a parse failure is
+fatal to the connection, so it is read through the raw command layer instead.
+
 Bodies are keyed by a content hash of the full RFC822 octets, first-write-wins.
 **A Message-ID hash alone must not be the key**: Message-IDs are public, echoed
 in every `References:` header, and forgeable, so with `INSERT OR REPLACE` a
@@ -238,7 +256,11 @@ work is chunked per folder so it yields to user actions.
 - **`async-imap` 0.11.3 cannot express any of this**: no `ENABLE`, its `SELECT`
   parser drops `VANISHED`, and `check_status_ok` discards the tagged response
   code where `COPYUID` and `[MODIFIED …]` live. A fork-versus-hand-rolled
-  decision gates the protocol work.
+  decision gates the protocol work. `EMAILID` is worse than discarded:
+  `imap-proto`'s `msg_att` is a closed alternation with no catch-all, and the
+  decoder turns the resulting parse error into a fatal I/O error that latches
+  the connection closed — so the object id must be read off the transport
+  underneath the client, never through it.
 
 ## Alternatives considered
 
