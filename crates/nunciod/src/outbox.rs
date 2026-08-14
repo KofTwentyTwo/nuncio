@@ -222,6 +222,7 @@ pub async fn execute_pending_mutations(
                     message_id = %item.message_id,
                     "outbox: mutation conflicted with another client: {observed}"
                 );
+                record_conflict(db, &item, &observed).await;
                 ("conflicted", item.retry_count, |s| s.failed += 1)
             }
             Disposition::Permanent(reason) => {
@@ -260,6 +261,35 @@ pub async fn execute_pending_mutations(
 
 /// Execute a single mutation and report its honest disposition. Performs no
 /// status writes itself -- the caller persists the outcome.
+/// Persist a conflict so it outlives the log line and the event stream.
+///
+/// The conflict id is derived from the mutation id, which makes re-recording
+/// the same refusal idempotent. A failure to persist is logged and swallowed:
+/// the mutation's own status write is what stops it being re-attempted, and
+/// losing the audit row must not take the drain pass down with it.
+async fn record_conflict(db: &DatabaseEngine, item: &PendingRemoteMutation, observed: &str) {
+    let placement = serde_json::from_str::<MutationPayload>(&item.payload)
+        .ok()
+        .and_then(|p| p.placement);
+    let conflict = nuncio_core::model::MutationConflict {
+        id: format!("conflict-{}", item.id),
+        mutation_id: item.id.clone(),
+        message_id: item.message_id.clone(),
+        mutation_type: item.mutation_type.clone(),
+        placement,
+        observed: observed.to_string(),
+        detected_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default(),
+        resolved_at: None,
+        resolution: None,
+    };
+    if let Err(e) = db.record_conflict(&conflict).await {
+        tracing::warn!(mutation_id = %item.id, "outbox: failed to record conflict: {e}");
+    }
+}
+
 async fn execute_one(
     db: &DatabaseEngine,
     env: &dyn RemoteExecutionEnv,
@@ -304,9 +334,12 @@ async fn execute_one(
 ///
 /// The addressing comes from a placement rather than the message row, because
 /// those coordinates are properties of a mailbox occupancy and a message can
-/// hold several. The outbox row records only the message key, so which occupancy
-/// the rule matched is not recoverable here -- and when the message occupies
-/// more than one mailbox, this **refuses** rather than picking one.
+/// hold several. When the row records the occupancy its intent was formed
+/// against, that occupancy is used verbatim -- after confirming the message
+/// still occupies it, so a mutation cannot be aimed at a mailbox the message has
+/// since left. Otherwise the occupancy is inferred, and inference is only
+/// allowed when it is unambiguous: with more than one placement this **refuses**
+/// rather than picking one.
 ///
 /// Guessing is not the conservative option. A rule that matched the `INBOX`
 /// copy would `MOVE` or `DELETE` whichever copy happened to sort first, against
@@ -317,9 +350,7 @@ async fn execute_one(
 /// guessing is destructive and irreversible.
 ///
 /// The refusal is permanent, not retryable: nothing about a later attempt makes
-/// the outbox row remember a placement it never recorded. Carrying the
-/// originating placement on the row is the real fix, and belongs with the
-/// placement-aware wire surface.
+/// a row remember a placement it never recorded.
 async fn dispatch_mailbox_mutation(
     db: &DatabaseEngine,
     env: &dyn RemoteExecutionEnv,
@@ -359,6 +390,27 @@ async fn dispatch_mailbox_mutation(
             return Disposition::Retry(format!("failed to resolve the message's placements: {e}"))
         }
     };
+    if let Some(named) = &payload.placement {
+        return match placements.iter().find(|p| &p.key() == named) {
+            Some(placement) => {
+                let placement = placement.clone();
+                apply_mailbox_mutation(env, mutation, email, &placement, kind).await
+            }
+            // The named occupancy is gone. Re-addressing to a different one
+            // would act on mail the caller never selected, so this is terminal.
+            None => Disposition::Permanent(format!(
+                "message '{}' no longer occupies {}/{} (uidvalidity {}, uid {}); \
+                 refusing to re-aim a {} at a different mailbox",
+                email.id,
+                named.account_id,
+                named.folder_id,
+                named.uid_validity,
+                named.remote_id,
+                mutation.mutation_type
+            )),
+        };
+    }
+
     let placement = match placements.as_slice() {
         [only] => only,
         [] => {
@@ -390,6 +442,18 @@ async fn dispatch_mailbox_mutation(
         }
     };
 
+    apply_mailbox_mutation(env, mutation, email, placement, kind).await
+}
+
+/// Issue an already-addressed mailbox mutation against the account's backend and
+/// translate the backend's three honest outcomes into a disposition.
+async fn apply_mailbox_mutation(
+    env: &dyn RemoteExecutionEnv,
+    mutation: &PendingRemoteMutation,
+    email: &nuncio_core::model::Email,
+    placement: &nuncio_core::model::Placement,
+    kind: RemoteMutationKind,
+) -> Disposition {
     let backend = match env.mail_backend(&placement.account_id).await {
         Ok(backend) => backend,
         Err(e) => return Disposition::Retry(format!("failed to build mail backend: {e}")),
@@ -723,6 +787,7 @@ mod tests {
             payload: serde_json::to_string(&MutationPayload {
                 action_type: "FLAG".to_string(),
                 target: None,
+                placement: None,
             })
             .expect("serialize payload"),
             status: "pending".to_string(),

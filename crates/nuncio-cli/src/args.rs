@@ -250,6 +250,26 @@ pub enum AccountSubcommand {
         #[arg(short, long, help = "Unique account identifier")]
         id: String,
     },
+    /// Turn the filter engine on or off for one account.
+    Filters {
+        /// Unique account identifier.
+        #[arg(short, long, help = "Unique account identifier")]
+        id: String,
+        /// Run filters against this account's incoming mail.
+        #[arg(
+            long,
+            help = "Enable filters for this account",
+            conflicts_with = "disable"
+        )]
+        enable: bool,
+        /// Stop running filters against this account's incoming mail.
+        #[arg(
+            long,
+            help = "Disable filters for this account",
+            conflicts_with = "enable"
+        )]
+        disable: bool,
+    },
     /// Edit an existing account profile configuration.
     Edit {
         /// Unique account identifier.
@@ -342,6 +362,66 @@ pub enum MailSubcommand {
         /// Mark the message as unread.
         #[arg(long, help = "Mark the message as unread", conflicts_with = "read")]
         unread: bool,
+    },
+    /// Move one occupancy of a message into another folder.
+    Move {
+        /// Unique message identifier.
+        #[arg(short, long, help = "Unique message identifier")]
+        id: String,
+        /// Destination folder identifier.
+        #[arg(short, long, help = "Destination folder identifier")]
+        to: String,
+        /// Which mailbox occupancy to act on, as
+        /// `account/folder/uidvalidity/uid`. Required when the message occupies
+        /// more than one mailbox; `mail read` lists them.
+        #[arg(long, help = "Occupancy as account/folder/uidvalidity/uid")]
+        placement: Option<String>,
+    },
+    /// Delete one occupancy of a message. Other occupancies survive.
+    Delete {
+        /// Unique message identifier.
+        #[arg(short, long, help = "Unique message identifier")]
+        id: String,
+        /// Which mailbox occupancy to act on, as
+        /// `account/folder/uidvalidity/uid`.
+        #[arg(long, help = "Occupancy as account/folder/uidvalidity/uid")]
+        placement: Option<String>,
+    },
+    /// Flag one occupancy of a message.
+    Flag {
+        /// Unique message identifier.
+        #[arg(short, long, help = "Unique message identifier")]
+        id: String,
+        /// Which mailbox occupancy to act on, as
+        /// `account/folder/uidvalidity/uid`.
+        #[arg(long, help = "Occupancy as account/folder/uidvalidity/uid")]
+        placement: Option<String>,
+    },
+    /// Remove the flag from one occupancy of a message.
+    Unflag {
+        /// Unique message identifier.
+        #[arg(short, long, help = "Unique message identifier")]
+        id: String,
+        /// Which mailbox occupancy to act on, as
+        /// `account/folder/uidvalidity/uid`.
+        #[arg(long, help = "Occupancy as account/folder/uidvalidity/uid")]
+        placement: Option<String>,
+    },
+    /// List mutations the server refused because another client changed the
+    /// message first.
+    Conflicts {
+        /// Also list conflicts that have already been resolved.
+        #[arg(long, help = "Include already-resolved conflicts")]
+        all: bool,
+    },
+    /// Mark a conflict handled, recording how it was resolved.
+    Resolve {
+        /// Conflict identifier, as reported by `mail conflicts`.
+        #[arg(short, long, help = "Conflict identifier")]
+        id: String,
+        /// Note recording how the conflict was resolved.
+        #[arg(short, long, help = "How the conflict was resolved")]
+        note: String,
     },
     /// Export mailbox messages to a portable file format: MBOX, an EML
     /// zip archive, JSON, or JSON Lines.

@@ -425,6 +425,14 @@ impl HeadlessRunner {
                     .await
                 }
                 AccountSubcommand::Show { id } => self.handle_account_show(id, json_mode).await,
+                AccountSubcommand::Filters {
+                    id,
+                    enable,
+                    disable,
+                } => {
+                    self.handle_account_filters(id, *enable, *disable, json_mode)
+                        .await
+                }
                 AccountSubcommand::Edit {
                     id,
                     email,
@@ -467,6 +475,28 @@ impl HeadlessRunner {
                 MailSubcommand::Search { query } => self.handle_search(query, json_mode).await,
                 MailSubcommand::Mark { id, read, unread } => {
                     self.handle_mark_read(id, *read, *unread, json_mode).await
+                }
+                MailSubcommand::Move { id, to, placement } => {
+                    self.handle_mail_mutation("move", id, placement.as_ref(), Some(to), json_mode)
+                        .await
+                }
+                MailSubcommand::Delete { id, placement } => {
+                    self.handle_mail_mutation("delete", id, placement.as_ref(), None, json_mode)
+                        .await
+                }
+                MailSubcommand::Flag { id, placement } => {
+                    self.handle_mail_mutation("flag", id, placement.as_ref(), None, json_mode)
+                        .await
+                }
+                MailSubcommand::Unflag { id, placement } => {
+                    self.handle_mail_mutation("unflag", id, placement.as_ref(), None, json_mode)
+                        .await
+                }
+                MailSubcommand::Conflicts { all } => {
+                    self.handle_list_conflicts(*all, json_mode).await
+                }
+                MailSubcommand::Resolve { id, note } => {
+                    self.handle_resolve_conflict(id, note, json_mode).await
                 }
                 MailSubcommand::Export {
                     format,
@@ -1076,6 +1106,245 @@ impl HeadlessRunner {
                 Self::render_error(&format!("message '{}' not found", id), json_mode)
             }
             Err(status) => Self::render_status_error("mark_read", &status, json_mode),
+        }
+    }
+
+    /// Parse an `account/folder/uidvalidity/uid` occupancy selector.
+    ///
+    /// All four coordinates are required and none may be empty: a partial
+    /// selector addresses nothing, and silently completing it would aim a
+    /// destructive mutation at a mailbox the user did not name.
+    fn parse_placement(spec: &str) -> Result<nuncio_proto::v1::PlacementRef, String> {
+        let parts: Vec<&str> = spec.split('/').collect();
+        match parts.as_slice() {
+            [account_id, folder_id, uidvalidity, uid]
+                if !account_id.is_empty()
+                    && !folder_id.is_empty()
+                    && !uidvalidity.is_empty()
+                    && !uid.is_empty() =>
+            {
+                Ok(nuncio_proto::v1::PlacementRef {
+                    account_id: (*account_id).to_string(),
+                    folder_id: (*folder_id).to_string(),
+                    uidvalidity: (*uidvalidity).to_string(),
+                    uid: (*uid).to_string(),
+                })
+            }
+            _ => Err(format!(
+                "placement '{spec}' is not account/folder/uidvalidity/uid"
+            )),
+        }
+    }
+
+    /// `mail move`/`delete`/`flag`/`unflag`: queue a placement-addressed remote
+    /// mutation via the daemon and report the outbox id it was queued as.
+    ///
+    /// The reported outcome is "queued", never "done": the daemon's outbox is
+    /// what actually talks to the server, and only it can say whether the
+    /// mutation applied, conflicted, or could not be verified.
+    async fn handle_mail_mutation(
+        &self,
+        verb: &str,
+        id: &str,
+        placement: Option<&String>,
+        destination: Option<&String>,
+        json_mode: bool,
+    ) -> String {
+        let placement = match placement.map(|p| Self::parse_placement(p)) {
+            Some(Ok(placement)) => Some(placement),
+            Some(Err(e)) => return Self::render_error(&e, json_mode),
+            None => None,
+        };
+
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        let queued = match verb {
+            "move" => {
+                let Some(to) = destination else {
+                    return Self::render_error("a destination folder is required", json_mode);
+                };
+                client
+                    .move_message(nuncio_proto::v1::MoveMessageRequest {
+                        message_id: id.to_string(),
+                        placement,
+                        destination_folder_id: to.clone(),
+                    })
+                    .await
+                    .map(|r| r.into_inner().mutation_id)
+            }
+            "delete" => client
+                .delete_message(nuncio_proto::v1::DeleteMessageRequest {
+                    message_id: id.to_string(),
+                    placement,
+                })
+                .await
+                .map(|r| r.into_inner().mutation_id),
+            _ => client
+                .flag_message(nuncio_proto::v1::FlagMessageRequest {
+                    message_id: id.to_string(),
+                    placement,
+                    flagged: verb == "flag",
+                })
+                .await
+                .map(|r| r.into_inner().mutation_id),
+        };
+
+        match queued {
+            Ok(mutation_id) => {
+                if json_mode {
+                    format_json(&json!({
+                        "status": "queued",
+                        "operation": verb,
+                        "id": id,
+                        "mutation_id": mutation_id,
+                    }))
+                } else {
+                    format!("Queued {verb} of '{id}' as mutation '{mutation_id}'")
+                }
+            }
+            Err(status) => Self::render_status_error(verb, &status, json_mode),
+        }
+    }
+
+    /// `mail conflicts`: list mutations the server refused because another
+    /// client changed the message first.
+    async fn handle_list_conflicts(&self, include_resolved: bool, json_mode: bool) -> String {
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+        match client
+            .list_conflicts(nuncio_proto::v1::ListConflictsRequest {
+                include_resolved,
+                limit: 100,
+            })
+            .await
+        {
+            Ok(response) => {
+                let conflicts = response.into_inner().conflicts;
+                if json_mode {
+                    let rows: Vec<_> = conflicts
+                        .iter()
+                        .map(|c| {
+                            json!({
+                                "id": c.id,
+                                "mutation_id": c.mutation_id,
+                                "message_id": c.message_id,
+                                "operation": c.mutation_type,
+                                "observed": c.observed,
+                                "resolved": c.resolved_at.is_some(),
+                            })
+                        })
+                        .collect();
+                    format_json(&json!({ "conflicts": rows }))
+                } else if conflicts.is_empty() {
+                    "No conflicts recorded".to_string()
+                } else {
+                    let mut out = String::new();
+                    for c in &conflicts {
+                        let state = if c.resolved_at.is_some() {
+                            "resolved"
+                        } else {
+                            "open"
+                        };
+                        out.push_str(&format!(
+                            "{} [{}] {} on '{}': {}\n",
+                            c.id, state, c.mutation_type, c.message_id, c.observed
+                        ));
+                    }
+                    out.trim_end().to_string()
+                }
+            }
+            Err(status) => Self::render_status_error("list_conflicts", &status, json_mode),
+        }
+    }
+
+    /// `mail resolve`: record a human's decision about a conflict.
+    async fn handle_resolve_conflict(&self, id: &str, note: &str, json_mode: bool) -> String {
+        let mut client = match self.connect_mail_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+        match client
+            .resolve_conflict(nuncio_proto::v1::ResolveConflictRequest {
+                conflict_id: id.to_string(),
+                resolution: note.to_string(),
+            })
+            .await
+        {
+            Ok(_) => {
+                if json_mode {
+                    format_json(&json!({ "status": "resolved", "id": id }))
+                } else {
+                    format!("Conflict '{id}' resolved")
+                }
+            }
+            Err(status) => Self::render_status_error("resolve_conflict", &status, json_mode),
+        }
+    }
+
+    /// `account filters`: flip one account's `filters_enabled` and persist it
+    /// through the daemon's `UpdateAccount` RPC.
+    ///
+    /// The account is read back first so the update carries its real current
+    /// configuration; sending a locally-invented config would silently reset
+    /// every field the CLI did not know about.
+    async fn handle_account_filters(
+        &self,
+        id: &str,
+        enable: bool,
+        disable: bool,
+        json_mode: bool,
+    ) -> String {
+        if enable == disable {
+            return Self::render_error(
+                "exactly one of --enable or --disable must be specified",
+                json_mode,
+            );
+        }
+
+        let mut client = match self.connect_accounts_client().await {
+            Ok(client) => client,
+            Err(e) => return Self::render_error(&e, json_mode),
+        };
+
+        let accounts = match client
+            .list_accounts(nuncio_proto::v1::ListAccountsRequest {})
+            .await
+        {
+            Ok(response) => response.into_inner().accounts,
+            Err(status) => return Self::render_status_error("list_accounts", &status, json_mode),
+        };
+        let Some(mut config) = accounts.into_iter().find(|a| a.id == id) else {
+            return Self::render_error(&format!("account '{id}' not found"), json_mode);
+        };
+        config.filters_enabled = enable;
+
+        match client
+            .update_account(nuncio_proto::v1::UpdateAccountRequest {
+                config: Some(config),
+                password: None,
+            })
+            .await
+        {
+            Ok(_) => {
+                if json_mode {
+                    format_json(&json!({
+                        "status": "updated",
+                        "id": id,
+                        "filters_enabled": enable,
+                    }))
+                } else {
+                    format!(
+                        "Filters {} for account '{id}'",
+                        if enable { "enabled" } else { "disabled" }
+                    )
+                }
+            }
+            Err(status) => Self::render_status_error("update_account", &status, json_mode),
         }
     }
 
@@ -1826,6 +2095,9 @@ impl HeadlessRunner {
             keyring_secret_key: keyring_key.clone(),
             sync_interval: Some(nuncio_proto::time::duration_from_secs(300)),
             transport: Some(transport),
+            // Filters take irreversible remote actions, so adding an account
+            // never opts it in; `account filters` does, deliberately.
+            filters_enabled: false,
         };
 
         let mut client = match self.connect_accounts_client().await {
@@ -3147,6 +3419,7 @@ mod tests {
                         email_address: "stub@nuncio.mx".to_string(),
                         keyring_secret_key: "nuncio/acct-stub-1".to_string(),
                         sync_interval: Some(nuncio_proto::time::duration_from_secs(300)),
+                        filters_enabled: false,
                         transport: Some(nuncio_proto::v1::account_config::Transport::ImapSmtp(
                             nuncio_proto::v1::ImapSmtpTransport {
                                 imap_host: "imap.nuncio.mx".to_string(),
@@ -3371,6 +3644,13 @@ mod tests {
                 body_plain: Some("Stub body text".to_string()),
                 body_html: None,
                 attachments: Vec::new(),
+                placements: vec![nuncio_proto::v1::Placement {
+                    account_id: "acct-stub-1".to_string(),
+                    folder_id: "inbox".to_string(),
+                    uidvalidity: "1".to_string(),
+                    uid: "42".to_string(),
+                    read: false,
+                }],
             }
         }
 
@@ -3383,10 +3663,77 @@ mod tests {
             last_mark_read: Arc<Mutex<Option<MarkReadRequest>>>,
             last_send_message: Arc<Mutex<Option<SendMessageRequest>>>,
             last_sync: Arc<Mutex<Option<SyncRequest>>>,
+            last_move: Arc<Mutex<Option<nuncio_proto::v1::MoveMessageRequest>>>,
+            last_delete: Arc<Mutex<Option<nuncio_proto::v1::DeleteMessageRequest>>>,
+            last_flag: Arc<Mutex<Option<nuncio_proto::v1::FlagMessageRequest>>>,
         }
 
         #[tonic::async_trait]
         impl MailService for StubMail {
+            async fn move_message(
+                &self,
+                request: tonic::Request<nuncio_proto::v1::MoveMessageRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::MoveMessageResponse>, tonic::Status>
+            {
+                *self.last_move.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(request.into_inner());
+                Ok(tonic::Response::new(
+                    nuncio_proto::v1::MoveMessageResponse {
+                        mutation_id: "mut-stub-1".to_string(),
+                    },
+                ))
+            }
+
+            async fn delete_message(
+                &self,
+                request: tonic::Request<nuncio_proto::v1::DeleteMessageRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::DeleteMessageResponse>, tonic::Status>
+            {
+                *self.last_delete.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(request.into_inner());
+                Ok(tonic::Response::new(
+                    nuncio_proto::v1::DeleteMessageResponse {
+                        mutation_id: "mut-stub-2".to_string(),
+                    },
+                ))
+            }
+
+            async fn flag_message(
+                &self,
+                request: tonic::Request<nuncio_proto::v1::FlagMessageRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::FlagMessageResponse>, tonic::Status>
+            {
+                *self.last_flag.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(request.into_inner());
+                Ok(tonic::Response::new(
+                    nuncio_proto::v1::FlagMessageResponse {
+                        mutation_id: "mut-stub-3".to_string(),
+                    },
+                ))
+            }
+
+            async fn list_conflicts(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::ListConflictsRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::ListConflictsResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    nuncio_proto::v1::ListConflictsResponse {
+                        conflicts: Vec::new(),
+                    },
+                ))
+            }
+
+            async fn resolve_conflict(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::ResolveConflictRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::ResolveConflictResponse>, tonic::Status>
+            {
+                Ok(tonic::Response::new(
+                    nuncio_proto::v1::ResolveConflictResponse {},
+                ))
+            }
+
             async fn list_folders(
                 &self,
                 _request: tonic::Request<ListFoldersRequest>,
@@ -3717,6 +4064,46 @@ mod tests {
 
         #[tonic::async_trait]
         impl MailService for StubMailAlwaysErrors {
+            async fn move_message(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::MoveMessageRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::MoveMessageResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn delete_message(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::DeleteMessageRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::DeleteMessageResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn flag_message(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::FlagMessageRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::FlagMessageResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn list_conflicts(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::ListConflictsRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::ListConflictsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
+            async fn resolve_conflict(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::ResolveConflictRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::ResolveConflictResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("mailbox index is corrupt"))
+            }
+
             async fn list_folders(
                 &self,
                 _request: tonic::Request<ListFoldersRequest>,
@@ -3820,6 +4207,52 @@ mod tests {
 
         #[tonic::async_trait]
         impl MailService for StubMailTypedError {
+            /// The one typed-error path this stub exists to exercise on the
+            /// mutation surface: a genuine, server-evidenced conflict.
+            async fn move_message(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::MoveMessageRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::MoveMessageResponse>, tonic::Status>
+            {
+                Err(nuncio_proto::errors::status_with_metadata(
+                    ErrorReason::Conflict,
+                    "message was moved by another client",
+                    [("message_id".to_string(), "msg-stub-1".to_string())],
+                ))
+            }
+
+            async fn delete_message(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::DeleteMessageRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::DeleteMessageResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+
+            async fn flag_message(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::FlagMessageRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::FlagMessageResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+
+            async fn list_conflicts(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::ListConflictsRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::ListConflictsResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+
+            async fn resolve_conflict(
+                &self,
+                _request: tonic::Request<nuncio_proto::v1::ResolveConflictRequest>,
+            ) -> Result<tonic::Response<nuncio_proto::v1::ResolveConflictResponse>, tonic::Status>
+            {
+                Err(tonic::Status::internal("unused in this test"))
+            }
+
             async fn list_folders(
                 &self,
                 _request: tonic::Request<ListFoldersRequest>,

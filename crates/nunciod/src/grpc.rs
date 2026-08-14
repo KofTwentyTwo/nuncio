@@ -34,27 +34,30 @@ use nuncio_proto::v1::{
     CalendarSyncRequest, CalendarSyncResponse, Contact as ContactProto,
     ContactEmail as ContactEmailProto, ContactPhone as ContactPhoneProto, ContactsSyncRequest,
     ContactsSyncResponse, CreateContactRequest, CreateContactResponse, CreateRuleRequest,
-    CreateRuleResponse, DatabaseRecovered, DavTransport as DavTransportProto, DeleteRuleRequest,
-    DeleteRuleResponse, Event, EventError, ExportFormat as ExportFormatProto, ExportRequest,
-    ExportResponse, ExportRulesRequest, ExportRulesResponse, FilterExecuted,
-    FilterExecutionLog as FilterExecutionLogProto, FilterRule as FilterRuleProto,
-    Folder as FolderProto, GetContactRequest, GetContactResponse, GetEventRequest,
-    GetEventResponse, GetExecutionLogsRequest, GetExecutionLogsResponse, GetMessageRequest,
-    GetMessageResponse, GetStatusRequest, GetStatusResponse,
-    ImapSmtpTransport as ImapSmtpTransportProto, ImportRulesRequest, ImportRulesResponse,
-    JmapTransport as JmapTransportProto, ListAccountsRequest, ListAccountsResponse,
+    CreateRuleResponse, DatabaseRecovered, DavTransport as DavTransportProto, DeleteMessageRequest,
+    DeleteMessageResponse, DeleteRuleRequest, DeleteRuleResponse, Event, EventError,
+    ExportFormat as ExportFormatProto, ExportRequest, ExportResponse, ExportRulesRequest,
+    ExportRulesResponse, FilterExecuted, FilterExecutionLog as FilterExecutionLogProto,
+    FilterRule as FilterRuleProto, FlagMessageRequest, FlagMessageResponse, Folder as FolderProto,
+    GetContactRequest, GetContactResponse, GetEventRequest, GetEventResponse,
+    GetExecutionLogsRequest, GetExecutionLogsResponse, GetMessageRequest, GetMessageResponse,
+    GetStatusRequest, GetStatusResponse, ImapSmtpTransport as ImapSmtpTransportProto,
+    ImportRulesRequest, ImportRulesResponse, JmapTransport as JmapTransportProto,
+    ListAccountsRequest, ListAccountsResponse, ListConflictsRequest, ListConflictsResponse,
     ListContactsRequest, ListContactsResponse, ListEventsRequest, ListEventsResponse,
     ListFoldersRequest, ListFoldersResponse, ListMessagesRequest, ListMessagesResponse,
     ListRecordsRequest, ListRecordsResponse, ListRulesRequest, ListRulesResponse, MarkReadRequest,
     MarkReadResponse, Message as MessageProto, MessageFlagsChanged, MessageSearchHit,
-    PreviewRuleRequest, PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse,
-    RuleExportFormat as RuleExportFormatProto, SearchMessagesRequest, SearchMessagesResponse,
-    SendMessageRequest, SendMessageResponse, ShuttingDown, SubscribeRequest, SyncCompleted,
-    SyncRequest, SyncResponse, SyncStarted, SyncState as SyncStateProto,
-    TestAccountConnectionRequest, TestAccountConnectionResponse, TlsMode as TlsModeProto,
-    TriageProgress, TriageRequest, UpdateAccountRequest, UpdateAccountResponse, UpdateAvailable,
-    UpdateRuleRequest, UpdateRuleResponse, ValidateRuleRequest, ValidateRuleResponse,
-    VerifyChainRequest, VerifyChainResponse,
+    MoveMessageRequest, MoveMessageResponse, MutationConflict as MutationConflictProto,
+    Placement as PlacementProto, PlacementRef as PlacementRefProto, PreviewRuleRequest,
+    PreviewRuleResponse, RemoveAccountRequest, RemoveAccountResponse, ResolveConflictRequest,
+    ResolveConflictResponse, RuleExportFormat as RuleExportFormatProto, SearchMessagesRequest,
+    SearchMessagesResponse, SendMessageRequest, SendMessageResponse, ShuttingDown,
+    SubscribeRequest, SyncCompleted, SyncRequest, SyncResponse, SyncStarted,
+    SyncState as SyncStateProto, TestAccountConnectionRequest, TestAccountConnectionResponse,
+    TlsMode as TlsModeProto, TriageProgress, TriageRequest, UpdateAccountRequest,
+    UpdateAccountResponse, UpdateAvailable, UpdateRuleRequest, UpdateRuleResponse,
+    ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
 };
 use nuncio_store::db::DatabaseEngine;
 use nuncio_store::search::SearchEngine;
@@ -429,6 +432,7 @@ fn map_account_config_to_proto(config: nuncio_core::AccountConfig) -> AccountCon
             config.sync_interval_secs,
         )),
         transport: Some(transport),
+        filters_enabled: config.filters_enabled,
     }
 }
 
@@ -490,7 +494,7 @@ fn map_account_config_from_proto(
         email_address: config.email_address,
         keyring_secret_key: config.keyring_secret_key,
         sync_interval_secs: nuncio_proto::time::duration_to_secs(&sync_interval),
-        filters_enabled: false,
+        filters_enabled: config.filters_enabled,
         transport,
     })
 }
@@ -993,6 +997,54 @@ fn map_email_to_proto(placed: nuncio_store::db::MessageWithPlacement) -> Message
             .into_iter()
             .map(map_attachment_to_proto)
             .collect(),
+        // Filled in by `fill_placements`, which needs the store.
+        placements: Vec::new(),
+    }
+}
+
+/// Maps one stored occupancy onto its wire-format `nuncio.v1.Placement`.
+fn map_placement_to_proto(placement: nuncio_core::model::Placement) -> PlacementProto {
+    PlacementProto {
+        account_id: placement.account_id,
+        folder_id: placement.folder_id,
+        uidvalidity: placement.uid_validity,
+        uid: placement.remote_id,
+        read: placement.read,
+    }
+}
+
+/// Maps a wire-format `nuncio.v1.PlacementRef` onto the store's key type.
+fn map_placement_ref_from_proto(placement: PlacementRefProto) -> nuncio_core::model::PlacementKey {
+    nuncio_core::model::PlacementKey {
+        account_id: placement.account_id,
+        folder_id: placement.folder_id,
+        uid_validity: placement.uidvalidity,
+        remote_id: placement.uid,
+    }
+}
+
+/// Fills each message's complete placement set from the store.
+///
+/// This costs one query per message rather than one per page. That is the
+/// honest price of the field: occupancy is per-message state and a page can mix
+/// messages that sit in one mailbox with messages that sit in ten. A failure to
+/// read one message's placements leaves that message's set empty rather than
+/// failing the whole listing, and is logged -- a partial page is more useful
+/// than none, and the field is additive so a client that ignores it is
+/// unaffected.
+async fn fill_placements(db: &DatabaseEngine, messages: &mut [MessageProto]) {
+    for message in messages.iter_mut() {
+        match db.placements_of(&message.id).await {
+            Ok(placements) => {
+                message.placements = placements.into_iter().map(map_placement_to_proto).collect();
+            }
+            Err(e) => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    "Mail: failed to read the placement set: {e}"
+                );
+            }
+        }
     }
 }
 
@@ -1786,6 +1838,145 @@ async fn primary_placement(
     })
 }
 
+/// Rule id recorded on outbox rows a human queued directly rather than a filter.
+///
+/// The outbox row's `rule_id` explains *why* a mutation exists; for a
+/// hand-driven one the honest answer is "a person asked", not a rule that does
+/// not exist.
+const MANUAL_ORIGIN: &str = "manual";
+
+/// Seconds since the Unix epoch, saturating at 0 before it.
+fn unix_now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// Resolve which occupancy a mutation should act on.
+///
+/// A named placement is honoured only after confirming the message still
+/// occupies it, so a client working from a stale listing cannot aim a `MOVE` or
+/// `DELETE` at a mailbox the message has left. An unnamed placement is inferred
+/// only when the message occupies exactly one mailbox; with several, this is a
+/// typed validation failure that lists the candidates, because picking one
+/// would act on mail the caller never selected and there is no undo.
+async fn resolve_target_placement(
+    db: &DatabaseEngine,
+    message_id: &str,
+    named: Option<PlacementRefProto>,
+) -> Result<nuncio_core::model::PlacementKey, Status> {
+    if message_id.is_empty() {
+        return Err(Status::invalid_argument("message_id is required"));
+    }
+    let placements = db.placements_of(message_id).await.map_err(|e| {
+        Status::internal(format!("failed to read placements for '{message_id}': {e}"))
+    })?;
+
+    if let Some(named) = named {
+        let key = map_placement_ref_from_proto(named);
+        return if placements.iter().any(|p| p.key() == key) {
+            Ok(key)
+        } else {
+            Err(errors::status_with_metadata(
+                ErrorReason::MessageNotFound,
+                format!(
+                    "message '{message_id}' does not occupy {}/{} (uidvalidity {}, uid {})",
+                    key.account_id, key.folder_id, key.uid_validity, key.remote_id
+                ),
+                [("message_id".to_string(), message_id.to_string())],
+            ))
+        };
+    }
+
+    match placements.as_slice() {
+        [only] => Ok(only.key()),
+        [] => Err(errors::status_with_metadata(
+            ErrorReason::MessageNotFound,
+            format!("message '{message_id}' occupies no mailbox"),
+            [("message_id".to_string(), message_id.to_string())],
+        )),
+        several => {
+            let folders: Vec<&str> = several.iter().map(|p| p.folder_id.as_str()).collect();
+            Err(errors::status_with_metadata(
+                ErrorReason::ValidationFailed,
+                format!(
+                    "message '{message_id}' occupies {} mailboxes ({}); name one in `placement` \
+                     rather than leaving the target to be guessed",
+                    several.len(),
+                    folders.join(", ")
+                ),
+                [
+                    ("message_id".to_string(), message_id.to_string()),
+                    ("placement_count".to_string(), several.len().to_string()),
+                ],
+            ))
+        }
+    }
+}
+
+/// Maps a stored conflict onto its wire-format `nuncio.v1.MutationConflict`.
+fn map_conflict_to_proto(conflict: nuncio_core::model::MutationConflict) -> MutationConflictProto {
+    MutationConflictProto {
+        id: conflict.id,
+        mutation_id: conflict.mutation_id,
+        message_id: conflict.message_id,
+        mutation_type: conflict.mutation_type,
+        placement: conflict.placement.map(|p| PlacementRefProto {
+            account_id: p.account_id,
+            folder_id: p.folder_id,
+            uidvalidity: p.uid_validity,
+            uid: p.remote_id,
+        }),
+        observed: conflict.observed,
+        detected_at: Some(nuncio_proto::time::timestamp_from_unix_secs(
+            conflict.detected_at,
+        )),
+        resolved_at: conflict
+            .resolved_at
+            .map(nuncio_proto::time::timestamp_from_unix_secs),
+        resolution: conflict.resolution,
+    }
+}
+
+impl MailGrpcService {
+    /// Durably queue a placement-addressed remote mutation on the outbox.
+    ///
+    /// Every mutation RPC funnels through here rather than touching a backend
+    /// directly: the outbox is what makes an intent survive a crash, and what
+    /// turns the server's answer into one of three honest outcomes instead of a
+    /// hopeful assumption. The RPC returns once the intent is durable, which is
+    /// the only thing it can truthfully promise.
+    async fn enqueue_mutation(
+        &self,
+        message_id: &str,
+        op: &str,
+        target: Option<String>,
+        placement: nuncio_core::model::PlacementKey,
+    ) -> Result<String, Status> {
+        let mutation = nuncio_filter::OutboxManager::create_mutation_at(
+            MANUAL_ORIGIN,
+            message_id,
+            op,
+            target,
+            Some(placement.clone()),
+        );
+        self.db
+            .save_pending_mutation(&mutation)
+            .await
+            .map_err(|e| Status::internal(format!("failed to queue {op} mutation: {e}")))?;
+        tracing::info!(
+            mutation_id = %mutation.id,
+            op = %op,
+            message_id = %message_id,
+            account_id = %placement.account_id,
+            folder_id = %placement.folder_id,
+            "Mail: queued placement-addressed mutation"
+        );
+        Ok(mutation.id)
+    }
+}
+
 #[tonic::async_trait]
 impl Mail for MailGrpcService {
     /// Lists folders across every **configured** account, merged by folder id.
@@ -1870,7 +2061,9 @@ impl Mail for MailGrpcService {
                 ])
             })
             .unwrap_or_default();
-        let messages = messages.into_iter().map(map_email_to_proto).collect();
+        let mut messages: Vec<MessageProto> =
+            messages.into_iter().map(map_email_to_proto).collect();
+        fill_placements(&self.db, &mut messages).await;
 
         Ok(Response::new(ListMessagesResponse {
             messages,
@@ -1897,8 +2090,23 @@ impl Mail for MailGrpcService {
 
         let placement = primary_placement(&self.db, &req.message_id).await?;
 
+        let mut message = map_email_to_proto((email, placement));
+        message.placements = self
+            .db
+            .placements_of(&req.message_id)
+            .await
+            .map_err(|e| {
+                Status::internal(format!(
+                    "failed to read placements for '{}': {e}",
+                    req.message_id
+                ))
+            })?
+            .into_iter()
+            .map(map_placement_to_proto)
+            .collect();
+
         Ok(Response::new(GetMessageResponse {
-            message: Some(map_email_to_proto((email, placement))),
+            message: Some(message),
         }))
     }
 
@@ -1947,6 +2155,97 @@ impl Mail for MailGrpcService {
         });
 
         Ok(Response::new(MarkReadResponse {}))
+    }
+
+    async fn move_message(
+        &self,
+        request: Request<MoveMessageRequest>,
+    ) -> Result<Response<MoveMessageResponse>, Status> {
+        let req = request.into_inner();
+        if req.destination_folder_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "destination_folder_id is required",
+            ));
+        }
+        let placement = resolve_target_placement(&self.db, &req.message_id, req.placement).await?;
+        let mutation_id = self
+            .enqueue_mutation(
+                &req.message_id,
+                "MOVE",
+                Some(req.destination_folder_id.clone()),
+                placement,
+            )
+            .await?;
+        Ok(Response::new(MoveMessageResponse { mutation_id }))
+    }
+
+    async fn delete_message(
+        &self,
+        request: Request<DeleteMessageRequest>,
+    ) -> Result<Response<DeleteMessageResponse>, Status> {
+        let req = request.into_inner();
+        let placement = resolve_target_placement(&self.db, &req.message_id, req.placement).await?;
+        let mutation_id = self
+            .enqueue_mutation(&req.message_id, "DELETE", None, placement)
+            .await?;
+        Ok(Response::new(DeleteMessageResponse { mutation_id }))
+    }
+
+    async fn flag_message(
+        &self,
+        request: Request<FlagMessageRequest>,
+    ) -> Result<Response<FlagMessageResponse>, Status> {
+        let req = request.into_inner();
+        let placement = resolve_target_placement(&self.db, &req.message_id, req.placement).await?;
+        let op = if req.flagged { "FLAG" } else { "UNFLAG" };
+        let mutation_id = self
+            .enqueue_mutation(&req.message_id, op, None, placement)
+            .await?;
+        Ok(Response::new(FlagMessageResponse { mutation_id }))
+    }
+
+    async fn list_conflicts(
+        &self,
+        request: Request<ListConflictsRequest>,
+    ) -> Result<Response<ListConflictsResponse>, Status> {
+        let req = request.into_inner();
+        let limit = pagination::clamp_page_size(req.limit);
+        let conflicts = self
+            .db
+            .list_conflicts(req.include_resolved, limit)
+            .await
+            .map_err(|e| Status::internal(format!("failed to list conflicts: {e}")))?;
+        Ok(Response::new(ListConflictsResponse {
+            conflicts: conflicts.into_iter().map(map_conflict_to_proto).collect(),
+        }))
+    }
+
+    async fn resolve_conflict(
+        &self,
+        request: Request<ResolveConflictRequest>,
+    ) -> Result<Response<ResolveConflictResponse>, Status> {
+        let req = request.into_inner();
+        if req.conflict_id.is_empty() {
+            return Err(Status::invalid_argument("conflict_id is required"));
+        }
+        let resolved_at = unix_now_secs();
+        let applied = self
+            .db
+            .resolve_conflict(&req.conflict_id, &req.resolution, resolved_at)
+            .await
+            .map_err(|e| Status::internal(format!("failed to resolve conflict: {e}")))?;
+        if !applied {
+            // Either it never existed or someone already resolved it. Reporting
+            // success would tell the caller their decision was recorded when it
+            // was not.
+            return Err(errors::status_with_metadata(
+                ErrorReason::MessageNotFound,
+                format!("no unresolved conflict '{}' to resolve", req.conflict_id),
+                [("conflict_id".to_string(), req.conflict_id.clone())],
+            ));
+        }
+        tracing::info!(conflict_id = %req.conflict_id, "Mail: conflict resolved");
+        Ok(Response::new(ResolveConflictResponse {}))
     }
 
     async fn search_messages(
@@ -4298,6 +4597,7 @@ mod tests {
             email_address: format!("{id}@nuncio.mx"),
             keyring_secret_key: keyring_secret_key.to_string(),
             sync_interval: Some(nuncio_proto::time::duration_from_secs(60)),
+            filters_enabled: false,
             transport: Some(TransportProto::ImapSmtp(ImapSmtpTransportProto {
                 imap_host: "imap.nuncio.mx".to_string(),
                 imap_port: 993,
@@ -4317,6 +4617,7 @@ mod tests {
             email_address: "no-transport@nuncio.mx".to_string(),
             keyring_secret_key: "nuncio/acct-no-transport".to_string(),
             sync_interval: Some(nuncio_proto::time::duration_from_secs(60)),
+            filters_enabled: false,
             transport: None,
         };
         let err = map_account_config_from_proto(config)

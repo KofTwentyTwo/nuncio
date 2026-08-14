@@ -45,6 +45,14 @@ enum ErrorReason {
   ERROR_REASON_UNSUPPORTED = 11;
   // An unexpected internal error the client cannot act on specifically.
   ERROR_REASON_INTERNAL = 12;
+  // Another client changed the target first and the server said so.
+  //
+  // Raised only on positive evidence; an outcome the server left unverifiable
+  // is never reported as a conflict. Retrying is not the remedy -- the intent
+  // was formed against state that no longer exists, so re-issuing it would
+  // either do nothing or overwrite a change the caller never saw. The conflict
+  // is also recorded durably and is retrievable via `Mail.ListConflicts`.
+  ERROR_REASON_CONFLICT = 13;
 }
 
 // ErrorInfo is the structured error payload the daemon attaches to a failed
@@ -378,6 +386,11 @@ message AccountConfig {
     JmapTransport jmap = 16;
     DavTransport dav = 17;
   }
+  // Whether the filter engine runs against this account's incoming mail.
+  //
+  // Defaults to false: filters take irreversible remote actions, so an account
+  // does not get them by being added, only by being told to.
+  bool filters_enabled = 18;
 }
 
 // AddAccountRequest carries the full account configuration plus the raw
@@ -478,6 +491,24 @@ service Mail {
   rpc GetMessage(GetMessageRequest) returns (GetMessageResponse);
   // MarkRead updates a message's read/unread flag.
   rpc MarkRead(MarkReadRequest) returns (MarkReadResponse);
+  // MoveMessage enqueues a verified remote move of one occupancy of a message
+  // into another folder. Returns as soon as the intent is durably queued; the
+  // outbox executes it against the server and only records success on positive
+  // proof.
+  rpc MoveMessage(MoveMessageRequest) returns (MoveMessageResponse);
+  // DeleteMessage enqueues a verified remote delete of one occupancy of a
+  // message. Other occupancies of the same message are untouched.
+  rpc DeleteMessage(DeleteMessageRequest) returns (DeleteMessageResponse);
+  // FlagMessage enqueues a verified remote flag/unflag of one occupancy of a
+  // message.
+  rpc FlagMessage(FlagMessageRequest) returns (FlagMessageResponse);
+  // ListConflicts returns mutations the server refused because another client
+  // had already changed the message. Conflicts are durable state, not a
+  // notification: the event stream is a lossy broadcast, so this table is the
+  // source of truth a client reconciles against.
+  rpc ListConflicts(ListConflictsRequest) returns (ListConflictsResponse);
+  // ResolveConflict marks a conflict handled, recording the human's decision.
+  rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
   // SearchMessages runs a full-text (FTS5) search over cached message
   // subjects, senders, and bodies, returning a keyset-paginated page of hits
   // ordered by relevance rank.
@@ -542,8 +573,8 @@ message Message {
   //
   // A message can occupy several folders at once. This names the one the
   // message was reached through: the requested folder for a listing, and the
-  // lowest-sorting folder id for a lookup by id. A field carrying the complete
-  // placement set is not yet part of this contract.
+  // lowest-sorting folder id for a lookup by id. See `placements` for the
+  // complete set of mailboxes this message occupies.
   string folder_id = 3;
   // Subject line.
   string subject = 4;
@@ -561,6 +592,48 @@ message Message {
   optional string body_html = 10;
   // List of attached files.
   repeated Attachment attachments = 11;
+  // Every mailbox this message occupies, folder id ascending.
+  //
+  // Message identity is content-addressed and folder-independent, so one
+  // message can sit in several mailboxes at once -- Gmail labels make that
+  // ordinary rather than exotic. Mutations that act on a single occupancy
+  // (`MoveMessage`, `DeleteMessage`) need one of these to address, and a client
+  // that only ever saw `folder_id` cannot tell a one-mailbox message from a
+  // ten-mailbox one.
+  repeated Placement placements = 12;
+}
+
+// A single mailbox occupancy of a message: where one copy of it lives, and how
+// to address that copy on the server that holds it.
+message Placement {
+  // Account owning the mailbox.
+  string account_id = 1;
+  // Mailbox folder identifier.
+  string folder_id = 2;
+  // The UIDVALIDITY generation `uid` was captured under. Addressing is only
+  // valid within this generation; the server rejects a stale one rather than
+  // acting on whatever now bears that uid.
+  string uidvalidity = 3;
+  // Protocol-native id addressing the message in this mailbox.
+  string uid = 4;
+  // Read/unread flag of this occupancy specifically.
+  bool read = 5;
+}
+
+// Names one occupancy for a mutation to act on.
+//
+// All four coordinates are required. This is deliberately not "the folder" --
+// UIDVALIDITY scopes the uid, and dropping it would let a mutation formed
+// before a mailbox was recreated land on an unrelated message.
+message PlacementRef {
+  // Account owning the mailbox.
+  string account_id = 1;
+  // Mailbox folder identifier.
+  string folder_id = 2;
+  // The UIDVALIDITY generation `uid` was captured under.
+  string uidvalidity = 3;
+  // Protocol-native id addressing the message in this mailbox.
+  string uid = 4;
 }
 
 // Mirrors `nuncio_core::model::Folder`.
@@ -646,6 +719,106 @@ message MarkReadRequest {
 // MarkReadResponse currently carries no parameters; a successful RPC
 // response (as opposed to a `Status` error) is confirmation enough.
 message MarkReadResponse {}
+
+// Request to move one occupancy of a message into another folder.
+message MoveMessageRequest {
+  // Content-addressed key of the message to move.
+  string message_id = 1;
+  // Which occupancy to move. Optional only when the message occupies exactly
+  // one mailbox; with several, omitting it is refused rather than guessed,
+  // because moving the wrong copy is destructive and has no undo.
+  optional PlacementRef placement = 2;
+  // Destination folder id, within the same account as `placement`.
+  string destination_folder_id = 3;
+}
+
+// Result of enqueuing a move.
+message MoveMessageResponse {
+  // Identifier of the queued outbox mutation, for correlating with conflicts.
+  string mutation_id = 1;
+}
+
+// Request to delete one occupancy of a message.
+message DeleteMessageRequest {
+  // Content-addressed key of the message to delete.
+  string message_id = 1;
+  // Which occupancy to delete. Optional only when the message occupies exactly
+  // one mailbox. Deleting removes that copy; other occupancies survive.
+  optional PlacementRef placement = 2;
+}
+
+// Result of enqueuing a delete.
+message DeleteMessageResponse {
+  // Identifier of the queued outbox mutation.
+  string mutation_id = 1;
+}
+
+// Request to flag or unflag one occupancy of a message.
+message FlagMessageRequest {
+  // Content-addressed key of the message to flag.
+  string message_id = 1;
+  // Which occupancy to flag. Optional only when the message occupies exactly
+  // one mailbox.
+  optional PlacementRef placement = 2;
+  // Desired end state: true flags, false unflags.
+  bool flagged = 3;
+}
+
+// Result of enqueuing a flag change.
+message FlagMessageResponse {
+  // Identifier of the queued outbox mutation.
+  string mutation_id = 1;
+}
+
+// A mutation the server refused because another client changed the message
+// first, recorded durably so the decision can be made later.
+message MutationConflict {
+  // Stable identifier of this conflict record.
+  string id = 1;
+  // The outbox mutation that conflicted.
+  string mutation_id = 2;
+  // Content-addressed key of the message the mutation targeted.
+  string message_id = 3;
+  // The operation that was refused (e.g. "MOVE", "DELETE", "FLAG").
+  string mutation_type = 4;
+  // The occupancy the mutation was aimed at, when the queued intent named one.
+  optional PlacementRef placement = 5;
+  // The server's positive evidence that another client changed the message.
+  // A conflict is never inferred from an unverifiable outcome.
+  string observed = 6;
+  // When the conflict was detected.
+  google.protobuf.Timestamp detected_at = 7;
+  // When a human resolved it, if they have.
+  optional google.protobuf.Timestamp resolved_at = 8;
+  // Free-form note recording how it was resolved.
+  optional string resolution = 9;
+}
+
+// Request to list recorded mutation conflicts.
+message ListConflictsRequest {
+  // Include conflicts a human has already resolved. Resolved rows are kept as
+  // the audit trail of what was decided, so they are opt-in.
+  bool include_resolved = 1;
+  // Maximum number of conflicts to return; clamped to the server's page limit.
+  uint32 limit = 2;
+}
+
+// A page of mutation conflicts, newest first.
+message ListConflictsResponse {
+  // The conflicts.
+  repeated MutationConflict conflicts = 1;
+}
+
+// Request to mark a conflict handled.
+message ResolveConflictRequest {
+  // Identifier of the conflict to resolve.
+  string conflict_id = 1;
+  // Note recording how it was resolved.
+  string resolution = 2;
+}
+
+// Result of resolving a conflict.
+message ResolveConflictResponse {}
 
 // SearchMessagesRequest. Pages hits using the shared keyset convention (see
 // `ListMessagesRequest`); the cursor here encodes `(rank, id)` so paging

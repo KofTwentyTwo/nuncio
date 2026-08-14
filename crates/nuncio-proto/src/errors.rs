@@ -37,6 +37,11 @@ impl ErrorReason {
             ErrorReason::BackendUnreachable => Code::Unavailable,
             ErrorReason::AuthRequired => Code::Unauthenticated,
             ErrorReason::Unsupported => Code::Unimplemented,
+            // `Aborted` is the canonical code for a concurrency conflict, and
+            // unlike `FailedPrecondition` it tells a client the call may be
+            // retried only after re-reading the current state -- which is
+            // exactly the remedy here.
+            ErrorReason::Conflict => Code::Aborted,
         }
     }
 }
