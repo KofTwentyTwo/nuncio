@@ -91,6 +91,50 @@ pub struct FolderChanges {
     pub next_state: String,
 }
 
+/// What a mutation attempt actually established.
+///
+/// Two states are not enough. A protocol that answers `OK` for a command that
+/// did nothing -- which IMAP does, by design, for a UID that no longer exists
+/// (RFC 3501 section 6.4.8) -- makes "succeeded" and "failed" an incomplete
+/// partition. The missing third state is *the server accepted the command and
+/// its response does not establish what happened*, and collapsing that into
+/// either neighbour is how a lost mutation gets recorded as done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationOutcome {
+    /// The server's response proves the change was made.
+    ///
+    /// Requires positive evidence: a `COPYUID` naming the destination UIDs, a
+    /// removal report for a delete, or an explicit acknowledgement for a flag
+    /// change. `token` carries whatever the server returned to address the
+    /// result afterwards (the destination UID for a move), when it returned
+    /// one at all -- a DAV server that rewrites the object MUST NOT return an
+    /// ETag (RFC 4791 section 5.3.4), so absence here is ordinary.
+    Applied {
+        /// Server-assigned handle for the result, when the response carried one.
+        token: Option<String>,
+    },
+    /// Another client changed the message first, and the server said so.
+    ///
+    /// Requires positive evidence too: `[MODIFIED …]` (RFC 7162 section 3.1.3)
+    /// or an HTTP 412. A mutation that merely failed to find its target is
+    /// **not** a conflict -- `MODIFIED` reports "changed by someone else",
+    /// never "gone".
+    Conflict {
+        /// What the server reported about the conflicting state.
+        observed: String,
+    },
+    /// The command was accepted and its response settles nothing.
+    ///
+    /// The honest reading of an absent `COPYUID` (only `SHOULD` for `MOVE` per
+    /// RFC 6851 section 4.3, and legitimately omitted for a `UIDNOTSTICKY`
+    /// destination), or of a UID set that matched nothing. The caller must
+    /// re-enumerate to find out, not guess.
+    Unknown {
+        /// Why the response was inconclusive.
+        reason: String,
+    },
+}
+
 /// Protocol-agnostic mail backend engine trait implemented by JMAP and IMAP engines.
 #[async_trait]
 pub trait MailBackend: Send + Sync {
@@ -124,11 +168,15 @@ pub trait MailBackend: Send + Sync {
     }
 
     /// Apply a remote mutation (move/copy/flag/delete) to a single message
-    /// against the real server. MUST return `Ok(())` only when the server
-    /// genuinely applied the change -- implementations must never fabricate
-    /// success, and must refuse to act (returning an error) when the target
-    /// message cannot be safely identified (e.g. an IMAP UIDVALIDITY mismatch).
-    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError>;
+    /// against the real server.
+    ///
+    /// Returns what the server's response actually proves. Implementations
+    /// must never report [`MutationOutcome::Applied`] on the strength of a
+    /// tagged `OK` alone, and must refuse to act (returning `Err`) when the
+    /// target cannot be safely identified -- e.g. an IMAP UIDVALIDITY
+    /// mismatch, where the stored UID now names a different message.
+    async fn apply_mutation(&self, spec: &RemoteMutationSpec)
+        -> Result<MutationOutcome, MailError>;
 }
 
 /// A composed outbound email message ready to send over SMTP. Deliberately

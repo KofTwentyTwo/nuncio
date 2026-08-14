@@ -36,8 +36,8 @@ use nuncio_filter::{
     WebhookError,
 };
 use nuncio_mail::{
-    MailBackend, MailError, MessageSender, OutboundMessage, RemoteMutationKind, RemoteMutationSpec,
-    SmtpTransportEngine,
+    MailBackend, MailError, MessageSender, MutationOutcome, OutboundMessage, RemoteMutationKind,
+    RemoteMutationSpec, SmtpTransportEngine,
 };
 use nuncio_store::db::{DatabaseEngine, DatabaseError};
 use nuncio_store::vault::{SecretManager, VaultError, WEBHOOK_SIGNING_KEY_ACCOUNT};
@@ -129,6 +129,12 @@ pub trait RemoteExecutionEnv: Send + Sync {
 enum Disposition {
     /// The real operation genuinely succeeded; mark `completed`.
     Completed,
+    /// Another client changed the message first and the server said so.
+    ///
+    /// Terminal, and deliberately not a retry: the user's intent was formed
+    /// against state that no longer exists, so re-issuing it would either do
+    /// nothing or overwrite someone else's change.
+    Conflict(String),
     /// A transient failure; keep retrying until `MAX_RETRIES` is exceeded.
     Retry(String),
     /// A permanent failure nothing could retry away; mark `failed` now.
@@ -208,6 +214,15 @@ pub async fn execute_pending_mutations(
                     "outbox: mutation completed"
                 );
                 ("completed", item.retry_count, |s| s.completed += 1)
+            }
+            Disposition::Conflict(observed) => {
+                tracing::warn!(
+                    mutation_id = %item.id,
+                    op = %item.mutation_type,
+                    message_id = %item.message_id,
+                    "outbox: mutation conflicted with another client: {observed}"
+                );
+                ("conflicted", item.retry_count, |s| s.failed += 1)
             }
             Disposition::Permanent(reason) => {
                 tracing::warn!(
@@ -341,7 +356,19 @@ async fn dispatch_mailbox_mutation(
     );
 
     match backend.apply_mutation(&spec).await {
-        Ok(()) => Disposition::Completed,
+        Ok(MutationOutcome::Applied { .. }) => Disposition::Completed,
+        // Another client won. Retrying would either do nothing or overwrite a
+        // change the user did not make, so this stops here and stays visible
+        // rather than being quietly re-attempted.
+        Ok(MutationOutcome::Conflict { observed }) => Disposition::Conflict(observed),
+        // The server accepted the command and proved nothing. Treated as
+        // retryable, because the alternative -- recording it as done -- is the
+        // exact silent-loss this outcome exists to prevent. A genuinely
+        // applied mutation re-attempted is a no-op; a lost one recorded as
+        // complete is unrecoverable.
+        Ok(MutationOutcome::Unknown { reason }) => {
+            Disposition::Retry(format!("mutation outcome unverified: {reason}"))
+        }
         Err(e) => Disposition::Retry(format!("remote mutation failed: {e}")),
     }
 }

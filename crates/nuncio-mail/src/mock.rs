@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use nuncio_core::model::{Email, Folder};
 use std::sync::{Arc, Mutex};
 
-use crate::backend::{MailBackend, MessageSender, OutboundMessage, RemoteMutationSpec};
+use crate::backend::{
+    MailBackend, MessageSender, MutationOutcome, OutboundMessage, RemoteMutationSpec,
+};
 use crate::parser::MailError;
 
 /// Thread-safe mock mail backend for offline testing.
@@ -162,7 +164,10 @@ impl MailBackend for MockMailBackend {
         })
     }
 
-    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+    async fn apply_mutation(
+        &self,
+        spec: &RemoteMutationSpec,
+    ) -> Result<MutationOutcome, MailError> {
         let should_fail = self
             .should_fail
             .lock()
@@ -179,7 +184,7 @@ impl MailBackend for MockMailBackend {
             .lock()
             .map_err(|e| MailError::ParseFailed(e.to_string()))?;
         applied.push(spec.clone());
-        Ok(())
+        Ok(MutationOutcome::Applied { token: None })
     }
 }
 
