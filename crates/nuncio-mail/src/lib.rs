@@ -22,7 +22,7 @@ pub use backend::{
     RemoteMutationKind, RemoteMutationSpec,
 };
 pub use imap::{IdleSocketState, ImapDualSocketManager, ImapEngine};
-pub use jmap::JmapEngine;
+pub use jmap::{EmailChangesPage, JmapEngine};
 pub use mock::{MockMailBackend, MockMessageSender};
 pub use parser::{MailError, MimeParserAdapter};
 pub use smtp::SmtpTransportEngine;
