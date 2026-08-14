@@ -1,166 +1,146 @@
 //! Shared in-test `tracing` capture helper.
 //!
-//! Installs a thread-local subscriber that records every span (with its
-//! fields) and every event (with its level, fields, and message) into an
-//! in-memory buffer, so tests can assert on what the code logged -- including
-//! the negative assertion that a secret never appears in any recorded field.
-//! Deterministic and fully offline: no global subscriber, no I/O.
+//! Records one formatted line per event (level plus `Debug`-rendered fields,
+//! including the message) into an in-memory buffer, so tests can assert that
+//! a level tag and specific fields appear on the SAME logged event. This
+//! crate has no dependency on `tracing-subscriber`, so the capture is a
+//! minimal, hand-rolled `tracing::Subscriber` rather than a `Layer` -- that
+//! keeps this helper free of a new dependency. Fully offline: no I/O.
 //!
-//! This mirrors the identical helper in `nuncio-cal` and `nuncio-contacts`.
-//! The webhook tests previously used a hand-rolled `tracing::Subscriber`
-//! installed with `set_default`; that captured nothing whenever a sibling test
-//! reached the same callsites first, because callsite `Interest` is cached
-//! process-globally and a raw subscriber does not participate in the
-//! `tracing_subscriber` registry's interest handling. The result was an
-//! order-dependent empty capture that failed roughly three runs in ten.
+//! The subscriber is installed **once, globally**, and events are routed to a
+//! per-thread line buffer. That split is deliberate and load-bearing: a
+//! thread-local subscriber cannot work here, because `tracing` caches each
+//! callsite's `Interest` process-wide on first use. See
+//! [`install_global_capture`].
 
 #![cfg(test)]
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing::field::{Field, Visit};
-use tracing::span::Attributes;
-use tracing::{Event, Id, Level, Subscriber};
-use tracing_subscriber::layer::Context as LayerContext;
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::registry::LookupSpan;
+use tracing::span;
 
-/// A captured span: its name and the string-rendered fields it opened with.
-#[derive(Debug, Clone)]
-pub(crate) struct RecordedSpan {
-    #[allow(dead_code)]
-    pub name: String,
-    pub fields: HashMap<String, String>,
+thread_local! {
+    /// The line buffer collecting telemetry for the test running on THIS
+    /// thread, or `None` on any thread not currently inside [`capture_logs`].
+    ///
+    /// Routing per thread is what keeps the single global subscriber from
+    /// letting concurrent tests read each other's telemetry.
+    static ACTIVE_LINES: RefCell<Option<Arc<Mutex<Vec<String>>>>> = const { RefCell::new(None) };
 }
 
-/// A captured event: its level and its string-rendered fields (including the
-/// `message`).
-#[derive(Debug, Clone)]
-pub(crate) struct RecordedEvent {
-    pub level: Level,
-    pub fields: HashMap<String, String>,
-}
+struct LineVisitor<'a>(&'a mut String);
 
-impl RecordedEvent {
-    /// The event's `message` field, or the empty string if it had none.
-    pub fn message(&self) -> &str {
-        self.fields.get("message").map(String::as_str).unwrap_or("")
-    }
-
-    /// The string-rendered value of `name`, if the event carried that field.
-    pub fn field(&self, name: &str) -> Option<&str> {
-        self.fields.get(name).map(String::as_str)
-    }
-}
-
-/// In-memory sink of everything the subscriber captured during a test.
-#[derive(Debug, Default)]
-pub(crate) struct Recorder {
-    spans: Mutex<Vec<RecordedSpan>>,
-    events: Mutex<Vec<RecordedEvent>>,
-}
-
-impl Recorder {
-    /// A snapshot of every captured span.
-    #[allow(dead_code)]
-    pub fn spans(&self) -> Vec<RecordedSpan> {
-        self.spans.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-
-    /// A snapshot of every captured event.
-    pub fn events(&self) -> Vec<RecordedEvent> {
-        self.events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    /// Every field value recorded across all spans and events, so a test can
-    /// assert that a secret never appears anywhere in the telemetry.
-    pub fn all_field_values(&self) -> Vec<String> {
-        let mut values = Vec::new();
-        for span in self.spans().iter() {
-            values.extend(span.fields.values().cloned());
-        }
-        for event in self.events().iter() {
-            values.extend(event.fields.values().cloned());
-        }
-        values
-    }
-}
-
-struct FieldVisitor(HashMap<String, String>);
-
-impl Visit for FieldVisitor {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.0.insert(field.name().to_string(), value.to_string());
-    }
+impl Visit for LineVisitor<'_> {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0
-            .entry(field.name().to_string())
-            .or_insert_with(|| format!("{value:?}"));
+        self.0.push_str(&format!(" {}={:?}", field.name(), value));
     }
 }
 
-struct CaptureLayer(Arc<Recorder>);
+/// Minimal `tracing::Subscriber` that records a formatted line per event
+/// (level plus fields) without pulling in `tracing-subscriber`'s registry
+/// machinery. Spans are not tracked (`new_span` returns a constant id) since
+/// no test in this crate asserts on span structure, only on event lines.
+struct CaptureSubscriber;
 
-impl<S> tracing_subscriber::Layer<S> for CaptureLayer
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: LayerContext<'_, S>) {
-        let mut visitor = FieldVisitor(HashMap::new());
-        attrs.record(&mut visitor);
-        self.0
-            .spans
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(RecordedSpan {
-                name: attrs.metadata().name().to_string(),
-                fields: visitor.0,
-            });
+impl tracing::Subscriber for CaptureSubscriber {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
     }
 
-    fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
-        let mut visitor = FieldVisitor(HashMap::new());
+    fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
+        span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut line = format!("{}", event.metadata().level());
+        let mut visitor = LineVisitor(&mut line);
         event.record(&mut visitor);
-        self.0
-            .events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(RecordedEvent {
-                level: *event.metadata().level(),
-                fields: visitor.0,
-            });
+        ACTIVE_LINES.with(|slot| {
+            if let Some(lines) = slot.borrow().as_ref() {
+                lines.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+            }
+        });
+    }
+
+    fn enter(&self, _span: &span::Id) {}
+
+    fn exit(&self, _span: &span::Id) {}
+}
+
+/// Install the capturing subscriber as the process-wide default, exactly once.
+///
+/// It MUST be global rather than thread-local, and this is the whole reason the
+/// helper is shaped this way. `tracing` resolves each callsite's `Interest`
+/// **once for the process** and caches it; a callsite first executed on a thread
+/// with no subscriber caches `Interest::never()` and is then skipped forever --
+/// before any later thread-local subscriber is ever consulted. Under a parallel
+/// test harness, whichever thread reaches a callsite first therefore decides
+/// whether any other test can ever capture it, which made every log-capture
+/// assertion in this crate a coin flip.
+///
+/// A single global subscriber removes the race: every callsite registers against
+/// a real subscriber, so interest is always enabled, and per-thread routing
+/// (`ACTIVE_LINES`) decides what is actually recorded.
+fn install_global_capture() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        // A global default may already be set by another component of the same
+        // test binary; capturing still works through the thread-local routing
+        // above, so a lost race here is not fatal.
+        let _ = tracing::subscriber::set_global_default(CaptureSubscriber);
+        // Callsites executed before this point resolved their interest against
+        // the no-op dispatcher and cached "never". Recompute so they can be
+        // captured from here on. Done once, at install -- not per test.
+        tracing::callsite::rebuild_interest_cache();
+    });
+}
+
+/// Resets this thread's line buffer slot on drop, so a panicking test cannot
+/// leak its buffer into whatever the harness runs next on the same thread.
+struct LinesGuard;
+
+impl Drop for LinesGuard {
+    fn drop(&mut self) {
+        ACTIVE_LINES.with(|slot| *slot.borrow_mut() = None);
     }
 }
 
-/// Runs `f` with a thread-local capturing subscriber installed and returns the
-/// recorder alongside `f`'s result. Because the subscriber is thread-local,
-/// any async work driven inside `f` must run on the calling thread (e.g. a
-/// current-thread runtime's `block_on`) for its telemetry to be captured --
-/// see [`block_on_captured`].
-pub(crate) fn with_recorder<T>(f: impl FnOnce() -> T) -> (Arc<Recorder>, T) {
-    let recorder = Arc::new(Recorder::default());
-    let subscriber = tracing_subscriber::registry().with(CaptureLayer(recorder.clone()));
-    let value = tracing::subscriber::with_default(subscriber, f);
-    (recorder, value)
+/// A capture in progress on the current thread. Held across the code under
+/// test -- including any `.await` points, as long as the test stays on a
+/// single OS thread (e.g. the default current-thread `#[tokio::test]`
+/// runtime) -- then queried for the lines captured so far.
+pub(crate) struct CapturedLogs {
+    lines: Arc<Mutex<Vec<String>>>,
+    _guard: LinesGuard,
 }
 
-/// Drives `future` to completion on a current-thread runtime built inside the
-/// capture scope, so every event it emits lands on the thread holding the
-/// subscriber. This is the async counterpart to [`with_recorder`]; a
-/// `#[tokio::test]` cannot be used here because its runtime is created outside
-/// the capture scope.
-pub(crate) fn block_on_captured<F: std::future::Future>(future: F) -> (Arc<Recorder>, F::Output) {
-    with_recorder(|| {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-        match runtime {
-            Ok(rt) => rt.block_on(future),
-            Err(e) => panic!("building a current-thread runtime must succeed: {e}"),
-        }
-    })
+impl CapturedLogs {
+    /// A snapshot of every formatted event line captured on this thread so
+    /// far: level plus `Debug`-rendered fields (including `message`).
+    pub fn lines(&self) -> Vec<String> {
+        self.lines.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+/// Start capturing this thread's `tracing` events as formatted lines.
+///
+/// Only this thread's events are captured, so any async work driven while the
+/// returned [`CapturedLogs`] is alive must run on the calling thread (e.g. a
+/// current-thread runtime's `block_on`) to be captured -- the subscriber
+/// itself is global, but the destination buffer is per-thread; see
+/// [`install_global_capture`] for why that split is load-bearing.
+pub(crate) fn capture_logs() -> CapturedLogs {
+    install_global_capture();
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    ACTIVE_LINES.with(|slot| *slot.borrow_mut() = Some(lines.clone()));
+    CapturedLogs {
+        lines,
+        _guard: LinesGuard,
+    }
 }

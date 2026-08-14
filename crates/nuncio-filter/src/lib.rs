@@ -8,11 +8,10 @@ pub mod codegen;
 pub mod engine;
 pub mod outbox;
 pub mod parser;
-pub mod validator;
-pub mod webhook;
-
 #[cfg(test)]
 mod test_tracing;
+pub mod validator;
+pub mod webhook;
 
 pub use ast::*;
 pub use codegen::*;
