@@ -5,13 +5,21 @@
 
 pub mod backend;
 pub mod imap;
+pub mod imap_raw;
 pub mod jmap;
 pub mod mock;
 pub mod parser;
 pub mod smtp;
 
+// A real loopback IMAP server for offline tests. Behind a feature so it never
+// enters a production build, but visible to this crate's own tests and to
+// dependents that opt in (integration suites in `nunciod`).
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_server;
+
 pub use backend::{
-    MailBackend, MessageSender, OutboundMessage, RemoteMutationKind, RemoteMutationSpec,
+    FolderChanges, MailBackend, MessageSender, MutationOutcome, OutboundMessage, PlacedMessage,
+    RemoteMutationKind, RemoteMutationSpec,
 };
 pub use imap::{IdleSocketState, ImapDualSocketManager, ImapEngine};
 pub use jmap::JmapEngine;

@@ -7,7 +7,8 @@
 //! account it connects a real [`MailBackend`] (a real [`ImapEngine`] for an
 //! IMAP/SMTP transport, built from [`AccountConfig`] plus the
 //! account's keyring-stored password), fetches folders and messages, and
-//! persists every message through [`DatabaseEngine::save_email`].
+//! persists every message, together with the mailbox occupancy it was found
+//! in, through [`DatabaseEngine::save_email_at`].
 //!
 //! # Testability
 //!
@@ -20,6 +21,7 @@
 //! all-accounts sync fans these per-account runs out through
 //! [`crate::sync_dispatcher::sync_all_configured`], so concurrency and the
 //! per-account timeout are bounded in one place rather than serialized here.
+use nuncio_core::model::PlacementKey;
 use nuncio_core::{AccountConfig, CoreCommand, CoreEvent, EventBus, Transport};
 use nuncio_filter::{FilterEngine, OutboxManager, RuleAction};
 use nuncio_mail::{ImapEngine, JmapEngine, MailBackend, MailError};
@@ -68,24 +70,39 @@ fn remote_action_tag(action: &RuleAction) -> Option<(&'static str, Option<String
     }
 }
 
-/// Evaluate `email` against `filter_engine` and route every matched rule's
-/// actions to their real, persisted effect.
+/// Evaluate `email` **as it sits in `placement`** against `filter_engine` and
+/// route every matched rule's actions to their real, persisted effect.
 ///
-/// Filters fire EXACTLY ONCE per newly-arrived message: callers (see
-/// [`fetch_and_persist`]) must only invoke this for a message that was
-/// genuinely new to the store on this sync pass, never for one that already
-/// existed. Sync is not yet incremental -- every sync re-fetches and
-/// re-persists messages the backend still reports -- so calling this
-/// unconditionally on every persisted message would re-fire a rule's actions
-/// on every single re-sync of the same mailbox: a fresh
-/// `PendingRemoteMutation` and a fresh `FilterExecutionLog` entry per cycle
-/// for a message that arrived once, growing the outbox and the audit ledger
-/// without bound and (once a real mutation transport lands) duplicating the
-/// real remote operation. This function itself has no way to tell "new" from
-/// "already seen" -- that determination is the caller's responsibility.
+/// Evaluation is per placement because the rule language can ask where a
+/// message is: `WHERE FOLDER = 'INBOX'` has no answer for a message that
+/// occupies three mailboxes, so the caller fans out over the occupancies and
+/// each call answers for exactly one.
 ///
-/// `MarkRead`/`MarkUnread` apply immediately to the stored message via
-/// [`DatabaseEngine::set_message_read`]. Every other action enqueues a real
+/// Acting, in contrast, is once per (rule, message). Every matched rule must
+/// win [`DatabaseEngine::claim_filter_fire`] before any of its actions run, and
+/// the claim is keyed on message identity, not on the placement. `MOVE` and
+/// `FLAG` converge under repetition -- ten moves leave one net effect -- but
+/// `FORWARD` and `CALL WEBHOOK` land on third parties and have no shared state
+/// to converge against: one message in ten folders would page an on-call
+/// engineer ten times. The claim fails closed, so an unverifiable claim skips
+/// the actions rather than licensing them.
+///
+/// The claim is spent the moment it is won, before the actions are known to
+/// have succeeded. A rule whose enqueue then fails is therefore not retried on
+/// a later pass. That is the deliberate trade: re-firing FORWARD and CALL
+/// WEBHOOK on a partial failure would re-deliver to a third party, and a
+/// duplicate mail cannot be un-received, while a dropped one is visible in the
+/// warning below and recoverable by hand.
+///
+/// The claim also subsumes the older "only call me for a new message" contract
+/// for re-arrivals of the same message. Callers should still gate on a genuinely
+/// new occupancy (see [`fetch_and_persist`]) -- the claim stops repeat *actions*,
+/// not the wasted evaluation of a mailbox nothing changed in.
+///
+/// `MarkRead`/`MarkUnread` apply immediately to the occupancy that was
+/// evaluated, via [`DatabaseEngine::set_placement_read`]: IMAP `\Seen` is
+/// per-mailbox, so "mark this read" is only well-defined once it names a
+/// mailbox. Every other action enqueues a real
 /// [`nuncio_filter::PendingRemoteMutation`] through the existing outbox
 /// (`OutboxManager::create_mutation` + `DatabaseEngine::save_pending_mutation`)
 /// for the background outbox worker to pick up -- this function never
@@ -104,40 +121,69 @@ fn remote_action_tag(action: &RuleAction) -> Option<(&'static str, Option<String
 ///
 /// Standalone and reusable by design: this is the exact evaluate-and-route
 /// logic other sync paths (e.g. a bulk retroactive triage over the whole
-/// store) need, so it takes only a `DatabaseEngine`/`FilterEngine`/`Email`
-/// and has no dependency on the live inbound-sync call chain.
+/// store) need, so it takes only a `DatabaseEngine`/`FilterEngine`/`Email`/
+/// `Placement` and has no dependency on the live inbound-sync call chain.
 pub async fn apply_filter_actions(
     db: &nuncio_store::db::DatabaseEngine,
     filter_engine: &FilterEngine,
     email: &nuncio_core::model::Email,
+    placement: &nuncio_core::model::Placement,
 ) -> usize {
     let mut applied = 0usize;
+    let placed = nuncio_filter::PlacedEmail { email, placement };
 
-    for (rule, actions) in filter_engine.evaluate(email) {
+    for (rule, actions) in filter_engine.evaluate(placed) {
+        // Claim before acting, never after. The claim is keyed on message
+        // identity, so the same mail reaching a second mailbox -- an ordinary
+        // MOVE, or a Gmail label -- evaluates again but acts only once.
+        match db.claim_filter_fire(&rule.id, &email.id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(
+                    rule_id = %rule.id,
+                    message_key = %email.id,
+                    folder_id = %placement.folder_id,
+                    "rule already fired for this message; skipping actions for this placement"
+                );
+                continue;
+            }
+            Err(e) => {
+                // Fail closed. An unverifiable claim must not become a licence
+                // to act: a lost claim check on a FORWARD is a duplicate mail
+                // the recipient cannot un-receive.
+                tracing::error!(
+                    rule_id = %rule.id,
+                    message_key = %email.id,
+                    error = %e,
+                    "could not claim the filter fire; skipping actions"
+                );
+                continue;
+            }
+        }
+
+        let placement_key = placement.key();
         for action in actions {
             let immediate_ok = match &action {
-                RuleAction::MarkRead => match db.set_message_read(&email.id, true).await {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::warn!(
-                            "filter rule '{}' MARK READ failed for message '{}': {e}",
-                            rule.id,
-                            email.id
-                        );
-                        false
+                // One write with a boolean rather than two near-identical
+                // arms. Both name the occupancy that was evaluated, because
+                // `\Seen` is per-mailbox: a message read in INBOX is not
+                // thereby read in Archive.
+                RuleAction::MarkRead | RuleAction::MarkUnread => {
+                    let read = matches!(action, RuleAction::MarkRead);
+                    let label = if read { "MARK READ" } else { "MARK UNREAD" };
+                    match db.set_placement_read(&placement_key, read).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(
+                                "filter rule '{}' {label} failed for message '{}' in folder '{}': {e}",
+                                rule.id,
+                                email.id,
+                                placement.folder_id
+                            );
+                            false
+                        }
                     }
-                },
-                RuleAction::MarkUnread => match db.set_message_read(&email.id, false).await {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::warn!(
-                            "filter rule '{}' MARK UNREAD failed for message '{}': {e}",
-                            rule.id,
-                            email.id
-                        );
-                        false
-                    }
-                },
+                }
                 RuleAction::MoveTo(_)
                 | RuleAction::CopyTo(_)
                 | RuleAction::Flag
@@ -197,31 +243,42 @@ pub async fn apply_filter_actions(
     applied
 }
 
-/// Fetch every folder and every message in every folder from `backend`,
-/// persisting each message via [`DatabaseEngine::save_email`] and, for
-/// messages genuinely new to the store, evaluating it against
-/// `filter_engine` via [`apply_filter_actions`].
+/// Fetch every folder from `backend`, persist each reported occupancy via
+/// [`DatabaseEngine::save_email_at`], evaluate the genuinely-new occupancies
+/// against `filter_engine` through [`apply_filter_actions`], and delete the
+/// occupancies the server no longer reports.
 ///
-/// Sync is not yet incremental (a re-sync re-fetches every message the
-/// backend still reports, not just genuinely new ones), so new-vs-seen must
-/// be determined BEFORE `save_email` persists (or re-persists) anything --
-/// `save_email` is `INSERT OR REPLACE` and would otherwise erase the
-/// distinction between "arriving for the first time" and "seen again". Doing
-/// that with one existence lookup per message (`DatabaseEngine::get_message`)
-/// is an N+1 query pattern over a fetched chunk; instead, this classifies an
-/// entire folder's chunk with a single batched
-/// `DatabaseEngine::existing_message_ids` lookup up front, then folds in a
-/// per-batch "already seen this pass" set while iterating so a chunk that
-/// itself contains a repeated id (e.g. a backend surfacing the same message
-/// twice in one fetch) still fires at most once -- exactly as if each
-/// message's existence had been checked one at a time immediately before its
-/// own `save_email`.
+/// # Why classification is per placement, not per message
 ///
-/// Returns the total number of messages processed (a message id "processed"
-/// more than once, e.g. by a backend that returns the same id from multiple
-/// folders, is counted once per occurrence -- `save_email` itself is
-/// `INSERT OR REPLACE`, so storage stays deduplicated by message id
-/// regardless).
+/// Message identity is folder-independent: a message already stored from
+/// `INBOX` has the same key when it turns up in `Archive`. Asking "have I seen
+/// this *message*?" therefore answers `yes` for a mailbox this daemon has never
+/// filtered, and the arrival silently fires nothing -- no error, no log. The
+/// question that matches the intent is "have I seen this *occupancy*?", so this
+/// classifies on [`PlacementKey`] via
+/// [`DatabaseEngine::existing_placements`].
+///
+/// Classification happens BEFORE the write, because `save_email_at` upserts and
+/// would otherwise erase the distinction between a first arrival and a
+/// re-report. One batched lookup covers the whole chunk rather than an N+1 of
+/// per-row existence checks, and a per-pass "already seen" set folds in on top
+/// so a backend that surfaces the same occupancy twice in one fetch still
+/// classifies it as new exactly once.
+///
+/// Firing once per *arrival* is not the same as acting once per *message*; the
+/// second guarantee lives in the claim inside [`apply_filter_actions`].
+///
+/// # Absence
+///
+/// [`nuncio_mail::FolderChanges::present`] is honoured as written: `None` means
+/// the pass was incremental and cannot speak to absence, and treating it as
+/// "nothing is present" would delete the whole folder. Only `Some(list)` --
+/// which `nuncio-mail` withholds when a SELECT omitted UIDVALIDITY, since the
+/// keys it could build would name no stored row -- licenses deleting the stored
+/// placements missing from it.
+///
+/// Returns the total number of occupancies processed: one message reported from
+/// two folders counts twice, because two mailboxes really did report it.
 ///
 /// Contains no event-bus or credential logic -- pure fetch-and-persist, so
 /// it is the smallest unit tests can exercise directly with a
@@ -246,34 +303,81 @@ async fn fetch_and_persist(
             Some(acct) => db.get_folder_sync_state(acct, &folder.id).await?,
             None => None,
         };
-        let (emails, new_state) = backend
-            .sync_messages(&folder.id, last_state.as_deref())
+        let changes = backend
+            .sync_changes(&folder.id, last_state.as_deref())
             .await?;
-        let fetched = emails.len();
+        let placed = changes.upserts;
+        let fetched = placed.len();
+        let new_state = changes.next_state;
 
         // One round trip classifies the whole chunk instead of one lookup per
-        // message. A lookup failure that is not "not found" would be a
-        // genuine DB error; `existing_message_ids` surfaces those as `Err`
-        // rather than silently treating the batch as "not new", so callers
-        // never persist and skip-filter on an unverified assumption.
-        let chunk_ids: Vec<String> = emails.iter().map(|e| e.id.clone()).collect();
-        let already_present = db.existing_message_ids(&chunk_ids).await?;
+        // occupancy. This asks about *placements*, not messages: identity is
+        // folder-independent, so a message already stored from another folder
+        // is still a first arrival here, and testing the message key instead
+        // would classify it as seen and skip filtering it entirely. A lookup
+        // failure that is not "not found" surfaces as `Err` rather than
+        // silently reading as "not new", so nothing is persisted and
+        // skip-filtered on an unverified assumption.
+        let chunk_keys: Vec<PlacementKey> = placed.iter().map(|p| p.placement.key()).collect();
+        let already_present = db.existing_placements(&chunk_keys).await?;
         let mut seen_this_pass = std::collections::HashSet::new();
 
-        for email in emails {
-            let is_new =
-                !already_present.contains(&email.id) && seen_this_pass.insert(email.id.clone());
-            db.save_email(&email).await?;
+        for message in placed {
+            let key = message.placement.key();
+            let is_new = !already_present.contains(&key) && seen_this_pass.insert(key);
+            db.save_email_at(&message.email, message.source, &message.placement)
+                .await?;
             // Filter execution is single-owner per account (see
             // `AccountConfig::filters_enabled`). A daemon that is not the owner
             // still syncs and stores the message; it just does not act on it,
             // because the side-effecting actions -- FORWARD, CALL WEBHOOK --
-            // are not idempotent across daemons.
+            // are not idempotent across daemons. The gate sits outside the
+            // fire-once claim on purpose: a non-owner must not consume the
+            // claim it is declining to act on.
             if is_new && filters_enabled {
-                apply_filter_actions(db, filter_engine, &email).await;
+                apply_filter_actions(db, filter_engine, &message.email, &message.placement).await;
             }
             synced += 1;
         }
+        // Reconcile what the server no longer has. Until this existed, a sync
+        // could only ever add: a message moved or deleted by any other client
+        // -- another daemon, a phone, webmail -- stayed in the local store
+        // forever, and every account accumulated ghosts.
+        //
+        // What a folder stops mentioning is an occupancy, never a message: the
+        // same mail may still sit in another mailbox, and it goes only when its
+        // last placement does -- which `delete_placements` decides, not this.
+        //
+        // A `PlacementKey` names its own account, so an explicitly-reported
+        // removal is actionable with no ambient account context at all. Only
+        // the `present` diff needs one, because its other half is a lookup
+        // keyed by (account, folder).
+        let mut gone: Vec<PlacementKey> = changes.removals;
+
+        // `present` is the folder's complete contents when the pass was
+        // able to enumerate them. `None` and `Some(vec![])` are NOT the
+        // same: `None` means the pass was incremental and cannot speak to
+        // absence, and treating it as "nothing is present" would delete
+        // the folder.
+        if let (Some(acct), Some(present)) = (account_id, changes.present) {
+            let present: std::collections::HashSet<PlacementKey> = present.into_iter().collect();
+            let stored = db.placements_in_folder(acct, &folder.id).await?;
+            gone.extend(stored.into_iter().filter(|key| !present.contains(key)));
+        }
+
+        gone.sort_unstable();
+        gone.dedup();
+        if !gone.is_empty() {
+            let outcome = db.delete_placements(&gone).await?;
+            tracing::info!(
+                account_id = ?account_id,
+                folder_id = %folder.id,
+                placements_removed = outcome.placements_removed,
+                messages_reaped = outcome.messages_reaped,
+                "removed placements that are no longer on the server"
+            );
+        }
+
         // Persist the returned checkpoint only AFTER this folder's messages
         // have landed, so the stored high-water mark can never advance past
         // work that actually reached the store.
@@ -429,9 +533,9 @@ pub async fn run_account_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nuncio_core::model::{Email, Folder};
+    use nuncio_core::model::{Email, Folder, IdentitySource, Placement};
     use nuncio_core::{CoreEvent, EngineStatus, TlsMode};
-    use nuncio_mail::MockMailBackend;
+    use nuncio_mail::{MockMailBackend, PlacedMessage};
     use nuncio_store::db::DatabaseEngine;
     use serde_json::json;
     use wiremock::matchers::{body_partial_json, method, path};
@@ -553,22 +657,56 @@ mod tests {
         }
     }
 
-    fn mock_email(id: &str, folder_id: &str, subject: &str) -> Email {
-        Email {
-            id: id.to_string(),
-            account_id: "acct-mock-1".to_string(),
-            folder_id: folder_id.to_string(),
-            remote_id: id.to_string(),
-            uid_validity: "1".to_string(),
-            subject: subject.to_string(),
-            sender: "alice@nuncio.mx".to_string(),
-            recipient: "bob@nuncio.mx".to_string(),
-            received_at: 1_700_000_000,
-            read: false,
-            body_plain: Some(format!("body for {id}")),
-            body_html: None,
-            attachments: Vec::new(),
+    /// One mock message as a backend would surface it: identity plus the
+    /// occupancy it was found in. `id` doubles as the folder-scoped UID, which
+    /// keeps distinct ids in one folder distinct occupancies.
+    fn mock_placed(id: &str, folder_id: &str, subject: &str) -> PlacedMessage {
+        PlacedMessage {
+            email: Email {
+                id: id.to_string(),
+                account_id: "acct-mock-1".to_string(),
+                subject: subject.to_string(),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1_700_000_000,
+                body_plain: Some(format!("body for {id}")),
+                body_html: None,
+                attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
+            },
+            source: IdentitySource::Surrogate,
+            placement: Placement {
+                account_id: "acct-mock-1".to_string(),
+                folder_id: folder_id.to_string(),
+                uid_validity: "1".to_string(),
+                remote_id: id.to_string(),
+                read: false,
+            },
         }
+    }
+
+    /// The read flag of a message's one occupancy, for the single-placement
+    /// mock fixtures. Fails loudly rather than defaulting if the message turns
+    /// out to sit in no mailbox at all -- "unread" and "not there" are
+    /// different answers and must not be conflated by a test helper.
+    async fn read_flag_of(db: &DatabaseEngine, message_key: &str) -> bool {
+        let placements = db
+            .placements_of(message_key)
+            .await
+            .expect("read the message's placements");
+        assert_eq!(
+            placements.len(),
+            1,
+            "fixture expects exactly one occupancy of '{message_key}'"
+        );
+        placements[0].read
+    }
+
+    /// The message key every [`MockMailBackend::with_same_message_in`]
+    /// occupancy carries.
+    fn shared_key() -> &'static str {
+        MockMailBackend::SHARED_MESSAGE_KEY
     }
 
     #[tokio::test]
@@ -586,8 +724,8 @@ mod tests {
             total_messages: 2,
             unread_messages: 2,
         });
-        mock.add_message(mock_email("m1", "inbox", "Hello"));
-        mock.add_message(mock_email("m2", "inbox", "World"));
+        mock.add_message(mock_placed("m1", "inbox", "Hello"));
+        mock.add_message(mock_placed("m2", "inbox", "World"));
 
         let filter_engine = empty_filter_engine();
         let synced = sync_with_backend(
@@ -603,11 +741,14 @@ mod tests {
         assert_eq!(synced, 2);
 
         let persisted = db
-            .list_messages("inbox", 10)
+            .list_messages("acct-mock-1", "inbox", 10)
             .await
             .expect("list persisted messages");
         assert_eq!(persisted.len(), 2);
-        let subjects: Vec<String> = persisted.iter().map(|e| e.subject.clone()).collect();
+        let subjects: Vec<String> = persisted
+            .iter()
+            .map(|(email, _placement)| email.subject.clone())
+            .collect();
         assert!(subjects.contains(&"Hello".to_string()));
         assert!(subjects.contains(&"World".to_string()));
 
@@ -802,12 +943,13 @@ mod tests {
         // folder, and its protocol-native JMAP object id round-trips in
         // `remote_id`.
         let persisted = db
-            .list_messages("inbox", 10)
+            .list_messages("acct-jmap-real-1", "inbox", 10)
             .await
             .expect("jmap message persisted");
         assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].subject, "Welcome to JMAP Sync");
-        assert_eq!(persisted[0].remote_id, "jmap-msg-1");
+        let (email, placement) = &persisted[0];
+        assert_eq!(email.subject, "Welcome to JMAP Sync");
+        assert_eq!(placement.remote_id, "jmap-msg-1");
 
         assert_eq!(
             events.recv().await.expect("start event"),
@@ -914,17 +1056,16 @@ mod tests {
             total_messages: 1,
             unread_messages: 1,
         });
-        mock.add_message(mock_email("m-urgent", "inbox", "Urgent: server down"));
+        mock.add_message(mock_placed("m-urgent", "inbox", "Urgent: server down"));
 
         let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
             .expect("sync succeeds");
         assert_eq!(synced, 1);
 
-        let stored = db.get_message("m-urgent").await.expect("message persisted");
         assert!(
-            stored.read,
-            "MARK READ action must genuinely flip the stored read flag"
+            read_flag_of(&db, "m-urgent").await,
+            "MARK READ action must genuinely flip the occupancy's read flag"
         );
 
         let logs = db
@@ -969,15 +1110,17 @@ mod tests {
             total_messages: 1,
             unread_messages: 1,
         });
-        mock.add_message(mock_email("m-urgent", "inbox", "Urgent: server down"));
+        mock.add_message(mock_placed("m-urgent", "inbox", "Urgent: server down"));
 
         let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, false)
             .await
             .expect("sync succeeds");
 
         assert_eq!(synced, 1, "the message must still be synced and stored");
-        let stored = db.get_message("m-urgent").await.expect("message persisted");
-        assert!(!stored.read, "a non-owning daemon must not apply MARK READ");
+        assert!(
+            !read_flag_of(&db, "m-urgent").await,
+            "a non-owning daemon must not apply MARK READ"
+        );
         assert!(
             db.list_filter_execution_logs(10)
                 .await
@@ -1054,7 +1197,7 @@ mod tests {
             total_messages: 1,
             unread_messages: 1,
         });
-        mock.add_message(mock_email("m-archive", "inbox", "Please Archive Me"));
+        mock.add_message(mock_placed("m-archive", "inbox", "Please Archive Me"));
 
         let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
@@ -1079,11 +1222,7 @@ mod tests {
         assert_eq!(logs[0].message_id, "m-archive");
 
         // The remote action must not have applied a local read-flag change.
-        let stored = db
-            .get_message("m-archive")
-            .await
-            .expect("message persisted");
-        assert!(!stored.read);
+        assert!(!read_flag_of(&db, "m-archive").await);
     }
 
     #[tokio::test]
@@ -1108,15 +1247,17 @@ mod tests {
             total_messages: 1,
             unread_messages: 1,
         });
-        mock.add_message(mock_email("m-plain", "inbox", "Just a normal update"));
+        mock.add_message(mock_placed("m-plain", "inbox", "Just a normal update"));
 
         let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
             .expect("sync succeeds");
         assert_eq!(synced, 1);
 
-        let stored = db.get_message("m-plain").await.expect("message persisted");
-        assert!(!stored.read, "non-matching message must stay untouched");
+        assert!(
+            !read_flag_of(&db, "m-plain").await,
+            "non-matching message must stay untouched"
+        );
 
         let logs = db
             .list_filter_execution_logs(10)
@@ -1167,7 +1308,9 @@ mod tests {
             total_messages: 1,
             unread_messages: 1,
         });
-        mock.add_message(mock_email("m-repeat", "inbox", "Urgent: server down"));
+        let repeat = mock_placed("m-repeat", "inbox", "Urgent: server down");
+        let repeat_key = repeat.placement.key();
+        mock.add_message(repeat);
 
         // First sync: the message is genuinely new, so both rules must fire.
         let synced_first = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
@@ -1175,11 +1318,7 @@ mod tests {
             .expect("first sync succeeds");
         assert_eq!(synced_first, 1);
 
-        let stored_after_first = db
-            .get_message("m-repeat")
-            .await
-            .expect("message persisted after first sync");
-        assert!(stored_after_first.read);
+        assert!(read_flag_of(&db, "m-repeat").await);
 
         let logs_after_first = db
             .list_filter_execution_logs(10)
@@ -1196,7 +1335,7 @@ mod tests {
         // Manually flip the message back to unread, exactly as a user
         // reading and then un-reading it would -- proves the second sync
         // doesn't re-flip it back to read via a repeat MARK READ fire.
-        db.set_message_read("m-repeat", false)
+        db.set_placement_read(&repeat_key, false)
             .await
             .expect("manually mark unread");
 
@@ -1207,12 +1346,8 @@ mod tests {
             .expect("second sync succeeds");
         assert_eq!(synced_second, 1);
 
-        let stored_after_second = db
-            .get_message("m-repeat")
-            .await
-            .expect("message persisted after second sync");
         assert!(
-            !stored_after_second.read,
+            !read_flag_of(&db, "m-repeat").await,
             "a re-sync of an already-seen message must not re-fire MARK READ"
         );
 
@@ -1239,10 +1374,10 @@ mod tests {
 
     #[tokio::test]
     async fn sync_with_backend_fires_filters_only_for_new_messages_in_a_mixed_batch() {
-        // A single fetched chunk containing a mix of an already-seen message
-        // (persisted by a prior sync) and genuinely new ones must fire filter
-        // actions ONLY for the new ones, via the batched
-        // `existing_message_ids` classification -- not a per-message lookup.
+        // A single fetched chunk containing a mix of an already-stored
+        // occupancy (persisted by a prior sync) and genuinely new ones must
+        // fire filter actions ONLY for the new ones, via the batched
+        // `existing_placements` classification -- not a per-row lookup.
         let (db, _dir) = DatabaseEngine::connect_ephemeral()
             .await
             .expect("ephemeral db");
@@ -1256,16 +1391,13 @@ mod tests {
         .expect("parse rule");
         let filter_engine = FilterEngine::new(vec![mark_read_rule]).expect("compile rule");
 
-        // Pre-seed one message directly, simulating it having landed in a
+        // Pre-seed one occupancy directly, simulating it having landed in a
         // prior sync pass. It must NOT re-fire even though this pass's
         // backend still reports it (sync is not yet incremental).
-        db.save_email(&mock_email(
-            "m-already-seen",
-            "inbox",
-            "Urgent: known issue",
-        ))
-        .await
-        .expect("pre-seed existing message");
+        let seeded = mock_placed("m-already-seen", "inbox", "Urgent: known issue");
+        db.save_email_at(&seeded.email, seeded.source, &seeded.placement)
+            .await
+            .expect("pre-seed existing occupancy");
 
         let mock = MockMailBackend::new();
         mock.add_folder(Folder {
@@ -1275,9 +1407,13 @@ mod tests {
             unread_messages: 3,
         });
         // Mixed chunk: one already-present id, two genuinely new ids.
-        mock.add_message(mock_email("m-already-seen", "inbox", "Urgent: known issue"));
-        mock.add_message(mock_email("m-new-1", "inbox", "Urgent: brand new"));
-        mock.add_message(mock_email("m-new-2", "inbox", "Urgent: also new"));
+        mock.add_message(mock_placed(
+            "m-already-seen",
+            "inbox",
+            "Urgent: known issue",
+        ));
+        mock.add_message(mock_placed("m-new-1", "inbox", "Urgent: brand new"));
+        mock.add_message(mock_placed("m-new-2", "inbox", "Urgent: also new"));
 
         let synced = sync_with_backend(&db, &event_bus, &mock, &filter_engine, None, true)
             .await
@@ -1299,16 +1435,12 @@ mod tests {
         assert!(fired_ids.contains("m-new-2"));
         assert!(!fired_ids.contains("m-already-seen"));
 
-        // The pre-seeded message must still be persisted (INSERT OR REPLACE
-        // semantics are unaffected by the batched new/seen classification)
-        // but its read flag must be untouched by this pass's MARK READ rule.
-        let already_seen = db
-            .get_message("m-already-seen")
-            .await
-            .expect("still persisted");
+        // The pre-seeded occupancy must still be persisted (the upsert is
+        // unaffected by the batched new/seen classification) but its read flag
+        // must be untouched by this pass's MARK READ rule.
         assert!(
-            !already_seen.read,
-            "a message that already existed before this sync must not re-fire MARK READ"
+            !read_flag_of(&db, "m-already-seen").await,
+            "an occupancy that already existed before this sync must not re-fire MARK READ"
         );
     }
 
@@ -1331,7 +1463,7 @@ mod tests {
             total_messages: 1,
             unread_messages: 1,
         });
-        mock.add_message(mock_email("m-inc-1", "inbox", "First"));
+        mock.add_message(mock_placed("m-inc-1", "inbox", "First"));
 
         let filter_engine = empty_filter_engine();
 
@@ -1376,6 +1508,228 @@ mod tests {
         assert_eq!(
             mock.since_state_calls(),
             vec![None, Some("uidnext-4242".to_string())],
+        );
+    }
+
+    /// A rule that matches the one message the shared-identity mock stages.
+    fn rule_matching_the_shared_message() -> nuncio_filter::FilterRule {
+        nuncio_filter::NsqlParser::parse_rule(
+            "Archive Shared",
+            1,
+            "WHERE subject CONTAINS 'Shared' ACTION MOVE TO 'Archive'",
+        )
+        .expect("parse rule")
+    }
+
+    #[tokio::test]
+    async fn a_message_arriving_in_a_second_folder_still_gets_evaluated() {
+        // The regression this guards: with identity now folder-independent, a
+        // message already stored from INBOX has a known message_key, so a
+        // message-scoped "already present" test would classify its arrival in
+        // Archive as old and skip filtering it entirely -- silently, with no
+        // error and nothing in the log.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+
+        let rule = rule_matching_the_shared_message();
+        let filter_engine = FilterEngine::new(vec![rule.clone()]).expect("compile rule");
+
+        // Already stored, from INBOX. The message key is therefore known
+        // before this sync begins -- but nothing has ever filtered Archive.
+        let in_inbox = MockMailBackend::shared_message_in("INBOX", "1");
+        db.save_email_at(&in_inbox.email, in_inbox.source, &in_inbox.placement)
+            .await
+            .expect("pre-seed the INBOX occupancy");
+
+        let backend = MockMailBackend::with_same_message_in(&["Archive"]);
+        let processed = fetch_and_persist(
+            &db,
+            &event_bus,
+            &backend,
+            &filter_engine,
+            Some(MockMailBackend::SHARED_ACCOUNT_ID),
+            true,
+        )
+        .await
+        .expect("sync succeeds");
+
+        assert_eq!(processed, 1, "the Archive occupancy is processed");
+        let placements = db
+            .placements_of(shared_key())
+            .await
+            .expect("read the message's placements");
+        assert_eq!(
+            placements.len(),
+            2,
+            "one message, now occupying both mailboxes"
+        );
+
+        assert!(
+            db.has_filter_fired(&rule.id, shared_key())
+                .await
+                .expect("read the claim ledger"),
+            "an arrival in a second folder must be evaluated, not skipped as already-seen"
+        );
+        let pending = db
+            .list_pending_mutations(10)
+            .await
+            .expect("list pending mutations");
+        assert_eq!(
+            pending.len(),
+            1,
+            "with a real outbox mutation behind the fire, not just a ledger row"
+        );
+        assert_eq!(pending[0].message_id, shared_key());
+    }
+
+    #[tokio::test]
+    async fn a_rule_fires_once_for_a_message_that_lands_in_two_folders() {
+        // MOVE and FLAG converge under repetition; FORWARD and CALL WEBHOOK do
+        // not. Two occupancies of one message must not page an on-call
+        // engineer twice.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+
+        let rule = rule_matching_the_shared_message();
+        let filter_engine = FilterEngine::new(vec![rule.clone()]).expect("compile rule");
+
+        let backend = MockMailBackend::with_same_message_in(&["INBOX", "Archive"]);
+        let processed = fetch_and_persist(
+            &db,
+            &event_bus,
+            &backend,
+            &filter_engine,
+            Some(MockMailBackend::SHARED_ACCOUNT_ID),
+            true,
+        )
+        .await
+        .expect("sync succeeds");
+
+        assert_eq!(processed, 2, "both occupancies are processed");
+        let placements = db
+            .placements_of(shared_key())
+            .await
+            .expect("read the message's placements");
+        assert_eq!(placements.len(), 2);
+
+        assert_eq!(
+            db.filter_fire_count().await.expect("read the claim ledger"),
+            1,
+            "one claim, therefore one set of actions"
+        );
+        assert!(db
+            .has_filter_fired(&rule.id, shared_key())
+            .await
+            .expect("read the claim ledger"));
+
+        let pending = db
+            .list_pending_mutations(10)
+            .await
+            .expect("list pending mutations");
+        assert_eq!(
+            pending.len(),
+            1,
+            "one outbox mutation for the message, not one per folder"
+        );
+        let logs = db
+            .list_filter_execution_logs(10)
+            .await
+            .expect("list execution logs");
+        assert_eq!(logs.len(), 1, "and one audit entry, not one per folder");
+    }
+
+    #[tokio::test]
+    async fn an_unverifiable_claim_skips_the_actions_rather_than_licensing_them() {
+        // Fail closed. If the claim itself errors, the engine cannot know
+        // whether this rule has already acted on this message -- and a lost
+        // claim check on a FORWARD is a duplicate mail the recipient cannot
+        // un-receive. Dropping the ledger table makes the claim error for real
+        // while every other write still works, so a mutation appearing here
+        // would be a genuine "acted without a claim", not a dead store.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+
+        let rule = rule_matching_the_shared_message();
+        let filter_engine = FilterEngine::new(vec![rule.clone()]).expect("compile rule");
+
+        let placed = MockMailBackend::shared_message_in("INBOX", "1");
+        db.save_email_at(&placed.email, placed.source, &placed.placement)
+            .await
+            .expect("store the occupancy");
+
+        sqlx::query("DROP TABLE filter_fired")
+            .execute(db.pool())
+            .await
+            .expect("drop the claim ledger");
+
+        let applied =
+            apply_filter_actions(&db, &filter_engine, &placed.email, &placed.placement).await;
+        assert_eq!(applied, 0, "an unclaimed rule must apply nothing");
+
+        let pending = db
+            .list_pending_mutations(10)
+            .await
+            .expect("list pending mutations");
+        assert!(
+            pending.is_empty(),
+            "no outbox mutation may be enqueued off an unverifiable claim"
+        );
+        let logs = db
+            .list_filter_execution_logs(10)
+            .await
+            .expect("list execution logs");
+        assert!(
+            logs.is_empty(),
+            "and nothing may be recorded as having fired"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_account_less_pass_still_applies_server_confirmed_removals() {
+        // A `PlacementKey` names its own account, so an explicitly-reported
+        // removal needs no ambient account context. Gating the whole removals
+        // block on `account_id.is_some()` would silently discard a VANISHED
+        // report on a mock-driven `SyncAll`, leaving a ghost the server has
+        // already told us is gone.
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("ephemeral db");
+        let event_bus = EventBus::new();
+        let filter_engine = empty_filter_engine();
+
+        let staged = mock_placed("m-vanished", "inbox", "Deleted elsewhere");
+        db.save_email_at(&staged.email, staged.source, &staged.placement)
+            .await
+            .expect("store the occupancy a prior pass left behind");
+
+        let mock = MockMailBackend::new();
+        mock.add_folder(Folder {
+            id: "inbox".to_string(),
+            name: "Inbox".to_string(),
+            total_messages: 0,
+            unread_messages: 0,
+        });
+        mock.set_removals(vec![staged.placement.key()]);
+
+        // `None` account: the pass has nowhere to key a checkpoint and cannot
+        // run the `present` diff, but the removal is still actionable.
+        let synced = fetch_and_persist(&db, &event_bus, &mock, &filter_engine, None, true)
+            .await
+            .expect("sync succeeds");
+        assert_eq!(synced, 0, "nothing new arrived");
+
+        let placements = db
+            .placements_of("m-vanished")
+            .await
+            .expect("read the message's placements");
+        assert!(
+            placements.is_empty(),
+            "the server-confirmed removal must be applied without an account id"
         );
     }
 }

@@ -1,7 +1,7 @@
 //! IMAP4rev1 dual-socket connection engine and IDLE push stream manager.
 
 use async_trait::async_trait;
-use nuncio_core::model::{Email, Folder};
+use nuncio_core::model::{Email, Folder, MessageIdentity, Placement, PlacementKey, RemoteIdentity};
 use nuncio_core::TlsMode;
 use std::fmt::Debug;
 use std::pin::Pin;
@@ -52,7 +52,10 @@ const MAX_MESSAGES_PER_FETCH_BATCH: usize = 200;
 /// would ever accept is pointless to transfer only to reject.
 const MAX_MESSAGE_BODY_BYTES: u32 = 25 * 1024 * 1024;
 
-use crate::backend::{MailBackend, RemoteMutationKind, RemoteMutationSpec};
+use crate::backend::{
+    FolderChanges, MailBackend, MutationOutcome, PlacedMessage, RemoteMutationKind,
+    RemoteMutationSpec,
+};
 use crate::parser::{MailError, MimeParserAdapter};
 
 /// Recover a raw IMAP UID from a [`RemoteMutationSpec::remote_id`] (a decimal
@@ -86,80 +89,191 @@ fn parse_uid_validity(uid_validity: &str) -> Option<u32> {
 /// first turns that into a safe full re-fetch instead.
 const CHECKPOINT_DELIM: char = ':';
 
-/// The `UID FETCH` sequence-set to issue for a folder sync, resolved from the
-/// stored checkpoint. Kept as a small typed value (rather than collapsing to a
-/// bare range string) so the distinct fall-back reasons stay observable: all
-/// of `Full`/`CorruptCheckpoint`/`UidValidityChanged` fetch `1:*`, but only the
-/// latter two are worth flagging, and tests can assert on which branch fired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FetchRange {
-    /// No prior checkpoint (first-ever sync of this folder): fetch everything.
-    Full,
-    /// A checkpoint was stored but could not be parsed (malformed, or a legacy
-    /// bare-UID checkpoint predating UIDVALIDITY tracking). Falls back to a
-    /// full fetch, surfaced (logged) rather than silently ignored.
-    CorruptCheckpoint,
-    /// The stored checkpoint's UIDVALIDITY no longer matches the mailbox's
-    /// current UIDVALIDITY (the mailbox was renumbered) or the server did not
-    /// report a current UIDVALIDITY to compare against. Stored UIDs are no
-    /// longer meaningful, so this falls back to a safe full re-fetch.
-    UidValidityChanged {
-        /// UIDVALIDITY recorded in the stored checkpoint.
-        stored: u32,
-        /// UIDVALIDITY the server reports now, if any.
-        current: Option<u32>,
-    },
-    /// A valid checkpoint whose UIDVALIDITY still matches: fetch only UIDs at
-    /// or above the stored boundary, i.e. messages that arrived since.
-    Incremental(u32),
+/// Scheme tag prefixing every checkpoint this build writes.
+///
+/// The stored value is `"v1:uidnext:{uidvalidity}:{uidnext}"`. The tag exists
+/// because the *next* checkpoint scheme -- a QRESYNC `(uidvalidity,
+/// highestmodseq)` pair -- has exactly the same shape as this one and a wholly
+/// different meaning. Untagged, an upgraded engine would hand a stored UIDNEXT
+/// to a server as a MODSEQ. UIDNEXT is normally the larger number, so the
+/// server would answer "nothing changed since" and every message below that
+/// point would never be enumerated again: silent, permanent mail loss with no
+/// error anywhere.
+///
+/// Anything that does not carry a scheme this build recognises -- an unknown
+/// tag, or a bare `"42:105"` written before tagging existed -- resolves to a
+/// full re-fetch. Over-fetching is recoverable; misreading a token is not.
+const CHECKPOINT_SCHEME_UIDNEXT: &str = "v1:uidnext";
+
+/// Read a `COPY`/`MOVE` outcome from whether the server proved it.
+///
+/// `COPYUID` present is proof and names the destination UIDs. Absent is
+/// **unknown, never failure**: RFC 6851 section 4.3 makes it only `SHOULD` for
+/// `MOVE`, RFC 4315 section 3 permits omitting it for a `UIDNOTSTICKY`
+/// destination or one the client cannot `SELECT`, and a UID set matching
+/// nothing succeeds having done nothing (RFC 3501 section 6.4.8). Those are
+/// indistinguishable from here, and the caller has to re-enumerate to tell.
+fn copy_outcome(copy_uid: Option<crate::imap_raw::CopyUid>, op: &str) -> MutationOutcome {
+    match copy_uid {
+        Some(proof) if !proof.destination_uids.is_empty() => MutationOutcome::Applied {
+            token: Some(
+                proof
+                    .destination_uids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        },
+        _ => MutationOutcome::Unknown {
+            reason: format!(
+                "the server accepted the UID {op} without a COPYUID, so nothing proves it moved"
+            ),
+        },
+    }
 }
 
-impl FetchRange {
-    /// Render the IMAP `UID FETCH` sequence-set. Every non-incremental variant
-    /// fetches all UIDs (`1:*`); an incremental checkpoint `n` fetches `n:*`,
-    /// which the server bounds to UIDs `>= n` -- a genuinely narrower fetch.
-    fn sequence_set(self) -> String {
+/// Scheme for a mod-sequence checkpoint: `"v2:modseq:{uidvalidity}:{modseq}"`.
+///
+/// Written by both mod-sequence rungs. QRESYNC and CONDSTORE differ in how
+/// changes are *requested*, not in what has to be remembered -- both resume
+/// from `(UIDVALIDITY, HIGHESTMODSEQ)` -- so one scheme covers both and a
+/// mailbox can move between them without invalidating its checkpoint.
+const CHECKPOINT_SCHEME_MODSEQ: &str = "v2:modseq";
+
+/// Which mechanism a folder sync can use, in descending order of precision.
+///
+/// Chosen **per mailbox, not per account**: `NOMODSEQ` is a mailbox property
+/// (RFC 7162 section 3.1.2.2), so one folder on a CONDSTORE server can still be
+/// unable to answer mod-sequence queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncRung {
+    /// `SELECT (QRESYNC …)` returns `VANISHED` plus changed messages in one
+    /// round trip. The server reports removals directly.
+    /// Fastmail/Cyrus, Dovecot.
+    Qresync,
+    /// `CHANGEDSINCE` narrows the fetch, but the server never volunteers
+    /// removals, so absence is found by diffing the full UID set.
+    /// **Gmail lives here**: it advertises CONDSTORE and not QRESYNC.
+    Condstore,
+    /// Neither extension. Changes and removals both come from a full UID-set
+    /// enumeration. **Exchange lives here.**
+    UidSetDiff,
+    /// No usable checkpoint: fetch everything. Also where an unreadable or
+    /// UIDVALIDITY-invalidated checkpoint lands.
+    Full,
+}
+
+/// What the server and this mailbox can actually do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MailboxSyncCapabilities {
+    /// Server advertises `QRESYNC` **and** this connection enabled it.
+    pub qresync_enabled: bool,
+    /// Server advertises `CONDSTORE`.
+    pub condstore: bool,
+    /// This mailbox reported a `HIGHESTMODSEQ`. A mailbox answering
+    /// `NOMODSEQ` has no mod-sequences to compare against no matter what the
+    /// server advertises.
+    pub mailbox_has_modseq: bool,
+}
+
+/// One folder-sync pass, resolved before any body is fetched.
+#[derive(Debug, Clone)]
+pub(crate) struct FolderSyncPlan {
+    /// The mechanism this pass negotiated.
+    pub rung: SyncRung,
+    pub uid_validity: Option<u32>,
+    pub uid_next: Option<u32>,
+    pub highest_modseq: Option<u64>,
+    /// UID set whose bodies this pass fetches. Empty means nothing changed.
+    pub body_sequence_set: String,
+    /// UIDs the server reported as gone (QRESYNC only).
+    pub vanished_uids: Vec<u32>,
+    /// The folder's complete UID set, when this pass enumerated it.
+    pub present_uids: Option<Vec<u32>>,
+}
+
+/// A checkpoint decoded into the resume point it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Checkpoint {
+    /// `v1:uidnext` -- resume from a UID boundary.
+    UidNext { uid_validity: u32, uid_next: u32 },
+    /// `v2:modseq` -- resume from a mod-sequence.
+    ModSeq { uid_validity: u32, modseq: u64 },
+}
+
+impl Checkpoint {
+    fn uid_validity(self) -> u32 {
         match self {
-            FetchRange::Full
-            | FetchRange::CorruptCheckpoint
-            | FetchRange::UidValidityChanged { .. } => "1:*".to_string(),
-            FetchRange::Incremental(uid) => format!("{}:*", uid),
+            Checkpoint::UidNext { uid_validity, .. } | Checkpoint::ModSeq { uid_validity, .. } => {
+                uid_validity
+            }
         }
     }
 }
 
-/// Resolve the fetch range from a stored `since_state` checkpoint and the
-/// mailbox's CURRENT UIDVALIDITY (as just reported by `SELECT`). `None` means
-/// no prior sync (full fetch). A checkpoint in the `"{uidvalidity}:{uidnext}"`
-/// format proceeds incrementally only when its UIDVALIDITY still matches the
-/// server's current one; a mismatch (mailbox renumbered) or a missing current
-/// UIDVALIDITY forces a safe full re-fetch. A malformed or legacy bare-number
-/// checkpoint is treated as corrupt (full fetch, flagged), never misread as a
-/// live UID boundary.
-fn resolve_fetch_range(since_state: Option<&str>, current_uid_validity: Option<u32>) -> FetchRange {
-    let Some(raw) = since_state else {
-        return FetchRange::Full;
-    };
-    let parsed = raw
-        .split_once(CHECKPOINT_DELIM)
-        .and_then(|(validity, uid)| {
-            Some((
-                validity.trim().parse::<u32>().ok()?,
-                uid.trim().parse::<u32>().ok()?,
-            ))
+/// Decode a stored checkpoint, or `None` when it carries no scheme this build
+/// recognises. An unrecognised token is never guessed at -- see
+/// [`CHECKPOINT_SCHEME_UIDNEXT`] for why that would lose mail silently.
+pub(crate) fn parse_checkpoint(raw: &str) -> Option<Checkpoint> {
+    let raw = raw.trim();
+    if let Some(body) = raw
+        .strip_prefix(CHECKPOINT_SCHEME_MODSEQ)
+        .and_then(|r| r.strip_prefix(CHECKPOINT_DELIM))
+    {
+        let (validity, modseq) = body.split_once(CHECKPOINT_DELIM)?;
+        return Some(Checkpoint::ModSeq {
+            uid_validity: validity.trim().parse().ok()?,
+            modseq: modseq.trim().parse().ok()?,
         });
-    let Some((stored_validity, uid)) = parsed else {
-        return FetchRange::CorruptCheckpoint;
-    };
-    if uid < 1 {
-        return FetchRange::CorruptCheckpoint;
     }
-    match current_uid_validity {
-        Some(current) if current == stored_validity => FetchRange::Incremental(uid),
-        current => FetchRange::UidValidityChanged {
-            stored: stored_validity,
-            current,
-        },
+    let body = raw
+        .strip_prefix(CHECKPOINT_SCHEME_UIDNEXT)
+        .and_then(|r| r.strip_prefix(CHECKPOINT_DELIM))?;
+    let (validity, uid) = body.split_once(CHECKPOINT_DELIM)?;
+    let uid_next: u32 = uid.trim().parse().ok()?;
+    if uid_next < 1 {
+        return None;
+    }
+    Some(Checkpoint::UidNext {
+        uid_validity: validity.trim().parse().ok()?,
+        uid_next,
+    })
+}
+
+/// Pick the rung for this pass.
+///
+/// A checkpoint whose UIDVALIDITY no longer matches the mailbox is not a
+/// downgrade to a lesser rung -- it is [`SyncRung::Full`]. UIDs restart after a
+/// UIDVALIDITY change, so every stored boundary refers to a different message
+/// than it did (RFC 3501 section 2.3.1.1).
+pub(crate) fn choose_rung(
+    checkpoint: Option<Checkpoint>,
+    current_uid_validity: Option<u32>,
+    caps: MailboxSyncCapabilities,
+) -> SyncRung {
+    let modseq_usable = caps.mailbox_has_modseq && (caps.qresync_enabled || caps.condstore);
+
+    let Some(checkpoint) = checkpoint else {
+        // No checkpoint means everything must be fetched regardless of what
+        // the server can do.
+        return SyncRung::Full;
+    };
+    let (Some(current), stored) = (current_uid_validity, checkpoint.uid_validity()) else {
+        return SyncRung::Full;
+    };
+    if current != stored {
+        return SyncRung::Full;
+    }
+
+    match checkpoint {
+        Checkpoint::ModSeq { .. } if modseq_usable && caps.qresync_enabled => SyncRung::Qresync,
+        Checkpoint::ModSeq { .. } if modseq_usable => SyncRung::Condstore,
+        // A mod-sequence checkpoint against a mailbox that can no longer
+        // answer mod-sequence queries (index loss, or a move to a server
+        // without the extension) has nothing to resume from.
+        Checkpoint::ModSeq { .. } => SyncRung::Full,
+        Checkpoint::UidNext { .. } => SyncRung::UidSetDiff,
     }
 }
 
@@ -672,7 +786,8 @@ impl ImapEngine {
     }
 
     /// Fetch and parse the messages in a folder over an active IMAP session,
-    /// returning the fetched messages and the new sync checkpoint.
+    /// returning each message with the occupancy it was found in, plus the new
+    /// sync checkpoint.
     ///
     /// `since_state` is the checkpoint returned by a previous sync of this
     /// folder, encoded as `"{uidvalidity}:{uidnext}"` (see [`CHECKPOINT_DELIM`]).
@@ -688,7 +803,7 @@ impl ImapEngine {
         folder_id: &str,
         since_state: Option<&str>,
         session: &mut async_imap::Session<S>,
-    ) -> Result<(Vec<Email>, String), MailError>
+    ) -> Result<FolderChanges, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -707,15 +822,21 @@ impl ImapEngine {
     /// exercise the multi-batch path with a small window instead of a huge
     /// fixture.
     ///
-    /// The sync runs in two phases so the transient working set stays bounded
-    /// regardless of mailbox size:
+    /// The sync runs in two phases:
     /// 1. A cheap enumeration ([`build_enumerate_command_query`]) reads every
     ///    in-range message's UID and `RFC822.SIZE` with NO body. Messages at or
     ///    below [`MAX_MESSAGE_BODY_BYTES`] are queued for a full-body fetch;
     ///    oversized ones are queued for a headers-only fetch and WARN-logged.
     /// 2. Each queue is drained in explicit UID-set batches of at most
-    ///    `batch_size`, so the full bodies held in memory at once never exceed
-    ///    one batch.
+    ///    `batch_size`, so a single `UID FETCH` request never asks the server
+    ///    for more than that many bodies at a time.
+    ///
+    /// Batching bounds the size of each *request*, not the memory this function
+    /// holds: the parsed messages accumulate into one `Vec` across every batch,
+    /// so the returned [`FolderChanges`] carries the whole in-range set and the
+    /// peak working set still scales with the mailbox. That is the shape a
+    /// caller receiving `FolderChanges` depends on, so anything downstream must
+    /// be sized for a whole folder rather than a batch.
     #[tracing::instrument(
         skip(self, session),
         fields(account_id = %self.account_id, folder_id = %folder_id),
@@ -727,35 +848,18 @@ impl ImapEngine {
         since_state: Option<&str>,
         session: &mut async_imap::Session<S>,
         batch_size: usize,
-    ) -> Result<(Vec<Email>, String), MailError>
+    ) -> Result<FolderChanges, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
-        let mailbox = session.select(folder_id).await.map_err(|e| {
-            MailError::ImapError(format!("failed to select folder '{}': {}", folder_id, e))
-        })?;
-        let server_uid_next = mailbox.uid_next;
-        let server_uid_validity = mailbox.uid_validity;
-
-        let range = resolve_fetch_range(since_state, server_uid_validity);
-        match range {
-            FetchRange::CorruptCheckpoint => tracing::warn!(
-                folder_id,
-                checkpoint = since_state.unwrap_or_default(),
-                "ignoring unparseable folder sync checkpoint; falling back to a full fetch"
-            ),
-            FetchRange::UidValidityChanged { stored, current } => tracing::warn!(
-                folder_id,
-                stored_uidvalidity = stored,
-                current_uidvalidity = current,
-                "mailbox UIDVALIDITY changed (renumbered); the stored UID checkpoint is no \
-                 longer valid, so re-fetching in full to avoid silently skipping messages"
-            ),
-            FetchRange::Full | FetchRange::Incremental(_) => {}
-        }
+        let plan = self
+            .plan_folder_sync(folder_id, since_state, session)
+            .await?;
+        let server_uid_next = plan.uid_next;
+        let server_uid_validity = plan.uid_validity;
 
         let batch_size = batch_size.max(1);
-        let sequence_set = range.sequence_set();
+        let sequence_set = plan.body_sequence_set.clone();
 
         // Phase 1: enumerate UIDs and sizes only -- no bodies transferred, so
         // this stays small even for an enormous mailbox.
@@ -857,57 +961,382 @@ impl ImapEngine {
         // safely falls back to a full fetch.
         let boundary_uid = server_uid_next
             .or_else(|| (max_uid_seen > 0).then_some(max_uid_seen.saturating_add(1)));
-        let new_checkpoint = match (server_uid_validity, boundary_uid) {
-            (Some(validity), Some(uid)) => format!("{}{}{}", validity, CHECKPOINT_DELIM, uid),
+        // A mod-sequence checkpoint is preferred whenever the mailbox can
+        // supply one, even after a full pass: writing it is what lets the NEXT
+        // sync use a higher rung than this one did.
+        let new_checkpoint = match (server_uid_validity, plan.highest_modseq, boundary_uid) {
+            (Some(validity), Some(modseq), _) => format!(
+                "{}{}{}{}{}",
+                CHECKPOINT_SCHEME_MODSEQ, CHECKPOINT_DELIM, validity, CHECKPOINT_DELIM, modseq
+            ),
+            (Some(validity), None, Some(uid)) => format!(
+                "{}{}{}{}{}",
+                CHECKPOINT_SCHEME_UIDNEXT, CHECKPOINT_DELIM, validity, CHECKPOINT_DELIM, uid
+            ),
             _ => since_state
                 .map(str::to_string)
                 .unwrap_or_else(|| "full-resync-required".to_string()),
         };
 
+        // Absence can only be reported against a known UIDVALIDITY generation.
+        //
+        // `[UIDVALIDITY]` is REQUIRED on a successful SELECT (RFC 3501 section
+        // 6.3.1), so this should not happen -- but a server that omits it would
+        // otherwise produce keys carrying an empty generation, and NONE of them
+        // would match placements stored under a real one. Under the documented
+        // contract ("delete any placement absent from `present`") that reads as
+        // "the folder holds nothing", and the caller deletes the whole mailbox.
+        // Saying nothing is the only safe answer, and it mirrors the checkpoint
+        // above, which likewise refuses to write a validity-less value.
+        let (removals, present) = match server_uid_validity {
+            Some(_) => {
+                // Both are occupancies, not messages: a UID that vanished from
+                // this folder says nothing about copies of the same message
+                // elsewhere.
+                let removals: Vec<PlacementKey> = plan
+                    .vanished_uids
+                    .iter()
+                    .map(|uid| self.placement_key_for(folder_id, server_uid_validity, *uid))
+                    .collect();
+                let present = plan.present_uids.as_ref().map(|uids| {
+                    uids.iter()
+                        .map(|uid| self.placement_key_for(folder_id, server_uid_validity, *uid))
+                        .collect()
+                });
+                (removals, present)
+            }
+            None => {
+                tracing::warn!(
+                    folder_id,
+                    vanished = plan.vanished_uids.len(),
+                    enumerated = plan.present_uids.as_ref().map_or(0, Vec::len),
+                    "mailbox reported no UIDVALIDITY, so this pass cannot key an occupancy and \
+                     reports no absence; upserts are still surfaced"
+                );
+                (Vec::new(), None)
+            }
+        };
+
         tracing::info!(
             account_id = %self.account_id,
             folder_id,
+            rung = ?plan.rung,
             fetched = emails.len(),
+            removed = removals.len(),
+            enumerated = present.as_ref().map_or(0, Vec::len),
             oversized = oversized_uids.len(),
             skipped = skipped_no_uid,
             "imap folder sync complete"
         );
 
-        Ok((emails, new_checkpoint))
+        Ok(FolderChanges {
+            upserts: emails,
+            removals,
+            present,
+            next_state: new_checkpoint,
+        })
     }
 
-    /// Build an [`Email`] from a full-body (or envelope-only) FETCH item. When
-    /// the item carries a `BODY[]` it is parsed as a full MIME message; when it
-    /// does not (a server that returned only the ENVELOPE), a minimal record is
-    /// synthesised from the envelope so the message is still surfaced honestly.
+    /// Negotiate capabilities, select the folder by the best available means,
+    /// and decide what this pass must fetch and what it can say about absence.
+    ///
+    /// This is where the ladder is applied. Ordering matters: `ENABLE` must
+    /// precede `SELECT` (RFC 7162 section 3.2.3 makes a server answer `BAD` to
+    /// a QRESYNC `SELECT` otherwise), and the rung cannot be finalised until
+    /// the mailbox has reported whether it has mod-sequences at all.
+    async fn plan_folder_sync<S>(
+        &self,
+        folder_id: &str,
+        since_state: Option<&str>,
+        session: &mut async_imap::Session<S>,
+    ) -> Result<FolderSyncPlan, MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
+        let (has_qresync, has_condstore) = {
+            let caps = session
+                .capabilities()
+                .await
+                .map_err(|e| MailError::ImapError(format!("CAPABILITY query failed: {e}")))?;
+            (caps.has_str("QRESYNC"), caps.has_str("CONDSTORE"))
+        };
+
+        let checkpoint = since_state.and_then(parse_checkpoint);
+        if since_state.is_some() && checkpoint.is_none() {
+            tracing::warn!(
+                folder_id,
+                checkpoint = since_state.unwrap_or_default(),
+                "folder sync checkpoint carries no scheme this build recognises; \
+                 re-fetching in full rather than guessing at its meaning"
+            );
+        }
+
+        // ENABLE before SELECT, and only when there is a mod-sequence
+        // checkpoint that a QRESYNC SELECT could actually resume from.
+        let qresync_enabled = match (has_qresync, checkpoint) {
+            (true, Some(Checkpoint::ModSeq { .. })) => {
+                crate::imap_raw::enable(session, &["QRESYNC"]).await?
+            }
+            _ => false,
+        };
+
+        // Try the QRESYNC SELECT when it is available. Per RFC 7162 section
+        // 3.2.5 a server whose UIDVALIDITY no longer matches simply ignores the
+        // QRESYNC parameters, so this is safe to attempt: the mismatch is
+        // detected below from the UIDVALIDITY it reports back.
+        let (selected, attempted_qresync) = match (qresync_enabled, checkpoint) {
+            (
+                true,
+                Some(Checkpoint::ModSeq {
+                    uid_validity,
+                    modseq,
+                }),
+            ) => (
+                crate::imap_raw::select_qresync(session, folder_id, uid_validity, modseq, None)
+                    .await?,
+                true,
+            ),
+            _ => {
+                let exchange =
+                    crate::imap_raw::run_collected(session, &format!("SELECT {folder_id}")).await?;
+                if !exchange.ok {
+                    return Err(MailError::ImapError(format!(
+                        "failed to select folder '{folder_id}': {}",
+                        exchange.information.as_deref().unwrap_or("no detail")
+                    )));
+                }
+                (exchange, false)
+            }
+        };
+
+        let caps = MailboxSyncCapabilities {
+            qresync_enabled,
+            condstore: has_condstore,
+            mailbox_has_modseq: selected.highest_modseq.is_some(),
+        };
+        let mut rung = choose_rung(checkpoint, selected.uid_validity, caps);
+        // The QRESYNC SELECT was issued optimistically; if the server answered
+        // with a different UIDVALIDITY it ignored our parameters, and anything
+        // it did report refers to a UID space that no longer exists.
+        if attempted_qresync && rung != SyncRung::Qresync {
+            tracing::warn!(
+                folder_id,
+                "QRESYNC resume was refused or the mailbox was renumbered; re-fetching in full"
+            );
+        }
+        if rung == SyncRung::Qresync && !attempted_qresync {
+            rung = SyncRung::Full;
+        }
+
+        let mut plan = FolderSyncPlan {
+            rung,
+            uid_validity: selected.uid_validity,
+            uid_next: selected.uid_next,
+            highest_modseq: selected.highest_modseq,
+            body_sequence_set: "1:*".to_string(),
+            vanished_uids: Vec::new(),
+            present_uids: None,
+        };
+
+        match rung {
+            SyncRung::Qresync => {
+                // The server volunteered both halves: what changed, and what
+                // disappeared. No enumeration of the folder is needed at all,
+                // which is the entire reason this rung is worth having.
+                plan.vanished_uids = selected.vanished_uids.clone();
+                plan.body_sequence_set = if selected.fetched_uids.is_empty() {
+                    // Nothing changed. An empty set would be a protocol error,
+                    // so ask for a range that cannot match instead of skipping
+                    // the fetch path.
+                    String::new()
+                } else {
+                    join_uid_batch(&selected.fetched_uids)
+                };
+            }
+            SyncRung::Condstore => {
+                let modseq = match checkpoint {
+                    Some(Checkpoint::ModSeq { modseq, .. }) => modseq,
+                    _ => 0,
+                };
+                let changed = self
+                    .enumerate_uids(session, folder_id, Some(modseq))
+                    .await?;
+                plan.body_sequence_set = if changed.is_empty() {
+                    String::new()
+                } else {
+                    join_uid_batch(&changed)
+                };
+                // CONDSTORE narrows the fetch but never reports removals, so
+                // absence has to be found by enumerating what remains.
+                plan.present_uids = Some(self.enumerate_uids(session, folder_id, None).await?);
+            }
+            SyncRung::UidSetDiff => {
+                // New arrivals come from the UID boundary; removals from the
+                // full UID set. Two cheap enumerations beat re-fetching bodies.
+                if let Some(Checkpoint::UidNext { uid_next, .. }) = checkpoint {
+                    plan.body_sequence_set = format!("{uid_next}:*");
+                }
+                plan.present_uids = Some(self.enumerate_uids(session, folder_id, None).await?);
+            }
+            SyncRung::Full => {
+                // Everything is fetched, so the same pass also establishes
+                // exactly what the folder holds.
+                plan.present_uids = Some(self.enumerate_uids(session, folder_id, None).await?);
+            }
+        }
+
+        Ok(plan)
+    }
+
+    /// List the folder's UIDs, optionally narrowed to those changed since
+    /// `changed_since`. Requests no bodies and no flags, so the cost is one
+    /// short line per message rather than a download.
+    async fn enumerate_uids<S>(
+        &self,
+        session: &mut async_imap::Session<S>,
+        folder_id: &str,
+        changed_since: Option<u64>,
+    ) -> Result<Vec<u32>, MailError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
+    {
+        let command = match changed_since {
+            Some(modseq) => format!("UID FETCH 1:* (UID) (CHANGEDSINCE {modseq})"),
+            None => "UID FETCH 1:* (UID)".to_string(),
+        };
+        let exchange = crate::imap_raw::run_collected(session, &command).await?;
+        if !exchange.ok {
+            return Err(MailError::ImapError(format!(
+                "UID enumeration of '{folder_id}' failed: {}",
+                exchange.information.as_deref().unwrap_or("no detail")
+            )));
+        }
+        let mut uids = exchange.fetched_uids;
+        uids.sort_unstable();
+        uids.dedup();
+        Ok(uids)
+    }
+
+    /// The placement key a UID addresses in this account/folder/UIDVALIDITY
+    /// scope, so absence reports name occupancies the same way stored rows do.
+    ///
+    /// Deliberately NOT a message key. A UID is only ever evidence about one
+    /// mailbox: `VANISHED` says this folder no longer holds this UID, not that
+    /// the message is gone -- another mailbox may still hold a copy. It also
+    /// could not be a message key even in principle, because the key a message
+    /// is stored under depends on which identity tier the server supported,
+    /// and a UID cannot reconstruct that.
+    fn placement_key_for(
+        &self,
+        folder_id: &str,
+        uid_validity: Option<u32>,
+        uid: u32,
+    ) -> PlacementKey {
+        PlacementKey {
+            account_id: self.account_id.clone(),
+            folder_id: folder_id.to_string(),
+            uid_validity: uid_validity.map(|v| v.to_string()).unwrap_or_default(),
+            remote_id: uid.to_string(),
+        }
+    }
+
+    /// Build the identity and placement for one fetched message.
+    ///
+    /// `EMAILID` and `X-GM-MSGID` are only present when the server advertised
+    /// `OBJECTID` / `X-GM-EXT-1` and the FETCH asked for them; when neither is
+    /// available the pair of `Message-ID` and content hash carries the identity,
+    /// and only if both are missing does this fall back to the folder-scoped
+    /// surrogate -- which is the one tier that does not survive a move.
+    ///
+    /// The server-supplied hints arrive as one [`RemoteIdentity`] rather than as
+    /// four loose arguments: they are already a single value at every call site,
+    /// and spreading them out buys no clarity while pushing this function past
+    /// the argument-count lint.
+    ///
+    /// In practice every IMAP call site passes `email_id: None` and
+    /// `gm_msgid: None` today, because the FETCH never asks for them, so this
+    /// engine reaches only the `Message-ID`+content tier or the surrogate. The
+    /// JMAP engine enters at the top tier, which means an IMAP-derived key and
+    /// a JMAP-derived key for the *same* message will not match. Syncing one
+    /// account over both engines does not converge on a shared identity yet.
+    fn place(
+        &self,
+        folder_id: &str,
+        uid_validity: &str,
+        remote_id: &str,
+        remote: RemoteIdentity<'_>,
+        read: bool,
+    ) -> (MessageIdentity, Placement) {
+        let identity =
+            Email::derive_message_key(&self.account_id, remote, folder_id, uid_validity, remote_id);
+        let placement = Placement {
+            account_id: self.account_id.clone(),
+            folder_id: folder_id.to_string(),
+            uid_validity: uid_validity.to_string(),
+            remote_id: remote_id.to_string(),
+            read,
+        };
+        (identity, placement)
+    }
+
+    /// Build a [`PlacedMessage`] from a full-body (or envelope-only) FETCH item.
+    /// When the item carries a `BODY[]` it is parsed as a full MIME message;
+    /// when it does not (a server that returned only the ENVELOPE), a minimal
+    /// record is synthesised from the envelope so the message is still surfaced
+    /// honestly.
     fn build_email_from_fetch(
         &self,
         folder_id: &str,
         server_uid_validity: Option<u32>,
         fetch_data: &async_imap::types::Fetch,
-    ) -> Result<Email, MailError> {
+    ) -> Result<PlacedMessage, MailError> {
         let uid_num = fetch_data.uid.unwrap_or(0);
         // The message is addressed on the wire by its UID within the folder's
-        // UIDVALIDITY scope; the persisted id is an opaque surrogate hashed over
-        // both plus the account and folder, so the same UID in another
-        // folder/account can never collide.
+        // UIDVALIDITY scope. That pair, with the folder and account, is the
+        // *placement*; the message's own identity is derived separately so that
+        // moving it between folders does not make it a different message.
         let remote_id = uid_num.to_string();
         let uid_validity = server_uid_validity
             .map(|v| v.to_string())
             .unwrap_or_default();
-        let email_id = Email::surrogate_id(&self.account_id, folder_id, &uid_validity, &remote_id);
 
         let is_read = fetch_data
             .flags()
             .any(|flag| matches!(flag, async_imap::types::Flag::Seen));
 
+        // EMAILID (RFC 8474) and X-GM-MSGID are not requested by the current
+        // FETCH, so identity rests on the Message-ID/content pair where the
+        // message carried a Message-ID and on the folder-scoped surrogate
+        // otherwise.
+        //
+        // Adding those FETCH items is not a local change. Every already-stored
+        // message would derive a DIFFERENT key on its next resync, so each
+        // re-reported placement repoints to the new key -- and the old message
+        // row, now referenced by nothing, is never reaped. Its decrypted body
+        // stays in the plaintext FTS index forever, which is exactly the leak
+        // the reap on placement removal exists to prevent. The FETCH items can
+        // only be requested once the repoint path reaps the message it
+        // abandons; until then, requesting them leaks plaintext.
         if let Some(raw_bytes) = fetch_data.body() {
-            let mut email =
-                MimeParserAdapter::parse_mime(&email_id, &self.account_id, folder_id, raw_bytes)?;
-            email.remote_id = remote_id;
-            email.uid_validity = uid_validity;
-            email.read = is_read;
-            return Ok(email);
+            let mut email = MimeParserAdapter::parse_mime(&self.account_id, raw_bytes)?;
+            let (identity, placement) = self.place(
+                folder_id,
+                &uid_validity,
+                &remote_id,
+                RemoteIdentity {
+                    email_id: None,
+                    gm_msgid: None,
+                    message_id: email.message_id.as_deref(),
+                    content_hash: email.content_hash.as_deref(),
+                },
+                is_read,
+            );
+            email.id = identity.key;
+            return Ok(PlacedMessage {
+                email,
+                source: identity.source,
+                placement,
+            });
         }
 
         let subject = fetch_data
@@ -931,24 +1360,51 @@ impl ImapEngine {
 
         let received_at = fetch_data.internal_date().map_or(0, |dt| dt.timestamp());
 
-        Ok(Email {
-            id: email_id,
-            account_id: self.account_id.clone(),
-            folder_id: folder_id.to_string(),
-            remote_id,
-            uid_validity,
-            subject,
-            sender,
-            recipient,
-            received_at,
-            read: is_read,
-            body_plain: None,
-            body_html: None,
-            attachments: Vec::new(),
+        // No body was returned, so there are no octets to hash -- but the
+        // ENVELOPE carries `message-id` (RFC 3501 section 7.4.2), so identity
+        // capture does not have to be skipped on this path.
+        let message_id = fetch_data
+            .envelope()
+            .and_then(|env| env.message_id.as_ref())
+            .and_then(|raw| Email::normalize_message_id(&String::from_utf8_lossy(raw)));
+
+        // With no octets there is no content hash, and the `Message-ID` alone
+        // is never enough to key on, so this path lands on the surrogate tier.
+        // That is the honest answer: nothing was fetched that could prove two
+        // folders hold the same message.
+        let (identity, placement) = self.place(
+            folder_id,
+            &uid_validity,
+            &remote_id,
+            RemoteIdentity {
+                email_id: None,
+                gm_msgid: None,
+                message_id: message_id.as_deref(),
+                content_hash: None,
+            },
+            is_read,
+        );
+
+        Ok(PlacedMessage {
+            email: Email {
+                id: identity.key,
+                account_id: self.account_id.clone(),
+                subject,
+                sender,
+                recipient,
+                received_at,
+                body_plain: None,
+                body_html: None,
+                attachments: Vec::new(),
+                message_id,
+                content_hash: None,
+            },
+            source: identity.source,
+            placement,
         })
     }
 
-    /// Build an [`Email`] for a message whose body exceeded
+    /// Build a [`PlacedMessage`] for a message whose body exceeded
     /// [`MAX_MESSAGE_BODY_BYTES`]: its headers (`BODY[HEADER]`) are parsed for
     /// honest metadata (subject/sender/date) but the oversized body is left
     /// unfetched, so the record carries an EMPTY body rather than a fabricated
@@ -959,30 +1415,50 @@ impl ImapEngine {
         folder_id: &str,
         server_uid_validity: Option<u32>,
         fetch_data: &async_imap::types::Fetch,
-    ) -> Email {
+    ) -> PlacedMessage {
         let uid_num = fetch_data.uid.unwrap_or(0);
         let remote_id = uid_num.to_string();
         let uid_validity = server_uid_validity
             .map(|v| v.to_string())
             .unwrap_or_default();
-        let email_id = Email::surrogate_id(&self.account_id, folder_id, &uid_validity, &remote_id);
         let is_read = fetch_data
             .flags()
             .any(|flag| matches!(flag, async_imap::types::Flag::Seen));
 
         if let Some(header_bytes) = fetch_data.header() {
-            if let Ok(mut email) =
-                MimeParserAdapter::parse_mime(&email_id, &self.account_id, folder_id, header_bytes)
-            {
+            if let Ok(mut email) = MimeParserAdapter::parse_mime(&self.account_id, header_bytes) {
                 // A headers-only parse yields no body, but be explicit that the
                 // oversized body was intentionally not fetched.
-                email.remote_id = remote_id;
-                email.uid_validity = uid_validity;
-                email.read = is_read;
                 email.body_plain = None;
                 email.body_html = None;
                 email.attachments = Vec::new();
-                return email;
+                // `parse_mime` hashed the header section it was handed, but
+                // `content_hash` is defined over a message's FULL octets.
+                // Keeping that value would publish a hash that silently means
+                // something else, so drop it; the `Message-ID` it recovered
+                // from those headers is still correct and is kept. Dropping it
+                // also costs this message the content tier -- a `Message-ID`
+                // never keys on its own -- so an oversized message identifies
+                // by its folder-scoped surrogate until the octets are fetched.
+                email.content_hash = None;
+                let (identity, placement) = self.place(
+                    folder_id,
+                    &uid_validity,
+                    &remote_id,
+                    RemoteIdentity {
+                        email_id: None,
+                        gm_msgid: None,
+                        message_id: email.message_id.as_deref(),
+                        content_hash: None,
+                    },
+                    is_read,
+                );
+                email.id = identity.key;
+                return PlacedMessage {
+                    email,
+                    source: identity.source,
+                    placement,
+                };
             }
         }
 
@@ -990,20 +1466,31 @@ impl ImapEngine {
         // `build_email_from_fetch` cannot error on this path (no body to parse),
         // but if it ever did, surface a minimal honest record rather than panic.
         self.build_email_from_fetch(folder_id, server_uid_validity, fetch_data)
-            .unwrap_or_else(|_| Email {
-                id: email_id,
-                account_id: self.account_id.clone(),
-                folder_id: folder_id.to_string(),
-                remote_id,
-                uid_validity,
-                subject: "No Subject".to_string(),
-                sender: "unknown@nuncio.mx".to_string(),
-                recipient: "me@nuncio.mx".to_string(),
-                received_at: 0,
-                read: is_read,
-                body_plain: None,
-                body_html: None,
-                attachments: Vec::new(),
+            .unwrap_or_else(|_| {
+                let (identity, placement) = self.place(
+                    folder_id,
+                    &uid_validity,
+                    &remote_id,
+                    RemoteIdentity::default(),
+                    is_read,
+                );
+                PlacedMessage {
+                    email: Email {
+                        id: identity.key,
+                        account_id: self.account_id.clone(),
+                        subject: "No Subject".to_string(),
+                        sender: "unknown@nuncio.mx".to_string(),
+                        recipient: "me@nuncio.mx".to_string(),
+                        received_at: 0,
+                        body_plain: None,
+                        body_html: None,
+                        attachments: Vec::new(),
+                        message_id: None,
+                        content_hash: None,
+                    },
+                    source: identity.source,
+                    placement,
+                }
             })
     }
 
@@ -1015,7 +1502,7 @@ impl ImapEngine {
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<FolderChanges, MailError> {
         let (username, password) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
             _ => {
@@ -1061,7 +1548,7 @@ impl ImapEngine {
         &self,
         spec: &RemoteMutationSpec,
         session: &mut async_imap::Session<S>,
-    ) -> Result<(), MailError>
+    ) -> Result<MutationOutcome, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -1129,52 +1616,80 @@ impl ImapEngine {
         match &spec.kind {
             RemoteMutationKind::SetFlagged { value } => {
                 let op = if *value { "+FLAGS" } else { "-FLAGS" };
-                self.uid_store_flags(session, &uid_set, op, "\\Flagged")
-                    .await
+                let exchange = crate::imap_raw::run_collected(
+                    session,
+                    &format!("UID STORE {uid_set} {op} (\\Flagged)"),
+                )
+                .await?;
+                if let Some(conflicting) = exchange.modified_uids() {
+                    return Ok(MutationOutcome::Conflict {
+                        observed: format!("server reported MODIFIED for uid(s) {conflicting:?}"),
+                    });
+                }
+                if !exchange.ok {
+                    return Err(MailError::ImapError(format!(
+                        "UID STORE {op} for uid {uid_set} failed: {}",
+                        exchange.information.as_deref().unwrap_or("no detail")
+                    )));
+                }
+                // An untagged FETCH echoing the new flags is proof. Its absence
+                // is not failure: RFC 3501 section 6.4.6 lets a server suppress
+                // it, and a store that changes nothing legitimately produces
+                // none -- so the honest answer is that nothing was established.
+                if exchange.fetched_uids.is_empty() {
+                    Ok(MutationOutcome::Unknown {
+                        reason: "the server acknowledged the store without echoing the message"
+                            .to_string(),
+                    })
+                } else {
+                    Ok(MutationOutcome::Applied { token: None })
+                }
             }
             RemoteMutationKind::Copy { to_folder } => {
-                session.uid_copy(&uid_set, to_folder).await.map_err(|e| {
-                    MailError::ImapError(format!(
+                let exchange = crate::imap_raw::run_collected(
+                    session,
+                    &format!("UID COPY {uid_set} {to_folder}"),
+                )
+                .await?;
+                if !exchange.ok {
+                    return Err(MailError::ImapError(format!(
                         "UID COPY of '{}' to '{}' failed: {}",
-                        spec.message_id, to_folder, e
-                    ))
-                })
+                        spec.message_id,
+                        to_folder,
+                        exchange.information.as_deref().unwrap_or("no detail")
+                    )));
+                }
+                Ok(copy_outcome(exchange.copy_uid, "COPY"))
             }
             RemoteMutationKind::Move { to_folder } => {
                 self.uid_move(session, &uid_set, to_folder, &spec.message_id)
                     .await
             }
             RemoteMutationKind::Delete => {
-                self.uid_store_flags(session, &uid_set, "+FLAGS", "\\Deleted")
-                    .await?;
-                self.uid_expunge_scoped(session, &uid_set).await
+                let store = crate::imap_raw::run_collected(
+                    session,
+                    &format!("UID STORE {uid_set} +FLAGS (\\Deleted)"),
+                )
+                .await?;
+                if !store.ok {
+                    return Err(MailError::ImapError(format!(
+                        "UID STORE +FLAGS (\\Deleted) for uid {uid_set} failed: {}",
+                        store.information.as_deref().unwrap_or("no detail")
+                    )));
+                }
+                let expunged = self.uid_expunge_scoped(session, &uid_set).await?;
+                // Under QRESYNC the removal is reported as VANISHED rather than
+                // EXPUNGE (RFC 6851 section 4.4), so counting only EXPUNGE
+                // would report failure on every successful delete.
+                if expunged {
+                    Ok(MutationOutcome::Applied { token: None })
+                } else {
+                    Ok(MutationOutcome::Unknown {
+                        reason: "the server reported no removal for the expunged uid".to_string(),
+                    })
+                }
             }
         }
-    }
-
-    /// Issue a `UID STORE {uid} {op} ({flag})` and drain its untagged `FETCH`
-    /// responses, surfacing any protocol error. `op` is `+FLAGS`/`-FLAGS`.
-    async fn uid_store_flags<S>(
-        &self,
-        session: &mut async_imap::Session<S>,
-        uid_set: &str,
-        op: &str,
-        flag: &str,
-    ) -> Result<(), MailError>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
-    {
-        let query = format!("{op} ({flag})");
-        let updates = session.uid_store(uid_set, &query).await.map_err(|e| {
-            MailError::ImapError(format!("UID STORE {query} for uid {uid_set} failed: {e}"))
-        })?;
-        tokio::pin!(updates);
-        while let Some(item) = updates.next().await {
-            item.map_err(|e| {
-                MailError::ImapError(format!("reading UID STORE response failed: {e}"))
-            })?;
-        }
-        Ok(())
     }
 
     /// Permanently remove ONLY the target `uid_set` from the selected folder
@@ -1191,7 +1706,7 @@ impl ImapEngine {
         &self,
         session: &mut async_imap::Session<S>,
         uid_set: &str,
-    ) -> Result<(), MailError>
+    ) -> Result<bool, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -1209,17 +1724,19 @@ impl ImapEngine {
             )));
         }
 
-        let expunged = session
-            .uid_expunge(uid_set)
-            .await
-            .map_err(|e| MailError::ImapError(format!("UID EXPUNGE {uid_set} failed: {e}")))?;
-        tokio::pin!(expunged);
-        while let Some(item) = expunged.next().await {
-            item.map_err(|e| {
-                MailError::ImapError(format!("reading UID EXPUNGE response failed: {e}"))
-            })?;
+        // Collected rather than streamed, because a QRESYNC-enabled server
+        // answers with VANISHED instead of EXPUNGE (RFC 6851 section 4.4) and
+        // the typed expunge stream only yields the latter. Reading just that
+        // stream reports "nothing removed" on every successful delete.
+        let exchange =
+            crate::imap_raw::run_collected(session, &format!("UID EXPUNGE {uid_set}")).await?;
+        if !exchange.ok {
+            return Err(MailError::ImapError(format!(
+                "UID EXPUNGE {uid_set} failed: {}",
+                exchange.information.as_deref().unwrap_or("no detail")
+            )));
         }
-        Ok(())
+        Ok(!exchange.vanished_uids.is_empty() || !exchange.expunged_seqs.is_empty())
     }
 
     /// Move a message by UID, preferring RFC 6851 `UID MOVE` and falling back
@@ -1233,7 +1750,7 @@ impl ImapEngine {
         uid_set: &str,
         to_folder: &str,
         message_id: &str,
-    ) -> Result<(), MailError>
+    ) -> Result<MutationOutcome, MailError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + Debug + 'static,
     {
@@ -1245,27 +1762,53 @@ impl ImapEngine {
         drop(caps);
 
         if has_move {
-            return session.uid_mv(uid_set, to_folder).await.map_err(|e| {
-                MailError::ImapError(format!(
-                    "UID MOVE of '{message_id}' to '{to_folder}' failed: {e}"
-                ))
-            });
+            let exchange =
+                crate::imap_raw::run_collected(session, &format!("UID MOVE {uid_set} {to_folder}"))
+                    .await?;
+            if !exchange.ok {
+                return Err(MailError::ImapError(format!(
+                    "UID MOVE of '{message_id}' to '{to_folder}' failed: {}",
+                    exchange.information.as_deref().unwrap_or("no detail")
+                )));
+            }
+            return Ok(copy_outcome(exchange.copy_uid, "MOVE"));
         }
 
-        session.uid_copy(uid_set, to_folder).await.map_err(|e| {
-            MailError::ImapError(format!(
-                "UID COPY (move fallback) of '{message_id}' to '{to_folder}' failed: {e}"
-            ))
-        })?;
-        self.uid_store_flags(session, uid_set, "+FLAGS", "\\Deleted")
-            .await?;
-        self.uid_expunge_scoped(session, uid_set).await
+        let copied =
+            crate::imap_raw::run_collected(session, &format!("UID COPY {uid_set} {to_folder}"))
+                .await?;
+        if !copied.ok {
+            return Err(MailError::ImapError(format!(
+                "UID COPY (move fallback) of '{message_id}' to '{to_folder}' failed: {}",
+                copied.information.as_deref().unwrap_or("no detail")
+            )));
+        }
+        // The copy half is what the destination proof refers to; the source
+        // removal below is separately verified, and a failure there leaves a
+        // duplicate rather than a lost message.
+        let outcome = copy_outcome(copied.copy_uid, "COPY");
+        let stored = crate::imap_raw::run_collected(
+            session,
+            &format!("UID STORE {uid_set} +FLAGS (\\Deleted)"),
+        )
+        .await?;
+        if !stored.ok {
+            return Err(MailError::ImapError(format!(
+                "UID STORE +FLAGS (\\Deleted) during move fallback failed: {}",
+                stored.information.as_deref().unwrap_or("no detail")
+            )));
+        }
+        self.uid_expunge_scoped(session, uid_set).await?;
+        Ok(outcome)
     }
 
     /// Apply a remote mutation over a freshly authenticated session. See
     /// [`Self::apply_mutation_with_session`] for the UIDVALIDITY guard and the
     /// per-action protocol commands.
-    pub async fn apply_remote_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+    pub async fn apply_remote_mutation(
+        &self,
+        spec: &RemoteMutationSpec,
+    ) -> Result<MutationOutcome, MailError> {
         let (username, password) = match (&self.username, &self.password) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
             _ => {
@@ -1423,15 +1966,18 @@ impl MailBackend for ImapEngine {
         Ok(folders)
     }
 
-    async fn sync_messages(
+    async fn sync_changes(
         &self,
         folder_id: &str,
         since_state: Option<&str>,
-    ) -> Result<(Vec<Email>, String), MailError> {
+    ) -> Result<FolderChanges, MailError> {
         self.sync_folder_messages(folder_id, since_state).await
     }
 
-    async fn apply_mutation(&self, spec: &RemoteMutationSpec) -> Result<(), MailError> {
+    async fn apply_mutation(
+        &self,
+        spec: &RemoteMutationSpec,
+    ) -> Result<MutationOutcome, MailError> {
         self.apply_remote_mutation(spec).await
     }
 }
@@ -1439,6 +1985,7 @@ impl MailBackend for ImapEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nuncio_core::model::IdentitySource;
     use tracing_test::traced_test;
 
     #[tokio::test]
@@ -1492,7 +2039,16 @@ mod tests {
             while let Some(line) = read_scripted_line(&mut socket).await {
                 let tag = line.split_whitespace().next().unwrap_or("").to_string();
                 let upper = line.to_ascii_uppercase();
-                if upper.contains("LOGIN") {
+                if upper.contains("CAPABILITY") {
+                    let _ = socket
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                } else if upper.contains("LOGIN") {
                     let _ = socket
                         .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
                         .await;
@@ -1526,76 +2082,8 @@ mod tests {
         assert_eq!(folders[1].id, "Archive");
     }
 
-    #[test]
-    fn resolve_fetch_range_distinguishes_none_valid_corrupt_and_renumbered_checkpoints() {
-        // First-ever sync: full history (current UIDVALIDITY irrelevant).
-        assert_eq!(resolve_fetch_range(None, Some(1)), FetchRange::Full);
-        assert_eq!(resolve_fetch_range(None, None).sequence_set(), "1:*");
-
-        // Valid checkpoint whose UIDVALIDITY still matches: narrowed fetch.
-        assert_eq!(
-            resolve_fetch_range(Some("1:105"), Some(1)),
-            FetchRange::Incremental(105)
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("1:105"), Some(1)).sequence_set(),
-            "105:*"
-        );
-        assert_eq!(
-            resolve_fetch_range(Some(" 7 : 42 "), Some(7)),
-            FetchRange::Incremental(42)
-        );
-
-        // UIDVALIDITY changed (mailbox renumbered) or the server reported none
-        // to compare against: MUST fall back to a full fetch, distinctly, so a
-        // renumber can never silently skip the low new UIDs.
-        assert_eq!(
-            resolve_fetch_range(Some("1:105"), Some(2)),
-            FetchRange::UidValidityChanged {
-                stored: 1,
-                current: Some(2)
-            }
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("1:105"), Some(2)).sequence_set(),
-            "1:*"
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("1:105"), None),
-            FetchRange::UidValidityChanged {
-                stored: 1,
-                current: None
-            }
-        );
-
-        // Malformed or legacy bare-number (pre-UIDVALIDITY) checkpoints are
-        // corrupt -> full fetch, never misread as a live UID boundary.
-        assert_eq!(
-            resolve_fetch_range(Some(""), Some(1)),
-            FetchRange::CorruptCheckpoint
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("105"), Some(1)),
-            FetchRange::CorruptCheckpoint,
-            "a legacy bare-number checkpoint must not be read as a UID boundary"
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("1:0"), Some(1)),
-            FetchRange::CorruptCheckpoint
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("not:auid"), Some(1)),
-            FetchRange::CorruptCheckpoint
-        );
-        assert_eq!(
-            resolve_fetch_range(Some("not-a-uid"), Some(1)).sequence_set(),
-            "1:*"
-        );
-    }
-
     /// Read a single CRLF-terminated line from a scripted-server stream,
-    /// returning `None` at EOF (client hung up). Used only by the in-memory
-    /// duplex tests below; the real fetch path never parses raw lines.
+    /// returning `None` at EOF (client hung up).
     async fn read_scripted_line<R: AsyncRead + Unpin>(reader: &mut R) -> Option<String> {
         let mut buf = Vec::new();
         let mut byte = [0u8; 1];
@@ -1621,6 +2109,159 @@ mod tests {
         }
     }
 
+    /// The body/size fetches from a captured command list, excluding the
+    /// `(UID)`-only enumeration a non-QRESYNC rung issues to find removals.
+    /// That pass is expected and says nothing about how the body fetch was
+    /// narrowed, which is what these tests are about.
+    fn body_fetch_ranges(all: &[String]) -> Vec<String> {
+        all.iter()
+            .filter(|c| !c.to_ascii_uppercase().ends_with("(UID)"))
+            .cloned()
+            .collect()
+    }
+
+    /// Capabilities that can reach every rung, so a test only has to vary the
+    /// one thing it is about.
+    fn full_caps() -> MailboxSyncCapabilities {
+        MailboxSyncCapabilities {
+            qresync_enabled: true,
+            condstore: true,
+            mailbox_has_modseq: true,
+        }
+    }
+
+    #[test]
+    fn checkpoints_round_trip_through_their_scheme() {
+        assert_eq!(
+            parse_checkpoint("v2:modseq:42:900"),
+            Some(Checkpoint::ModSeq {
+                uid_validity: 42,
+                modseq: 900
+            })
+        );
+        assert_eq!(
+            parse_checkpoint("v1:uidnext:42:105"),
+            Some(Checkpoint::UidNext {
+                uid_validity: 42,
+                uid_next: 105
+            })
+        );
+        assert_eq!(
+            parse_checkpoint("v1:uidnext: 7 : 42 "),
+            Some(Checkpoint::UidNext {
+                uid_validity: 7,
+                uid_next: 42
+            })
+        );
+    }
+
+    #[test]
+    fn an_untagged_or_unknown_scheme_checkpoint_is_not_interpreted() {
+        // A QRESYNC checkpoint is (uidvalidity, highestmodseq) -- the same
+        // shape as (uidvalidity, uidnext) and a different meaning. Reading one
+        // as the other hands the server a UIDNEXT where it expects a MODSEQ;
+        // UIDNEXT is normally the larger number, so the server answers
+        // "nothing changed" and everything below is never enumerated again.
+        for token in [
+            "42:105",           // pre-tagging
+            "v3:future:42:105", // a scheme from a later build
+            "v1:modseq:42:105", // tag-shaped but not ours
+            "v1:42:105",        // truncated tag
+            "v1:uidnext:42:0",  // a UID boundary below 1 is not addressable
+            "",
+        ] {
+            assert_eq!(
+                parse_checkpoint(token),
+                None,
+                "token {token:?} must not be interpreted"
+            );
+            assert_eq!(
+                choose_rung(parse_checkpoint(token), Some(42), full_caps()),
+                SyncRung::Full,
+                "an uninterpretable token must re-fetch everything"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rung_is_chosen_from_the_checkpoint_and_what_the_mailbox_supports() {
+        let modseq = parse_checkpoint("v2:modseq:42:900");
+        let uidnext = parse_checkpoint("v1:uidnext:42:105");
+
+        // Fastmail/Cyrus, Dovecot: the server states removals directly.
+        assert_eq!(
+            choose_rung(modseq, Some(42), full_caps()),
+            SyncRung::Qresync
+        );
+
+        // Gmail: CONDSTORE without QRESYNC. This is the rung a two-rung ladder
+        // would have skipped, pushing the largest provider onto full sweeps.
+        assert_eq!(
+            choose_rung(
+                modseq,
+                Some(42),
+                MailboxSyncCapabilities {
+                    qresync_enabled: false,
+                    condstore: true,
+                    mailbox_has_modseq: true
+                }
+            ),
+            SyncRung::Condstore
+        );
+
+        // Exchange: neither extension, so a UID-set diff is all that is left.
+        assert_eq!(
+            choose_rung(
+                uidnext,
+                Some(42),
+                MailboxSyncCapabilities {
+                    qresync_enabled: false,
+                    condstore: false,
+                    mailbox_has_modseq: false
+                }
+            ),
+            SyncRung::UidSetDiff
+        );
+
+        // NOMODSEQ is a MAILBOX property (RFC 7162 3.1.2.2): a mod-sequence
+        // checkpoint against a mailbox that cannot answer mod-sequence queries
+        // has nothing to resume from, whatever the server advertises.
+        assert_eq!(
+            choose_rung(
+                modseq,
+                Some(42),
+                MailboxSyncCapabilities {
+                    qresync_enabled: true,
+                    condstore: true,
+                    mailbox_has_modseq: false
+                }
+            ),
+            SyncRung::Full
+        );
+
+        // No checkpoint at all.
+        assert_eq!(choose_rung(None, Some(42), full_caps()), SyncRung::Full);
+    }
+
+    #[test]
+    fn a_uidvalidity_change_forces_a_full_pass_from_every_rung() {
+        // UIDs restart after a UIDVALIDITY change (RFC 3501 2.3.1.1), so every
+        // stored boundary now names a different message. This is not a
+        // downgrade to a lesser rung; nothing stored can be resumed from.
+        for token in ["v2:modseq:42:900", "v1:uidnext:42:105"] {
+            assert_eq!(
+                choose_rung(parse_checkpoint(token), Some(43), full_caps()),
+                SyncRung::Full,
+                "{token} must not survive a renumbering"
+            );
+            assert_eq!(
+                choose_rung(parse_checkpoint(token), None, full_caps()),
+                SyncRung::Full,
+                "{token}: a server that reports no UIDVALIDITY cannot be resumed against"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn incremental_sync_narrows_the_fetch_range_on_the_second_pass() {
         // Drives a real `async_imap::Session` over an in-memory duplex pair
@@ -1642,6 +2283,17 @@ mod tests {
                     }
                     let _ = io
                         .write_all(format!("{tag} OK FETCH completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("CAPABILITY") {
+                    // The planner negotiates capabilities before selecting; a
+                    // script that never answers this blocks the client forever.
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
                         .await;
                 } else if upper.contains("LOGIN") {
                     let _ = io
@@ -1674,26 +2326,33 @@ mod tests {
 
         // First sync: no checkpoint -> full history; returns
         // "{uidvalidity}:{uidnext}" from real server state.
-        let (first, checkpoint) = engine
+        let first_pass = engine
             .sync_folder_messages_with_session("INBOX", None, &mut session)
             .await
             .expect("first sync succeeds");
+        let (first, checkpoint) = (first_pass.upserts, first_pass.next_state);
         assert!(first.is_empty());
-        assert_eq!(checkpoint, "1:105");
+        assert_eq!(checkpoint, "v1:uidnext:1:105");
 
         // Second sync: feed back the checkpoint; UIDVALIDITY still matches
         // (1), so the fetch is narrowed.
-        let (_second, checkpoint2) = engine
+        let __changes = engine
             .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
             .await
             .expect("second sync succeeds");
-        assert_eq!(checkpoint2, "1:105");
+        let (_second, checkpoint2) = (__changes.upserts, __changes.next_state);
+        assert_eq!(checkpoint2, "v1:uidnext:1:105");
 
         drop(session);
         let _ = server.await;
 
-        let ranges = fetch_ranges.lock().expect("lock captured ranges");
-        assert_eq!(ranges.len(), 2, "expected exactly two UID FETCH commands");
+        let all = fetch_ranges.lock().expect("lock captured ranges");
+        let ranges = body_fetch_ranges(&all);
+        assert_eq!(
+            ranges.len(),
+            2,
+            "expected one body fetch per sync, got: {all:?}"
+        );
         assert!(
             ranges[0].contains("1:*"),
             "first sync must fetch full history, got: {}",
@@ -1712,17 +2371,25 @@ mod tests {
     }
 
     /// The RFC822 body of a scripted fixture message.
+    ///
+    /// Carries a `Message-ID` so the full-body path reaches the content tier.
+    /// That is what makes the headers-only path's tier meaningful to assert:
+    /// the same message identifies differently there, and only because the
+    /// header-section hash is deliberately discarded.
     fn fixture_body(uid: u32) -> String {
         format!(
             "Subject: Message {uid}\r\nFrom: sender{uid}@example.test\r\n\
+             Message-ID: <msg{uid}@example.test>\r\n\
              To: me@example.test\r\n\r\nBody of message {uid}.\r\n"
         )
     }
 
-    /// The header block (no body) of a scripted fixture message.
+    /// The header block (no body) of a scripted fixture message. Same headers
+    /// as [`fixture_body`], including the `Message-ID`.
     fn fixture_header(uid: u32) -> String {
         format!(
             "Subject: Message {uid}\r\nFrom: sender{uid}@example.test\r\n\
+             Message-ID: <msg{uid}@example.test>\r\n\
              To: me@example.test\r\n\r\n"
         )
     }
@@ -1756,13 +2423,17 @@ mod tests {
     /// and records every `UID FETCH` command line the client issued so a test
     /// can assert on the exact batching. Returns the synced emails, the new
     /// checkpoint, and the captured `UID FETCH` command lines.
+    ///
+    /// `uidvalidity` is an `Option` so a test can script the one thing RFC 3501
+    /// section 6.3.1 says a SELECT must never do -- omit `[UIDVALIDITY]` -- and
+    /// check the sync stays safe when a server does it anyway.
     async fn run_batched_sync(
         messages: Vec<(u32, u32)>,
-        uidvalidity: u32,
+        uidvalidity: Option<u32>,
         uidnext: u32,
         since_state: Option<String>,
         batch_size: usize,
-    ) -> (Vec<Email>, String, Vec<String>) {
+    ) -> (FolderChanges, Vec<String>) {
         let (client_io, server_io) = tokio::io::duplex(65536);
         let fetch_cmds = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let server_cmds = fetch_cmds.clone();
@@ -1808,14 +2479,29 @@ mod tests {
                     }
                     resp.push_str(&format!("{tag} OK FETCH completed\r\n"));
                     let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("CAPABILITY") {
+                    // The planner negotiates capabilities before selecting; a
+                    // script that never answers this blocks the client forever.
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
                 } else if upper.contains("LOGIN") {
                     let _ = io
                         .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
                         .await;
                 } else if upper.contains("SELECT") {
+                    let validity_line = match uidvalidity {
+                        Some(v) => format!("* OK [UIDVALIDITY {v}] ok\r\n"),
+                        None => String::new(),
+                    };
                     let resp = format!(
                         "* FLAGS (\\Seen)\r\n* {exists} EXISTS\r\n* 0 RECENT\r\n\
-                         * OK [UIDVALIDITY {uidvalidity}] ok\r\n* OK [UIDNEXT {uidnext}] ok\r\n\
+                         {validity_line}* OK [UIDNEXT {uidnext}] ok\r\n\
                          {tag} OK [READ-WRITE] SELECT done\r\n"
                     );
                     let _ = io.write_all(resp.as_bytes()).await;
@@ -1835,7 +2521,7 @@ mod tests {
             .map_err(|(e, _)| e)
             .expect("scripted login succeeds");
         let engine = ImapEngine::new("acct-1", "example.test", 993);
-        let (emails, checkpoint) = engine
+        let changes = engine
             .sync_folder_messages_batched("INBOX", since_state.as_deref(), &mut session, batch_size)
             .await
             .expect("batched sync succeeds");
@@ -1843,7 +2529,7 @@ mod tests {
         let _ = server.await;
 
         let cmds = fetch_cmds.lock().expect("lock captured commands").clone();
-        (emails, checkpoint, cmds)
+        (changes, cmds)
     }
 
     /// The captured `UID FETCH` command lines that pulled FULL bodies (a
@@ -1865,10 +2551,11 @@ mod tests {
         // `1:*` body fetch. The enumeration discovers the UIDs; the bodies are
         // then fetched in explicit UID-set chunks of at most the batch size.
         let messages: Vec<(u32, u32)> = (1..=5).map(|u| (u, 100)).collect();
-        let (emails, checkpoint, cmds) = run_batched_sync(messages, 1, 6, None, 2).await;
+        let (changes, cmds) = run_batched_sync(messages, Some(1), 6, None, 2).await;
+        let emails = &changes.upserts;
 
         assert_eq!(emails.len(), 5, "every message must be synced");
-        assert_eq!(checkpoint, "1:6");
+        assert_eq!(changes.next_state, "v1:uidnext:1:6");
 
         let body_cmds = body_fetch_commands(&cmds);
         assert_eq!(
@@ -1898,7 +2585,8 @@ mod tests {
         // normal messages get full bodies.
         let huge = MAX_MESSAGE_BODY_BYTES + 1;
         let messages: Vec<(u32, u32)> = vec![(1, 100), (2, huge), (3, 100)];
-        let (emails, _checkpoint, cmds) = run_batched_sync(messages, 1, 4, None, 200).await;
+        let (changes, cmds) = run_batched_sync(messages, Some(1), 4, None, 200).await;
+        let emails = &changes.upserts;
 
         assert_eq!(emails.len(), 3, "no message may be silently dropped");
 
@@ -1923,26 +2611,53 @@ mod tests {
         // body -- never a fabricated one.
         let oversized = emails
             .iter()
-            .find(|e| e.remote_id == "2")
+            .find(|e| e.placement.remote_id == "2")
             .expect("oversized message must be present");
         assert!(
-            oversized.body_plain.is_none() && oversized.body_html.is_none(),
+            oversized.email.body_plain.is_none() && oversized.email.body_html.is_none(),
             "oversized message must carry no body, got: {oversized:?}"
         );
         assert!(
-            oversized.subject.contains('2'),
+            oversized.email.subject.contains('2'),
             "oversized message must keep honest header metadata, got: {oversized:?}"
+        );
+
+        // The header section it WAS given hashes to something, but that hash
+        // covers only the headers, not the message. Publishing it would key the
+        // message on the wrong octets -- and then the same message would key
+        // differently once its body was finally fetched, resurrecting it as a
+        // duplicate. So the hash is dropped, which costs this message the
+        // content tier even though it carried a Message-ID.
+        assert!(
+            oversized.email.message_id.is_some(),
+            "the headers-only parse must still recover the Message-ID"
+        );
+        assert_eq!(
+            oversized.email.content_hash, None,
+            "a hash over only the header section must never be published"
+        );
+        assert_eq!(
+            oversized.source,
+            IdentitySource::Surrogate,
+            "without octets to hash, a Message-ID alone must not reach the content tier"
         );
 
         // The normal messages DID get full bodies.
         for uid in ["1", "3"] {
             let email = emails
                 .iter()
-                .find(|e| e.remote_id == uid)
+                .find(|e| e.placement.remote_id == uid)
                 .expect("normal message present");
             assert!(
-                email.body_plain.is_some(),
+                email.email.body_plain.is_some(),
                 "normal message {uid} must have a body, got: {email:?}"
+            );
+            // The contrast that gives the assertion above its force: the same
+            // headers, plus the octets, DO reach the content tier.
+            assert_eq!(
+                email.source,
+                IdentitySource::MessageIdContent,
+                "a full-body fetch with a Message-ID must reach the content tier"
             );
         }
     }
@@ -1954,33 +2669,43 @@ mod tests {
         // checkpoint enumerates only the narrowed `{uidnext}:*` range (so a
         // fire-once-per-new-message consumer never re-sees old mail).
         let messages: Vec<(u32, u32)> = (1..=3).map(|u| (u, 100)).collect();
-        let (first, checkpoint, first_cmds) =
-            run_batched_sync(messages.clone(), 1, 4, None, 2).await;
-        assert_eq!(first.len(), 3);
-        assert_eq!(checkpoint, "1:4");
+        let (first, first_cmds) = run_batched_sync(messages.clone(), Some(1), 4, None, 2).await;
+        let checkpoint = first.next_state.clone();
+        assert_eq!(first.upserts.len(), 3);
+        assert_eq!(checkpoint, "v1:uidnext:1:4");
         assert!(
             first_cmds.iter().any(|c| c.contains("1:*")),
             "first sync enumerates the full range, got: {first_cmds:?}"
         );
 
-        let (second, checkpoint2, second_cmds) =
-            run_batched_sync(messages, 1, 4, Some(checkpoint.clone()), 2).await;
+        let (second, second_cmds) =
+            run_batched_sync(messages, Some(1), 4, Some(checkpoint.clone()), 2).await;
         assert_eq!(
-            second.len(),
+            second.upserts.len(),
             0,
             "no new mail arrived, so an incremental sync returns nothing"
         );
         assert_eq!(
-            checkpoint2, "1:4",
+            second.next_state, "v1:uidnext:1:4",
             "checkpoint stays stable across an empty pass"
         );
+        let second_bodies = body_fetch_ranges(&second_cmds);
         assert!(
-            second_cmds.iter().any(|c| c.contains("4:*")),
-            "second sync must enumerate the narrowed range, got: {second_cmds:?}"
+            second_bodies.iter().any(|c| c.contains("4:*")),
+            "second sync must fetch only the narrowed range, got: {second_bodies:?}"
         );
         assert!(
-            !second_cmds.iter().any(|c| c.contains("1:*")),
-            "second sync must NOT re-enumerate the full range, got: {second_cmds:?}"
+            !second_bodies.iter().any(|c| c.contains("1:*")),
+            "second sync must NOT re-fetch bodies for the full range, got: {second_bodies:?}"
+        );
+        // The `1:*` that IS expected: a UID-only enumeration. Without QRESYNC
+        // there is no other way to learn a message was removed, and it costs
+        // one short line per message rather than a body.
+        assert!(
+            second_cmds
+                .iter()
+                .any(|c| c.to_ascii_uppercase().ends_with("(UID)") && c.contains("1:*")),
+            "a non-QRESYNC rung must enumerate the folder to detect removals, got: {second_cmds:?}"
         );
     }
 
@@ -2007,6 +2732,17 @@ mod tests {
                     }
                     let _ = io
                         .write_all(format!("{tag} OK FETCH completed\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("CAPABILITY") {
+                    // The planner negotiates capabilities before selecting; a
+                    // script that never answers this blocks the client forever.
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
                         .await;
                 } else if upper.contains("LOGIN") {
                     let _ = io
@@ -2042,29 +2778,36 @@ mod tests {
         let engine = ImapEngine::new("acct-1", "example.test", 993);
 
         // First sync under UIDVALIDITY 1 stores "1:105".
-        let (_first, checkpoint) = engine
+        let __changes = engine
             .sync_folder_messages_with_session("INBOX", None, &mut session)
             .await
             .expect("first sync succeeds");
-        assert_eq!(checkpoint, "1:105");
+        let (_first, checkpoint) = (__changes.upserts, __changes.next_state);
+        assert_eq!(checkpoint, "v1:uidnext:1:105");
 
         // Second sync: server now reports UIDVALIDITY 2. The stored checkpoint
         // is stale, so the fetch MUST be a full `1:*`, and the checkpoint is
         // rewritten under the new UIDVALIDITY.
-        let (_second, checkpoint2) = engine
+        let __changes = engine
             .sync_folder_messages_with_session("INBOX", Some(&checkpoint), &mut session)
             .await
             .expect("second sync succeeds");
+        let (_second, checkpoint2) = (__changes.upserts, __changes.next_state);
         assert_eq!(
-            checkpoint2, "2:105",
+            checkpoint2, "v1:uidnext:2:105",
             "checkpoint must be rewritten under the new UIDVALIDITY"
         );
 
         drop(session);
         let _ = server.await;
 
-        let ranges = fetch_ranges.lock().expect("lock captured ranges");
-        assert_eq!(ranges.len(), 2, "expected exactly two UID FETCH commands");
+        let all = fetch_ranges.lock().expect("lock captured ranges");
+        let ranges = body_fetch_ranges(&all);
+        assert_eq!(
+            ranges.len(),
+            2,
+            "expected one body fetch per sync, got: {all:?}"
+        );
         assert!(
             ranges[0].contains("1:*"),
             "first sync fetches full history, got: {}",
@@ -2093,6 +2836,17 @@ mod tests {
                 if upper.contains("UID FETCH") {
                     // Deliberately never respond: a mid-stream server stall.
                     std::future::pending::<()>().await;
+                } else if upper.contains("CAPABILITY") {
+                    // The planner negotiates capabilities before selecting; a
+                    // script that never answers this blocks the client forever.
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
                 } else if upper.contains("LOGIN") {
                     let _ = io
                         .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
@@ -2167,7 +2921,7 @@ mod tests {
         advertise_move: bool,
         advertise_uidplus: bool,
         select_uid_validity: u32,
-    ) -> (Result<(), MailError>, Vec<String>) {
+    ) -> (Result<MutationOutcome, MailError>, Vec<String>) {
         let (client_io, server_io) = tokio::io::duplex(8192);
         let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let server_commands = commands.clone();
@@ -2632,7 +3386,16 @@ mod tests {
             while let Some(line) = read_scripted_line(&mut io).await {
                 let tag = line.split_whitespace().next().unwrap_or("").to_string();
                 let upper = line.to_ascii_uppercase();
-                if upper.contains("LOGIN") {
+                if upper.contains("CAPABILITY") {
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                } else if upper.contains("LOGIN") {
                     let _ = io
                         .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
                         .await;
@@ -2664,10 +3427,11 @@ mod tests {
             .expect("scripted login succeeds");
         let engine = ImapEngine::new("acct-completion", "example.test", 993);
 
-        let (emails, _checkpoint) = engine
+        let __changes = engine
             .sync_folder_messages_with_session("INBOX", None, &mut session)
             .await
             .expect("sync succeeds");
+        let (emails, _checkpoint) = (__changes.upserts, __changes.next_state);
         assert!(emails.is_empty());
 
         drop(session);
@@ -2715,5 +3479,260 @@ mod tests {
             IdleSocketState::Listening
         );
         Ok(())
+    }
+
+    /// Drive a folder sync over a scripted server that serves exactly ONE
+    /// message: `uid`, with `raw` as its full RFC822 octets and `seen`
+    /// controlling its `\Seen` flag. Holding the octets fixed while varying the
+    /// folder, UIDVALIDITY and UID is the shape of "the same message, found in
+    /// two mailboxes" -- which is what the identity/placement split exists for.
+    ///
+    /// Passing `raw = None` scripts the envelope-only path instead: the server
+    /// answers the body fetch with an `ENVELOPE` and no `BODY[]`, which is what
+    /// a server that will not hand over octets looks like.
+    async fn run_single_message_sync(
+        folder_id: &str,
+        uidvalidity: u32,
+        uid: u32,
+        seen: bool,
+        raw: Option<&str>,
+    ) -> PlacedMessage {
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let raw = raw.map(str::to_string);
+        let uidnext = uid.saturating_add(1);
+        let flags = if seen { "\\Seen" } else { "" };
+
+        let server = tokio::spawn(async move {
+            let mut io = server_io;
+            while let Some(line) = read_scripted_line(&mut io).await {
+                let tag = line.split_whitespace().next().unwrap_or("").to_string();
+                let upper = line.to_ascii_uppercase();
+                if upper.contains("UID FETCH") {
+                    let size = raw.as_ref().map_or(64, String::len);
+                    let resp = if !upper.contains("BODY.PEEK[]") {
+                        // Enumeration pass: UID + size only, no body.
+                        format!(
+                            "* 1 FETCH (UID {uid} RFC822.SIZE {size})\r\n\
+                             {tag} OK FETCH completed\r\n"
+                        )
+                    } else if let Some(raw) = raw.as_ref() {
+                        format!(
+                            "* 1 FETCH (UID {uid} RFC822.SIZE {size} FLAGS ({flags}) \
+                             BODY[] {{{size}}}\r\n{raw})\r\n{tag} OK FETCH completed\r\n"
+                        )
+                    } else {
+                        // A server that answers with metadata but no octets.
+                        // ENVELOPE still carries `message-id` (RFC 3501
+                        // section 7.4.2), so identity capture is not skipped --
+                        // but there is nothing to hash.
+                        format!(
+                            "* 1 FETCH (UID {uid} RFC822.SIZE {size} FLAGS ({flags}) \
+                             ENVELOPE (\"Mon, 1 Jan 2024 00:00:00 +0000\" \"Env subject\" \
+                             ((\"A\" NIL \"alice\" \"b.example\")) \
+                             ((\"A\" NIL \"alice\" \"b.example\")) \
+                             ((\"A\" NIL \"alice\" \"b.example\")) \
+                             ((\"B\" NIL \"bob\" \"b.example\")) \
+                             NIL NIL NIL \"<env@b.example>\"))\r\n\
+                             {tag} OK FETCH completed\r\n"
+                        )
+                    };
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("CAPABILITY") {
+                    // The planner negotiates capabilities before selecting; a
+                    // script that never answers this blocks the client forever.
+                    let _ = io
+                        .write_all(
+                            format!(
+                                "* CAPABILITY IMAP4rev1 UIDPLUS MOVE\r\n{tag} OK CAPABILITY\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                } else if upper.contains("LOGIN") {
+                    let _ = io
+                        .write_all(format!("{tag} OK Logged in\r\n").as_bytes())
+                        .await;
+                } else if upper.contains("SELECT") {
+                    let resp = format!(
+                        "* FLAGS (\\Seen)\r\n* 1 EXISTS\r\n* 0 RECENT\r\n\
+                         * OK [UIDVALIDITY {uidvalidity}] ok\r\n* OK [UIDNEXT {uidnext}] ok\r\n\
+                         {tag} OK [READ-WRITE] SELECT done\r\n"
+                    );
+                    let _ = io.write_all(resp.as_bytes()).await;
+                } else if upper.contains("LOGOUT") {
+                    let _ = io
+                        .write_all(format!("* BYE\r\n{tag} OK LOGOUT\r\n").as_bytes())
+                        .await;
+                    break;
+                }
+            }
+        });
+
+        let client = async_imap::Client::new(client_io);
+        let mut session = client
+            .login("user", "pass")
+            .await
+            .map_err(|(e, _)| e)
+            .expect("scripted login succeeds");
+        let engine = ImapEngine::new("acct-1", "example.test", 993);
+        let changes = engine
+            .sync_folder_messages_batched(folder_id, None, &mut session, 8)
+            .await
+            .expect("scripted sync succeeds");
+        drop(session);
+        let _ = server.await;
+
+        changes
+            .upserts
+            .into_iter()
+            .next()
+            .expect("the scripted message must be surfaced")
+    }
+
+    #[tokio::test]
+    async fn the_imap_backend_gives_one_identity_to_a_message_found_in_two_folders() {
+        // Byte-identical octets under two different UIDs in two different
+        // mailboxes -- an IMAP COPY, or a Gmail label. Identity comes from the
+        // Message-ID/content pair, so the derived key is ONE value while the
+        // placements stay distinct. Before the split this was two messages.
+        let raw = "Message-ID: <a@b.example>\r\nSubject: Hi\r\n\
+                   From: alice@b.example\r\n\r\nbody\r\n";
+        let inbox = run_single_message_sync("INBOX", 42, 5, true, Some(raw)).await;
+        let archive = run_single_message_sync("Archive", 77, 9, false, Some(raw)).await;
+
+        assert_eq!(inbox.source, IdentitySource::MessageIdContent);
+        assert_eq!(archive.source, IdentitySource::MessageIdContent);
+        assert_eq!(
+            inbox.email.id, archive.email.id,
+            "the same octets in two folders must derive one message key"
+        );
+
+        assert_eq!(inbox.placement.account_id, "acct-1");
+        assert_eq!(inbox.placement.folder_id, "INBOX");
+        assert_eq!(inbox.placement.uid_validity, "42");
+        assert_eq!(inbox.placement.remote_id, "5");
+        assert_eq!(archive.placement.folder_id, "Archive");
+        assert_eq!(archive.placement.uid_validity, "77");
+        assert_eq!(archive.placement.remote_id, "9");
+
+        // IMAP `\Seen` is per-mailbox (RFC 3501 section 2.3.2), so read state
+        // belongs to the occupancy, not to the message.
+        assert!(inbox.placement.read);
+        assert!(!archive.placement.read);
+    }
+
+    #[tokio::test]
+    async fn a_message_with_no_message_id_stays_on_the_folder_scoped_surrogate() {
+        // RFC 5322 section 3.6.4 makes Message-ID a SHOULD, so a message may
+        // carry none. Without it there is no content tier, and the backend must
+        // report two honest folder-scoped keys rather than claim a stability
+        // the server gave it no basis for.
+        let raw = "Subject: No id\r\nFrom: alice@b.example\r\n\r\nbody\r\n";
+        let inbox = run_single_message_sync("INBOX", 42, 5, false, Some(raw)).await;
+        let archive = run_single_message_sync("Archive", 77, 9, false, Some(raw)).await;
+
+        assert_eq!(inbox.source, IdentitySource::Surrogate);
+        assert_ne!(
+            inbox.email.id, archive.email.id,
+            "a surrogate is folder-scoped and must not be claimed to survive a move"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_envelope_only_fetch_keeps_its_message_id_but_stays_on_the_surrogate() {
+        // A server that returns metadata and no octets. ENVELOPE carries
+        // `message-id` (RFC 3501 section 7.4.2) so the header is still
+        // captured, but there is nothing to hash -- and a Message-ID alone is
+        // public and forgeable, so it must never key storage by itself.
+        let placed = run_single_message_sync("INBOX", 42, 5, false, None).await;
+
+        assert_eq!(placed.email.subject, "Env subject");
+        assert_eq!(placed.email.message_id.as_deref(), Some("env@b.example"));
+        assert_eq!(
+            placed.email.content_hash, None,
+            "no octets were fetched, so there is nothing honest to hash"
+        );
+        assert_eq!(
+            placed.source,
+            IdentitySource::Surrogate,
+            "an envelope-only fetch must not reach the content tier"
+        );
+        assert_eq!(placed.placement.remote_id, "5");
+        assert_eq!(placed.placement.uid_validity, "42");
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn a_select_without_uidvalidity_reports_no_absence_at_all() {
+        // RFC 3501 section 6.3.1 makes `[UIDVALIDITY]` REQUIRED on SELECT, so a
+        // server omitting it is broken -- but the failure mode is a wiped
+        // mailbox, not a bad sync. Every placement key this pass could build
+        // would carry an empty generation and match nothing the store holds,
+        // and under the `present` contract that reads as "the folder is empty".
+        // The pass must therefore decline to speak about absence, while still
+        // surfacing what it fetched.
+        let messages: Vec<(u32, u32)> = (1..=2).map(|u| (u, 100)).collect();
+        let (changes, _cmds) = run_batched_sync(messages, None, 3, None, 200).await;
+
+        assert_eq!(
+            changes.upserts.len(),
+            2,
+            "the messages themselves are still surfaced"
+        );
+        assert_eq!(
+            changes.present, None,
+            "a pass that cannot key an occupancy must not claim to know what is present"
+        );
+        assert!(
+            changes.removals.is_empty(),
+            "nor may it report a removal, got: {:?}",
+            changes.removals
+        );
+        // And it must say why, rather than failing silently.
+        assert!(logs_contain("mailbox reported no UIDVALIDITY"));
+
+        // The same pass against a compliant server DOES report presence, so the
+        // assertions above are about the missing UIDVALIDITY and nothing else.
+        let messages: Vec<(u32, u32)> = (1..=2).map(|u| (u, 100)).collect();
+        let (compliant, _cmds) = run_batched_sync(messages, Some(7), 3, None, 200).await;
+        let present = compliant
+            .present
+            .expect("a compliant SELECT must let the pass report presence");
+        assert_eq!(present.len(), 2);
+        assert!(present.iter().all(|k| k.uid_validity == "7"));
+    }
+
+    #[tokio::test]
+    async fn a_message_fetched_from_two_folders_keeps_one_identity() {
+        // Both folders return the same Message-ID and the same octets, so the
+        // content tier must produce one key from two different UIDs.
+        let raw = b"Message-ID: <a@b.example>\r\nSubject: Hi\r\n\r\nbody";
+        let hash = Email::content_hash_of(raw);
+        let inbox = Email::derive_message_key(
+            "acct-1",
+            RemoteIdentity {
+                email_id: None,
+                gm_msgid: None,
+                message_id: Some("a@b.example"),
+                content_hash: Some(&hash),
+            },
+            "INBOX",
+            "42",
+            "5",
+        );
+        let archive = Email::derive_message_key(
+            "acct-1",
+            RemoteIdentity {
+                email_id: None,
+                gm_msgid: None,
+                message_id: Some("a@b.example"),
+                content_hash: Some(&hash),
+            },
+            "Archive",
+            "77",
+            "9",
+        );
+        assert_eq!(inbox.key, archive.key);
+        assert_eq!(inbox.source, IdentitySource::MessageIdContent);
     }
 }

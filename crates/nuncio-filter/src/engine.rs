@@ -6,12 +6,26 @@ use crate::ast::{
 };
 use arc_swap::ArcSwap;
 use hmac::{Hmac, Mac};
-use nuncio_core::model::Email;
+use nuncio_core::model::{Email, Placement};
 use regex::Regex;
 use sha2::Sha256;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+
+/// A message together with the one mailbox occupancy being evaluated.
+///
+/// `WHERE FOLDER = 'INBOX'` has no answer for a message that sits in three
+/// folders at once, so evaluation is defined against a single placement and the
+/// caller fans out over however many the message has. Borrowing both halves
+/// keeps that fan-out free of clones.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacedEmail<'a> {
+    /// Identity and content -- the same for every placement.
+    pub email: &'a Email,
+    /// The occupancy this evaluation is about.
+    pub placement: &'a Placement,
+}
 
 /// Pre-compiled single filter rule optimizing regex and predicate execution.
 #[derive(Clone)]
@@ -55,31 +69,40 @@ impl CompiledFilter {
         }
     }
 
-    /// Evaluate email message against compiled rule condition tree.
+    /// Evaluate one placement against the compiled rule condition tree.
     ///
     /// This checks only the WHERE-clause conditions; it does NOT apply the
     /// rule's account scope. Callers must gate on
     /// [`FilterRule::matches_account`] first (as every `FilterEngine` entry
     /// point does), or a rule scoped to one account will fire on messages of
     /// another.
-    pub fn evaluate_condition(&self, email: &Email) -> bool {
-        Self::eval_node(&self.rule.conditions, email, &self.compiled_regexes)
+    pub fn evaluate_condition(&self, placed: PlacedEmail<'_>) -> bool {
+        Self::eval_node(&self.rule.conditions, placed, &self.compiled_regexes)
     }
 
-    fn eval_node(node: &ConditionNode, email: &Email, regexes: &[(String, Regex)]) -> bool {
+    fn eval_node(
+        node: &ConditionNode,
+        placed: PlacedEmail<'_>,
+        regexes: &[(String, Regex)],
+    ) -> bool {
         match node {
-            ConditionNode::Leaf(leaf) => Self::eval_leaf(leaf, email, regexes),
+            ConditionNode::Leaf(leaf) => Self::eval_leaf(leaf, placed, regexes),
             ConditionNode::And(children) => {
-                children.iter().all(|c| Self::eval_node(c, email, regexes))
+                children.iter().all(|c| Self::eval_node(c, placed, regexes))
             }
             ConditionNode::Or(children) => {
-                children.iter().any(|c| Self::eval_node(c, email, regexes))
+                children.iter().any(|c| Self::eval_node(c, placed, regexes))
             }
-            ConditionNode::Not(inner) => !Self::eval_node(inner, email, regexes),
+            ConditionNode::Not(inner) => !Self::eval_node(inner, placed, regexes),
         }
     }
 
-    fn eval_leaf(leaf: &ConditionLeaf, email: &Email, regexes: &[(String, Regex)]) -> bool {
+    fn eval_leaf(
+        leaf: &ConditionLeaf,
+        placed: PlacedEmail<'_>,
+        regexes: &[(String, Regex)],
+    ) -> bool {
+        let email = placed.email;
         match &leaf.field {
             FilterField::Subject => {
                 Self::eval_string_op(&email.subject, &leaf.operator, &leaf.value, regexes)
@@ -98,12 +121,18 @@ impl CompiledFilter {
                     .unwrap_or("");
                 Self::eval_string_op(body, &leaf.operator, &leaf.value, regexes)
             }
-            FilterField::Folder => {
-                Self::eval_string_op(&email.folder_id, &leaf.operator, &leaf.value, regexes)
-            }
-            FilterField::Account => {
-                Self::eval_string_op(&email.account_id, &leaf.operator, &leaf.value, regexes)
-            }
+            FilterField::Folder => Self::eval_string_op(
+                &placed.placement.folder_id,
+                &leaf.operator,
+                &leaf.value,
+                regexes,
+            ),
+            FilterField::Account => Self::eval_string_op(
+                &placed.placement.account_id,
+                &leaf.operator,
+                &leaf.value,
+                regexes,
+            ),
             FilterField::HasAttachment => {
                 let has = !email.attachments.is_empty();
                 if let FilterValue::Boolean(b) = leaf.value {
@@ -277,18 +306,26 @@ impl FilterEngine {
         Ok(())
     }
 
-    /// Evaluate email message returning matching rule actions.
+    /// Evaluate one placement of a message, returning the matching rules' actions.
+    ///
+    /// Defined per placement, not per message: `FOLDER` and `ACCOUNT` are
+    /// properties of where the message sits, and a message can sit in several
+    /// places at once. Callers holding a multi-placement message evaluate each
+    /// placement and are responsible for not acting twice on one message -- see
+    /// the fire-once claim in the store.
     ///
     /// A rule only ever fires for the account it was created against
     /// (`FilterRule::target_account`, set via `ON ACCOUNT` or `*` for all
     /// accounts) — condition matching alone is not account-scoped, so this
     /// check must happen before `evaluate_condition` runs.
-    pub fn evaluate(&self, email: &Email) -> Vec<(FilterRule, Vec<RuleAction>)> {
+    pub fn evaluate(&self, placed: PlacedEmail<'_>) -> Vec<(FilterRule, Vec<RuleAction>)> {
         let guard = self.cache.load();
         let mut results = Vec::new();
 
         for filter in &guard.filters {
-            if filter.rule.matches_account(&email.account_id) && filter.evaluate_condition(email) {
+            if filter.rule.matches_account(&placed.placement.account_id)
+                && filter.evaluate_condition(placed)
+            {
                 debug!(
                     rule_id = %filter.rule.id,
                     rule_name = %filter.rule.name,
@@ -315,21 +352,25 @@ impl FilterEngine {
     /// the remaining rules rather than aborting the whole batch.
     pub async fn evaluate_with_timeout(
         &self,
-        email: &Email,
+        placed: PlacedEmail<'_>,
         timeout_duration: Duration,
     ) -> Vec<(FilterRule, Vec<RuleAction>)> {
         let guard = self.cache.load();
         let mut results = Vec::new();
 
         for filter in &guard.filters {
-            if !filter.rule.matches_account(&email.account_id) {
+            if !filter.rule.matches_account(&placed.placement.account_id) {
                 continue;
             }
 
             let filter_for_task = filter.clone();
-            let email_for_task = email.clone();
+            let email_for_task = placed.email.clone();
+            let placement_for_task = placed.placement.clone();
             let eval_task = tokio::task::spawn_blocking(move || {
-                filter_for_task.evaluate_condition(&email_for_task)
+                filter_for_task.evaluate_condition(PlacedEmail {
+                    email: &email_for_task,
+                    placement: &placement_for_task,
+                })
             });
 
             match tokio::time::timeout(timeout_duration, eval_task).await {
@@ -370,7 +411,7 @@ impl FilterEngine {
     /// Rules whose account scope does not match the message are reported as
     /// `SKIPPED (account scope mismatch)` rather than omitted, so the trace
     /// distinguishes "condition did not match" from "rule does not apply here".
-    pub fn preview(&self, email: &Email) -> FilterPreviewResult {
+    pub fn preview(&self, placed: PlacedEmail<'_>) -> FilterPreviewResult {
         let start = Instant::now();
         let guard = self.cache.load();
         let mut matched_rule_id = None;
@@ -380,7 +421,7 @@ impl FilterEngine {
         let mut matched = false;
 
         for filter in &guard.filters {
-            if !filter.rule.matches_account(&email.account_id) {
+            if !filter.rule.matches_account(&placed.placement.account_id) {
                 traces.push(format!(
                     "Rule '{}' (priority {}): SKIPPED (account scope mismatch)",
                     filter.rule.name, filter.rule.priority
@@ -388,7 +429,7 @@ impl FilterEngine {
                 continue;
             }
 
-            let is_match = filter.evaluate_condition(email);
+            let is_match = filter.evaluate_condition(placed);
             traces.push(format!(
                 "Rule '{}' (priority {}): {}",
                 filter.rule.name,
@@ -406,7 +447,7 @@ impl FilterEngine {
         let elapsed = start.elapsed().as_micros() as u64;
 
         FilterPreviewResult {
-            message_id: email.id.clone(),
+            message_id: placed.email.id.clone(),
             matched,
             matched_rule_id,
             matched_rule_name,
@@ -434,68 +475,32 @@ impl FilterEngine {
 mod tests {
     use super::*;
     use nuncio_core::model::Email;
-    use std::sync::Mutex;
-    use tracing::field::{Field, Visit};
-    use tracing::span;
 
-    /// Minimal `tracing::Subscriber` that records a formatted line per event
-    /// so tests can assert on emitted level + fields without pulling in
-    /// `tracing-subscriber`'s registry machinery.
-    struct CapturingSubscriber {
-        events: Arc<Mutex<Vec<String>>>,
-    }
-
-    struct LineVisitor<'a>(&'a mut String);
-
-    impl Visit for LineVisitor<'_> {
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!(" {}={:?}", field.name(), value));
-        }
-    }
-
-    impl tracing::Subscriber for CapturingSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
-            span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut line = format!("{}", event.metadata().level());
-            let mut visitor = LineVisitor(&mut line);
-            event.record(&mut visitor);
-            if let Ok(mut events) = self.events.lock() {
-                events.push(line);
-            }
-        }
-
-        fn enter(&self, _span: &span::Id) {}
-
-        fn exit(&self, _span: &span::Id) {}
-    }
-
-    fn test_email(account_id: &str, subject: &str, folder_id: &str) -> Email {
-        Email {
+    /// Build an `Email`/`Placement` pair that shares one account between the
+    /// message and the mailbox it is placed in, matching how a message and
+    /// its own placement always agree on account.
+    fn test_placed_email(account_id: &str, subject: &str, folder_id: &str) -> (Email, Placement) {
+        let email = Email {
             id: "msg-1".to_string(),
             account_id: account_id.to_string(),
-            folder_id: folder_id.to_string(),
-            remote_id: "1".to_string(),
-            uid_validity: "1".to_string(),
             subject: subject.to_string(),
             sender: "alice@nuncio.mx".to_string(),
             recipient: "bob@nuncio.mx".to_string(),
             received_at: 1700000000,
-            read: false,
             body_plain: Some("Hello".to_string()),
             body_html: None,
             attachments: Vec::new(),
-        }
+            message_id: None,
+            content_hash: None,
+        };
+        let placement = Placement {
+            account_id: account_id.to_string(),
+            folder_id: folder_id.to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: "1".to_string(),
+            read: false,
+        };
+        (email, placement)
     }
 
     #[test]
@@ -504,27 +509,19 @@ mod tests {
         let rule = crate::parser::NsqlParser::parse_rule("Urgent", 1, nsql).unwrap();
         let engine = FilterEngine::new(vec![rule]).unwrap();
 
-        let email = Email {
-            id: "msg-1".to_string(),
-            account_id: "acct-1".to_string(),
-            folder_id: "inbox".to_string(),
-            remote_id: "1".to_string(),
-            uid_validity: "1".to_string(),
-            subject: "Urgent Meeting".to_string(),
-            sender: "alice@nuncio.mx".to_string(),
-            recipient: "bob@nuncio.mx".to_string(),
-            received_at: 1700000000,
-            read: false,
-            body_plain: Some("Hello".to_string()),
-            body_html: None,
-            attachments: Vec::new(),
-        };
+        let (email, placement) = test_placed_email("acct-1", "Urgent Meeting", "inbox");
 
-        let results = engine.evaluate(&email);
+        let results = engine.evaluate(PlacedEmail {
+            email: &email,
+            placement: &placement,
+        });
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1.len(), 2);
 
-        let preview = engine.preview(&email);
+        let preview = engine.preview(PlacedEmail {
+            email: &email,
+            placement: &placement,
+        });
         assert!(preview.matched);
         assert_eq!(preview.matched_rule_name, Some("Urgent".to_string()));
     }
@@ -544,14 +541,27 @@ mod tests {
 
         // Condition matches the subject, but the message belongs to a
         // different account than the rule was created for.
-        let email_b = test_email("acct-b", "Weekly Report", "inbox");
+        let (email_b, placement_b) = test_placed_email("acct-b", "Weekly Report", "inbox");
         assert!(
-            engine.evaluate(&email_b).is_empty(),
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email_b,
+                    placement: &placement_b
+                })
+                .is_empty(),
             "rule scoped to acct-a must not match a message from acct-b"
         );
 
-        let email_a = test_email("acct-a", "Weekly Report", "inbox");
-        assert_eq!(engine.evaluate(&email_a).len(), 1);
+        let (email_a, placement_a) = test_placed_email("acct-a", "Weekly Report", "inbox");
+        assert_eq!(
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email_a,
+                    placement: &placement_a
+                })
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -560,15 +570,27 @@ mod tests {
         let rule = crate::parser::NsqlParser::parse_rule("Scoped To A", 1, nsql).unwrap();
         let engine = FilterEngine::new(vec![rule]).unwrap();
 
-        let email_b = test_email("acct-b", "Weekly Report", "inbox");
+        let (email_b, placement_b) = test_placed_email("acct-b", "Weekly Report", "inbox");
         let results = engine
-            .evaluate_with_timeout(&email_b, Duration::from_secs(1))
+            .evaluate_with_timeout(
+                PlacedEmail {
+                    email: &email_b,
+                    placement: &placement_b,
+                },
+                Duration::from_secs(1),
+            )
             .await;
         assert!(results.is_empty());
 
-        let email_a = test_email("acct-a", "Weekly Report", "inbox");
+        let (email_a, placement_a) = test_placed_email("acct-a", "Weekly Report", "inbox");
         let results = engine
-            .evaluate_with_timeout(&email_a, Duration::from_secs(1))
+            .evaluate_with_timeout(
+                PlacedEmail {
+                    email: &email_a,
+                    placement: &placement_a,
+                },
+                Duration::from_secs(1),
+            )
             .await;
         assert_eq!(results.len(), 1);
     }
@@ -579,8 +601,11 @@ mod tests {
         let rule = crate::parser::NsqlParser::parse_rule("Scoped To A", 1, nsql).unwrap();
         let engine = FilterEngine::new(vec![rule]).unwrap();
 
-        let email_b = test_email("acct-b", "Weekly Report", "inbox");
-        let preview = engine.preview(&email_b);
+        let (email_b, placement_b) = test_placed_email("acct-b", "Weekly Report", "inbox");
+        let preview = engine.preview(PlacedEmail {
+            email: &email_b,
+            placement: &placement_b,
+        });
         assert!(!preview.matched);
         assert!(preview
             .condition_traces
@@ -594,8 +619,16 @@ mod tests {
         let rule = crate::parser::NsqlParser::parse_rule("Global", 1, nsql).unwrap();
         let engine = FilterEngine::new(vec![rule]).unwrap();
 
-        let email = test_email("any-account", "Weekly Report", "inbox");
-        assert_eq!(engine.evaluate(&email).len(), 1);
+        let (email, placement) = test_placed_email("any-account", "Weekly Report", "inbox");
+        assert_eq!(
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email,
+                    placement: &placement
+                })
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -605,20 +638,30 @@ mod tests {
         let engine = FilterEngine::new(vec![rule]).unwrap();
 
         // Same folder_id, different account_id: a rule matching on the
-        // `account` condition field must key off email.account_id, never
-        // fall through to comparing folder_id.
-        let email_a = test_email("acct-a", "Anything", "shared-folder");
+        // `account` condition field must key off the placement's account_id,
+        // never fall through to comparing folder_id.
+        let (email_a, placement_a) = test_placed_email("acct-a", "Anything", "shared-folder");
         assert_eq!(
-            engine.evaluate(&email_a).len(),
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email_a,
+                    placement: &placement_a
+                })
+                .len(),
             1,
-            "rule on account = 'acct-a' must match a message with account_id 'acct-a'"
+            "rule on account = 'acct-a' must match a placement with account_id 'acct-a'"
         );
 
-        let email_b = test_email("acct-b", "Anything", "shared-folder");
+        let (email_b, placement_b) = test_placed_email("acct-b", "Anything", "shared-folder");
         assert!(
-            engine.evaluate(&email_b).is_empty(),
-            "rule on account = 'acct-a' must not match a message with account_id 'acct-b', \
-             even when it shares the same folder_id as an acct-a message"
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email_b,
+                    placement: &placement_b
+                })
+                .is_empty(),
+            "rule on account = 'acct-a' must not match a placement with account_id 'acct-b', \
+             even when it shares the same folder_id as an acct-a placement"
         );
     }
 
@@ -628,11 +671,24 @@ mod tests {
         let rule = crate::parser::NsqlParser::parse_rule("Not In Spam Or Trash", 1, nsql).unwrap();
         let engine = FilterEngine::new(vec![rule]).unwrap();
 
-        let inbox_email = test_email("acct-1", "Anything", "inbox");
-        assert_eq!(engine.evaluate(&inbox_email).len(), 1);
+        let (inbox_email, inbox_placement) = test_placed_email("acct-1", "Anything", "inbox");
+        assert_eq!(
+            engine
+                .evaluate(PlacedEmail {
+                    email: &inbox_email,
+                    placement: &inbox_placement
+                })
+                .len(),
+            1
+        );
 
-        let spam_email = test_email("acct-1", "Anything", "spam");
-        assert!(engine.evaluate(&spam_email).is_empty());
+        let (spam_email, spam_placement) = test_placed_email("acct-1", "Anything", "spam");
+        assert!(engine
+            .evaluate(PlacedEmail {
+                email: &spam_email,
+                placement: &spam_placement
+            })
+            .is_empty());
     }
 
     #[test]
@@ -657,8 +713,16 @@ mod tests {
         };
         let engine = FilterEngine::new(vec![rule]).unwrap();
 
-        let email = test_email("acct-1", "Anything", "inbox");
-        assert_eq!(engine.evaluate(&email).len(), 1);
+        let (email, placement) = test_placed_email("acct-1", "Anything", "inbox");
+        assert_eq!(
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email,
+                    placement: &placement
+                })
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -685,8 +749,16 @@ mod tests {
         };
         let engine = FilterEngine::new(vec![rule]).unwrap();
 
-        let email = test_email("acct-1", "Anything", "inbox");
-        assert_eq!(engine.evaluate(&email).len(), 1);
+        let (email, placement) = test_placed_email("acct-1", "Anything", "inbox");
+        assert_eq!(
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email,
+                    placement: &placement
+                })
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -697,11 +769,7 @@ mod tests {
         // real blocking-pool thread while the timer races it on the async
         // task, so the timer reliably wins for any evaluation slower than a
         // few microseconds.
-        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = CapturingSubscriber {
-            events: events.clone(),
-        };
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let logs = crate::test_tracing::capture_logs();
 
         let rule = FilterRule {
             id: "slow-rule".to_string(),
@@ -721,11 +789,17 @@ mod tests {
         };
         let engine = FilterEngine::new(vec![rule]).unwrap();
 
-        let mut email = test_email("acct-1", "Anything", "inbox");
+        let (mut email, placement) = test_placed_email("acct-1", "Anything", "inbox");
         email.body_plain = Some("A".repeat(60_000_000));
 
         let results = engine
-            .evaluate_with_timeout(&email, Duration::from_millis(1))
+            .evaluate_with_timeout(
+                PlacedEmail {
+                    email: &email,
+                    placement: &placement,
+                },
+                Duration::from_millis(1),
+            )
             .await;
 
         assert!(
@@ -734,12 +808,107 @@ mod tests {
              not fabricated as a match"
         );
 
-        let captured = events.lock().unwrap();
+        let captured = logs.lines();
         assert!(
             captured.iter().any(|line| line.contains("WARN")
                 && line.contains("timed out")
                 && line.contains("slow-rule")),
             "expected a WARN log carrying the rule id for the timed-out evaluation, got: {captured:?}"
+        );
+    }
+
+    fn sample_email(key: &str) -> Email {
+        Email {
+            id: key.to_string(),
+            account_id: "acct-1".to_string(),
+            subject: "Anything".to_string(),
+            sender: "alice@nuncio.mx".to_string(),
+            recipient: "bob@nuncio.mx".to_string(),
+            received_at: 1700000000,
+            body_plain: Some("Hello".to_string()),
+            body_html: None,
+            attachments: Vec::new(),
+            message_id: None,
+            content_hash: None,
+        }
+    }
+
+    fn sample_placement(folder_id: &str, remote_id: &str) -> Placement {
+        Placement {
+            account_id: "acct-1".to_string(),
+            folder_id: folder_id.to_string(),
+            uid_validity: "1".to_string(),
+            remote_id: remote_id.to_string(),
+            read: false,
+        }
+    }
+
+    fn rule_where_folder_is(folder: &str) -> FilterRule {
+        let nsql = format!("WHERE folder = '{folder}' ACTION MARK READ");
+        crate::parser::NsqlParser::parse_rule("Folder Filter", 1, &nsql).unwrap()
+    }
+
+    fn rule_where_account_is(account: &str) -> FilterRule {
+        let nsql = format!("WHERE account = '{account}' ACTION MARK READ");
+        crate::parser::NsqlParser::parse_rule("Account Filter", 1, &nsql).unwrap()
+    }
+
+    #[test]
+    fn a_folder_condition_matches_only_the_placement_it_is_evaluated_against() {
+        let engine = FilterEngine::new(vec![rule_where_folder_is("INBOX")]).unwrap();
+        let email = sample_email("key-1");
+        let inbox = sample_placement("INBOX", "5");
+        let archive = sample_placement("Archive", "9");
+
+        assert_eq!(
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email,
+                    placement: &inbox
+                })
+                .len(),
+            1,
+            "the INBOX placement matches"
+        );
+        assert_eq!(
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email,
+                    placement: &archive
+                })
+                .len(),
+            0,
+            "the same message's Archive placement does not"
+        );
+    }
+
+    #[test]
+    fn an_account_condition_reads_the_placement_account() {
+        let engine = FilterEngine::new(vec![rule_where_account_is("acct-1")]).unwrap();
+        let email = sample_email("key-1");
+        let mine = sample_placement("INBOX", "5");
+        let theirs = Placement {
+            account_id: "acct-2".into(),
+            ..sample_placement("INBOX", "5")
+        };
+
+        assert_eq!(
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email,
+                    placement: &mine
+                })
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .evaluate(PlacedEmail {
+                    email: &email,
+                    placement: &theirs
+                })
+                .len(),
+            0
         );
     }
 }
