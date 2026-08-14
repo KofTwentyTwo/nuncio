@@ -434,51 +434,6 @@ impl FilterEngine {
 mod tests {
     use super::*;
     use nuncio_core::model::Email;
-    use std::sync::Mutex;
-    use tracing::field::{Field, Visit};
-    use tracing::span;
-
-    /// Minimal `tracing::Subscriber` that records a formatted line per event
-    /// so tests can assert on emitted level + fields without pulling in
-    /// `tracing-subscriber`'s registry machinery.
-    struct CapturingSubscriber {
-        events: Arc<Mutex<Vec<String>>>,
-    }
-
-    struct LineVisitor<'a>(&'a mut String);
-
-    impl Visit for LineVisitor<'_> {
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!(" {}={:?}", field.name(), value));
-        }
-    }
-
-    impl tracing::Subscriber for CapturingSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
-            span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut line = format!("{}", event.metadata().level());
-            let mut visitor = LineVisitor(&mut line);
-            event.record(&mut visitor);
-            if let Ok(mut events) = self.events.lock() {
-                events.push(line);
-            }
-        }
-
-        fn enter(&self, _span: &span::Id) {}
-
-        fn exit(&self, _span: &span::Id) {}
-    }
 
     fn test_email(account_id: &str, subject: &str, folder_id: &str) -> Email {
         Email {
@@ -697,11 +652,7 @@ mod tests {
         // real blocking-pool thread while the timer races it on the async
         // task, so the timer reliably wins for any evaluation slower than a
         // few microseconds.
-        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = CapturingSubscriber {
-            events: events.clone(),
-        };
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let logs = crate::test_tracing::capture_logs();
 
         let rule = FilterRule {
             id: "slow-rule".to_string(),
@@ -734,7 +685,7 @@ mod tests {
              not fabricated as a match"
         );
 
-        let captured = events.lock().unwrap();
+        let captured = logs.lines();
         assert!(
             captured.iter().any(|line| line.contains("WARN")
                 && line.contains("timed out")

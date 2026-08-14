@@ -240,8 +240,6 @@ impl WebhookDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_tracing::block_on_captured;
-    use tracing::Level;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -348,80 +346,70 @@ mod tests {
         assert_eq!(first_blocked_address(&addrs), None);
     }
 
-    // Not `#[tokio::test]`: the capture subscriber is thread-local, so the
-    // runtime has to be built inside the capture scope for the dispatch's
-    // telemetry to land on the thread holding it.
-    #[test]
-    fn test_blocked_webhook_logs_warn_with_host_and_reason() {
-        let (recorder, result) = block_on_captured(async {
-            let dispatcher = WebhookDispatcher::new("secret_key_123");
-            dispatcher
-                .dispatch(
-                    "http://169.254.169.254/latest/meta-data",
-                    "rule_1",
-                    "msg_1",
-                    "Test",
-                    "a@b.com",
-                )
-                .await
-        });
+    #[tokio::test]
+    async fn test_blocked_webhook_logs_warn_with_host_and_reason() {
+        let logs = crate::test_tracing::capture_logs();
+
+        let dispatcher = WebhookDispatcher::new("secret_key_123");
+        let result = dispatcher
+            .dispatch(
+                "http://169.254.169.254/latest/meta-data",
+                "rule_1",
+                "msg_1",
+                "Test",
+                "a@b.com",
+            )
+            .await;
 
         assert!(matches!(result, Err(WebhookError::SecurityViolation(_))));
 
-        let events = recorder.events();
+        let captured = logs.lines();
         assert!(
-            events.iter().any(|e| e.level == Level::WARN
-                && e.message().contains("blocked")
-                && e.field("host")
-                    .is_some_and(|h| h.contains("169.254.169.254"))),
-            "expected a WARN log carrying the blocked host and reason, got: {events:?}"
+            captured.iter().any(|line| line.contains("WARN")
+                && line.contains("blocked")
+                && line.contains("169.254.169.254")),
+            "expected a WARN log carrying the blocked host and reason, got: {captured:?}"
         );
         assert!(
-            !recorder
-                .all_field_values()
-                .iter()
-                .any(|v| v.contains("secret_key_123")),
+            !captured.iter().any(|line| line.contains("secret_key_123")),
             "the webhook HMAC secret must never appear in a log line"
         );
     }
 
-    // See the sibling capture test for why this is not a `#[tokio::test]`.
-    // The wiremock server is started inside the same runtime so the whole
-    // exchange runs on the capturing thread.
-    #[test]
-    fn test_allowed_webhook_logs_debug_not_warn() {
-        let (recorder, status) = block_on_captured(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/hook"))
-                .respond_with(ResponseTemplate::new(200))
-                .mount(&mock_server)
-                .await;
+    #[tokio::test]
+    async fn test_allowed_webhook_logs_debug_not_warn() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
 
-            let dispatcher = WebhookDispatcher::new("secret_key_123");
-            let opts = ValidationOptions {
-                available_folders: None,
-                allowed_forward_domains: None,
-                block_private_webhooks: false,
-            };
-            let url = format!("{}/hook", mock_server.uri());
-            dispatcher
-                .dispatch_with_options(&url, "rule_1", "msg_1", "Test", "a@b.com", &opts)
-                .await
-                .expect("dispatch to the mock server must succeed")
-        });
+        let logs = crate::test_tracing::capture_logs();
+
+        let dispatcher = WebhookDispatcher::new("secret_key_123");
+        let opts = ValidationOptions {
+            available_folders: None,
+            allowed_forward_domains: None,
+            block_private_webhooks: false,
+        };
+        let url = format!("{}/hook", mock_server.uri());
+        let status = dispatcher
+            .dispatch_with_options(&url, "rule_1", "msg_1", "Test", "a@b.com", &opts)
+            .await
+            .expect("dispatch to the mock server must succeed");
         assert_eq!(status, 200);
 
-        let events = recorder.events();
+        let captured = logs.lines();
         assert!(
-            events
+            captured
                 .iter()
-                .any(|e| e.level == Level::DEBUG && e.message().contains("allowed")),
-            "expected a DEBUG log for the allowed egress decision, got: {events:?}"
+                .any(|line| line.contains("DEBUG") && line.contains("allowed")),
+            "expected a DEBUG log for the allowed egress decision, got: {captured:?}"
         );
         assert!(
-            !events.iter().any(|e| e.level == Level::WARN),
-            "an allowed dispatch must not emit a WARN, got: {events:?}"
+            !captured.iter().any(|line| line.contains("WARN")),
+            "an allowed dispatch must not emit a WARN, got: {captured:?}"
         );
     }
 }

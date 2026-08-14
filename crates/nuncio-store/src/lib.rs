@@ -7,6 +7,8 @@ pub mod cipher;
 pub mod db;
 pub mod recovery;
 pub mod search;
+#[cfg(test)]
+mod test_tracing;
 pub mod vault;
 
 pub use cipher::{CipherError, PayloadCipher};
