@@ -727,6 +727,21 @@ impl DatabaseEngine {
     /// fired the rule again. `INSERT ... ON CONFLICT DO NOTHING` makes winning
     /// the claim a single atomic statement, so two passes racing over the same
     /// message cannot both act.
+    ///
+    /// A claim outlives the message it was made against. Nothing reaps
+    /// `filter_fired` when the last placement goes, so a message deleted and
+    /// later re-delivered byte for byte will not fire its rules a second time.
+    /// That is deliberate: reaping alongside the message would hand a remote
+    /// party a way to re-trigger third-party side effects at will -- a
+    /// mailing-list message deleted and re-sent would `FORWARD` again -- and
+    /// under content-addressed identity an identical redelivery genuinely *is*
+    /// the same message, so declining to re-fire is the honest reading. The
+    /// failure this leaves open ("a rule that should have fired again did not")
+    /// is the safe direction for actions that reach outside the mailbox.
+    ///
+    /// The cost is a table that only grows, bounded by rules x messages ever
+    /// seen at roughly 150 bytes a row, and cleared only when an identity
+    /// schema bump resets `user_version` and rebuilds the derived tables.
     pub async fn claim_filter_fire(
         &self,
         rule_id: &str,
