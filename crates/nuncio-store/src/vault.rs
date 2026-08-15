@@ -1,6 +1,7 @@
 use aes_gcm::aead::{rand_core::RngCore, OsRng};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -241,6 +242,87 @@ impl SecretManager {
     }
 }
 
+/// Upper bound on how long a keyring read may block before the caller gives up
+/// and reports an actionable error.
+///
+/// Generous enough that a human at a logged-in desktop can answer a keychain
+/// consent prompt, short enough that an unattended process always terminates
+/// instead of stalling forever.
+pub const KEYRING_READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Why a bounded key-material read did not produce a key.
+///
+/// No variant ever carries key material: the only value interpolated into these
+/// messages is the vault *account name*, which names a purpose (for example
+/// `grpc-bearer-token`), never a secret.
+#[derive(Debug, Error)]
+pub enum BoundedVaultError {
+    /// The underlying vault read completed but failed.
+    #[error(transparent)]
+    Vault(#[from] VaultError),
+    /// The read did not finish within the allotted bound.
+    #[error(
+        "timed out after {}s reading key material '{account}' from the OS keyring: the keyring \
+         did not answer, which usually means it is locked (screen-lock or a never-unlocked login \
+         session) or is waiting on an access-consent prompt that no one can answer in this \
+         session (a keychain whose ACL no longer trusts this binary -- after a restore, \
+         migration, or rebuild -- prompts every time)",
+        .timeout.as_secs()
+    )]
+    TimedOut {
+        /// Vault account name whose read timed out.
+        account: String,
+        /// Bound that elapsed.
+        timeout: Duration,
+    },
+    /// The reader ended without reporting either success or failure.
+    #[error("the '{account}' keyring read ended without producing a result")]
+    Lost {
+        /// Vault account name whose read was lost.
+        account: String,
+    },
+}
+
+/// [`SecretManager::get_or_create_key_bytes`], bounded so it always terminates.
+///
+/// The read runs on a detached OS thread rather than inline, because a platform
+/// keyring read is an uncancellable blocking call: a locked keychain, or one
+/// whose ACL no longer trusts the calling binary, blocks on a consent prompt
+/// that never arrives in a headless or screen-locked session. Bounding it
+/// therefore means abandoning the thread, not cancelling the call.
+///
+/// A plain `std::thread::spawn` is used instead of `spawn_blocking` precisely
+/// because Tokio joins its blocking pool during runtime shutdown, which would
+/// reintroduce the same hang at process exit; a detached thread is reaped when
+/// the process ends.
+pub async fn get_or_create_key_bytes_bounded(
+    secrets: Arc<SecretManager>,
+    account: &str,
+    len: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>, BoundedVaultError> {
+    let owned_account = account.to_string();
+    let thread_account = owned_account.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let resolved = secrets.get_or_create_key_bytes(&thread_account, len);
+        // A closed receiver means the bound already elapsed; nothing to do.
+        let _ = tx.send(resolved);
+    });
+
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(Ok(bytes))) => Ok(bytes),
+        Ok(Ok(Err(e))) => Err(BoundedVaultError::Vault(e)),
+        Ok(Err(_)) => Err(BoundedVaultError::Lost {
+            account: owned_account,
+        }),
+        Err(_) => Err(BoundedVaultError::TimedOut {
+            account: owned_account,
+            timeout,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +478,118 @@ mod tests {
         // exercising get/set against the real OS keyring is intentionally left untested so
         // headless CI never depends on a real credential store being available.
         let _ = manager;
+    }
+
+    /// Vault provider whose reads never return, standing in for a locked
+    /// keychain or one waiting on an access-consent prompt nobody can answer.
+    struct BlockingVault;
+
+    impl SecretVault for BlockingVault {
+        fn get_secret(&self, _key: &str) -> Result<String, VaultError> {
+            loop {
+                std::thread::park();
+            }
+        }
+        fn set_secret(&self, _key: &str, _secret: &str) -> Result<(), VaultError> {
+            Ok(())
+        }
+        fn delete_secret(&self, _key: &str) -> Result<(), VaultError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_read_gives_up_on_a_keyring_that_never_answers() {
+        let secrets = Arc::new(SecretManager::new(BlockingVault));
+
+        let started = std::time::Instant::now();
+        let err = get_or_create_key_bytes_bounded(
+            secrets,
+            GRPC_TOKEN_ACCOUNT,
+            32,
+            Duration::from_millis(150),
+        )
+        .await
+        .expect_err("a read that never returns must not succeed");
+
+        assert!(
+            matches!(err, BoundedVaultError::TimedOut { .. }),
+            "expected a timeout, got: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the bound must actually terminate the read"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains(GRPC_TOKEN_ACCOUNT),
+            "the error must name which key material could not be read: {message}"
+        );
+        assert!(
+            message.contains("locked") && message.contains("consent"),
+            "the error must suggest the likely cause: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_read_mints_and_reloads_key_material_like_the_unbounded_one() {
+        let secrets = Arc::new(SecretManager::mock());
+
+        let minted = get_or_create_key_bytes_bounded(
+            Arc::clone(&secrets),
+            GRPC_TOKEN_ACCOUNT,
+            32,
+            KEYRING_READ_TIMEOUT,
+        )
+        .await
+        .expect("mock vault mints key material");
+        assert_eq!(minted.len(), 32);
+
+        let reloaded = get_or_create_key_bytes_bounded(
+            Arc::clone(&secrets),
+            GRPC_TOKEN_ACCOUNT,
+            32,
+            KEYRING_READ_TIMEOUT,
+        )
+        .await
+        .expect("mock vault reloads the same key material");
+        assert_eq!(minted, reloaded, "a second read must return the same key");
+        assert_eq!(
+            reloaded,
+            secrets
+                .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+                .expect("unbounded read agrees"),
+            "bounding a read must not change what it returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_read_surfaces_a_vault_failure_verbatim() {
+        struct FailingVault;
+        impl SecretVault for FailingVault {
+            fn get_secret(&self, _key: &str) -> Result<String, VaultError> {
+                Err(VaultError::StorageFailed("keyring is locked".into()))
+            }
+            fn set_secret(&self, _key: &str, _secret: &str) -> Result<(), VaultError> {
+                Ok(())
+            }
+            fn delete_secret(&self, _key: &str) -> Result<(), VaultError> {
+                Ok(())
+            }
+        }
+
+        let err = get_or_create_key_bytes_bounded(
+            Arc::new(SecretManager::new(FailingVault)),
+            WEBHOOK_SIGNING_KEY_ACCOUNT,
+            32,
+            KEYRING_READ_TIMEOUT,
+        )
+        .await
+        .expect_err("a failing vault must fail closed");
+
+        assert!(
+            matches!(err, BoundedVaultError::Vault(_)),
+            "a real vault failure must not be reported as a timeout: {err}"
+        );
     }
 }

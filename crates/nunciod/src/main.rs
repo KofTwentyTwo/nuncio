@@ -263,11 +263,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // `SecretManager` to write account password credentials to the OS
     // keyring (never to SQLite) -- see `nunciod::grpc`'s security comment on
     // why EVERY mounted service shares this one `BearerAuthInterceptor`.
+    // The read is bounded: a keyring that never answers must end in this
+    // logged startup failure, not in a daemon that hangs here forever.
     let grpc_secrets = account_secrets.clone();
-    let grpc_token_bytes = grpc_secrets
-        .get_or_create_key_bytes(nuncio_store::vault::GRPC_TOKEN_ACCOUNT, 32)
-        .map_err(|e| format!("failed to provision gRPC bearer token from vault: {e}"))?;
-    let grpc_token = hex::encode(grpc_token_bytes);
+    let grpc_token = nunciod::secrets::provision_grpc_token(
+        grpc_secrets.clone(),
+        nuncio_store::vault::KEYRING_READ_TIMEOUT,
+    )
+    .await?;
     let grpc_addr = nunciod::grpc::grpc_addr_from_env();
     tracing::info!(
         "nunciod gRPC (nuncio.v1.System, nuncio.v1.Accounts, nuncio.v1.Mail, nuncio.v1.Filters, \

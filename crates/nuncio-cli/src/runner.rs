@@ -1,11 +1,13 @@
 //! Headless engine runner executing CLI commands against core services.
 
 use nuncio_core::EventBus;
-use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
+use nuncio_store::vault::{
+    get_or_create_key_bytes_bounded, BoundedVaultError, SecretManager, GRPC_TOKEN_ACCOUNT,
+    KEYRING_READ_TIMEOUT,
+};
 use nuncio_store::{DatabaseEngine, DatabaseError};
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
 
 use crate::args::{
@@ -27,12 +29,6 @@ use crate::output::{format_json, format_json_error, format_json_error_with_info}
 /// CLI — makes the platform keychain ask the logged-in user for consent, which
 /// nothing can answer without an interactive desktop session.
 pub const GRPC_TOKEN_ENV: &str = "NUNCIO_GRPC_TOKEN";
-
-/// Upper bound on how long a keyring read may block before the CLI gives up and
-/// reports an actionable error. Generous enough that a human can answer a
-/// keychain consent prompt, short enough that an unattended run always
-/// terminates instead of stalling forever.
-const KEYRING_READ_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Normalizes a raw environment value into a usable token override.
 ///
@@ -446,15 +442,10 @@ impl HeadlessRunner {
     /// Resolves the gRPC bearer token, preferring an explicit override over the
     /// OS keyring.
     ///
-    /// The keyring read runs on a detached OS thread behind a bounded timeout
-    /// rather than inline. On macOS a keychain item whose ACL does not trust
-    /// this binary makes the read block on a GUI consent prompt that never
-    /// arrives in a headless session, and that call cannot be cancelled — so
-    /// the timeout must be able to abandon the thread. A plain
-    /// `std::thread::spawn` is used instead of `spawn_blocking` precisely
-    /// because Tokio joins its blocking pool during runtime shutdown, which
-    /// would reintroduce the hang at process exit; a detached thread is reaped
-    /// when the process ends.
+    /// The keyring read is bounded by [`get_or_create_key_bytes_bounded`], so a
+    /// keychain that never answers ends in an error rather than an unbounded
+    /// stall (see that helper for why the read is abandoned rather than
+    /// cancelled).
     ///
     /// The returned error never carries token material — only the vault's own
     /// failure description, which is keyed by account name, not secret value.
@@ -463,32 +454,25 @@ impl HeadlessRunner {
             return Ok(token.clone());
         }
 
-        let secrets = Arc::clone(&self.secrets);
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let resolved = secrets
-                .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-                .map(hex::encode)
-                .map_err(|e| e.to_string());
-            // A closed receiver means the timeout already fired; nothing to do.
-            let _ = tx.send(resolved);
-        });
-
-        match tokio::time::timeout(KEYRING_READ_TIMEOUT, rx).await {
-            Ok(Ok(Ok(token))) => Ok(token),
-            Ok(Ok(Err(e))) => Err(format!("failed to read gRPC bearer token from vault: {e}")),
-            Ok(Err(_)) => {
-                Err("gRPC bearer token lookup ended without producing a result".to_string())
-            }
-            Err(_) => Err(format!(
+        match get_or_create_key_bytes_bounded(
+            Arc::clone(&self.secrets),
+            GRPC_TOKEN_ACCOUNT,
+            32,
+            KEYRING_READ_TIMEOUT,
+        )
+        .await
+        {
+            Ok(bytes) => Ok(hex::encode(bytes)),
+            Err(BoundedVaultError::TimedOut { timeout, .. }) => Err(format!(
                 "timed out after {}s reading the gRPC bearer token from the OS keyring: the \
                  keyring is most likely waiting on an interactive access-consent prompt that \
                  cannot be answered in this session (the token belongs to nunciod, so another \
                  binary reading it needs consent). Run this command from a logged-in desktop \
                  session, or set {GRPC_TOKEN_ENV} to the daemon's bearer token to bypass the \
                  keyring entirely",
-                KEYRING_READ_TIMEOUT.as_secs()
+                timeout.as_secs()
             )),
+            Err(e) => Err(format!("failed to read gRPC bearer token from vault: {e}")),
         }
     }
 
