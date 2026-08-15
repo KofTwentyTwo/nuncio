@@ -97,6 +97,42 @@ impl CompiledFilter {
         }
     }
 
+    /// Total byte size of the message content Nuncio holds: every body part
+    /// plus every attachment payload.
+    ///
+    /// This is what `WHERE size > N` compares against. Counting only the
+    /// plaintext body would report `0` for the very common HTML-only message
+    /// and would ignore attachments entirely, so a size rule would quietly
+    /// return the wrong verdict on exactly the mail it is usually written to
+    /// catch (the big ones). Both body parts are summed rather than one being
+    /// preferred: a `multipart/alternative` message genuinely carries the
+    /// plaintext *and* the HTML on the wire, so summing them tracks the real
+    /// message rather than one arbitrary view of it.
+    ///
+    /// The figure is the size of the decoded content as stored, not the exact
+    /// RFC822 octet count of the original transmission -- headers, MIME
+    /// boundaries, and transfer encoding are not counted, because the raw
+    /// octets are not retained and no stored column carries their length. It is
+    /// therefore a consistent lower bound on the wire size, never a guess: for
+    /// base64-encoded attachments the transmitted form is roughly a third
+    /// larger again. Rules are written against what the store actually has.
+    fn message_size_bytes(email: &Email) -> i64 {
+        let mut total: u64 = 0;
+        for part in [email.body_plain.as_deref(), email.body_html.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            total = total.saturating_add(part.len() as u64);
+        }
+        for attachment in &email.attachments {
+            total = total.saturating_add(attachment.content.len() as u64);
+        }
+        // Saturate rather than wrap: a size past `i64::MAX` is not a real
+        // message, and a wrapped negative would make `size > N` answer the
+        // opposite of the truth.
+        i64::try_from(total).unwrap_or(i64::MAX)
+    }
+
     fn eval_leaf(
         leaf: &ConditionLeaf,
         placed: PlacedEmail<'_>,
@@ -146,11 +182,7 @@ impl CompiledFilter {
                 }
             }
             FilterField::Size => {
-                let size = email
-                    .body_plain
-                    .as_ref()
-                    .map(|b| b.len() as i64)
-                    .unwrap_or(0);
+                let size = Self::message_size_bytes(email);
                 if let FilterValue::Number(target) = leaf.value {
                     match leaf.operator {
                         FilterOperator::Equals => size == target,
@@ -524,6 +556,92 @@ mod tests {
         });
         assert!(preview.matched);
         assert_eq!(preview.matched_rule_name, Some("Urgent".to_string()));
+    }
+
+    /// Evaluate one NSQL rule against one message, returning whether it fired.
+    fn size_rule_matches(nsql: &str, email: &Email) -> bool {
+        let rule = crate::parser::NsqlParser::parse_rule("Size Rule", 1, nsql).unwrap();
+        let engine = FilterEngine::new(vec![rule]).unwrap();
+        let (_, placement) = test_placed_email(&email.account_id, "", "inbox");
+        !engine
+            .evaluate(PlacedEmail {
+                email,
+                placement: &placement,
+            })
+            .is_empty()
+    }
+
+    /// `size` must reflect every body part and every attachment, not the
+    /// plaintext body alone. An HTML-only message has no plaintext body at
+    /// all, so it used to measure zero bytes and silently fell on the wrong
+    /// side of every size comparison -- `size > 100` said no for a 400-byte
+    /// message, and `size < 100` said yes.
+    #[test]
+    fn size_counts_html_body_of_html_only_message() {
+        let (mut email, _) = test_placed_email("acct-1", "HTML only", "inbox");
+        email.body_plain = None;
+        email.body_html = Some(format!("<p>{}</p>", "x".repeat(400)));
+
+        assert!(
+            size_rule_matches("WHERE size > 100 ACTION MARK READ", &email),
+            "a 407-byte HTML-only message must satisfy size > 100"
+        );
+        assert!(
+            !size_rule_matches("WHERE size < 100 ACTION MARK READ", &email),
+            "a 407-byte HTML-only message must not satisfy size < 100"
+        );
+    }
+
+    /// Attachment payloads are part of the message's size. A short note
+    /// carrying a large attachment is exactly the mail a size rule is written
+    /// to catch, and counting only the note's text missed it entirely.
+    #[test]
+    fn size_counts_attachment_payloads() {
+        let (mut email, _) = test_placed_email("acct-1", "Invoice", "inbox");
+        email.body_plain = Some("See attached.".to_string());
+        email.attachments = vec![nuncio_core::model::Attachment {
+            filename: "invoice.pdf".to_string(),
+            mime_type: "application/pdf".to_string(),
+            content: vec![0u8; 5_000].into(),
+        }];
+
+        assert!(
+            size_rule_matches("WHERE size > 4096 ACTION MARK READ", &email),
+            "a 13-byte note with a 5000-byte attachment must satisfy size > 4096"
+        );
+    }
+
+    /// A `multipart/alternative` message carries both renderings on the wire,
+    /// so both are counted rather than one being preferred -- this pins the
+    /// definition `size` is documented to have.
+    #[test]
+    fn size_sums_both_body_parts_and_attachments() {
+        let (mut email, _) = test_placed_email("acct-1", "Both parts", "inbox");
+        email.body_plain = Some("a".repeat(100));
+        email.body_html = Some("b".repeat(250));
+        email.attachments = vec![nuncio_core::model::Attachment {
+            filename: "logo.png".to_string(),
+            mime_type: "image/png".to_string(),
+            content: vec![0u8; 650].into(),
+        }];
+
+        assert_eq!(CompiledFilter::message_size_bytes(&email), 1_000);
+        assert!(size_rule_matches(
+            "WHERE size = 1000 ACTION MARK READ",
+            &email
+        ));
+    }
+
+    /// A message with neither body part nor attachments genuinely measures
+    /// zero, and must still compare as a number rather than being skipped.
+    #[test]
+    fn size_of_empty_message_is_zero() {
+        let (mut email, _) = test_placed_email("acct-1", "Empty", "inbox");
+        email.body_plain = None;
+        email.body_html = None;
+
+        assert_eq!(CompiledFilter::message_size_bytes(&email), 0);
+        assert!(size_rule_matches("WHERE size < 1 ACTION MARK READ", &email));
     }
 
     #[test]
