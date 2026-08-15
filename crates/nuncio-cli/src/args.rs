@@ -211,13 +211,15 @@ pub enum AccountSubcommand {
         /// Email address or account username.
         #[arg(short, long, help = "Email address or account username")]
         email: String,
-        /// Account protocol: imap-smtp (default), jmap, or caldav. A caldav
-        /// account requires --collection-url and ignores the IMAP/SMTP flags.
+        /// Account protocol: imap-smtp (default), jmap, caldav, or carddav. A
+        /// caldav or carddav account requires --collection-url and ignores the
+        /// IMAP/SMTP flags.
         #[arg(long, default_value = "imap-smtp", help = "Account protocol")]
         protocol: String,
-        /// Fully-qualified CalDAV calendar-collection URL (required for a
-        /// caldav account; ignored for mail accounts).
-        #[arg(long, help = "CalDAV calendar-collection URL (caldav only)")]
+        /// Fully-qualified DAV collection URL -- a CalDAV calendar collection
+        /// or a CardDAV address book (required for a caldav or carddav
+        /// account; ignored for mail accounts).
+        #[arg(long, help = "DAV collection URL (caldav/carddav only)")]
         collection_url: Option<String>,
         /// IMAP server hostname.
         #[arg(long, default_value = "mail.kof22.com", help = "IMAP server hostname")]

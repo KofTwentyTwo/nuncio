@@ -458,6 +458,11 @@ impl SqliteRecoveryEngine {
                                     collection_url: collection_url.unwrap_or_default(),
                                 })
                             }
+                            nuncio_core::AccountProtocol::CardDav => {
+                                nuncio_core::Transport::CardDav(nuncio_core::DavTransport {
+                                    collection_url: collection_url.unwrap_or_default(),
+                                })
+                            }
                         };
                         nuncio_core::AccountConfig {
                             id,

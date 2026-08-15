@@ -16,6 +16,10 @@ pub enum AccountProtocol {
     /// `collection_url` and its own keyring credential; it does not use the
     /// IMAP/JMAP/SMTP mail endpoints.
     CalDav,
+    /// CardDAV (RFC 6352) address-book-collection protocol engine. Like
+    /// CalDAV, a CardDAV account is a standalone account entry addressed by
+    /// its `collection_url` and its own keyring credential.
+    CardDav,
 }
 
 impl AccountProtocol {
@@ -24,7 +28,21 @@ impl AccountProtocol {
     /// require [`AccountConfig::collection_url`] and do not require the
     /// IMAP/SMTP mail endpoint fields.
     pub fn is_dav(self) -> bool {
+        matches!(self, AccountProtocol::CalDav | AccountProtocol::CardDav)
+    }
+
+    /// Whether this protocol is specifically CalDAV. Callers that drive
+    /// calendar sync must use this rather than [`Self::is_dav`], which is also
+    /// true for CardDAV address books.
+    pub fn is_caldav(self) -> bool {
         matches!(self, AccountProtocol::CalDav)
+    }
+
+    /// Whether this protocol is specifically CardDAV. Callers that drive
+    /// contacts sync must use this rather than [`Self::is_dav`], which is also
+    /// true for CalDAV calendars.
+    pub fn is_carddav(self) -> bool {
+        matches!(self, AccountProtocol::CardDav)
     }
 }
 
@@ -104,9 +122,11 @@ pub struct JmapTransport {
     pub endpoint_host: String,
 }
 
-/// DAV transport parameters (CalDAV RFC 4791 today, CardDAV later). A DAV
-/// account is addressed by a fully-qualified collection URL rather than a mail
-/// host/port, because a DAV client dispatches requests directly at that URL.
+/// DAV transport parameters (CalDAV RFC 4791 calendars and CardDAV RFC 6352
+/// address books). A DAV account is addressed by a fully-qualified collection
+/// URL rather than a mail host/port, because a DAV client dispatches requests
+/// directly at that URL. Which flavour of DAV is spoken is carried by the
+/// enclosing [`Transport`] variant, not by this struct.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DavTransport {
     /// Fully-qualified collection URL (scheme + host + path).
@@ -124,8 +144,10 @@ pub enum Transport {
     ImapSmtp(ImapSmtpTransport),
     /// JMAP mail.
     Jmap(JmapTransport),
-    /// WebDAV collection (CalDAV today, CardDAV later).
+    /// CalDAV calendar collection.
     Dav(DavTransport),
+    /// CardDAV address-book collection.
+    CardDav(DavTransport),
 }
 
 impl Transport {
@@ -135,6 +157,7 @@ impl Transport {
             Transport::ImapSmtp(_) => AccountProtocol::ImapSmtp,
             Transport::Jmap(_) => AccountProtocol::Jmap,
             Transport::Dav(_) => AccountProtocol::CalDav,
+            Transport::CardDav(_) => AccountProtocol::CardDav,
         }
     }
 }
@@ -211,9 +234,21 @@ impl AccountConfig {
         self.transport.protocol()
     }
 
-    /// Whether this account speaks WebDAV against a collection URL.
+    /// Whether this account speaks WebDAV against a collection URL (CalDAV or
+    /// CardDAV). Callers driving a specific protocol's sync must use
+    /// [`Self::is_caldav`] or [`Self::is_carddav`] instead.
     pub fn is_dav(&self) -> bool {
+        matches!(self.transport, Transport::Dav(_) | Transport::CardDav(_))
+    }
+
+    /// Whether this account is specifically a CalDAV calendar account.
+    pub fn is_caldav(&self) -> bool {
         matches!(self.transport, Transport::Dav(_))
+    }
+
+    /// Whether this account is specifically a CardDAV address-book account.
+    pub fn is_carddav(&self) -> bool {
+        matches!(self.transport, Transport::CardDav(_))
     }
 
     /// The account's IMAP/SMTP transport parameters, present only for an
@@ -225,10 +260,10 @@ impl AccountConfig {
         }
     }
 
-    /// The account's DAV collection URL, present only for a DAV account.
+    /// The account's DAV collection URL, present for either DAV flavour.
     pub fn dav_collection_url(&self) -> Option<&str> {
         match &self.transport {
-            Transport::Dav(t) => Some(t.collection_url.as_str()),
+            Transport::Dav(t) | Transport::CardDav(t) => Some(t.collection_url.as_str()),
             _ => None,
         }
     }
@@ -294,9 +329,15 @@ impl AccountConfig {
                     });
                 }
             }
-            Transport::Dav(t) => {
-                // A DAV account is addressed by its collection URL, not by mail
-                // host/port endpoints.
+            Transport::Dav(t) | Transport::CardDav(t) => {
+                // Both DAV flavours are addressed by their collection URL, not
+                // by mail host/port endpoints, so they validate identically;
+                // only the endpoint label in the error differs.
+                let endpoint = if self.is_carddav() {
+                    "carddav"
+                } else {
+                    "caldav"
+                };
                 let url = t.collection_url.trim();
                 if url.is_empty() {
                     return Err(ConfigError::EmptyField {
@@ -313,7 +354,7 @@ impl AccountConfig {
                     let host = url_host(url).unwrap_or_default();
                     if !is_loopback_host(host) {
                         return Err(ConfigError::CleartextToRemoteHost {
-                            endpoint: "caldav",
+                            endpoint,
                             host: host.to_string(),
                         });
                     }

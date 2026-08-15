@@ -398,6 +398,7 @@ fn transport_kind(transport: &nuncio_core::Transport) -> &'static str {
         nuncio_core::Transport::ImapSmtp(_) => "imap_smtp",
         nuncio_core::Transport::Jmap(_) => "jmap",
         nuncio_core::Transport::Dav(_) => "dav",
+        nuncio_core::Transport::CardDav(_) => "carddav",
     }
 }
 
@@ -420,6 +421,9 @@ fn map_account_config_to_proto(config: nuncio_core::AccountConfig) -> AccountCon
             endpoint_host: t.endpoint_host,
         }),
         nuncio_core::Transport::Dav(t) => TransportProto::Dav(DavTransportProto {
+            collection_url: t.collection_url,
+        }),
+        nuncio_core::Transport::CardDav(t) => TransportProto::Carddav(DavTransportProto {
             collection_url: t.collection_url,
         }),
     };
@@ -480,10 +484,15 @@ fn map_account_config_from_proto(
         Some(TransportProto::Dav(t)) => nuncio_core::Transport::Dav(nuncio_core::DavTransport {
             collection_url: t.collection_url,
         }),
+        Some(TransportProto::Carddav(t)) => {
+            nuncio_core::Transport::CardDav(nuncio_core::DavTransport {
+                collection_url: t.collection_url,
+            })
+        }
         None => {
             return Err(errors::status(
                 ErrorReason::ValidationFailed,
-                "account transport is required (one of imap_smtp, jmap, dav must be set)",
+                "account transport is required (one of imap_smtp, jmap, dav, carddav must be set)",
             ))
         }
     };
@@ -583,13 +592,13 @@ impl AccountConnectionTester for RealAccountConnectionTester {
                     ),
                 }
             }
-            nuncio_core::Transport::Dav(_) => {
+            nuncio_core::Transport::Dav(_) | nuncio_core::Transport::CardDav(_) => {
                 return AccountConnectionReport {
                     imap: ProtocolProbe::failed(
-                        "IMAP connection probe is not applicable to a CalDAV account".to_string(),
+                        "IMAP connection probe is not applicable to a DAV account".to_string(),
                     ),
                     smtp: ProtocolProbe::failed(
-                        "SMTP connection probe is not applicable to a CalDAV account".to_string(),
+                        "SMTP connection probe is not applicable to a DAV account".to_string(),
                     ),
                 }
             }
@@ -1239,7 +1248,7 @@ impl CalendarGrpcService {
             .await
             .map_err(|e| Status::internal(format!("failed to list accounts: {e}")))?
             .into_iter()
-            .filter(|a| a.is_dav())
+            .filter(|a| a.is_caldav())
             .filter(|a| req.account_id.is_empty() || a.id == req.account_id)
             .collect();
 
@@ -1465,13 +1474,86 @@ impl std::fmt::Debug for ContactsEngineOverrides {
 /// `ListContacts`/`GetContact` always read genuinely persisted data.
 /// `CreateContact` persists a locally-authored contact directly to the
 /// store -- real local persistence, never a fabricated CardDAV write-back.
-/// `Sync` fetches from [`ContactsEngineOverrides::contacts_backend`] when
-/// injected; otherwise it returns an honest error, since there is no
-/// persisted per-account CardDAV configuration to build a real backend from
-/// yet (see `nunciod::contacts_sync`'s doc comment).
+/// `Sync` fetches from [`ContactsEngineOverrides::contacts_backend`] when a
+/// test double is injected; otherwise it takes the production path, building a
+/// real `CardDavClient` per configured CardDAV account (see
+/// [`Self::sync_configured_carddav_accounts`]).
 struct ContactsGrpcService {
     db: Arc<DatabaseEngine>,
+    secrets: Arc<SecretManager>,
     overrides: ContactsEngineOverrides,
+}
+
+impl ContactsGrpcService {
+    /// Production path: resolve every configured CardDAV account from the
+    /// store, build a real `CardDavClient` per account from its persisted
+    /// collection URL and keyring credential, and sync its contacts into the
+    /// store. Returns the total number of contacts synced.
+    ///
+    /// A request naming a specific `account_id` is scoped to that account; an
+    /// empty `account_id` syncs every configured CardDAV account. When no
+    /// CardDAV account matches -- including when the named account exists but
+    /// speaks some other protocol -- this returns an honest error rather than
+    /// a fabricated zero-count success, because there is genuinely no remote
+    /// address book to fetch from.
+    async fn sync_configured_carddav_accounts(
+        &self,
+        req: &ContactsSyncRequest,
+    ) -> Result<usize, Status> {
+        let carddav_accounts: Vec<nuncio_core::AccountConfig> = self
+            .db
+            .list_accounts()
+            .await
+            .map_err(|e| Status::internal(format!("failed to list accounts: {e}")))?
+            .into_iter()
+            .filter(|a| a.is_carddav())
+            .filter(|a| req.account_id.is_empty() || a.id == req.account_id)
+            .collect();
+
+        if carddav_accounts.is_empty() {
+            return Err(errors::status(
+                ErrorReason::NotConfigured,
+                if req.account_id.is_empty() {
+                    "no CardDAV account is configured; add one with protocol CARDDAV and a \
+                     collection_url before syncing"
+                        .to_string()
+                } else {
+                    format!(
+                        "no CardDAV account with id '{}' is configured",
+                        req.account_id
+                    )
+                },
+            ));
+        }
+
+        let mut total = 0usize;
+        for account in carddav_accounts {
+            // The credential lives ONLY in the OS keyring vault, keyed by the
+            // account's `keyring_secret_key`; it is read just-in-time here and
+            // wrapped so its backing memory is zeroized on drop.
+            let password = zeroize::Zeroizing::new(
+                self.secrets
+                    .get_secret(&account.keyring_secret_key)
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "failed to read CardDAV credential for account '{}': {e}",
+                            account.id
+                        ))
+                    })?,
+            );
+
+            total += crate::contacts_sync::sync_carddav_account(&self.db, &account, &password)
+                .await
+                .map_err(|e| {
+                    Status::internal(format!(
+                        "CardDAV sync failed for account '{}': {e}",
+                        account.id
+                    ))
+                })?;
+        }
+
+        Ok(total)
+    }
 }
 
 #[tonic::async_trait]
@@ -1488,13 +1570,7 @@ impl Contacts for ContactsGrpcService {
                     .await
                     .map_err(|e| Status::internal(format!("contacts sync failed: {e}")))?
             }
-            None => {
-                return Err(Status::internal(format!(
-                    "no CardDAV configuration exists for account '{}'; per-account CardDAV \
-                     configuration is not yet implemented",
-                    req.account_id
-                )));
-            }
+            None => self.sync_configured_carddav_accounts(&req).await?,
         };
 
         tracing::info!(
@@ -3751,6 +3827,7 @@ pub async fn serve_on_listener_with_overrides_and_shutdown(
     // this function's doc comment.
     let contacts_service = ContactsGrpcService {
         db,
+        secrets,
         overrides: contacts_overrides,
     };
     let contacts_interceptor = BearerAuthInterceptor::new(token);
@@ -8356,10 +8433,10 @@ mod tests {
                 account_id: "acct-contacts-no-config".to_string(),
             }))
             .await
-            .expect_err("sync with no injected backend and no CardDAV config must fail");
-        assert_eq!(err.code(), Code::Internal);
+            .expect_err("sync with no injected backend and no CardDAV account must fail");
+        assert_eq!(err.code(), Code::FailedPrecondition);
         assert!(err.message().contains("acct-contacts-no-config"));
-        assert!(err.message().contains("no CardDAV configuration"));
+        assert!(err.message().contains("no CardDAV account"));
     }
 
     /// With a [`ContactsEngineOverrides::contacts_backend`] injected, `Sync`

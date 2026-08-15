@@ -299,6 +299,10 @@ enum AccountProtocol {
   // own first-class account entry: it carries `collection_url` and its own
   // keyring credential, and does not require the IMAP/SMTP mail endpoints.
   ACCOUNT_PROTOCOL_CALDAV = 3;
+  // CardDAV (RFC 6352) address-book-collection account. Like CalDAV, it is its
+  // own first-class account entry carrying `collection_url` and its own
+  // keyring credential.
+  ACCOUNT_PROTOCOL_CARDDAV = 4;
 }
 
 // Mirrors `nuncio_core::TlsMode`.
@@ -337,12 +341,14 @@ message JmapTransport {
   string endpoint_host = 1;
 }
 
-// DAV transport parameters (CalDAV RFC 4791 today, CardDAV later). A DAV
-// account is addressed by a fully-qualified collection URL rather than a mail
-// host/port, because a DAV client dispatches requests directly at that URL.
+// DAV transport parameters (CalDAV RFC 4791 calendars and CardDAV RFC 6352
+// address books). A DAV account is addressed by a fully-qualified collection
+// URL rather than a mail host/port, because a DAV client dispatches requests
+// directly at that URL. Which flavour of DAV is spoken is carried by the
+// `transport` oneof case, not by this message.
 message DavTransport {
   // Fully-qualified collection URL (scheme + host + path), e.g. a CalDAV
-  // calendar collection or, later, a CardDAV address-book collection.
+  // calendar collection or a CardDAV address-book collection.
   string collection_url = 1;
 }
 
@@ -385,6 +391,7 @@ message AccountConfig {
     ImapSmtpTransport imap_smtp = 15;
     JmapTransport jmap = 16;
     DavTransport dav = 17;
+    DavTransport carddav = 19;
   }
   // Whether the filter engine runs against this account's incoming mail.
   //
@@ -1322,10 +1329,11 @@ message ExportResponse {
 // `get_calendar_event`), plus a real `Sync` that fetches events from a
 // `CalendarBackend` and persists them.
 //
-// This is an honest surface: there is currently no way to persist a
-// per-account CalDAV collection URL/credential, so `Sync` in production (no
-// injected test backend) has no real CalDAV connection to make and returns
-// an error rather than a fabricated success. There are deliberately no
+// This is an honest surface: in production `Sync` drives real CalDAV accounts
+// resolved from the store (`ACCOUNT_PROTOCOL_CALDAV` + `dav.collection_url`,
+// credential read from the OS keyring). With no such account configured it
+// returns `FAILED_PRECONDITION` rather than a fabricated success. There are
+// deliberately no
 // create/delete RPCs here -- this service does not add real CalDAV write
 // support.
 //
@@ -1428,10 +1436,10 @@ message GetEventResponse {
 // them, and a `CreateContact` that persists a locally-authored contact
 // directly to that same store.
 //
-// This is an honest surface: there is currently no way to persist a
-// per-account CardDAV address book collection URL/credential, so `Sync` in
-// production (no injected test backend) has no real CardDAV connection to
-// make and returns an error rather than a fabricated success.
+// This is an honest surface: in production `Sync` drives real CardDAV accounts
+// resolved from the store (`ACCOUNT_PROTOCOL_CARDDAV` + `carddav.collection_url`,
+// credential read from the OS keyring). With no such account configured it
+// returns `FAILED_PRECONDITION` rather than a fabricated success.
 // `CreateContact` is NOT a CardDAV write-back -- it only ever writes to the
 // daemon's own local store, the same way the address book has always worked
 // here, just now actually persisted through the daemon's real store instead
@@ -1445,10 +1453,11 @@ message GetEventResponse {
 // See `nunciod::grpc::serve_on_listener`.
 service Contacts {
   // Sync fetches contacts for `account_id` from the account's contacts
-  // backend and persists them via the store. With no per-account CardDAV
-  // configuration available in production, this returns `Status::internal`
-  // describing that gap unless a test double has been injected -- never a
-  // fabricated `synced_count`.
+  // backend and persists them via the store. In production it builds a real
+  // CardDAV client per configured CardDAV account; if `account_id` names an
+  // account that is not CardDAV, or no CardDAV account is configured at all,
+  // it returns `FAILED_PRECONDITION` -- never a fabricated `synced_count`.
+  // An empty `account_id` syncs every configured CardDAV account.
   rpc Sync(ContactsSyncRequest) returns (ContactsSyncResponse);
   // ListContacts returns a keyset-paginated page of persisted contacts for
   // `account_id`, ordered by interaction count (descending) then display
