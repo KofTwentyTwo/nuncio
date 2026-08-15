@@ -40,7 +40,7 @@ use nuncio_mail::{
     RemoteMutationSpec, SmtpTransportEngine,
 };
 use nuncio_store::db::{DatabaseEngine, DatabaseError};
-use nuncio_store::vault::{SecretManager, VaultError, WEBHOOK_SIGNING_KEY_ACCOUNT};
+use nuncio_store::vault::{SecretManager, VaultError};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -618,23 +618,22 @@ impl ProductionExecutionEnv {
     /// the vault is unavailable, so a `CALL WEBHOOK` is never dispatched
     /// unsigned -- and, being lazy, that failure is isolated to webhook
     /// dispatch and never disables the other mutation paths.
-    fn webhook_dispatcher(&self) -> Result<&WebhookDispatcher, WebhookError> {
+    ///
+    /// The vault read is bounded, so a keyring that never answers fails this
+    /// one dispatch honestly instead of parking the outbox worker forever.
+    async fn webhook_dispatcher(&self) -> Result<&WebhookDispatcher, WebhookError> {
         if let Some(dispatcher) = self.webhook.get() {
             return Ok(dispatcher);
         }
-        let key_bytes = self
-            .secrets
-            .get_or_create_key_bytes(WEBHOOK_SIGNING_KEY_ACCOUNT, 32)
-            .map_err(|e| {
-                WebhookError::SigningError(format!(
-                    "failed to provision webhook signing key from the vault: {e}"
-                ))
-            })?;
+        let key = crate::secrets::provision_webhook_signing_key(
+            Arc::clone(&self.secrets),
+            nuncio_store::vault::KEYRING_READ_TIMEOUT,
+        )
+        .await
+        .map_err(WebhookError::SigningError)?;
         // A concurrent caller may win the race to set it; either way the stored
         // dispatcher is authoritative.
-        let _ = self
-            .webhook
-            .set(WebhookDispatcher::new(hex::encode(key_bytes)));
+        let _ = self.webhook.set(WebhookDispatcher::new(key));
         self.webhook.get().ok_or_else(|| {
             WebhookError::SigningError("webhook dispatcher unavailable after provisioning".into())
         })
@@ -682,7 +681,8 @@ impl RemoteExecutionEnv for ProductionExecutionEnv {
     ) -> Result<u16, WebhookError> {
         // Production keeps the secure default egress policy (private/loopback
         // targets are rejected).
-        self.webhook_dispatcher()?
+        self.webhook_dispatcher()
+            .await?
             .dispatch_with_options(
                 url,
                 rule_id,

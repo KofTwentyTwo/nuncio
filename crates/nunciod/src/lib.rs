@@ -12,6 +12,7 @@ pub mod orchestrator;
 pub mod outbox;
 pub mod pagination;
 pub mod rpc_trace;
+pub mod secrets;
 pub mod send;
 pub mod sync;
 pub mod sync_dispatcher;
