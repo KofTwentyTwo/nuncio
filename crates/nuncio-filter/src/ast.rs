@@ -17,7 +17,8 @@ pub enum FilterField {
     Header(String),
     /// Attachment presence indicator (`true`/`false`).
     HasAttachment,
-    /// Message size in bytes.
+    /// Message size in bytes: all stored body parts plus all attachment
+    /// payloads. Excludes headers and MIME framing, which are not retained.
     Size,
     /// Current folder location (e.g. `INBOX`).
     Folder,
