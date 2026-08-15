@@ -1025,25 +1025,25 @@ fn map_placement_ref_from_proto(placement: PlacementRefProto) -> nuncio_core::mo
 
 /// Fills each message's complete placement set from the store.
 ///
-/// This costs one query per message rather than one per page. That is the
-/// honest price of the field: occupancy is per-message state and a page can mix
-/// messages that sit in one mailbox with messages that sit in ten. A failure to
-/// read one message's placements leaves that message's set empty rather than
-/// failing the whole listing, and is logged -- a partial page is more useful
-/// than none, and the field is additive so a client that ignores it is
-/// unaffected.
+/// One batched query for the whole page rather than one per message: occupancy
+/// is per-message state, but reading it per message makes a page of fifty cost
+/// fifty-one round trips, which shows up directly as page latency. A failure to
+/// read the batch leaves every set empty rather than failing the whole listing,
+/// and is logged -- a page without placements is more useful than none, and the
+/// field is additive so a client that ignores it is unaffected.
 async fn fill_placements(db: &DatabaseEngine, messages: &mut [MessageProto]) {
+    let keys: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
+    let mut grouped = match db.placements_of_batch(&keys).await {
+        Ok(grouped) => grouped,
+        Err(e) => {
+            tracing::warn!("Mail: failed to read the placement sets for this page: {e}");
+            return;
+        }
+    };
+
     for message in messages.iter_mut() {
-        match db.placements_of(&message.id).await {
-            Ok(placements) => {
-                message.placements = placements.into_iter().map(map_placement_to_proto).collect();
-            }
-            Err(e) => {
-                tracing::warn!(
-                    message_id = %message.id,
-                    "Mail: failed to read the placement set: {e}"
-                );
-            }
+        if let Some(placements) = grouped.remove(&message.id) {
+            message.placements = placements.into_iter().map(map_placement_to_proto).collect();
         }
     }
 }
