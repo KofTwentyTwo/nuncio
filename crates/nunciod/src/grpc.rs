@@ -59,7 +59,7 @@ use nuncio_proto::v1::{
     UpdateAccountResponse, UpdateAvailable, UpdateRuleRequest, UpdateRuleResponse,
     ValidateRuleRequest, ValidateRuleResponse, VerifyChainRequest, VerifyChainResponse,
 };
-use nuncio_store::db::DatabaseEngine;
+use nuncio_store::db::{BulkReadRow, DatabaseEngine};
 use nuncio_store::search::SearchEngine;
 use nuncio_store::vault::SecretManager;
 use std::pin::Pin;
@@ -977,7 +977,9 @@ fn map_attachment_from_proto(attachment: AttachmentProto) -> nuncio_core::model:
 /// `folder_id` and `read` come from the placement: both are per-mailbox facts
 /// now, and the wire message still carries exactly one of each, so it describes
 /// one occupancy of the message rather than the message as a whole.
-fn map_email_to_proto(placed: nuncio_store::db::MessageWithPlacement) -> MessageProto {
+fn map_email_to_proto(
+    placed: (nuncio_core::model::Email, nuncio_core::model::Placement),
+) -> MessageProto {
     let (email, placement) = placed;
     MessageProto {
         id: email.id,
@@ -1778,11 +1780,14 @@ impl MailGrpcService {
         // Re-impose the store's ordering over the concatenated per-account
         // pages, so the cursor this returns is a position in the merged
         // sequence rather than in whichever account happened to be last.
+        // Ordered on the identity columns, which every row carries whether or
+        // not its body decrypted -- so a row the store could not read still
+        // sorts into its rightful place and still occupies a page slot.
         rows.sort_by(|(a_mail, a_place), (b_mail, b_place)| {
             b_mail
-                .received_at
-                .cmp(&a_mail.received_at)
-                .then_with(|| b_mail.id.cmp(&a_mail.id))
+                .received_at()
+                .cmp(&a_mail.received_at())
+                .then_with(|| b_mail.message_key().cmp(a_mail.message_key()))
                 .then_with(|| b_place.uid_validity.cmp(&a_place.uid_validity))
                 .then_with(|| b_place.remote_id.cmp(&a_place.remote_id))
         });
@@ -1791,10 +1796,10 @@ impl MailGrpcService {
         rows.truncate(page_size);
         let next = has_more
             .then(|| {
-                rows.last().map(|(email, placement)| {
+                rows.last().map(|(read, placement)| {
                     (
-                        email.received_at,
-                        email.id.clone(),
+                        read.received_at(),
+                        read.message_key().to_string(),
                         placement.uid_validity.clone(),
                         placement.remote_id.clone(),
                     )
@@ -2061,13 +2066,36 @@ impl Mail for MailGrpcService {
                 ])
             })
             .unwrap_or_default();
-        let mut messages: Vec<MessageProto> =
-            messages.into_iter().map(map_email_to_proto).collect();
+        // A row whose stored body would not authenticate is reported by ID
+        // instead of being listed. It is neither dropped in silence (the caller
+        // would see a page one message short and have no way to know) nor
+        // substituted with an empty body (indistinguishable from a message that
+        // genuinely has none). The rest of the page is unaffected: one
+        // bit-rotted row must not take a folder listing down with it.
+        let mut unreadable_message_ids = Vec::new();
+        let mut placed = Vec::with_capacity(messages.len());
+        for (read, placement) in messages {
+            match read {
+                Ok(email) => placed.push((email, placement)),
+                Err(unreadable) => unreadable_message_ids.push(unreadable.message_key),
+            }
+        }
+        if !unreadable_message_ids.is_empty() {
+            tracing::warn!(
+                folder_id = %req.folder_id,
+                unreadable = unreadable_message_ids.len(),
+                "Mail: omitted messages from a listing page whose stored bodies failed \
+                 authentication"
+            );
+        }
+
+        let mut messages: Vec<MessageProto> = placed.into_iter().map(map_email_to_proto).collect();
         fill_placements(&self.db, &mut messages).await;
 
         Ok(Response::new(ListMessagesResponse {
             messages,
             next_page_token,
+            unreadable_message_ids,
         }))
     }
 
@@ -2971,6 +2999,7 @@ impl Filters for FiltersGrpcService {
                 let mut scanned: u64 = 0;
                 let mut matched: u64 = 0;
                 let mut applied: u64 = 0;
+                let mut unreadable: u64 = 0;
 
                 loop {
                     let batch = match db.get_message_chunk(&last_id, chunk_size).await {
@@ -2986,7 +3015,26 @@ impl Filters for FiltersGrpcService {
                     };
                     let is_last_page = batch.len() < chunk_size;
 
-                    for email in &batch {
+                    for read in &batch {
+                        // A message whose stored body will not authenticate is
+                        // counted and skipped, never evaluated: rules read the
+                        // body, so acting on one the store could not
+                        // authenticate would let corrupted bytes drive real
+                        // side effects. Skipping it does not stop the scan --
+                        // one bad row must not cost the whole store its rescan.
+                        let email = match read {
+                            Ok(email) => email,
+                            Err(un) => {
+                                unreadable += 1;
+                                tracing::warn!(
+                                    message_key = %un.message_key,
+                                    "Filters: skipping a message during triage whose stored \
+                                     body failed authentication"
+                                );
+                                scanned += 1;
+                                continue;
+                            }
+                        };
                         // Messages belonging to an account this daemon does not
                         // own are counted as scanned but never acted on, so the
                         // progress total still reflects the whole store. A
@@ -3025,8 +3073,11 @@ impl Filters for FiltersGrpcService {
                         }
                     }
 
+                    // Advanced from the last row the query returned, readable or
+                    // not: resuming from the last *readable* row would re-scan
+                    // every unreadable row after it, forever.
                     if let Some(last) = batch.last() {
-                        last_id = last.id.clone();
+                        last_id = last.message_key().to_string();
                     }
 
                     let done = is_last_page;
@@ -3037,6 +3088,7 @@ impl Filters for FiltersGrpcService {
                             actions_applied_count: applied,
                             last_message_id: last_id.clone(),
                             done,
+                            unreadable_count: unreadable,
                         }))
                         .await
                         .is_err()
@@ -3051,6 +3103,7 @@ impl Filters for FiltersGrpcService {
                             scanned,
                             matched,
                             applied,
+                            unreadable,
                             "Filters: triage rescan finished"
                         );
                         return;
@@ -3115,7 +3168,7 @@ impl Export for ExportGrpcService {
         };
         tracing::info!(format = ?format, scope = scope_kind, "Export: mailbox export started");
 
-        let messages = match req.scope {
+        let read_rows = match req.scope {
             Some(export_request::Scope::AccountId(account_id)) => {
                 self.db
                     .list_messages_for_export(Some(&account_id), None)
@@ -3129,6 +3182,29 @@ impl Export for ExportGrpcService {
             None => self.db.list_messages_for_export(None, None).await,
         }
         .map_err(|e| Status::internal(format!("failed to load messages for export: {e}")))?;
+
+        // A message whose stored body will not authenticate is left out of the
+        // archive and named in the response. The alternative -- writing it with
+        // an empty or "unavailable" body -- would put content into a file that
+        // outlives this store and that no later reader could distinguish from
+        // mail the user actually received. Reporting the gap keeps the archive
+        // honest about what it does contain, and one such row does not cost the
+        // user the export of everything else.
+        let mut unreadable_message_ids = Vec::new();
+        let mut messages = Vec::with_capacity(read_rows.len());
+        for read in read_rows {
+            match read {
+                Ok(email) => messages.push(email),
+                Err(unreadable) => unreadable_message_ids.push(unreadable.message_key),
+            }
+        }
+        if !unreadable_message_ids.is_empty() {
+            tracing::warn!(
+                unreadable = unreadable_message_ids.len(),
+                "Export: omitted messages whose stored bodies failed authentication; \
+                 the archive is incomplete and the omitted ids are reported to the caller"
+            );
+        }
 
         let output_path = std::path::PathBuf::from(&req.output_path);
         let summary = self
@@ -3147,6 +3223,7 @@ impl Export for ExportGrpcService {
             output_path: summary.output_path,
             message_count: summary.message_count as u64,
             bytes_written: summary.bytes_written,
+            unreadable_message_ids,
         }))
     }
 }
@@ -5368,6 +5445,75 @@ mod tests {
             vec![2, 2, 1],
             "and it must genuinely span pages that straddle the account boundary"
         );
+    }
+
+    /// One corrupted stored body must not take a folder listing down with it,
+    /// and must not disappear from it either.
+    ///
+    /// This is the wire-level half of the store's
+    /// `one_corrupt_body_does_not_destroy_a_bulk_read`: the page still carries
+    /// every message whose body authenticated, the one that did not is named in
+    /// `unreadable_message_ids` rather than returned with an invented body, and
+    /// `GetMessage` on that same id still fails closed -- there the caller asked
+    /// for exactly that content, so an answer without it would be a lie.
+    #[tokio::test]
+    async fn list_messages_reports_a_corrupt_body_instead_of_failing_the_page() {
+        let (db, _dir) = DatabaseEngine::connect_ephemeral()
+            .await
+            .expect("connect ephemeral test db");
+        seed_in_account(&db, "acct-a", "m-1", "inbox", 1_700_000_001).await;
+        seed_in_account(&db, "acct-a", "m-rotten", "inbox", 1_700_000_002).await;
+        seed_in_account(&db, "acct-a", "m-3", "inbox", 1_700_000_003).await;
+
+        // Flip a byte of the stored ciphertext, leaving it valid hex, so the
+        // read fails AEAD authentication exactly as bit-rot or tampering would.
+        let (stored,): (String,) =
+            sqlx::query_as("SELECT body_plain FROM messages WHERE message_key = ?")
+                .bind("m-rotten")
+                .fetch_one(db.pool())
+                .await
+                .expect("fetch stored ciphertext");
+        let mut bytes = hex::decode(&stored).expect("stored ciphertext is valid hex");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        sqlx::query("UPDATE messages SET body_plain = ? WHERE message_key = ?")
+            .bind(hex::encode(bytes))
+            .bind("m-rotten")
+            .execute(db.pool())
+            .await
+            .expect("corrupt stored ciphertext");
+
+        let mut client = mail_client_over(db).await;
+
+        let resp = client
+            .list_messages(authed_bearer_request(ListMessagesRequest {
+                folder_id: "inbox".to_string(),
+                page_size: 10,
+                page_token: String::new(),
+            }))
+            .await
+            .expect("one unreadable row must not fail the whole listing")
+            .into_inner();
+
+        let ids: Vec<&str> = resp.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["m-3", "m-1"],
+            "every message that authenticated must still be listed"
+        );
+        assert_eq!(
+            resp.unreadable_message_ids,
+            vec!["m-rotten".to_string()],
+            "the omitted message must be named, not silently missing"
+        );
+
+        let err = client
+            .get_message(authed_bearer_request(GetMessageRequest {
+                message_id: "m-rotten".to_string(),
+            }))
+            .await
+            .expect_err("the single-item read must still fail closed");
+        assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
     /// A configured account holding nothing in this folder must not truncate

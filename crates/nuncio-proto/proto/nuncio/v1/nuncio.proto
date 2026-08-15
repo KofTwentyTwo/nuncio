@@ -695,6 +695,16 @@ message ListMessagesResponse {
   repeated Message messages = 1;
   // Opaque cursor for the next page, or empty when this is the last page.
   string next_page_token = 2;
+  // IDs of messages that occupied this page but could not be returned: their
+  // stored body ciphertext failed authentication (tampering or bit-rot).
+  //
+  // One unreadable row does not fail the page -- the other messages are still
+  // listed -- but it is never returned with an empty or substituted body
+  // either, because that is indistinguishable from a genuinely empty message.
+  // It is named here instead, so a caller can say what it is not showing.
+  // `GetMessage` on one of these IDs still fails, which is the honest answer
+  // when the whole point of the call is that one message's content.
+  repeated string unreadable_message_ids = 3;
 }
 
 // GetMessageRequest.
@@ -1220,6 +1230,15 @@ message TriageProgress {
   // True only on the final message of the stream, once the whole store has
   // been scanned.
   bool done = 5;
+  // Total messages walked but not evaluated, because their stored body
+  // ciphertext failed authentication.
+  //
+  // A count rather than a list: this accumulates over a scan of the entire
+  // store and has no bound worth streaming. Each one is logged by name at
+  // WARN. Rules are never evaluated against a body the store could not
+  // authenticate -- a filter that acts on invented content is worse than one
+  // that reports it did not run.
+  uint64 unreadable_count = 6;
 }
 
 // Export exposes the daemon's real mailbox export engine
@@ -1287,6 +1306,15 @@ message ExportResponse {
   uint64 message_count = 2;
   // Total bytes actually written to `output_path`.
   uint64 bytes_written = 3;
+  // IDs of messages in scope that were NOT written, because their stored body
+  // ciphertext failed authentication.
+  //
+  // An export is the artifact that outlives the store, so the gap in it is
+  // named rather than merely counted: the caller can record exactly which mail
+  // its archive does not contain. Writing them with an empty or placeholder
+  // body instead would put text into an archive that the store never held, and
+  // no later reader could tell it apart from the real thing.
+  repeated string unreadable_message_ids = 4;
 }
 
 // Calendar exposes the READ path over the daemon's real, persistent calendar

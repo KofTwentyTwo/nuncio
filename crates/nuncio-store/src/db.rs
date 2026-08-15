@@ -323,17 +323,87 @@ pub struct SaveOutcome {
 /// as the only place both can reach.
 pub use nuncio_core::model::PlacementKey;
 
-/// A message paired with the mailbox occupancy it was read through.
+/// A stored row whose body ciphertext would not authenticate on read.
+///
+/// Carries only columns the store keeps in the clear -- the message key and its
+/// receipt time. It never carries body content, because the body is precisely
+/// what failed to authenticate and is therefore not trustworthy enough to hand
+/// on, log, or index.
+///
+/// `received_at` travels with the key so an unreadable row can still hold its
+/// slot in an ordering or a keyset page. Dropping it from the sequence outright
+/// would move every later row forward and make a keyset cursor point at the
+/// wrong place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableBody {
+    /// Store key of the row whose body would not authenticate.
+    pub message_key: String,
+    /// The row's receipt time, in the same units as `Email::received_at`.
+    pub received_at: i64,
+}
+
+/// One row of a **bulk** message read: `Ok` when the stored body authenticated,
+/// `Err` when it did not.
+///
+/// Single-item and bulk reads answer different questions, and this type is why
+/// they are allowed to answer them differently.
+///
+/// [`DatabaseEngine::get_message`] is asked for one named message. It fails
+/// closed -- returning `Err` for the whole call -- because a message handed back
+/// with an empty body is indistinguishable from a genuinely empty one, which
+/// would hide exactly the tampering the AEAD exists to detect.
+///
+/// A listing, a rescan or an export is asked for a *set*. Failing the whole set
+/// over one bit-rotted row hides the other forty-nine just as effectively as an
+/// empty body hides the one. So the bulk paths keep every row in its slot and
+/// refuse to invent a body for the ones that will not authenticate: the caller
+/// receives `Err(UnreadableBody)` for those rows and intact messages for the
+/// rest. Because the failure rides in the row rather than in the call, a caller
+/// cannot consume the page without meeting it.
+pub type MessageRead = Result<nuncio_core::model::Email, UnreadableBody>;
+
+/// The identity columns every bulk-read row carries, readable body or not.
+///
+/// Lets ordering, keyset cursors and progress counters treat an unreadable row
+/// as the row it still is, without first having to know whether its body
+/// decrypted.
+pub trait BulkReadRow {
+    /// Store key of this row.
+    fn message_key(&self) -> &str;
+    /// Receipt time of this row.
+    fn received_at(&self) -> i64;
+}
+
+impl BulkReadRow for MessageRead {
+    fn message_key(&self) -> &str {
+        match self {
+            Ok(email) => &email.id,
+            Err(unreadable) => &unreadable.message_key,
+        }
+    }
+
+    fn received_at(&self) -> i64 {
+        match self {
+            Ok(email) => email.received_at,
+            Err(unreadable) => unreadable.received_at,
+        }
+    }
+}
+
+/// A bulk-read message row paired with the mailbox occupancy it was read
+/// through.
 ///
 /// The two travel together out of every folder-scoped read: the caller almost
 /// always needs the per-mailbox facts (the read flag, the addressing UID) as
-/// well as the message, and re-deriving them would cost a query per row.
+/// well as the message, and re-deriving them would cost a query per row. The
+/// placement is present even for a row whose body would not authenticate --
+/// where the row sits is not encrypted, and the caller still needs it to page.
 ///
 /// Deliberately not called `PlacedMessage`: `nuncio_mail::PlacedMessage` is a
 /// different type carrying a third field (the identity tier a backend derived
 /// the key from), and the sync path imports both. One name for two shapes in
 /// one call site is a trap worth a longer name to avoid.
-pub type MessageWithPlacement = (nuncio_core::model::Email, nuncio_core::model::Placement);
+pub type MessageWithPlacement = (MessageRead, nuncio_core::model::Placement);
 
 /// Keyset cursor for [`DatabaseEngine::list_messages_page`]: the
 /// `(received_at, message_key, uidvalidity, uid)` of the last row of a page.
@@ -376,6 +446,15 @@ type MessageWithPlacementRow = (
     String,
     i64,
 );
+
+/// Drop a joined row's placement columns, leaving the identity-only
+/// [`MessageRow`] the body decoders take. Consumes the row so the message
+/// columns move rather than clone.
+fn narrow_placed_row(row: MessageWithPlacementRow) -> MessageRow {
+    (
+        row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
+    )
+}
 
 /// What a [`DatabaseEngine::delete_placements`] call removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1235,12 +1314,31 @@ impl DatabaseEngine {
         .await
         .map_err(DatabaseError::Query)?;
 
+        let mut unreadable = 0usize;
         for (message_key, subject, sender, body_plain) in rows {
-            let dec_plain = body_plain
+            let dec_plain = match body_plain
                 .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
                 .transpose()
-                .map_err(|e| DatabaseError::Decryption(e.to_string()))?
-                .unwrap_or_default();
+            {
+                Ok(plain) => plain.unwrap_or_default(),
+                Err(e) => {
+                    // This runs on every open, so failing the whole backfill on
+                    // one bit-rotted row would stop the daemon booting at all.
+                    // The row is left out of the index entirely rather than
+                    // indexed with an empty body: an FTS entry marks a message
+                    // permanently indexed, so an empty one would make its body
+                    // permanently unsearchable with nothing left to report it.
+                    // Leaving it out means every subsequent open re-reports it,
+                    // and a repaired row indexes itself without intervention.
+                    unreadable += 1;
+                    tracing::warn!(
+                        message_key = %message_key,
+                        error = %e,
+                        "stored message body failed authentication; leaving it out of the search index"
+                    );
+                    continue;
+                }
+            };
 
             sqlx::query(
                 "INSERT INTO messages_fts (message_key, subject, sender, body_plain) VALUES (?, ?, ?, ?)",
@@ -1252,6 +1350,14 @@ impl DatabaseEngine {
             .execute(&self.pool)
             .await
             .map_err(DatabaseError::Query)?;
+        }
+
+        if unreadable > 0 {
+            tracing::warn!(
+                unreadable,
+                "search index backfill skipped messages whose stored bodies failed \
+                 authentication; their bodies are not searchable until the rows are repaired"
+            );
         }
 
         Ok(())
@@ -1879,6 +1985,11 @@ impl DatabaseEngine {
     /// The placement travels with the message because the caller almost always
     /// needs the per-mailbox facts -- the read flag and the addressing UID --
     /// and re-deriving them would mean a second query per row.
+    ///
+    /// A row whose stored body will not authenticate comes back as
+    /// `Err(UnreadableBody)` in its own slot rather than failing the listing --
+    /// see [`MessageRead`] for why a bulk read differs from
+    /// [`Self::get_message`] here.
     pub async fn list_messages(
         &self,
         account_id: &str,
@@ -1906,39 +2017,14 @@ impl DatabaseEngine {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let dec_plain = row
-                .6
-                .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
-                .transpose()
-                .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-            let dec_html = row
-                .7
-                .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h))
-                .transpose()
-                .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-
-            out.push((
-                nuncio_core::model::Email {
-                    id: row.0,
-                    account_id: row.1,
-                    subject: row.2,
-                    sender: row.3,
-                    recipient: row.4,
-                    received_at: row.5,
-                    body_plain: dec_plain,
-                    body_html: dec_html,
-                    attachments: Vec::new(),
-                    message_id: row.8,
-                    content_hash: row.9,
-                },
-                nuncio_core::model::Placement {
-                    account_id: account_id.to_string(),
-                    folder_id: folder_id.to_string(),
-                    uid_validity: row.10,
-                    remote_id: row.11,
-                    read: row.12 != 0,
-                },
-            ));
+            let placement = nuncio_core::model::Placement {
+                account_id: account_id.to_string(),
+                folder_id: folder_id.to_string(),
+                uid_validity: row.10.clone(),
+                remote_id: row.11.clone(),
+                read: row.12 != 0,
+            };
+            out.push((self.bulk_email_from_row(narrow_placed_row(row)), placement));
         }
         Ok(out)
     }
@@ -1962,6 +2048,11 @@ impl DatabaseEngine {
     /// `uidvalidity`/`uid` are compared as the text they are stored as, which is
     /// an arbitrary but total order -- and matching the `ORDER BY` exactly is
     /// all a keyset needs.
+    ///
+    /// A row whose stored body will not authenticate occupies its slot in the
+    /// page as `Err(UnreadableBody)` -- see [`MessageRead`]. Keeping the slot is
+    /// what lets the keyset stay exact: the page is still as long as the query's
+    /// window, so the cursor still names a real position in the sequence.
     pub async fn list_messages_page(
         &self,
         account_id: &str,
@@ -2018,45 +2109,27 @@ impl DatabaseEngine {
         let has_more = rows.len() > page_size;
         let mut placed = Vec::with_capacity(rows.len().min(page_size));
         for row in rows.into_iter().take(page_size) {
-            let dec_plain = row
-                .6
-                .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
-                .transpose()
-                .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-            let dec_html = row
-                .7
-                .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h))
-                .transpose()
-                .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-            placed.push((
-                nuncio_core::model::Email {
-                    id: row.0,
-                    account_id: row.1,
-                    subject: row.2,
-                    sender: row.3,
-                    recipient: row.4,
-                    received_at: row.5,
-                    body_plain: dec_plain,
-                    body_html: dec_html,
-                    attachments: Vec::new(),
-                    message_id: row.8,
-                    content_hash: row.9,
-                },
-                nuncio_core::model::Placement {
-                    account_id: account_id.to_string(),
-                    folder_id: folder_id.to_string(),
-                    uid_validity: row.10,
-                    remote_id: row.11,
-                    read: row.12 != 0,
-                },
-            ));
+            let placement = nuncio_core::model::Placement {
+                account_id: account_id.to_string(),
+                folder_id: folder_id.to_string(),
+                uid_validity: row.10.clone(),
+                remote_id: row.11.clone(),
+                read: row.12 != 0,
+            };
+            // An unreadable row stays in the page rather than being filtered
+            // out of it. The keyset is positional: dropping rows here would
+            // make the page shorter than the query's own window, so `has_more`
+            // and the cursor below would both describe a sequence the store
+            // never returned, and rows between the last surviving row and the
+            // query's real boundary would become unreachable.
+            placed.push((self.bulk_email_from_row(narrow_placed_row(row)), placement));
         }
 
         let next = if has_more {
-            placed.last().map(|(e, p)| {
+            placed.last().map(|(read, p)| {
                 (
-                    e.received_at,
-                    e.id.clone(),
+                    read.received_at(),
+                    read.message_key().to_string(),
                     p.uid_validity.clone(),
                     p.remote_id.clone(),
                 )
@@ -2089,30 +2162,11 @@ impl DatabaseEngine {
         .await
         .map_err(DatabaseError::Query)?;
 
-        let dec_plain = row
-            .6
-            .map(|p| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &p))
-            .transpose()
-            .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-        let dec_html = row
-            .7
-            .map(|h| crate::cipher::PayloadCipher::decrypt_text_at_rest(&self.storage_key, &h))
-            .transpose()
-            .map_err(|e| DatabaseError::Decryption(e.to_string()))?;
-
-        Ok(nuncio_core::model::Email {
-            id: row.0,
-            account_id: row.1,
-            subject: row.2,
-            sender: row.3,
-            recipient: row.4,
-            received_at: row.5,
-            body_plain: dec_plain,
-            body_html: dec_html,
-            attachments: Vec::new(),
-            message_id: row.8,
-            content_hash: row.9,
-        })
+        // Fail-closed on purpose, and deliberately NOT the bulk decoder: this
+        // call names one message, so there is no other row for the caller to
+        // still receive, and a message returned with an empty body reads
+        // exactly like a genuinely empty one.
+        self.email_from_row(row)
     }
 
     /// Every placement currently stored for one folder of one account.
@@ -3182,11 +3236,18 @@ impl DatabaseEngine {
     ///
     /// Walks message identities, not placements: a chunked pass over the store
     /// wants each message exactly once, however many folders it occupies.
+    ///
+    /// A row whose stored body will not authenticate is returned as
+    /// `Err(UnreadableBody)` in its own slot -- see [`MessageRead`]. Keeping the
+    /// slot matters twice over here: a scan pages on chunk length and resumes
+    /// from the last key it saw, so silently shortening a chunk would both
+    /// declare the scan finished early and rewind the cursor past rows it never
+    /// looked at.
     pub async fn get_message_chunk(
         &self,
         last_key: &str,
         limit: usize,
-    ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
+    ) -> Result<Vec<MessageRead>, DatabaseError> {
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
             "SELECT message_key, account_id, subject, sender, recipient, received_at, \
              body_plain, body_html, message_id, content_hash FROM messages ",
@@ -3205,7 +3266,10 @@ impl DatabaseEngine {
             .await
             .map_err(DatabaseError::Query)?;
 
-        rows.into_iter().map(|r| self.email_from_row(r)).collect()
+        Ok(rows
+            .into_iter()
+            .map(|r| self.bulk_email_from_row(r))
+            .collect())
     }
 
     /// Query messages across the WHOLE store for export purposes,
@@ -3217,11 +3281,18 @@ impl DatabaseEngine {
     /// The folder filter is an `EXISTS` over `placements` rather than a join:
     /// a message occupying two folders must still export as one message, and a
     /// join would emit it once per matching placement.
+    ///
+    /// A row whose stored body will not authenticate is returned as
+    /// `Err(UnreadableBody)` rather than failing the export -- see
+    /// [`MessageRead`]. An archive is the one artifact a caller keeps after the
+    /// store is gone, so the caller is handed the key of every message it will
+    /// not contain and can name the gap; what it must never do is write a
+    /// message with a body the store could not authenticate.
     pub async fn list_messages_for_export(
         &self,
         account_id: Option<&str>,
         folder_id: Option<&str>,
-    ) -> Result<Vec<nuncio_core::model::Email>, DatabaseError> {
+    ) -> Result<Vec<MessageRead>, DatabaseError> {
         let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
             "SELECT m.message_key, m.account_id, m.subject, m.sender, m.recipient, \
              m.received_at, m.body_plain, m.body_html, m.message_id, m.content_hash \
@@ -3257,7 +3328,35 @@ impl DatabaseEngine {
             .await
             .map_err(DatabaseError::Query)?;
 
-        rows.into_iter().map(|r| self.email_from_row(r)).collect()
+        Ok(rows
+            .into_iter()
+            .map(|r| self.bulk_email_from_row(r))
+            .collect())
+    }
+
+    /// The bulk-read counterpart to [`Self::email_from_row`]: the same
+    /// decryption, but a body that will not authenticate is reported as
+    /// [`UnreadableBody`] for that row alone instead of failing the whole read.
+    ///
+    /// The failure is logged at `warn!` naming the message key, so an operator
+    /// watching the daemon sees which row is at fault rather than a listing that
+    /// is quietly one message short. The log deliberately carries the key and
+    /// the cipher's own error only -- never body content, which is the exact
+    /// material that failed to authenticate and must not be echoed anywhere.
+    fn bulk_email_from_row(&self, row: MessageRow) -> MessageRead {
+        let message_key = row.0.clone();
+        let received_at = row.5;
+        self.email_from_row(row).map_err(|e| {
+            tracing::warn!(
+                message_key = %message_key,
+                error = %e,
+                "stored message body failed authentication; returning this row as unreadable"
+            );
+            UnreadableBody {
+                message_key,
+                received_at,
+            }
+        })
     }
 
     /// Rebuild an [`nuncio_core::model::Email`] from the identity-column row
@@ -3552,6 +3651,13 @@ fn compute_log_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The message behind a bulk-read row that the fixture guarantees is
+    /// readable. Panics on an unreadable row so a test asserting on message
+    /// content can never silently pass over one that failed to authenticate.
+    fn readable(read: &MessageRead) -> &nuncio_core::model::Email {
+        read.as_ref().expect("this fixture row's body is readable")
+    }
     use sqlx::Connection;
 
     /// Proves that a transient error surfacing from the integrity probe (here, a
@@ -3831,7 +3937,7 @@ mod tests {
             .await
             .expect("list messages succeeds");
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].0.id, "msg-db-100");
+        assert_eq!(readable(&msgs[0].0).id, "msg-db-100");
         assert_eq!(msgs[0].1.remote_id, "100");
 
         let folders = engine
@@ -3844,9 +3950,13 @@ mod tests {
     }
 
     /// A `body_plain` column corrupted after a legitimate write (simulating tampering or
-    /// bit-rot) must make `get_message` and `list_messages` return
+    /// bit-rot) must make the SINGLE-ITEM `get_message` return
     /// `Err(DatabaseError::Decryption)`, never a silently-empty body -- that would defeat
     /// the AEAD's integrity guarantee exactly where it matters: detecting tampering on read.
+    ///
+    /// The bulk paths are covered by
+    /// `one_corrupt_body_does_not_destroy_a_bulk_read`, which asserts the other half of
+    /// the contract: they must not fail closed over one row, and must not hide it either.
     #[tokio::test]
     async fn corrupted_body_ciphertext_fails_closed_on_read() {
         let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
@@ -3906,20 +4016,218 @@ mod tests {
             .expect_err("get_message must fail closed on corrupted ciphertext");
         assert!(matches!(err, DatabaseError::Decryption(_)));
 
-        let err = engine
+        // The bulk paths deliberately do NOT fail the whole call here -- but the one
+        // corrupt row still never comes back carrying a body.
+        let listed = engine
             .list_messages("acct-1", "INBOX", 10)
             .await
-            .expect_err("list_messages must fail closed on corrupted ciphertext");
-        assert!(matches!(err, DatabaseError::Decryption(_)));
+            .expect("a bulk listing must survive one unreadable row");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].0.as_ref().err().map(|u| u.message_key.as_str()),
+            Some("msg-db-corrupt"),
+            "the corrupt row must be reported as unreadable, not returned with a body"
+        );
+    }
 
-        // The export path reads the same ciphertext column and must fail closed too --
-        // an export that silently dropped an unauthenticated body would write a file
-        // the user could not tell apart from a genuinely empty message.
-        let err = engine
+    /// Corrupt the stored `body_plain` ciphertext of one message in place, leaving it
+    /// valid hex so the failure is an AEAD authentication failure rather than a decode
+    /// error -- the same shape a flipped bit on disk or a tampering edit would produce.
+    async fn corrupt_stored_body(engine: &DatabaseEngine, message_key: &str) {
+        let (stored,): (String,) =
+            sqlx::query_as("SELECT body_plain FROM messages WHERE message_key = ?")
+                .bind(message_key)
+                .fetch_one(&engine.pool)
+                .await
+                .expect("fetch stored ciphertext");
+        let mut bytes = hex::decode(&stored).expect("stored ciphertext is valid hex");
+        let last_idx = bytes.len() - 1;
+        bytes[last_idx] ^= 0xFF;
+
+        sqlx::query("UPDATE messages SET body_plain = ? WHERE message_key = ?")
+            .bind(hex::encode(bytes))
+            .bind(message_key)
+            .execute(&engine.pool)
+            .await
+            .expect("corrupt stored ciphertext");
+    }
+
+    /// Split a bulk read into the keys that came back whole and the keys reported
+    /// unreadable, asserting along the way that nothing arrived with a fabricated body.
+    fn split_bulk_read(rows: &[MessageRead]) -> (Vec<&str>, Vec<&str>) {
+        let mut good = Vec::new();
+        let mut bad = Vec::new();
+        for row in rows {
+            match row {
+                Ok(email) => {
+                    assert!(
+                        email.body_plain.as_deref().is_some_and(|b| !b.is_empty()),
+                        "a readable row must carry its real body, never an empty one"
+                    );
+                    good.push(email.id.as_str());
+                }
+                Err(unreadable) => bad.push(unreadable.message_key.as_str()),
+            }
+        }
+        (good, bad)
+    }
+
+    /// Store `keys` as messages in one folder, with a distinct body per position.
+    async fn save_bulk_fixture(engine: &DatabaseEngine, keys: &[&str]) {
+        for (idx, key) in keys.iter().enumerate() {
+            let email = nuncio_core::model::Email {
+                id: (*key).to_string(),
+                account_id: "acct-1".to_string(),
+                subject: format!("Message {idx}"),
+                sender: "alice@nuncio.mx".to_string(),
+                recipient: "bob@nuncio.mx".to_string(),
+                received_at: 1_700_000_000 + idx as i64,
+                body_plain: Some(format!("body number {idx}")),
+                body_html: None,
+                attachments: Vec::new(),
+                message_id: None,
+                content_hash: None,
+            };
+            let placement = nuncio_core::model::Placement {
+                account_id: "acct-1".to_string(),
+                folder_id: "INBOX".to_string(),
+                uid_validity: "1".to_string(),
+                remote_id: idx.to_string(),
+                read: false,
+            };
+            engine
+                .save_email_at(
+                    &email,
+                    nuncio_core::model::IdentitySource::Surrogate,
+                    &placement,
+                )
+                .await
+                .expect("save email succeeds");
+        }
+    }
+
+    /// The counterpart to `corrupted_body_ciphertext_fails_closed_on_read`: one corrupt
+    /// row must not destroy a whole page, a whole rescan, or a whole export -- and must
+    /// not vanish from them either.
+    ///
+    /// Three messages are stored and the middle one's ciphertext is corrupted. Every bulk
+    /// path must return the two good messages, account for the bad one by key, and never
+    /// hand back a row carrying a body it could not authenticate. The single-item read of
+    /// that same message must still fail closed, which is what makes the two behaviours a
+    /// deliberate distinction rather than an inconsistency.
+    #[tokio::test]
+    async fn one_corrupt_body_does_not_destroy_a_bulk_read() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        save_bulk_fixture(&engine, &["msg-good-1", "msg-rotten", "msg-good-2"]).await;
+        corrupt_stored_body(&engine, "msg-rotten").await;
+
+        let listed = engine
+            .list_messages("acct-1", "INBOX", 10)
+            .await
+            .expect("listing survives one unreadable row");
+        let rows: Vec<MessageRead> = listed.into_iter().map(|(read, _)| read).collect();
+        let (good, bad) = split_bulk_read(&rows);
+        assert_eq!(good.len(), 2, "both intact messages are still listed");
+        assert_eq!(bad, vec!["msg-rotten"]);
+
+        // The keyset page must keep the unreadable row in its slot: a page one row short
+        // of its own window would make the cursor name a position the store never
+        // returned, and rows past it unreachable.
+        let (page, next) = engine
+            .list_messages_page("acct-1", "INBOX", None, 2)
+            .await
+            .expect("paged listing survives one unreadable row");
+        assert_eq!(page.len(), 2, "the unreadable row still occupies a slot");
+        assert!(next.is_some(), "a third row remains, so a cursor is owed");
+        let page_rows: Vec<MessageRead> = page.into_iter().map(|(read, _)| read).collect();
+        let (_, page_bad) = split_bulk_read(&page_rows);
+        assert_eq!(page_bad, vec!["msg-rotten"]);
+
+        let chunk = engine
+            .get_message_chunk("", 10)
+            .await
+            .expect("chunked scan survives one unreadable row");
+        assert_eq!(chunk.len(), 3, "the scan still walks every row");
+        let (good, bad) = split_bulk_read(&chunk);
+        assert_eq!(good.len(), 2);
+        assert_eq!(bad, vec!["msg-rotten"]);
+
+        let exported = engine
             .list_messages_for_export(None, None)
             .await
-            .expect_err("export must fail closed on corrupted ciphertext");
+            .expect("export survives one unreadable row");
+        let (good, bad) = split_bulk_read(&exported);
+        assert_eq!(
+            good.len(),
+            2,
+            "an export must still contain every message it can authenticate"
+        );
+        assert_eq!(
+            bad,
+            vec!["msg-rotten"],
+            "the message missing from the archive must be named, not silently dropped"
+        );
+
+        // The whole point of the distinction: asking for that one message by name still
+        // fails closed, because there is no other row left for the caller to receive.
+        let err = engine
+            .get_message("msg-rotten")
+            .await
+            .expect_err("the single-item read must still fail closed");
         assert!(matches!(err, DatabaseError::Decryption(_)));
+
+        // And the good messages are still individually readable -- the corruption is
+        // isolated to its own row, not smeared across the store.
+        assert_eq!(
+            engine
+                .get_message("msg-good-1")
+                .await
+                .expect("an intact message is still readable")
+                .body_plain
+                .as_deref(),
+            Some("body number 0")
+        );
+    }
+
+    /// `migrate()` runs on every open and backfills the search index from stored
+    /// ciphertext, so a single bit-rotted body must not stop the daemon booting. The
+    /// affected row is left out of the index (never indexed with an empty body, which
+    /// would mark it permanently indexed and permanently unsearchable), while every other
+    /// message indexes and searches normally.
+    #[tokio::test]
+    async fn fts_backfill_skips_one_corrupt_body_instead_of_failing_the_open() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+        save_bulk_fixture(&engine, &["msg-index-good", "msg-index-rotten"]).await;
+
+        // Drop both FTS entries so the backfill has real work, then corrupt one body.
+        sqlx::query("DELETE FROM messages_fts")
+            .execute(&engine.pool)
+            .await
+            .expect("clear the index");
+        corrupt_stored_body(&engine, "msg-index-rotten").await;
+
+        engine
+            .migrate()
+            .await
+            .expect("one unreadable body must not stop the store opening");
+
+        let search = crate::search::SearchEngine::new(&engine);
+        let hits = search
+            .search_messages("number 0")
+            .await
+            .expect("search succeeds");
+        assert_eq!(hits.len(), 1, "the intact message is indexed and findable");
+        assert_eq!(hits[0].id, "msg-index-good");
+
+        // The corrupt row is absent from the index rather than present with an empty
+        // body: it must stay a candidate for backfill so a repaired row heals itself.
+        let (indexed,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM messages_fts WHERE message_key = ?")
+                .bind("msg-index-rotten")
+                .fetch_one(&engine.pool)
+                .await
+                .expect("count index rows");
+        assert_eq!(indexed, 0);
     }
 
     fn sample_calendar_event(id: &str, account_id: &str) -> nuncio_core::model::CalendarEvent {
@@ -4758,14 +5066,14 @@ mod tests {
 
         let chunk1 = engine.get_message_chunk("", 3).await.unwrap();
         assert_eq!(chunk1.len(), 3);
-        assert_eq!(chunk1[0].id, "msg-001");
-        assert_eq!(chunk1[2].id, "msg-003");
+        assert_eq!(readable(&chunk1[0]).id, "msg-001");
+        assert_eq!(readable(&chunk1[2]).id, "msg-003");
 
-        let last_id = &chunk1.last().unwrap().id;
+        let last_id = &readable(chunk1.last().unwrap()).id;
         let chunk2 = engine.get_message_chunk(last_id, 3).await.unwrap();
         assert_eq!(chunk2.len(), 2);
-        assert_eq!(chunk2[0].id, "msg-004");
-        assert_eq!(chunk2[1].id, "msg-005");
+        assert_eq!(readable(&chunk2[0]).id, "msg-004");
+        assert_eq!(readable(&chunk2[1]).id, "msg-005");
 
         let mutation = nuncio_filter::OutboxManager::create_mutation(
             "rule-1",
@@ -5920,7 +6228,7 @@ mod tests {
             assert!(rows.len() <= 2, "page must not exceed page_size");
             seen.extend(
                 rows.iter()
-                    .map(|(e, p)| (e.id.clone(), p.remote_id.clone())),
+                    .map(|(e, p)| (readable(e).id.clone(), p.remote_id.clone())),
             );
             match next {
                 Some(cursor) => after = Some(cursor),
@@ -6055,10 +6363,10 @@ mod tests {
             .expect("list");
         let found = listed
             .iter()
-            .find(|(m, _)| m.id == pair.0.id)
+            .find(|(m, _)| readable(m).id == pair.0.id)
             .expect("the saved message is listed");
-        assert_eq!(found.0.message_id, pair.0.message_id);
-        assert_eq!(found.0.content_hash, pair.0.content_hash);
+        assert_eq!(readable(&found.0).message_id, pair.0.message_id);
+        assert_eq!(readable(&found.0).content_hash, pair.0.content_hash);
 
         let exported = engine
             .list_messages_for_export(None, None)
@@ -6066,10 +6374,10 @@ mod tests {
             .expect("export");
         let found = exported
             .iter()
-            .find(|m| m.id == pair.0.id)
+            .find(|m| readable(m).id == pair.0.id)
             .expect("the saved message is exportable");
-        assert_eq!(found.message_id, pair.0.message_id);
-        assert_eq!(found.content_hash, pair.0.content_hash);
+        assert_eq!(readable(found).message_id, pair.0.message_id);
+        assert_eq!(readable(found).content_hash, pair.0.content_hash);
 
         // A message with no Message-ID stays None rather than becoming "".
         let plain = synced_email("acct-1", "INBOX", "42", "8");
@@ -6134,8 +6442,8 @@ mod tests {
 
         let all = engine.list_messages_for_export(None, None).await.unwrap();
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].id, "msg-1");
-        assert_eq!(all[1].id, "msg-2");
+        assert_eq!(readable(&all[0]).id, "msg-1");
+        assert_eq!(readable(&all[1]).id, "msg-2");
     }
 
     #[tokio::test]
@@ -6149,7 +6457,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(scoped.len(), 1);
-        assert_eq!(scoped[0].id, "msg-1");
+        assert_eq!(readable(&scoped[0]).id, "msg-1");
     }
 
     #[tokio::test]
@@ -6163,7 +6471,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(scoped.len(), 1);
-        assert_eq!(scoped[0].id, "msg-2");
+        assert_eq!(readable(&scoped[0]).id, "msg-2");
     }
 
     #[tokio::test]
@@ -6178,7 +6486,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(scoped.len(), 1);
-        assert_eq!(scoped[0].id, "msg-1");
+        assert_eq!(readable(&scoped[0]).id, "msg-1");
     }
 
     /// An export whose WORM audit record cannot be persisted must never report success --
@@ -6189,7 +6497,13 @@ mod tests {
     async fn export_messages_to_file_fails_when_worm_audit_write_fails() {
         let (engine, dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
         save_export_message(&engine, "msg-1", "acct-a", "inbox").await;
-        let messages = engine.list_messages_for_export(None, None).await.unwrap();
+        let messages: Vec<_> = engine
+            .list_messages_for_export(None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|read| read.expect("fixture bodies are readable"))
+            .collect();
 
         engine.close().await;
 

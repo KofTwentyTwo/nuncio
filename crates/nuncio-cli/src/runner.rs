@@ -875,6 +875,11 @@ impl HeadlessRunner {
         // Follow `next_page_token` to the end so the command shows the whole
         // folder, transparently exercising the keyset pagination convention.
         let mut messages = Vec::new();
+        // Messages the daemon could not return because their stored bodies
+        // failed authentication. Reported rather than quietly missing: a
+        // listing that is one message short with no explanation is a lie of
+        // omission, and this is the only place the user would ever see it.
+        let mut unreadable: Vec<String> = Vec::new();
         let mut page_token = String::new();
         loop {
             match client
@@ -888,6 +893,7 @@ impl HeadlessRunner {
                 Ok(response) => {
                     let page = response.into_inner();
                     messages.extend(page.messages);
+                    unreadable.extend(page.unreadable_message_ids);
                     if page.next_page_token.is_empty() {
                         break;
                     }
@@ -904,10 +910,20 @@ impl HeadlessRunner {
                 messages.iter().map(message_proto_to_json).collect();
             format_json(&json!({
                 "folder": folder,
-                "messages": messages_json
+                "messages": messages_json,
+                "unreadable_message_ids": unreadable
             }))
-        } else {
+        } else if unreadable.is_empty() {
             format!("Folder '{}': {} message(s) found", folder, messages.len())
+        } else {
+            format!(
+                "Folder '{}': {} message(s) found; {} omitted (stored body failed \
+                 authentication): {}",
+                folder,
+                messages.len(),
+                unreadable.len(),
+                unreadable.join(", ")
+            )
         }
     }
 
@@ -1450,11 +1466,25 @@ impl HeadlessRunner {
                         "output_path": resp.output_path,
                         "message_count": resp.message_count,
                         "bytes_written": resp.bytes_written,
+                        "unreadable_message_ids": resp.unreadable_message_ids,
                     }))
-                } else {
+                } else if resp.unreadable_message_ids.is_empty() {
                     format!(
                         "Exported {} message(s) to '{}' ({} bytes)",
                         resp.message_count, resp.output_path, resp.bytes_written
+                    )
+                } else {
+                    // Named, not just counted: this archive outlives the store,
+                    // so the user needs to be able to record exactly which mail
+                    // it does not contain.
+                    format!(
+                        "Exported {} message(s) to '{}' ({} bytes); {} message(s) omitted \
+                         (stored body failed authentication): {}",
+                        resp.message_count,
+                        resp.output_path,
+                        resp.bytes_written,
+                        resp.unreadable_message_ids.len(),
+                        resp.unreadable_message_ids.join(", ")
                     )
                 }
             }
@@ -2018,6 +2048,7 @@ impl HeadlessRunner {
                         "actions_applied_count": p.actions_applied_count,
                         "last_message_id": p.last_message_id,
                         "done": p.done,
+                        "unreadable_count": p.unreadable_count,
                     })
                 })
                 .collect();
@@ -2025,8 +2056,11 @@ impl HeadlessRunner {
         } else {
             match updates.last() {
                 Some(last) => format!(
-                    "Triage complete: scanned={} matched={} actions_applied={}",
-                    last.scanned_count, last.matched_count, last.actions_applied_count
+                    "Triage complete: scanned={} matched={} actions_applied={} unreadable={}",
+                    last.scanned_count,
+                    last.matched_count,
+                    last.actions_applied_count,
+                    last.unreadable_count
                 ),
                 None => "Triage produced no progress updates.".to_string(),
             }
@@ -3844,6 +3878,7 @@ mod tests {
                 let mut message = stub_message();
                 message.folder_id = req.folder_id;
                 Ok(tonic::Response::new(ListMessagesResponse {
+                    unreadable_message_ids: Vec::new(),
                     messages: vec![message],
                     next_page_token: String::new(),
                 }))
@@ -5055,6 +5090,7 @@ mod tests {
             ) -> Result<tonic::Response<Self::TriageStream>, tonic::Status> {
                 let updates = vec![
                     Ok(TriageProgress {
+                        unreadable_count: 0,
                         scanned_count: 2,
                         matched_count: 1,
                         actions_applied_count: 1,
@@ -5062,6 +5098,7 @@ mod tests {
                         done: false,
                     }),
                     Ok(TriageProgress {
+                        unreadable_count: 0,
                         scanned_count: 3,
                         matched_count: 2,
                         actions_applied_count: 2,
@@ -5377,6 +5414,7 @@ mod tests {
                 let output_path = req.output_path.clone();
                 *self.last_request.lock().unwrap_or_else(|e| e.into_inner()) = Some(req);
                 Ok(tonic::Response::new(ExportResponse {
+                    unreadable_message_ids: Vec::new(),
                     output_path,
                     message_count: 7,
                     bytes_written: 4096,

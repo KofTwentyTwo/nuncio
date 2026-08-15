@@ -747,7 +747,12 @@ mod tests {
         assert_eq!(persisted.len(), 2);
         let subjects: Vec<String> = persisted
             .iter()
-            .map(|(email, _placement)| email.subject.clone())
+            .map(|(read, _placement)| {
+                read.as_ref()
+                    .expect("fixture body is readable")
+                    .subject
+                    .clone()
+            })
             .collect();
         assert!(subjects.contains(&"Hello".to_string()));
         assert!(subjects.contains(&"World".to_string()));
@@ -948,7 +953,10 @@ mod tests {
             .expect("jmap message persisted");
         assert_eq!(persisted.len(), 1);
         let (email, placement) = &persisted[0];
-        assert_eq!(email.subject, "Welcome to JMAP Sync");
+        assert_eq!(
+            email.as_ref().expect("fixture body is readable").subject,
+            "Welcome to JMAP Sync"
+        );
         assert_eq!(placement.remote_id, "jmap-msg-1");
 
         assert_eq!(
