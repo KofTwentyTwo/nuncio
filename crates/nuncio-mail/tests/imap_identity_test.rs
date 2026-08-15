@@ -193,7 +193,7 @@ async fn an_imap_emailid_and_a_jmap_object_id_produce_the_same_key() {
            "receivedAt":1700001000,"isUnread":true}}]}},"c1"]]}}"#
     );
     let (jmap, _state) = JmapEngine::new(ACCOUNT)
-        .parse_email_get_response(&jmap_response)
+        .parse_email_get_response(&jmap_response, "mb-inbox")
         .expect("the JMAP response parses");
 
     assert_eq!(imap.upserts.len(), 1);

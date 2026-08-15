@@ -451,17 +451,13 @@ impl JmapEngine {
         }
     }
 
-    /// Parse a raw JMAP `Email/get` JSON response payload into a list of
-    /// [`PlacedMessage`] and the new state string.
-    pub fn parse_email_get_response(
-        &self,
-        raw_json: &str,
-    ) -> Result<(Vec<PlacedMessage>, String), MailError> {
-        self.parse_email_get_response_in_folder(raw_json, "inbox")
-    }
-
     /// Parse a raw JMAP `Email/get` JSON response payload into the occupancies
     /// it establishes for `folder_id`, plus the account's Email state string.
+    ///
+    /// The caller supplies the mailbox being parsed for because the placements
+    /// this produces are keyed by it: a placement labelled with a folder the
+    /// account does not sync can never be matched again, so a fixed label would
+    /// silently strand every message it produced.
     ///
     /// A returned message whose `mailboxIds` is present and does NOT name
     /// `folder_id` is dropped rather than placed: `Email/changes` is
@@ -470,7 +466,7 @@ impl JmapEngine {
     /// here would invent an occupancy the server never reported. Membership
     /// that the server did not return at all is left alone -- unknown is not
     /// absent.
-    fn parse_email_get_response_in_folder(
+    pub fn parse_email_get_response(
         &self,
         raw_json: &str,
         folder_id: &str,
@@ -765,7 +761,7 @@ impl JmapEngine {
 
         let get_request = Self::build_email_get_request(jmap_account_id, Some(ids));
         let get_raw = self.post_jmap(api_url, &get_request).await?;
-        let (emails, state) = self.parse_email_get_response_in_folder(&get_raw, folder_id)?;
+        let (emails, state) = self.parse_email_get_response(&get_raw, folder_id)?;
 
         let present: Vec<PlacementKey> = emails.iter().map(|m| m.placement.key()).collect();
 
@@ -810,7 +806,7 @@ impl JmapEngine {
             let get_request =
                 Self::build_email_get_request(jmap_account_id, Some(changes.changed.clone()));
             let get_raw = self.post_jmap(api_url, &get_request).await?;
-            let (emails, _state) = self.parse_email_get_response_in_folder(&get_raw, folder_id)?;
+            let (emails, _state) = self.parse_email_get_response(&get_raw, folder_id)?;
             emails
         };
 
@@ -1118,7 +1114,7 @@ mod tests {
         }"#;
         let engine = JmapEngine::new("acct-1");
         let (emails, _state) = engine
-            .parse_email_get_response_in_folder(raw, "mb-inbox")
+            .parse_email_get_response(raw, "mb-inbox")
             .expect("parse get");
         let ids: Vec<&str> = emails
             .iter()
@@ -1142,7 +1138,9 @@ mod tests {
             ]
         }"#;
         let engine = JmapEngine::new("acct-1");
-        let (emails, _state) = engine.parse_email_get_response(raw).expect("parse get");
+        let (emails, _state) = engine
+            .parse_email_get_response(raw, "mb-inbox")
+            .expect("parse get");
 
         assert_eq!(
             emails[0].email.message_id.as_deref(),
@@ -1160,7 +1158,7 @@ mod tests {
     #[test]
     fn parse_invalid_jmap_json_fails() {
         let engine = JmapEngine::new("acct-1");
-        let res = engine.parse_email_get_response("{ invalid json }");
+        let res = engine.parse_email_get_response("{ invalid json }", "mb-inbox");
         assert!(res.is_err());
     }
 

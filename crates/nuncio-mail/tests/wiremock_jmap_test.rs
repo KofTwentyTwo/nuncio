@@ -81,7 +81,7 @@ async fn wiremock_jmap_session_discovery_and_email_get_sync() {
 
     let engine = JmapEngine::new("acct-100");
     let (emails, new_state) = engine
-        .parse_email_get_response(&resp.text().await.unwrap())
+        .parse_email_get_response(&resp.text().await.unwrap(), "mb-inbox")
         .expect("parse email get");
 
     assert_eq!(emails.len(), 1);
