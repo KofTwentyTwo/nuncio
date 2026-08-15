@@ -79,9 +79,7 @@ async fn cli_system_status_round_trips_over_grpc_to_live_daemon() {
     // client path against the live daemon, reading the token back from the
     // shared mock `SecretManager` (proving the CLI's injected-vault design
     // works end-to-end, not just against a hand-rolled token string).
-    let cli_runner = HeadlessRunner::ephemeral_with(secrets, addr.to_string())
-        .await
-        .expect("cli headless runner initializes");
+    let cli_runner = HeadlessRunner::connect_with(secrets, addr.to_string());
 
     let cli_status = cli_runner
         .execute_command(

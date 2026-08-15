@@ -100,13 +100,8 @@ async fn env_override_authenticates_without_consulting_the_vault() {
     );
     assert_ne!(unrelated_token, token);
 
-    let runner = HeadlessRunner::ephemeral_with_token_override(
-        unrelated_vault,
-        addr.to_string(),
-        Some(token),
-    )
-    .await
-    .expect("cli headless runner initializes");
+    let runner =
+        HeadlessRunner::connect_with_token_override(unrelated_vault, addr.to_string(), Some(token));
 
     let out = run_status(&runner).await;
     assert!(
@@ -127,9 +122,7 @@ async fn keyring_path_is_unchanged_when_no_override_is_set() {
     );
     let addr = boot_daemon(Arc::clone(&secrets), token).await;
 
-    let runner = HeadlessRunner::ephemeral_with(secrets, addr.to_string())
-        .await
-        .expect("cli headless runner initializes");
+    let runner = HeadlessRunner::connect_with(secrets, addr.to_string());
 
     let out = run_status(&runner).await;
     assert!(
@@ -211,13 +204,11 @@ async fn rejected_override_never_echoes_the_token_to_output_or_logs() {
     );
     let addr = boot_daemon(Arc::clone(&daemon_secrets), token).await;
 
-    let runner = HeadlessRunner::ephemeral_with_token_override(
+    let runner = HeadlessRunner::connect_with_token_override(
         Arc::new(SecretManager::mock()),
         addr.to_string(),
         Some(SENTINEL_TOKEN.to_string()),
-    )
-    .await
-    .expect("cli headless runner initializes");
+    );
 
     let out = run_status(&runner).await;
     assert!(

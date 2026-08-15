@@ -1,14 +1,11 @@
 //! Headless engine runner executing CLI commands against core services.
 
-use nuncio_core::EventBus;
 use nuncio_store::vault::{
     get_or_create_key_bytes_bounded, BoundedVaultError, SecretManager, GRPC_TOKEN_ACCOUNT,
     KEYRING_READ_TIMEOUT,
 };
-use nuncio_store::{DatabaseEngine, DatabaseError};
 use serde_json::json;
 use std::sync::Arc;
-use thiserror::Error;
 
 use crate::args::{
     AccountSubcommand, AuditSubcommand, CalSubcommand, Commands, ContactSubcommand,
@@ -336,107 +333,78 @@ fn filter_execution_log_proto_to_json(
     })
 }
 
-/// Errors emitted by the CLI headless runner.
-#[derive(Error, Debug)]
-pub enum RunnerError {
-    /// Engine initialization failure.
-    #[error("failed to initialize engine: {0}")]
-    InitFailed(String),
-    /// Database operation error.
-    #[error("database failure: {0}")]
-    Database(#[from] DatabaseError),
-}
-
 /// Headless core runner executing CLI commands non-interactively.
 ///
-/// Most commands operate against an ephemeral local engine (database +
-/// event bus) for now. `system status` (see [`Self::handle_system_status`])
-/// and `account add` / `account list` (see [`Self::handle_add_account`] /
-/// [`Self::handle_accounts_list`]) are the exceptions: they are thin gRPC
-/// clients of the real `nunciod` daemon's `nuncio.v1.System` and
-/// `nuncio.v1.Accounts` APIs, authenticated by a bearer token read from an
-/// injected [`SecretManager`] — production code uses
-/// [`SecretManager::production`] (the real OS keyring), while tests inject
-/// [`SecretManager::mock`] so no test ever touches the real vault. Setting
-/// [`GRPC_TOKEN_ENV`] overrides that lookup entirely, which is how the CLI is
-/// driven from a non-interactive session.
+/// Every command is a thin gRPC client of the real `nunciod` daemon: the CLI
+/// holds no database, no event bus, and no business logic of its own, because
+/// the daemon owns all state. The single exception is `update check` / `update
+/// apply` (see [`Self::handle_update_check`]), which is deliberately
+/// client-local — the daemon it would have to ask may be the very binary being
+/// replaced.
 ///
-/// `account add` persists through the daemon so the account (and its
-/// password, stored ONLY in the daemon's OS keyring vault) survives past
-/// this CLI process exiting -- unlike this runner's own ephemeral local
-/// `db`, which is thrown away when the process exits.
+/// Calls are authenticated by a bearer token read from an injected
+/// [`SecretManager`] — production code uses [`SecretManager::production`] (the
+/// real OS keyring), while tests inject [`SecretManager::mock`] so no test ever
+/// touches the real vault. Setting [`GRPC_TOKEN_ENV`] overrides that lookup
+/// entirely, which is how the CLI is driven from a non-interactive session.
+///
+/// Because nothing is persisted locally, state a command creates (an account
+/// and its password, stored ONLY in the daemon's OS keyring vault) survives
+/// this CLI process exiting.
 pub struct HeadlessRunner {
-    event_bus: EventBus,
-    db: DatabaseEngine,
     secrets: Arc<SecretManager>,
     grpc_addr: String,
     // When present, the bearer token to send instead of consulting `secrets`.
     // Resolved once at construction so a single CLI invocation cannot change
     // which credential it authenticates with halfway through.
     token_override: Option<String>,
-    // Kept only to hold the ephemeral database's backing directory open for
-    // the runner's lifetime: dropping it would unlink the directory out from
-    // under `db` while the pool may still need to open new connections.
-    _db_dir: tempfile::TempDir,
 }
 
 impl HeadlessRunner {
-    /// Initialize a new `HeadlessRunner` with an ephemeral database, the
-    /// real OS keyring vault ([`SecretManager::production`]), and the gRPC
-    /// daemon address resolved from [`nuncio_proto::grpc_addr_from_env`].
+    /// Initialize a new `HeadlessRunner` against the real OS keyring vault
+    /// ([`SecretManager::production`]) and the gRPC daemon address resolved
+    /// from [`nuncio_proto::grpc_addr_from_env`].
+    ///
     /// [`GRPC_TOKEN_ENV`], when set, supplies the bearer token instead of the
     /// keyring.
-    pub async fn ephemeral() -> Result<Self, RunnerError> {
-        Self::ephemeral_with_token_override(
+    pub fn connect() -> Self {
+        Self::connect_with_token_override(
             Arc::new(SecretManager::production()),
             nuncio_proto::grpc_addr_from_env(),
             grpc_token_from_env(),
         )
-        .await
     }
 
-    /// Initialize a new `HeadlessRunner` with an ephemeral database and an
-    /// explicit secret vault + gRPC daemon address.
+    /// Initialize a new `HeadlessRunner` with an explicit secret vault + gRPC
+    /// daemon address.
     ///
-    /// This is the constructor tests MUST use whenever they exercise
-    /// `system status`: pass a [`SecretManager::mock`]-backed instance
-    /// (never the real OS keyring) and the address of a test-local gRPC
-    /// server.
+    /// This is the constructor tests MUST use: pass a
+    /// [`SecretManager::mock`]-backed instance (never the real OS keyring) and
+    /// the address of a test-local gRPC server.
     /// The ambient [`GRPC_TOKEN_ENV`] override is deliberately NOT consulted
     /// here, so a variable that happens to be exported in a developer's shell
     /// can never change what an injected-vault test authenticates with; tests
     /// that want the override pass it explicitly to
-    /// [`Self::ephemeral_with_token_override`].
-    pub async fn ephemeral_with(
-        secrets: Arc<SecretManager>,
-        grpc_addr: String,
-    ) -> Result<Self, RunnerError> {
-        Self::ephemeral_with_token_override(secrets, grpc_addr, None).await
+    /// [`Self::connect_with_token_override`].
+    pub fn connect_with(secrets: Arc<SecretManager>, grpc_addr: String) -> Self {
+        Self::connect_with_token_override(secrets, grpc_addr, None)
     }
 
-    /// Initialize a new `HeadlessRunner` with an ephemeral database, an
-    /// explicit secret vault + gRPC daemon address, and an explicit bearer
-    /// token override.
+    /// Initialize a new `HeadlessRunner` with an explicit secret vault + gRPC
+    /// daemon address and an explicit bearer token override.
     ///
     /// `token_override`, when `Some`, is used verbatim as the `authorization:
     /// Bearer` credential and the vault is never consulted for it.
-    pub async fn ephemeral_with_token_override(
+    pub fn connect_with_token_override(
         secrets: Arc<SecretManager>,
         grpc_addr: String,
         token_override: Option<String>,
-    ) -> Result<Self, RunnerError> {
-        let (db, db_dir) = DatabaseEngine::connect_ephemeral()
-            .await
-            .map_err(|e| RunnerError::InitFailed(e.to_string()))?;
-        let event_bus = EventBus::new();
-        Ok(Self {
-            event_bus,
-            db,
+    ) -> Self {
+        Self {
             secrets,
-            _db_dir: db_dir,
             grpc_addr,
             token_override: normalize_token_override(token_override),
-        })
+        }
     }
 
     /// Resolves the gRPC bearer token, preferring an explicit override over the
@@ -474,18 +442,6 @@ impl HeadlessRunner {
             )),
             Err(e) => Err(format!("failed to read gRPC bearer token from vault: {e}")),
         }
-    }
-
-    /// Access the underlying `EventBus`.
-    #[allow(dead_code)]
-    pub fn event_bus(&self) -> &EventBus {
-        &self.event_bus
-    }
-
-    /// Access the underlying `DatabaseEngine`.
-    #[allow(dead_code)]
-    pub fn db(&self) -> &DatabaseEngine {
-        &self.db
     }
 
     /// Execute a CLI subcommand, returning a formatted string output.
@@ -877,10 +833,8 @@ impl HeadlessRunner {
 
     /// `mail sync`: a real thin gRPC client of the running `nunciod`
     /// daemon's `nuncio.v1.Mail/Sync` API.
-    /// Replaces this command's previous local-ephemeral behavior (flipping
-    /// this runner's own throwaway `EventBus` status flag, which never
-    /// fetched a single real message) with a real inbound sync against the
-    /// daemon's persistent store -- the RPC awaits full completion before
+    /// Runs a real inbound sync against the daemon's persistent store --
+    /// the RPC awaits full completion before
     /// returning, so a successful response's `synced_count` reflects
     /// messages that are already visible via `mail list`/`mail read`.
     async fn handle_sync(&self, json_mode: bool) -> String {
@@ -911,8 +865,7 @@ impl HeadlessRunner {
     /// `mail list`: a real thin gRPC client of the running `nunciod`
     /// daemon's `nuncio.v1.Mail` API. Lists
     /// messages in `folder`, newest first, from the daemon's real,
-    /// persistent store -- NOT this runner's own ephemeral local `db`, which
-    /// is thrown away when this CLI process exits.
+    /// persistent store -- the CLI keeps no store of its own.
     async fn handle_list_folder(&self, folder: &str, json_mode: bool) -> String {
         let mut client = match self.connect_mail_client().await {
             Ok(client) => client,
@@ -1633,8 +1586,7 @@ impl HeadlessRunner {
     /// `filter list`: a real thin gRPC client of the running `nunciod`
     /// daemon's `nuncio.v1.Filters` API. Lists
     /// every persisted filter rule from the daemon's real, persistent
-    /// store -- NOT this runner's own ephemeral local `db`, which is thrown
-    /// away when this CLI process exits.
+    /// store -- the CLI keeps no store of its own.
     async fn handle_filter_list(&self, json_mode: bool) -> String {
         let mut client = match self.connect_filters_client().await {
             Ok(client) => client,
@@ -1687,9 +1639,8 @@ impl HeadlessRunner {
     /// `filter create`: a real thin gRPC client of the running `nunciod`
     /// daemon's `nuncio.v1.Filters` API. The daemon parses, validates
     /// (6-pass `NsqlValidator`), and persists the
-    /// rule, then reloads its own live `FilterEngine` -- this runner's own
-    /// ephemeral local `db` is never touched, so the rule survives this CLI
-    /// process exiting.
+    /// rule, then reloads its own live `FilterEngine`. The rule lands in the
+    /// daemon's persistent store, so it survives this CLI process exiting.
     async fn handle_filter_create(
         &self,
         name: &str,
@@ -1880,8 +1831,7 @@ impl HeadlessRunner {
 
     /// `filter export`: a real thin gRPC client of the running `nunciod`
     /// daemon's `nuncio.v1.Filters` API, rendering every rule persisted in
-    /// the daemon's real, persistent store -- not this runner's own
-    /// ephemeral local `db`.
+    /// the daemon's real, persistent store -- the CLI keeps none of its own.
     async fn handle_filter_export(&self, format: &str, json_mode: bool) -> String {
         let format = match parse_rule_export_format(format) {
             Ok(f) => f,
@@ -2102,9 +2052,9 @@ impl HeadlessRunner {
     /// The account configuration AND `password` are sent to the daemon in a
     /// single `AddAccount` RPC; the daemon is solely responsible for
     /// writing the password to the OS keyring vault and the config to its
-    /// persistent database -- this runner's own ephemeral local `db` is
-    /// never touched for this command, so the account survives this CLI
-    /// process exiting. `password` is never logged here, only forwarded.
+    /// persistent database. The CLI writes nothing locally, so the account
+    /// survives this CLI process exiting. `password` is never logged here,
+    /// only forwarded.
     #[allow(clippy::too_many_arguments)]
     async fn handle_add_account(
         &self,
@@ -2319,8 +2269,7 @@ impl HeadlessRunner {
     /// Fetches every account from the daemon and returns the one matching
     /// `id`, or an error string. There is deliberately no single-account
     /// `GetAccount` RPC in the contract, so `account show`/`edit` filter the
-    /// `ListAccounts` result client-side -- always over the real daemon API,
-    /// never this runner's own ephemeral local `db`.
+    /// `ListAccounts` result client-side -- always over the real daemon API.
     async fn fetch_account_by_id(
         &self,
         id: &str,
@@ -2340,8 +2289,7 @@ impl HeadlessRunner {
 
     /// `account show`: a real thin gRPC client of the daemon's
     /// `nuncio.v1.Accounts/ListAccounts` API, filtered client-side to a single
-    /// account. Reads ONLY the daemon's persistent store -- never this
-    /// runner's own ephemeral local `db`.
+    /// account. Reads ONLY the daemon's persistent store.
     async fn handle_account_show(&self, id: &str, json_mode: bool) -> String {
         let account = match self.fetch_account_by_id(id).await {
             Ok(account) => account,
@@ -3143,13 +3091,11 @@ mod tests {
                 .expect("mock vault mints a token"),
         );
 
-        let runner = HeadlessRunner::ephemeral_with_token_override(
+        let runner = HeadlessRunner::connect_with_token_override(
             Arc::clone(&secrets),
             "127.0.0.1:1".to_string(),
             Some("  override-token  ".to_string()),
-        )
-        .await
-        .expect("runner init");
+        );
 
         let resolved = runner
             .resolve_grpc_token()
@@ -3169,10 +3115,7 @@ mod tests {
                 .expect("mock vault mints a token"),
         );
 
-        let runner =
-            HeadlessRunner::ephemeral_with(Arc::clone(&secrets), "127.0.0.1:1".to_string())
-                .await
-                .expect("runner init");
+        let runner = HeadlessRunner::connect_with(Arc::clone(&secrets), "127.0.0.1:1".to_string());
 
         assert_eq!(
             runner
@@ -3189,10 +3132,7 @@ mod tests {
     #[tokio::test]
     async fn ephemeral_with_ignores_an_ambient_env_override() {
         let secrets = Arc::new(SecretManager::mock());
-        let runner =
-            HeadlessRunner::ephemeral_with(Arc::clone(&secrets), "127.0.0.1:1".to_string())
-                .await
-                .expect("runner init");
+        let runner = HeadlessRunner::connect_with(Arc::clone(&secrets), "127.0.0.1:1".to_string());
         assert_eq!(runner.token_override, None);
     }
 
@@ -3260,9 +3200,7 @@ mod tests {
     #[tokio::test]
     async fn account_add_caldav_requires_collection_url_before_dialing() {
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), "127.0.0.1:1".into())
-                .await
-                .expect("runner init");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), "127.0.0.1:1".into());
 
         let out = runner
             .execute_command(
@@ -3294,9 +3232,7 @@ mod tests {
     #[tokio::test]
     async fn account_add_rejects_invalid_tls_mode_before_dialing_the_daemon() {
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), "127.0.0.1:1".into())
-                .await
-                .expect("runner init");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), "127.0.0.1:1".into());
 
         let bad_imap_mode = runner
             .execute_command(
@@ -3361,9 +3297,7 @@ mod tests {
     #[tokio::test]
     async fn system_status_reports_honest_error_when_daemon_unreachable() {
         let addr = reserve_unreachable_addr().await;
-        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
-            .await
-            .expect("ephemeral runner initializes");
+        let runner = HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr);
 
         let json_out = runner
             .execute_command(
@@ -3459,9 +3393,7 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         let out = runner
             .execute_command(
@@ -3607,9 +3539,7 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         let add_out = runner
             .execute_command(
@@ -3677,8 +3607,8 @@ mod tests {
         assert!(list_out_text.contains("stub@nuncio.mx"));
         assert!(list_out_text.contains("imap.nuncio.mx"));
 
-        // `account show` reads the daemon's ListAccounts result (filtered
-        // client-side), not the runner's own ephemeral local db.
+        // `account show` reads the daemon's ListAccounts result, filtered
+        // client-side.
         let show_out = runner
             .execute_command(
                 &Commands::Account {
@@ -4004,15 +3934,12 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         // `mail sync`: proves the CLI is a real gRPC client of `Mail/Sync`
         // -- it sends a `SyncRequest` with no `account_id` (sync every
         // account) and reports the daemon's real
-        // `synced_count` in its output, rather than fabricating a status by
-        // only flipping this runner's own throwaway local `EventBus`.
+        // `synced_count` in its output, rather than fabricating a status locally.
         let mail_sync = runner
             .execute_command(
                 &Commands::Mail {
@@ -4323,9 +4250,7 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         let out = runner
             .execute_command(
@@ -4476,9 +4401,7 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         // Text mode: human message, gRPC code, and the typed reason -- not a
         // raw status dump, and not silently dropping the code/reason.
@@ -4617,9 +4540,7 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         // `cal list`: proves the CLI is a real gRPC client of
         // `Calendar/ListEvents` -- the exact account/calendar/window
@@ -4659,8 +4580,7 @@ mod tests {
 
         // `cal sync`: proves the CLI is a real gRPC client of
         // `Calendar/Sync` and reports the daemon's real `synced_count`,
-        // rather than fabricating a "calendar_sync_started" status by only
-        // flipping this runner's own throwaway local `EventBus`.
+        // rather than fabricating a "calendar_sync_started" status locally.
         let cal_sync = runner
             .execute_command(
                 &Commands::Cal {
@@ -4822,9 +4742,7 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         // `contact list`: proves the CLI is a real gRPC client of
         // `Contacts/ListContacts` -- the exact account supplied reaches the
@@ -5172,9 +5090,7 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         // `filter create` happy path.
         let create_out = runner
@@ -5417,9 +5333,7 @@ mod tests {
     #[tokio::test]
     async fn filter_commands_report_honest_error_when_daemon_unreachable() {
         let addr = reserve_unreachable_addr().await;
-        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
-            .await
-            .expect("ephemeral runner initializes");
+        let runner = HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr);
 
         let out = runner
             .execute_command(
@@ -5487,9 +5401,7 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         let out = runner
             .execute_command(
@@ -5556,9 +5468,7 @@ mod tests {
         // first, the error would be a transport failure instead of the
         // expected format-parsing error.
         let addr = reserve_unreachable_addr().await;
-        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
-            .await
-            .expect("ephemeral runner initializes");
+        let runner = HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr);
 
         let out = runner
             .execute_command(
@@ -5640,9 +5550,7 @@ mod tests {
         });
 
         let runner =
-            HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-                .await
-                .expect("ephemeral runner initializes");
+            HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
         let list_out = runner
             .execute_command(
@@ -5687,9 +5595,7 @@ mod tests {
     #[tokio::test]
     async fn mail_export_and_system_audit_report_honest_error_when_daemon_unreachable() {
         let addr = reserve_unreachable_addr().await;
-        let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr)
-            .await
-            .expect("ephemeral runner initializes");
+        let runner = HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr);
 
         let export_out = runner
             .execute_command(
@@ -5732,14 +5638,5 @@ mod tests {
             .await;
         assert!(audit_verify_out.contains(r#""status":"error""#));
         assert!(audit_verify_out.contains("unreachable"));
-    }
-
-    #[test]
-    fn runner_error_display() {
-        let err = RunnerError::InitFailed("failed to open database".to_string());
-        assert_eq!(
-            err.to_string(),
-            "failed to initialize engine: failed to open database"
-        );
     }
 }

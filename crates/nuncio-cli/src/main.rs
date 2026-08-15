@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         *password = PasswordArg(entered);
     }
 
-    let runner = HeadlessRunner::ephemeral().await?;
+    let runner = HeadlessRunner::connect();
 
     let output_str = runner.execute_command(&cli.command, cli.json).await;
     println!("{}", output_str);

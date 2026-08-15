@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn system_test_cli_noun_verb_execution_matrix() {
-    let runner = HeadlessRunner::ephemeral().await.expect("runner init");
+    let runner = HeadlessRunner::connect();
 
     // 1. System status is a real gRPC client of the `nunciod` daemon, so it
     // is exercised separately below via `ephemeral_with` + `SecretManager::mock()`
@@ -60,9 +60,7 @@ async fn system_status_reports_honest_error_when_daemon_unreachable() {
     let addr = listener.local_addr().expect("listener has local addr");
     drop(listener); // free the port; nothing is listening on it now
 
-    let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-        .await
-        .expect("runner init");
+    let runner = HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
     let out: String = runner
         .execute_command(
@@ -92,9 +90,7 @@ async fn account_add_and_list_report_honest_errors_when_daemon_unreachable() {
     let addr = listener.local_addr().expect("listener has local addr");
     drop(listener); // free the port; nothing is listening on it now
 
-    let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-        .await
-        .expect("runner init");
+    let runner = HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
     let list_out: String = runner
         .execute_command(
@@ -152,9 +148,7 @@ async fn mail_and_folder_report_honest_errors_when_daemon_unreachable() {
     let addr = listener.local_addr().expect("listener has local addr");
     drop(listener); // free the port; nothing is listening on it now
 
-    let runner = HeadlessRunner::ephemeral_with(Arc::new(SecretManager::mock()), addr.to_string())
-        .await
-        .expect("runner init");
+    let runner = HeadlessRunner::connect_with(Arc::new(SecretManager::mock()), addr.to_string());
 
     let assert_honest_error = |out: String| {
         let json: Value = serde_json::from_str(&out).expect("valid json");
