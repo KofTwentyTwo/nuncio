@@ -5,6 +5,7 @@ use nuncio_store::vault::{SecretManager, GRPC_TOKEN_ACCOUNT};
 use nuncio_store::{DatabaseEngine, DatabaseError};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::args::{
@@ -13,6 +14,40 @@ use crate::args::{
 };
 
 use crate::output::{format_json, format_json_error, format_json_error_with_info};
+
+/// Environment variable that supplies the gRPC bearer token directly, bypassing
+/// the OS keyring entirely.
+///
+/// The keyring remains the default and only this client-side lookup honours the
+/// override: `nunciod` always mints and owns the authoritative token, so the
+/// daemon must never accept one from its environment.
+///
+/// The override exists because the keyring item's ACL is bound to the process
+/// that created it (`nunciod`). A *different* binary reading the same item — the
+/// CLI — makes the platform keychain ask the logged-in user for consent, which
+/// nothing can answer without an interactive desktop session.
+pub const GRPC_TOKEN_ENV: &str = "NUNCIO_GRPC_TOKEN";
+
+/// Upper bound on how long a keyring read may block before the CLI gives up and
+/// reports an actionable error. Generous enough that a human can answer a
+/// keychain consent prompt, short enough that an unattended run always
+/// terminates instead of stalling forever.
+const KEYRING_READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Normalizes a raw environment value into a usable token override.
+///
+/// Surrounding whitespace is stripped (shell heredocs and `env` files routinely
+/// add a trailing newline) and an empty value is treated as "not set", so
+/// `NUNCIO_GRPC_TOKEN=` cannot silently authenticate with an empty token.
+fn normalize_token_override(raw: Option<String>) -> Option<String> {
+    raw.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Reads the gRPC bearer token override from the process environment.
+fn grpc_token_from_env() -> Option<String> {
+    normalize_token_override(std::env::var(GRPC_TOKEN_ENV).ok())
+}
 
 /// Parses a `--imap-mode`/`--smtp-mode` CLI string into `nuncio_core::TlsMode`.
 /// Rejects anything else rather than silently defaulting, since silently
@@ -326,7 +361,9 @@ pub enum RunnerError {
 /// `nuncio.v1.Accounts` APIs, authenticated by a bearer token read from an
 /// injected [`SecretManager`] — production code uses
 /// [`SecretManager::production`] (the real OS keyring), while tests inject
-/// [`SecretManager::mock`] so no test ever touches the real vault.
+/// [`SecretManager::mock`] so no test ever touches the real vault. Setting
+/// [`GRPC_TOKEN_ENV`] overrides that lookup entirely, which is how the CLI is
+/// driven from a non-interactive session.
 ///
 /// `account add` persists through the daemon so the account (and its
 /// password, stored ONLY in the daemon's OS keyring vault) survives past
@@ -337,6 +374,10 @@ pub struct HeadlessRunner {
     db: DatabaseEngine,
     secrets: Arc<SecretManager>,
     grpc_addr: String,
+    // When present, the bearer token to send instead of consulting `secrets`.
+    // Resolved once at construction so a single CLI invocation cannot change
+    // which credential it authenticates with halfway through.
+    token_override: Option<String>,
     // Kept only to hold the ephemeral database's backing directory open for
     // the runner's lifetime: dropping it would unlink the directory out from
     // under `db` while the pool may still need to open new connections.
@@ -347,10 +388,13 @@ impl HeadlessRunner {
     /// Initialize a new `HeadlessRunner` with an ephemeral database, the
     /// real OS keyring vault ([`SecretManager::production`]), and the gRPC
     /// daemon address resolved from [`nuncio_proto::grpc_addr_from_env`].
+    /// [`GRPC_TOKEN_ENV`], when set, supplies the bearer token instead of the
+    /// keyring.
     pub async fn ephemeral() -> Result<Self, RunnerError> {
-        Self::ephemeral_with(
+        Self::ephemeral_with_token_override(
             Arc::new(SecretManager::production()),
             nuncio_proto::grpc_addr_from_env(),
+            grpc_token_from_env(),
         )
         .await
     }
@@ -362,9 +406,28 @@ impl HeadlessRunner {
     /// `system status`: pass a [`SecretManager::mock`]-backed instance
     /// (never the real OS keyring) and the address of a test-local gRPC
     /// server.
+    /// The ambient [`GRPC_TOKEN_ENV`] override is deliberately NOT consulted
+    /// here, so a variable that happens to be exported in a developer's shell
+    /// can never change what an injected-vault test authenticates with; tests
+    /// that want the override pass it explicitly to
+    /// [`Self::ephemeral_with_token_override`].
     pub async fn ephemeral_with(
         secrets: Arc<SecretManager>,
         grpc_addr: String,
+    ) -> Result<Self, RunnerError> {
+        Self::ephemeral_with_token_override(secrets, grpc_addr, None).await
+    }
+
+    /// Initialize a new `HeadlessRunner` with an ephemeral database, an
+    /// explicit secret vault + gRPC daemon address, and an explicit bearer
+    /// token override.
+    ///
+    /// `token_override`, when `Some`, is used verbatim as the `authorization:
+    /// Bearer` credential and the vault is never consulted for it.
+    pub async fn ephemeral_with_token_override(
+        secrets: Arc<SecretManager>,
+        grpc_addr: String,
+        token_override: Option<String>,
     ) -> Result<Self, RunnerError> {
         let (db, db_dir) = DatabaseEngine::connect_ephemeral()
             .await
@@ -376,7 +439,57 @@ impl HeadlessRunner {
             secrets,
             _db_dir: db_dir,
             grpc_addr,
+            token_override: normalize_token_override(token_override),
         })
+    }
+
+    /// Resolves the gRPC bearer token, preferring an explicit override over the
+    /// OS keyring.
+    ///
+    /// The keyring read runs on a detached OS thread behind a bounded timeout
+    /// rather than inline. On macOS a keychain item whose ACL does not trust
+    /// this binary makes the read block on a GUI consent prompt that never
+    /// arrives in a headless session, and that call cannot be cancelled — so
+    /// the timeout must be able to abandon the thread. A plain
+    /// `std::thread::spawn` is used instead of `spawn_blocking` precisely
+    /// because Tokio joins its blocking pool during runtime shutdown, which
+    /// would reintroduce the hang at process exit; a detached thread is reaped
+    /// when the process ends.
+    ///
+    /// The returned error never carries token material — only the vault's own
+    /// failure description, which is keyed by account name, not secret value.
+    async fn resolve_grpc_token(&self) -> Result<String, String> {
+        if let Some(token) = &self.token_override {
+            return Ok(token.clone());
+        }
+
+        let secrets = Arc::clone(&self.secrets);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let resolved = secrets
+                .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+                .map(hex::encode)
+                .map_err(|e| e.to_string());
+            // A closed receiver means the timeout already fired; nothing to do.
+            let _ = tx.send(resolved);
+        });
+
+        match tokio::time::timeout(KEYRING_READ_TIMEOUT, rx).await {
+            Ok(Ok(Ok(token))) => Ok(token),
+            Ok(Ok(Err(e))) => Err(format!("failed to read gRPC bearer token from vault: {e}")),
+            Ok(Err(_)) => {
+                Err("gRPC bearer token lookup ended without producing a result".to_string())
+            }
+            Err(_) => Err(format!(
+                "timed out after {}s reading the gRPC bearer token from the OS keyring: the \
+                 keyring is most likely waiting on an interactive access-consent prompt that \
+                 cannot be answered in this session (the token belongs to nunciod, so another \
+                 binary reading it needs consent). Run this command from a logged-in desktop \
+                 session, or set {GRPC_TOKEN_ENV} to the daemon's bearer token to bypass the \
+                 keyring entirely",
+                KEYRING_READ_TIMEOUT.as_secs()
+            )),
+        }
     }
 
     /// Access the underlying `EventBus`.
@@ -1412,17 +1525,13 @@ impl HeadlessRunner {
         }
     }
 
-    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// Resolves the gRPC bearer token (see [`Self::resolve_grpc_token`]) and dials the
     /// `nuncio.v1.Export` service at `self.grpc_addr`, shared by
     /// [`Self::handle_mail_export`].
     async fn connect_export_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedExportClient, String> {
-        let token_bytes = self
-            .secrets
-            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
-        let token = hex::encode(token_bytes);
+        let token = self.resolve_grpc_token().await?;
 
         nuncio_proto::client::connect_export(&self.grpc_addr, &token)
             .await
@@ -1524,17 +1633,13 @@ impl HeadlessRunner {
         }
     }
 
-    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// Resolves the gRPC bearer token (see [`Self::resolve_grpc_token`]) and dials the
     /// `nuncio.v1.Audit` service at `self.grpc_addr`, shared by
     /// [`Self::handle_audit_list`] / [`Self::handle_audit_verify`].
     async fn connect_audit_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedAuditClient, String> {
-        let token_bytes = self
-            .secrets
-            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
-        let token = hex::encode(token_bytes);
+        let token = self.resolve_grpc_token().await?;
 
         nuncio_proto::client::connect_audit(&self.grpc_addr, &token)
             .await
@@ -1994,17 +2099,13 @@ impl HeadlessRunner {
         }
     }
 
-    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// Resolves the gRPC bearer token (see [`Self::resolve_grpc_token`]) and dials the
     /// `nuncio.v1.Filters` service at `self.grpc_addr`, shared by every
     /// `filter` handler above.
     async fn connect_filters_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedFiltersClient, String> {
-        let token_bytes = self
-            .secrets
-            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
-        let token = hex::encode(token_bytes);
+        let token = self.resolve_grpc_token().await?;
 
         nuncio_proto::client::connect_filters(&self.grpc_addr, &token)
             .await
@@ -2459,51 +2560,39 @@ impl HeadlessRunner {
         }
     }
 
-    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// Resolves the gRPC bearer token (see [`Self::resolve_grpc_token`]) and dials the
     /// `nuncio.v1.Accounts` service at `self.grpc_addr`, shared by
     /// [`Self::handle_add_account`] and [`Self::handle_accounts_list`].
     async fn connect_accounts_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedAccountsClient, String> {
-        let token_bytes = self
-            .secrets
-            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
-        let token = hex::encode(token_bytes);
+        let token = self.resolve_grpc_token().await?;
 
         nuncio_proto::client::connect_accounts(&self.grpc_addr, &token)
             .await
             .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
     }
 
-    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// Resolves the gRPC bearer token (see [`Self::resolve_grpc_token`]) and dials the
     /// `nuncio.v1.Mail` service at `self.grpc_addr`, shared by every
     /// `mail`/`folder` read-path handler above.
     async fn connect_mail_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedMailClient, String> {
-        let token_bytes = self
-            .secrets
-            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
-        let token = hex::encode(token_bytes);
+        let token = self.resolve_grpc_token().await?;
 
         nuncio_proto::client::connect_mail(&self.grpc_addr, &token)
             .await
             .map_err(|e| format!("nunciod daemon unreachable at {}: {e}", self.grpc_addr))
     }
 
-    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// Resolves the gRPC bearer token (see [`Self::resolve_grpc_token`]) and dials the
     /// `nuncio.v1.Calendar` service at `self.grpc_addr`, shared by
     /// [`Self::handle_cal_list`] and [`Self::handle_cal_sync`].
     async fn connect_calendar_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedCalendarClient, String> {
-        let token_bytes = self
-            .secrets
-            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
-        let token = hex::encode(token_bytes);
+        let token = self.resolve_grpc_token().await?;
 
         nuncio_proto::client::connect_calendar(&self.grpc_addr, &token)
             .await
@@ -2612,17 +2701,13 @@ impl HeadlessRunner {
         }
     }
 
-    /// Resolves the gRPC bearer token from the injected vault and dials the
+    /// Resolves the gRPC bearer token (see [`Self::resolve_grpc_token`]) and dials the
     /// `nuncio.v1.Contacts` service at `self.grpc_addr`, shared by every
     /// `contact` handler above.
     async fn connect_contacts_client(
         &self,
     ) -> Result<nuncio_proto::client::AuthenticatedContactsClient, String> {
-        let token_bytes = self
-            .secrets
-            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
-        let token = hex::encode(token_bytes);
+        let token = self.resolve_grpc_token().await?;
 
         nuncio_proto::client::connect_contacts(&self.grpc_addr, &token)
             .await
@@ -2991,16 +3076,12 @@ impl HeadlessRunner {
         }
     }
 
-    /// Reads the gRPC bearer token from the injected vault, connects to the
+    /// Resolves the gRPC bearer token (see [`Self::resolve_grpc_token`]), connects to the
     /// daemon over gRPC, and calls `GetStatus`. Returns the full live health
     /// response on success, or a human-readable error string describing
     /// exactly what failed (vault, connection, or the RPC itself).
     async fn query_daemon_status(&self) -> Result<nuncio_proto::v1::GetStatusResponse, String> {
-        let token_bytes = self
-            .secrets
-            .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
-            .map_err(|e| format!("failed to read gRPC bearer token from vault: {e}"))?;
-        let token = hex::encode(token_bytes);
+        let token = self.resolve_grpc_token().await?;
 
         let mut client = nuncio_proto::client::connect_system(&self.grpc_addr, &token)
             .await
@@ -3038,6 +3119,98 @@ fn sync_state_label(state: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_token_override_trims_and_rejects_blank_values() {
+        assert_eq!(
+            normalize_token_override(Some("  deadbeef\n".to_string())),
+            Some("deadbeef".to_string())
+        );
+        assert_eq!(normalize_token_override(Some(String::new())), None);
+        assert_eq!(normalize_token_override(Some("   ".to_string())), None);
+        assert_eq!(normalize_token_override(None), None);
+    }
+
+    /// The env override must be picked up when set and must leave the runner on
+    /// the keyring path when it is unset or blank.
+    #[test]
+    fn grpc_token_from_env_reads_the_override_only_when_it_is_non_empty() {
+        std::env::remove_var(GRPC_TOKEN_ENV);
+        assert_eq!(grpc_token_from_env(), None);
+
+        std::env::set_var(GRPC_TOKEN_ENV, "");
+        assert_eq!(grpc_token_from_env(), None);
+
+        std::env::set_var(GRPC_TOKEN_ENV, "  c0ffee  ");
+        assert_eq!(grpc_token_from_env(), Some("c0ffee".to_string()));
+
+        std::env::remove_var(GRPC_TOKEN_ENV);
+    }
+
+    /// An injected override must be used verbatim and must never reach the
+    /// vault -- proven here by giving the runner a vault whose token is
+    /// necessarily different from the override.
+    #[tokio::test]
+    async fn resolve_grpc_token_prefers_the_override_over_the_vault() {
+        let secrets = Arc::new(SecretManager::mock());
+        let vault_token = hex::encode(
+            secrets
+                .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+                .expect("mock vault mints a token"),
+        );
+
+        let runner = HeadlessRunner::ephemeral_with_token_override(
+            Arc::clone(&secrets),
+            "127.0.0.1:1".to_string(),
+            Some("  override-token  ".to_string()),
+        )
+        .await
+        .expect("runner init");
+
+        let resolved = runner
+            .resolve_grpc_token()
+            .await
+            .expect("override resolves without touching the vault");
+        assert_eq!(resolved, "override-token");
+        assert_ne!(resolved, vault_token);
+    }
+
+    /// With no override the vault remains the source of the token.
+    #[tokio::test]
+    async fn resolve_grpc_token_falls_back_to_the_vault_without_an_override() {
+        let secrets = Arc::new(SecretManager::mock());
+        let vault_token = hex::encode(
+            secrets
+                .get_or_create_key_bytes(GRPC_TOKEN_ACCOUNT, 32)
+                .expect("mock vault mints a token"),
+        );
+
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::clone(&secrets), "127.0.0.1:1".to_string())
+                .await
+                .expect("runner init");
+
+        assert_eq!(
+            runner
+                .resolve_grpc_token()
+                .await
+                .expect("vault resolves the token"),
+            vault_token
+        );
+    }
+
+    /// `ephemeral_with` must ignore an ambient override so an exported variable
+    /// in a developer's shell cannot silently change what tests authenticate
+    /// with.
+    #[tokio::test]
+    async fn ephemeral_with_ignores_an_ambient_env_override() {
+        let secrets = Arc::new(SecretManager::mock());
+        let runner =
+            HeadlessRunner::ephemeral_with(Arc::clone(&secrets), "127.0.0.1:1".to_string())
+                .await
+                .expect("runner init");
+        assert_eq!(runner.token_override, None);
+    }
 
     #[test]
     fn parse_tls_mode_accepts_all_valid_modes_and_rejects_garbage() {

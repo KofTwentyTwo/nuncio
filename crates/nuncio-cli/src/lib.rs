@@ -12,4 +12,4 @@ pub use args::{
     SystemSubcommand,
 };
 pub use output::JsonResponse;
-pub use runner::HeadlessRunner;
+pub use runner::{HeadlessRunner, GRPC_TOKEN_ENV};

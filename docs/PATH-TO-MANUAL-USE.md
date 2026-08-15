@@ -51,6 +51,34 @@ cargo run -p nunciod                 # gRPC on 127.0.0.1:9420
 cargo run -p nuncio-cli -- system status
 ```
 
+### Driving the CLI headlessly
+
+`nunciod` mints the gRPC bearer token into the OS keyring, so the keychain
+item's ACL trusts **`nunciod`**. `nuncio-cli` is a different binary, so reading
+the same item makes macOS ask the logged-in user for consent (*"nuncio-cli
+wants to access key … in your keychain"*). Interactively you click Allow. In CI,
+over ssh, or in a background shell there is nobody to click it — the read
+blocks, and before this was fixed the CLI hung with no output at all.
+
+Set `NUNCIO_GRPC_TOKEN` to bypass the keyring for the CLI only:
+
+```bash
+NUNCIO_GRPC_TOKEN=<token> cargo run -p nuncio-cli -- system status
+```
+
+When it is set and non-empty the CLI uses it verbatim and never touches the
+keyring. When it is unset, behaviour is unchanged: the token still comes from
+the keyring, now behind a bounded timeout that reports an actionable error
+instead of stalling forever. The token is the daemon's hex-encoded
+`grpc-bearer-token` keychain item; read it once from a session that can answer
+the prompt (`security find-generic-password -s mx.nuncio.vault -a
+grpc-bearer-token -w`) and pass it through your own secret store. It is a
+credential: never commit it, never log it, never echo it into a shell history
+file.
+
+The daemon itself is unaffected — it *creates* the item rather than reading one
+another binary owns, so its own startup raises no consent prompt.
+
 Schema migrations were removed: databases are **created, never migrated**. A
 store from before that change errors on read rather than upgrading. Deleting it
 is correct — accounts and credentials live in the OS keyring and survive; cached
