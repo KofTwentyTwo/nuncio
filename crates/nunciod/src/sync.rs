@@ -482,7 +482,9 @@ pub(crate) fn build_mail_backend(
         ))),
         // A DAV-protocol account (e.g. CalDAV) has no inbound mail backend;
         // it is synced through its own domain service, not the mail path.
-        Transport::Dav(_) => Err(SyncError::NotAMailAccount(config.id.clone())),
+        Transport::Dav(_) | Transport::CardDav(_) => {
+            Err(SyncError::NotAMailAccount(config.id.clone()))
+        }
     }
 }
 

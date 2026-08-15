@@ -5,18 +5,12 @@
 //! single account, then persists each contact via
 //! [`DatabaseEngine::save_contact`].
 //!
-//! # No production entry point yet
-//!
-//! Unlike `sync.rs`'s `run_account_sync`/`run_all_accounts_sync`, this module
-//! deliberately has NO production entry point that resolves a real account's
-//! CardDAV address book collection URL and credential and builds a real
-//! `CardDavClient` from them: `nuncio_core::AccountConfig` carries no CardDAV
-//! fields today, so there is nothing persisted to build one from.
-//! [`sync_with_backend`] is the only function here; it is exercised directly
-//! in tests with `MockContactsBackend`, and it is the same seam a future
-//! story's production entry point will call once per-account CardDAV
-//! configuration exists.
-use nuncio_contacts::ContactsBackend;
+//! [`sync_carddav_account`] is the production entry point: it resolves a real
+//! account's persisted CardDAV address-book collection URL, builds a real
+//! [`CardDavClient`] from it plus the credential the caller read from the OS
+//! keyring, and funnels through the same [`sync_with_backend`] seam that tests
+//! drive with `MockContactsBackend`.
+use nuncio_contacts::{CardDavAccountConfig, CardDavClient, ContactsBackend};
 use nuncio_store::db::DatabaseError;
 use thiserror::Error;
 
@@ -66,6 +60,34 @@ pub async fn sync_with_backend(
         "contacts sync: persisted fetched contacts"
     );
     Ok(synced)
+}
+
+/// Production entry point: build a real [`CardDavClient`] for `account` from
+/// its persisted `collection_url` and the `password` resolved from the OS
+/// keyring vault, then fetch-and-persist that account's contacts via
+/// [`sync_with_backend`]. Returns the number of contacts synced.
+///
+/// `account`'s collection URL must be a fully-qualified CardDAV address-book
+/// collection URL (validated at `AddAccount` time); the account's
+/// `email_address` is used as the DAV basic-auth username. No fabricated data
+/// is ever returned -- a transport or persistence failure surfaces as a
+/// [`ContactsSyncError`].
+pub async fn sync_carddav_account(
+    db: &nuncio_store::db::DatabaseEngine,
+    account: &nuncio_core::AccountConfig,
+    password: &str,
+) -> Result<usize, ContactsSyncError> {
+    tracing::info!(
+        account_id = %account.id,
+        "contacts sync: dispatching CardDAV sync for account"
+    );
+    let client = CardDavClient::new(CardDavAccountConfig {
+        account_id: account.id.clone(),
+        carddav_url: account.dav_collection_url().unwrap_or_default().to_string(),
+        username: account.email_address.clone(),
+        auth_token: nuncio_core::redact::Redacted::new(password.to_string()),
+    });
+    sync_with_backend(db, &client, &account.id).await
 }
 
 #[cfg(test)]

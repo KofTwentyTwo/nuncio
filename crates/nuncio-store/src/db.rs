@@ -1404,7 +1404,7 @@ impl DatabaseEngine {
                 TlsMode::ImplicitTls,
                 String::new(),
             ),
-            Transport::Dav(t) => (
+            Transport::Dav(t) | Transport::CardDav(t) => (
                 String::new(),
                 0u16,
                 TlsMode::ImplicitTls,
@@ -1560,6 +1560,11 @@ impl DatabaseEngine {
                         }
                         nuncio_core::AccountProtocol::CalDav => {
                             nuncio_core::Transport::Dav(nuncio_core::DavTransport {
+                                collection_url: collection_url.unwrap_or_default(),
+                            })
+                        }
+                        nuncio_core::AccountProtocol::CardDav => {
+                            nuncio_core::Transport::CardDav(nuncio_core::DavTransport {
                                 collection_url: collection_url.unwrap_or_default(),
                             })
                         }
@@ -4721,6 +4726,43 @@ mod tests {
         assert_eq!(
             fetched.dav_collection_url(),
             Some("https://dav.example.com/calendars/user/work/")
+        );
+    }
+
+    /// A CardDAV account round-trips as CardDAV, not as the CalDAV variant it
+    /// shares physical columns with: both flavours persist their URL in
+    /// `collection_url`, so only the `protocol` discriminator distinguishes
+    /// them on reload, and confusing the two would silently point contacts
+    /// sync at a calendar collection (or vice versa).
+    #[tokio::test]
+    async fn carddav_account_round_trips_as_carddav_not_caldav() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        let carddav = nuncio_core::AccountConfig {
+            id: "acct-carddav-store-1".to_string(),
+            name: "Work Address Book".to_string(),
+            email_address: "card@nuncio.mx".to_string(),
+            keyring_secret_key: "nuncio/acct-carddav-store-1".to_string(),
+            sync_interval_secs: 300,
+            filters_enabled: false,
+            transport: nuncio_core::Transport::CardDav(nuncio_core::DavTransport {
+                collection_url: "https://dav.example.com/addressbooks/user/default/".to_string(),
+            }),
+        };
+        engine.save_account(&carddav).await.expect("save succeeds");
+
+        let fetched = engine
+            .get_account("acct-carddav-store-1")
+            .await
+            .expect("get succeeds")
+            .expect("account present");
+        assert_eq!(fetched, carddav);
+        assert_eq!(fetched.protocol(), nuncio_core::AccountProtocol::CardDav);
+        assert!(fetched.is_carddav());
+        assert!(!fetched.is_caldav());
+        assert_eq!(
+            fetched.dav_collection_url(),
+            Some("https://dav.example.com/addressbooks/user/default/")
         );
     }
 

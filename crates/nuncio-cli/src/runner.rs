@@ -75,8 +75,9 @@ fn parse_account_protocol(protocol: &str) -> Result<nuncio_proto::v1::AccountPro
         "imap-smtp" | "imap_smtp" | "imap" => Ok(nuncio_proto::v1::AccountProtocol::ImapSmtp),
         "jmap" => Ok(nuncio_proto::v1::AccountProtocol::Jmap),
         "caldav" | "cal-dav" | "cal_dav" => Ok(nuncio_proto::v1::AccountProtocol::Caldav),
+        "carddav" | "card-dav" | "card_dav" => Ok(nuncio_proto::v1::AccountProtocol::Carddav),
         other => Err(format!(
-            "invalid protocol '{other}' (expected imap-smtp, jmap, or caldav)"
+            "invalid protocol '{other}' (expected imap-smtp, jmap, caldav, or carddav)"
         )),
     }
 }
@@ -102,6 +103,10 @@ fn account_transport_json(config: &nuncio_proto::v1::AccountConfig) -> serde_jso
         }),
         Some(Transport::Dav(t)) => json!({
             "protocol": "caldav",
+            "collection_url": t.collection_url,
+        }),
+        Some(Transport::Carddav(t)) => json!({
+            "protocol": "carddav",
             "collection_url": t.collection_url,
         }),
         None => json!({ "protocol": "unspecified" }),
@@ -135,6 +140,7 @@ fn account_transport_summary(config: &nuncio_proto::v1::AccountConfig) -> String
         ),
         Some(Transport::Jmap(t)) => format!("JMAP {}", t.endpoint_host),
         Some(Transport::Dav(t)) => format!("CalDAV {}", t.collection_url),
+        Some(Transport::Carddav(t)) => format!("CardDAV {}", t.collection_url),
         None => "(no transport configured)".to_string(),
     }
 }
@@ -2117,9 +2123,20 @@ impl HeadlessRunner {
             Ok(p) => p,
             Err(e) => return Self::render_error(&e, json_mode),
         };
-        let is_caldav = account_protocol == nuncio_proto::v1::AccountProtocol::Caldav;
-        if is_caldav && collection_url.map(str::trim).unwrap_or_default().is_empty() {
-            return Self::render_error("a caldav account requires --collection-url", json_mode);
+        // Both DAV flavours are addressed by a collection URL rather than a
+        // mail host/port, so neither can be added without one.
+        let dav_kind = match account_protocol {
+            nuncio_proto::v1::AccountProtocol::Caldav => Some("caldav"),
+            nuncio_proto::v1::AccountProtocol::Carddav => Some("carddav"),
+            _ => None,
+        };
+        if let Some(kind) = dav_kind {
+            if collection_url.map(str::trim).unwrap_or_default().is_empty() {
+                return Self::render_error(
+                    &format!("a {kind} account requires --collection-url"),
+                    json_mode,
+                );
+            }
         }
 
         let keyring_key = format!("nuncio/{}", email);
@@ -2151,6 +2168,13 @@ impl HeadlessRunner {
                 nuncio_proto::v1::account_config::Transport::Dav(nuncio_proto::v1::DavTransport {
                     collection_url: collection_url.unwrap_or_default().to_string(),
                 })
+            }
+            nuncio_proto::v1::AccountProtocol::Carddav => {
+                nuncio_proto::v1::account_config::Transport::Carddav(
+                    nuncio_proto::v1::DavTransport {
+                        collection_url: collection_url.unwrap_or_default().to_string(),
+                    },
+                )
             }
             nuncio_proto::v1::AccountProtocol::Unspecified => {
                 return Self::render_error("account protocol is required", json_mode)
@@ -2191,20 +2215,25 @@ impl HeadlessRunner {
                     .map(|c| c.id)
                     .unwrap_or(account_id);
                 let is_jmap = account_protocol == nuncio_proto::v1::AccountProtocol::Jmap;
-                if is_caldav {
+                if let Some(kind) = dav_kind {
                     let collection = collection_url.unwrap_or_default();
+                    let label = if kind == "carddav" {
+                        "CardDAV"
+                    } else {
+                        "CalDAV"
+                    };
                     if json_mode {
                         format_json(&json!({
                             "configured": true,
                             "account_id": account_id,
                             "email": email,
-                            "protocol": "caldav",
+                            "protocol": kind,
                             "collection_url": collection,
                             "keyring_key": keyring_key
                         }))
                     } else {
                         format!(
-                            "CalDAV account '{email}' (ID: {account_id}) added via nunciod daemon with collection URL {collection}"
+                            "{label} account '{email}' (ID: {account_id}) added via nunciod daemon with collection URL {collection}"
                         )
                     }
                 } else if is_jmap {
