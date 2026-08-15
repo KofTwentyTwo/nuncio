@@ -4,6 +4,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod config;
+pub mod dav;
 pub mod export;
 pub mod mcp_policy;
 pub mod model;
@@ -14,6 +15,10 @@ pub mod worm_audit;
 pub use config::{
     AccountConfig, AccountProtocol, ConfigError, DavTransport, ImapSmtpTransport, JmapTransport,
     TlsMode, Transport,
+};
+pub use dav::{
+    parse_multistatus, MultistatusError, MultistatusReport, PropertyValue, SkipReason,
+    SkippedResponse, CALDAV_NS, CARDDAV_NS, DAV_NS,
 };
 pub use export::{ExportEngine, ExportError, ExportFormat, ExportSummary};
 pub use mcp_policy::{AgentPermissions, DataType, McpAgentPolicy};

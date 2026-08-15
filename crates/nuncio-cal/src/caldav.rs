@@ -1,6 +1,7 @@
 //! CalDAV (RFC 4791) / WebDAV REPORT client and XML query generator.
 
 use async_trait::async_trait;
+use nuncio_core::dav::{parse_multistatus, CALDAV_NS};
 use nuncio_core::model::CalendarEvent;
 use nuncio_core::redact::Redacted;
 use serde::{Deserialize, Serialize};
@@ -85,60 +86,74 @@ impl CalDavClient {
         )
     }
 
-    /// Parse CalDAV WebDAV XML `<multistatus>` response containing embedded VEVENT data.
+    /// Parse a CalDAV WebDAV XML `<multistatus>` response containing embedded VEVENT data.
+    ///
+    /// The document is traversed with a namespace-aware parser and `calendar-data` is matched
+    /// on `{urn:ietf:params:xml:ns:caldav}calendar-data`, so the server's choice of prefix (or
+    /// of a default namespace) is irrelevant and a body this client cannot read is an error
+    /// rather than an empty -- and indistinguishable from genuinely empty -- event list.
     ///
     /// A VEVENT block that fails to parse is dropped from the returned events but never
     /// silently: it is logged at `warn` (with its UID, if extractable, and a short parse-error
     /// reason -- never the raw VEVENT body) so a sync that quietly lost calendar data is
     /// visible in telemetry instead of just showing up as a smaller-than-expected event count.
+    /// A `<response>` that carried no readable `calendar-data` at all (a `404` propstat, say)
+    /// is logged the same way.
     pub fn parse_multistatus_response(
         &self,
         calendar_id: &str,
         raw_xml: &str,
     ) -> Result<Vec<CalendarEvent>, CalendarError> {
-        let (events, _dropped) = self.parse_multistatus_response_counted(calendar_id, raw_xml);
-        Ok(events)
+        self.parse_multistatus_response_counted(calendar_id, raw_xml)
+            .map(|(events, _dropped)| events)
     }
 
     /// Same parse as [`Self::parse_multistatus_response`], additionally reporting how many
-    /// VEVENT blocks were dropped as unparseable so callers can log round-trip counts.
+    /// calendar entries were lost -- unparseable VEVENTs plus unreadable responses -- so
+    /// callers can log round-trip counts.
     fn parse_multistatus_response_counted(
         &self,
         calendar_id: &str,
         raw_xml: &str,
-    ) -> (Vec<CalendarEvent>, usize) {
-        let mut events = Vec::new();
-        let mut dropped = 0usize;
+    ) -> Result<(Vec<CalendarEvent>, usize), CalendarError> {
+        let report = parse_multistatus(raw_xml, CALDAV_NS, "calendar-data")
+            .map_err(|e| CalendarError::MalformedResponse(e.to_string()))?;
 
-        // Extract <c:calendar-data> or <calendar-data> text blocks
-        for block in raw_xml.split("<c:calendar-data>") {
-            if let Some((ics_data, _)) = block.split_once("</c:calendar-data>") {
-                let clean_ics = ics_data.trim();
-                if !clean_ics.is_empty() {
-                    let event_id = format!("caldav-evt-{}", events.len() + dropped + 1);
-                    match IcalParserAdapter::parse_ical(
-                        &event_id,
-                        &self.config.account_id,
-                        calendar_id,
-                        clean_ics,
-                    ) {
-                        Ok(event) => events.push(event),
-                        Err(err) => {
-                            dropped += 1;
-                            warn!(
-                                account_id = %self.config.account_id,
-                                calendar_id = %calendar_id,
-                                uid = %extract_vevent_uid(clean_ics).unwrap_or_else(|| "unknown".to_string()),
-                                reason = %err,
-                                "dropped unparseable VEVENT"
-                            );
-                        }
-                    }
+        let mut dropped = report.skipped.len();
+        for skipped in &report.skipped {
+            warn!(
+                account_id = %self.config.account_id,
+                calendar_id = %calendar_id,
+                href = %skipped.href.as_deref().unwrap_or("unknown"),
+                reason = %skipped.reason,
+                "dropped CalDAV response with no readable calendar-data"
+            );
+        }
+
+        let mut events = Vec::new();
+        for (index, entry) in report.values.iter().enumerate() {
+            let event_id = format!("caldav-evt-{}", index + 1);
+            match IcalParserAdapter::parse_ical(
+                &event_id,
+                &self.config.account_id,
+                calendar_id,
+                &entry.value,
+            ) {
+                Ok(event) => events.push(event),
+                Err(err) => {
+                    dropped += 1;
+                    warn!(
+                        account_id = %self.config.account_id,
+                        calendar_id = %calendar_id,
+                        uid = %extract_vevent_uid(&entry.value).unwrap_or_else(|| "unknown".to_string()),
+                        reason = %err,
+                        "dropped unparseable VEVENT"
+                    );
                 }
             }
         }
 
-        (events, dropped)
+        Ok((events, dropped))
     }
 
     /// Format a unix timestamp as the `YYYYMMDDTHHMMSSZ` form RFC 4791's
@@ -214,7 +229,7 @@ impl CalDavClient {
             .await
             .map_err(|e| CalendarError::TransportFailed(e.to_string()))?;
 
-        let (events, dropped) = self.parse_multistatus_response_counted(calendar_id, &raw_xml);
+        let (events, dropped) = self.parse_multistatus_response_counted(calendar_id, &raw_xml)?;
         info!(
             account_id = %self.config.account_id,
             calendar_id = %calendar_id,
@@ -354,6 +369,117 @@ END:VCALENDAR</c:calendar-data>
         for value in recorder.all_field_values() {
             assert!(!value.contains("Confidential Merger Talks"));
         }
+    }
+
+    /// The same document, written the three ways a compliant server may write it. Before
+    /// namespace-aware parsing, only the middle one produced any events at all.
+    #[test]
+    fn parse_multistatus_response_reads_any_prefix_binding_of_the_caldav_namespace() {
+        let client = CalDavClient::new(test_config());
+        let event_ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nSUMMARY:Product Planning\nEND:VEVENT\nEND:VCALENDAR";
+
+        let uppercase = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:CAL="urn:ietf:params:xml:ns:caldav">
+    <D:response><D:href>/evt1.ics</D:href><D:propstat><D:prop>
+        <CAL:calendar-data>{event_ics}</CAL:calendar-data>
+    </D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
+</D:multistatus>"#
+        );
+        let default_ns = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+    <response><href>/evt1.ics</href><propstat><prop>
+        <c:calendar-data>{event_ics}</c:calendar-data>
+    </prop><status>HTTP/1.1 200 OK</status></propstat></response>
+</multistatus>"#
+        );
+        let odd_prefix = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<ns0:multistatus xmlns:ns0="DAV:" xmlns:ns1="urn:ietf:params:xml:ns:caldav">
+    <ns0:response><ns0:href>/evt1.ics</ns0:href><ns0:propstat><ns0:prop>
+        <ns1:calendar-data>{event_ics}</ns1:calendar-data>
+    </ns0:prop><ns0:status>HTTP/1.1 200 OK</ns0:status></ns0:propstat></ns0:response>
+</ns0:multistatus>"#
+        );
+
+        for (label, xml) in [
+            ("uppercase prefixes", &uppercase),
+            ("default namespace", &default_ns),
+            ("generated prefixes", &odd_prefix),
+        ] {
+            let events = client
+                .parse_multistatus_response("cal-work", xml)
+                .unwrap_or_else(|e| panic!("{label} parses: {e}"));
+            assert_eq!(events.len(), 1, "{label}");
+            assert_eq!(events[0].summary, "Product Planning", "{label}");
+        }
+    }
+
+    #[test]
+    fn parse_multistatus_response_warns_when_a_response_has_no_readable_calendar_data() {
+        use crate::test_tracing::with_recorder;
+
+        let client = CalDavClient::new(test_config());
+        // The first response's property merely *contains* the searched name; the second
+        // returns the real property under a 404 propstat, which is not a value.
+        let xml_response = r#"<?xml version="1.0" encoding="utf-8"?>
+        <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+            <d:response>
+                <d:href>/lookalike.ics</d:href>
+                <d:propstat><d:prop>
+                    <c:calendar-data-summary>NOT THE PAYLOAD</c:calendar-data-summary>
+                </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+            </d:response>
+            <d:response>
+                <d:href>/gone.ics</d:href>
+                <d:propstat><d:prop>
+                    <c:calendar-data>BEGIN:VCALENDAR
+END:VCALENDAR</c:calendar-data>
+                </d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>
+            </d:response>
+        </d:multistatus>"#;
+
+        let (recorder, result) =
+            with_recorder(|| client.parse_multistatus_response("cal-work", xml_response));
+        let events = result.expect("an unreadable response is not fatal");
+        assert!(events.is_empty(), "neither response carries calendar-data");
+
+        let warnings: Vec<_> = recorder
+            .events()
+            .into_iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(warnings.len(), 2, "both omissions must be visible");
+        let hrefs: Vec<_> = warnings
+            .iter()
+            .filter_map(|w| w.fields.get("href").cloned())
+            .collect();
+        assert!(hrefs.contains(&"/lookalike.ics".to_string()));
+        assert!(hrefs.contains(&"/gone.ics".to_string()));
+        assert!(warnings
+            .iter()
+            .any(|w| w.fields.get("reason").is_some_and(|r| r.contains("404"))));
+    }
+
+    #[test]
+    fn parse_multistatus_response_rejects_a_body_it_cannot_read_instead_of_returning_empty() {
+        let client = CalDavClient::new(test_config());
+
+        // A malformed document: the `<d:response>` element is never closed.
+        let truncated = r#"<?xml version="1.0" encoding="utf-8"?>
+        <d:multistatus xmlns:d="DAV:"><d:response><d:href>/a.ics</d:href>"#;
+        assert!(matches!(
+            client.parse_multistatus_response("cal-work", truncated),
+            Err(CalendarError::MalformedResponse(_))
+        ));
+
+        // A body that is not a multistatus at all (an intercepting proxy's error page).
+        let not_dav = "<html><body>502 Bad Gateway</body></html>";
+        assert!(matches!(
+            client.parse_multistatus_response("cal-work", not_dav),
+            Err(CalendarError::MalformedResponse(_))
+        ));
     }
 
     #[test]

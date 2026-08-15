@@ -19,7 +19,6 @@ tracing = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 reqwest = { workspace = true }
-quick-xml = { workspace = true }
 regex = { workspace = true }
 async-trait = { workspace = true }
 
