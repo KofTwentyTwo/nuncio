@@ -413,13 +413,36 @@ fn tls_mode_to_db(mode: nuncio_core::TlsMode) -> &'static str {
 }
 
 /// Parse a persisted `accounts` TLS-mode column back into
-/// [`nuncio_core::TlsMode`]. An unrecognized value falls back to the safe
-/// default (implicit TLS) rather than failing the whole account load.
-fn tls_mode_from_db(value: &str) -> nuncio_core::TlsMode {
+/// [`nuncio_core::TlsMode`].
+///
+/// Fails closed. TLS modes are validated before they are written, so the only
+/// way an unrecognized token reaches this function is corruption or tampering
+/// of the row. Coercing such a value to a default would silently hand the
+/// caller a transport the operator never configured -- reading `"start_tls"`
+/// as implicit TLS, or an unreadable value as *any* concrete mode, changes the
+/// account's security posture with no signal at all. The account's real mode is
+/// unknown at that point, and an unknown security posture is not something this
+/// layer may guess at, so the read is refused and the offending account, column,
+/// and raw value are named in the error.
+///
+/// This is deliberately stricter than the best-effort recovery path in
+/// [`crate::recovery`]: salvage exists to rescue what it can from an already
+/// broken file and has no caller to return an error to, whereas this is the
+/// path every ordinary account read takes.
+fn tls_mode_from_db(
+    account_id: &str,
+    column: &str,
+    value: &str,
+) -> Result<nuncio_core::TlsMode, DatabaseError> {
     match value {
-        "start_tls" => nuncio_core::TlsMode::StartTls,
-        "plain" => nuncio_core::TlsMode::Plain,
-        _ => nuncio_core::TlsMode::ImplicitTls,
+        "implicit_tls" => Ok(nuncio_core::TlsMode::ImplicitTls),
+        "start_tls" => Ok(nuncio_core::TlsMode::StartTls),
+        "plain" => Ok(nuncio_core::TlsMode::Plain),
+        other => Err(DatabaseError::Corrupted(format!(
+            "account {account_id} has an unrecognized {column} value {other:?}; refusing to \
+             load it under a guessed TLS mode -- re-save the account with a valid transport \
+             security setting"
+        ))),
     }
 }
 
@@ -1369,8 +1392,7 @@ impl DatabaseEngine {
         .await
         .map_err(DatabaseError::Query)?;
 
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(
                 |(
                     id,
@@ -1387,7 +1409,8 @@ impl DatabaseEngine {
                     smtp_tls_mode,
                     collection_url,
                     filters_enabled,
-                )| {
+                )|
+                 -> Result<nuncio_core::AccountConfig, DatabaseError> {
                     let protocol = serde_json::from_str(&protocol_str)
                         .unwrap_or(nuncio_core::AccountProtocol::ImapSmtp);
                     // Reconstruct the exact transport variant from the
@@ -1410,10 +1433,18 @@ impl DatabaseEngine {
                             nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
                                 imap_host: server_host,
                                 imap_port: server_port as u16,
-                                imap_tls_mode: tls_mode_from_db(&imap_tls_mode),
+                                imap_tls_mode: tls_mode_from_db(
+                                    &id,
+                                    "imap_tls_mode",
+                                    &imap_tls_mode,
+                                )?,
                                 smtp_host: resolved_smtp_host,
                                 smtp_port: resolved_smtp_port,
-                                smtp_tls_mode: tls_mode_from_db(&smtp_tls_mode),
+                                smtp_tls_mode: tls_mode_from_db(
+                                    &id,
+                                    "smtp_tls_mode",
+                                    &smtp_tls_mode,
+                                )?,
                             })
                         }
                         nuncio_core::AccountProtocol::Jmap => {
@@ -1427,7 +1458,7 @@ impl DatabaseEngine {
                             })
                         }
                     };
-                    nuncio_core::AccountConfig {
+                    Ok(nuncio_core::AccountConfig {
                         id,
                         name,
                         email_address,
@@ -1435,10 +1466,10 @@ impl DatabaseEngine {
                         sync_interval_secs: sync_interval_secs as u64,
                         filters_enabled: filters_enabled != 0,
                         transport,
-                    }
+                    })
                 },
             )
-            .collect())
+            .collect()
     }
 
     /// Fetch the persisted inbound-sync checkpoint for a folder, or `None` if
@@ -4287,6 +4318,69 @@ mod tests {
         assert_eq!(ft.imap_tls_mode, nuncio_core::TlsMode::StartTls);
         assert_eq!(ft.smtp_tls_mode, nuncio_core::TlsMode::Plain);
         assert_eq!(fetched, acct);
+    }
+
+    /// An unreadable stored TLS mode must fail the read rather than resolve to
+    /// a guessed one. The account below is configured for STARTTLS; its stored
+    /// mode is then overwritten out-of-band with a token this build does not
+    /// know. Previously that token was coerced to implicit TLS, so every
+    /// ordinary account read handed the caller a transport the operator never
+    /// chose, with nothing anywhere to say so. Both the IMAP and the SMTP
+    /// column are checked, and `get_account` is checked alongside
+    /// `list_accounts` because it reads through the same path.
+    #[tokio::test]
+    async fn unrecognized_stored_tls_mode_fails_the_read_instead_of_defaulting() {
+        for column in ["imap_tls_mode", "smtp_tls_mode"] {
+            let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+            let acct = nuncio_core::AccountConfig {
+                id: "acct-tls-corrupt".to_string(),
+                name: "Tampered TLS Account".to_string(),
+                email_address: "tampered@nuncio.mx".to_string(),
+                keyring_secret_key: "nuncio/acct-tls-corrupt".to_string(),
+                sync_interval_secs: 60,
+                filters_enabled: false,
+                transport: nuncio_core::Transport::ImapSmtp(nuncio_core::ImapSmtpTransport {
+                    imap_host: "imap.nuncio.mx".to_string(),
+                    imap_port: 143,
+                    imap_tls_mode: nuncio_core::TlsMode::StartTls,
+                    smtp_host: "smtp.nuncio.mx".to_string(),
+                    smtp_port: 587,
+                    smtp_tls_mode: nuncio_core::TlsMode::StartTls,
+                }),
+            };
+            engine.save_account(&acct).await.expect("save succeeds");
+
+            // Simulates corruption or tampering of the row: writes are
+            // validated, so this value could never arrive through the API.
+            sqlx::query(&format!("UPDATE accounts SET {column} = ? WHERE id = ?"))
+                .bind("tls")
+                .bind("acct-tls-corrupt")
+                .execute(&engine.pool)
+                .await
+                .expect("corrupting update succeeds");
+
+            let err = engine
+                .list_accounts()
+                .await
+                .expect_err("an unreadable TLS mode must not resolve to a default");
+            let message = err.to_string();
+            assert!(
+                matches!(err, DatabaseError::Corrupted(_)),
+                "expected a corruption error, got: {message}"
+            );
+            for expected in ["acct-tls-corrupt", column, "tls"] {
+                assert!(
+                    message.contains(expected),
+                    "error must name {expected}, got: {message}"
+                );
+            }
+
+            engine
+                .get_account("acct-tls-corrupt")
+                .await
+                .expect_err("get_account must fail closed on the same row");
+        }
     }
 
     /// A CalDAV account's `collection_url` must survive save/reload, and a
