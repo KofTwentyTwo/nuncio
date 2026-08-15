@@ -22,6 +22,12 @@ pub enum CalendarError {
     #[error("unresolvable TZID timezone reference: {0}")]
     UnresolvableTimezone(String),
 
+    /// The server answered, but its body is not a WebDAV `multistatus` document this client
+    /// can traverse. Distinct from an empty result: a response that cannot be read must never
+    /// be reported as a calendar with no events in it.
+    #[error("malformed CalDAV multistatus response: {0}")]
+    MalformedResponse(String),
+
     /// CalDAV network/transport-layer failure (connection, TLS, or an unexpected HTTP status)
     /// distinct from a payload that connected fine but failed to parse.
     #[error("CalDAV transport failure: {0}")]

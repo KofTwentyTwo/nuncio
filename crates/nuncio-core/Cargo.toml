@@ -28,6 +28,7 @@ tar.workspace = true
 regex.workspace = true
 zip.workspace = true
 chrono.workspace = true
+quick-xml.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
