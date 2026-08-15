@@ -1777,6 +1777,71 @@ impl DatabaseEngine {
             .collect())
     }
 
+    /// Every mailbox each of `message_keys` currently occupies, grouped by key.
+    ///
+    /// The batched form of [`Self::placements_of`], for callers holding a whole
+    /// page of messages: one query per chunk instead of one per message. Keys
+    /// absent from the result occupy no mailbox; callers that need an entry for
+    /// every requested key should treat a missing entry as an empty set.
+    ///
+    /// Each key's placements are ordered by folder id ascending, exactly as
+    /// [`Self::placements_of`] orders them -- callers take the first placement
+    /// as the message's canonical mailbox, so the order is part of the
+    /// contract, not an incidental property of the query plan.
+    ///
+    /// Chunked at [`MAX_KEYS_PER_IN_LIST`] for the same reason as
+    /// [`Self::existing_placements`]: the bind-parameter ceiling belongs to the
+    /// statement, so it can only be enforced where the statement is built.
+    /// Duplicate keys are collapsed first, so no key's placements can be
+    /// gathered from two chunks and appended twice.
+    pub async fn placements_of_batch(
+        &self,
+        message_keys: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<nuncio_core::model::Placement>>, DatabaseError>
+    {
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<&String> = message_keys
+            .iter()
+            .filter(|key| seen.insert(key.as_str()))
+            .collect();
+
+        let mut grouped: std::collections::HashMap<String, Vec<nuncio_core::model::Placement>> =
+            std::collections::HashMap::new();
+
+        for chunk in unique.chunks(MAX_KEYS_PER_IN_LIST) {
+            let mut builder: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+                "SELECT message_key, account_id, folder_id, uidvalidity, uid, read_flag
+                 FROM placements WHERE message_key IN (",
+            );
+            let mut separated = builder.separated(", ");
+            for key in chunk {
+                separated.push_bind(*key);
+            }
+            builder.push(") ORDER BY message_key ASC, folder_id ASC");
+
+            let rows: Vec<(String, String, String, String, String, i64)> = builder
+                .build_query_as()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DatabaseError::Query)?;
+
+            for (message_key, account_id, folder_id, uid_validity, remote_id, read_flag) in rows {
+                grouped
+                    .entry(message_key)
+                    .or_default()
+                    .push(nuncio_core::model::Placement {
+                        account_id,
+                        folder_id,
+                        uid_validity,
+                        remote_id,
+                        read: read_flag != 0,
+                    });
+            }
+        }
+
+        Ok(grouped)
+    }
+
     /// Messages occupying one folder of one account, newest first, paired with
     /// the placement they were found through.
     ///
@@ -5492,6 +5557,83 @@ mod tests {
             "a key that was never persisted must never be reported as known"
         );
         assert_eq!(known.len(), 1, "and the query must not echo its own input");
+    }
+
+    #[tokio::test]
+    async fn placements_of_batch_matches_per_message_placements_of_including_order() {
+        let (engine, _dir) = DatabaseEngine::connect_ephemeral().await.unwrap();
+
+        // Folders are saved in an order that is neither insertion-sorted nor
+        // reverse-sorted, so a batch query that forgot to order by folder id
+        // would come back visibly wrong rather than accidentally right.
+        for (key, folder, uid) in [
+            ("key-a", "Zeta", "1"),
+            ("key-a", "Alpha", "2"),
+            ("key-a", "Mid", "3"),
+            ("key-b", "Sent", "4"),
+            ("key-b", "Archive", "5"),
+            // Placed but never asked for: proves the `IN (...)` filter is real.
+            ("key-unrequested", "INBOX", "6"),
+        ] {
+            let (email, placement) = sample_message_and_placement(key, folder, uid);
+            engine
+                .save_email_at(
+                    &email,
+                    nuncio_core::model::IdentitySource::EmailId,
+                    &placement,
+                )
+                .await
+                .unwrap();
+        }
+
+        // "key-a" appears twice: a caller may hand over a page with repeats,
+        // and a key gathered from two chunks must not be appended twice.
+        let requested = [
+            "key-a".to_string(),
+            "key-b".to_string(),
+            "key-a".to_string(),
+            "key-never-saved".to_string(),
+        ];
+        let grouped = engine.placements_of_batch(&requested).await.unwrap();
+
+        for key in ["key-a", "key-b"] {
+            let one_at_a_time = engine.placements_of(key).await.unwrap();
+            assert!(
+                one_at_a_time.len() > 1 || key == "key-b",
+                "the fixture must exercise more than one placement per message"
+            );
+            assert_eq!(
+                grouped.get(key),
+                Some(&one_at_a_time),
+                "the batched read of '{key}' must equal the per-message read, element for element"
+            );
+
+            let folders: Vec<&str> = one_at_a_time
+                .iter()
+                .map(|placement| placement.folder_id.as_str())
+                .collect();
+            let mut sorted = folders.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                folders, sorted,
+                "the first placement of '{key}' is taken as its canonical mailbox, so folder id order is load-bearing"
+            );
+        }
+
+        assert_eq!(
+            grouped.get("key-a").map(Vec::len),
+            Some(3),
+            "a repeated key must not have its placements gathered twice"
+        );
+        assert!(
+            !grouped.contains_key("key-never-saved"),
+            "a key that occupies no mailbox must be absent, not invented"
+        );
+        assert!(
+            !grouped.contains_key("key-unrequested"),
+            "the batch must answer only for the keys it was asked about"
+        );
+        assert_eq!(grouped.len(), 2, "and for nothing else");
     }
 
     /// A first sync of a real mailbox hands `existing_placements` the entire
