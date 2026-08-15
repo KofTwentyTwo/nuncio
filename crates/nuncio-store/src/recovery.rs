@@ -179,6 +179,18 @@ impl SqliteRecoveryEngine {
     /// Salvage readable accounts and filter rules from damaged database or backup file,
     /// re-creating a fresh SQLite file at `target_db_path`. Cryptographic key material for
     /// the freshly re-created engine is provisioned from `secrets`.
+    ///
+    /// # Precondition
+    ///
+    /// The caller MUST have fully closed (via [`DatabaseEngine::close`], which awaits every
+    /// pooled connection's teardown) any engine still holding `target_db_path` before calling
+    /// this. Salvage unlinks `target_db_path` and its `-wal`/`-shm` companions and then creates
+    /// a brand-new database at that same path; a connection left open over the old file is torn
+    /// down asynchronously, and SQLite's close-time WAL handling operates on `-wal`/`-shm` *by
+    /// path*. A teardown landing after the unlink therefore collides with the fresh database's
+    /// own companions -- leaving the new, empty main file paired with a `-wal` describing the
+    /// old one, whose replay reads past end-of-file and fails with `SQLITE_IOERR_SHORT_READ`.
+    /// `DatabaseEngine::close_and_salvage` is the in-tree caller that honours this.
     pub async fn salvage(
         corrupted_db_path: &Path,
         target_db_path: &Path,
@@ -530,6 +542,17 @@ mod tests {
             let nsql = "SELECT * FROM emails WHERE subject CONTAINS 'Spam' ACTION DELETE";
             let rule = nuncio_filter::NsqlParser::parse_rule("Spam Filter", 1, nsql).unwrap();
             engine.save_filter_rule(&rule).await.unwrap();
+
+            // Closing before salvage is the documented precondition of
+            // `SqliteRecoveryEngine::salvage`, and it is what the production caller
+            // (`DatabaseEngine::close_and_salvage`) does. Merely dropping the engine is not
+            // equivalent: the pool's teardown is deferred onto the runtime, so the old
+            // connection's close-time WAL handling can land *after* salvage has unlinked
+            // `-wal`/`-shm` and created a fresh database at this same path -- pairing the new,
+            // empty main file with a `-wal` describing the old one and failing the subsequent
+            // page read with `SQLITE_IOERR_SHORT_READ`. `close()` awaits that teardown, so the
+            // window does not exist at all rather than merely being narrow.
+            engine.close().await;
         }
 
         // Step 2: Perform salvage recovery
