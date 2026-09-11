@@ -12,7 +12,7 @@ use tonic::{service::interceptor::InterceptedService, transport::Channel};
 
 pub struct SystemHarness {
     clock_origin: std::time::Instant,
-    pub google: MockGoogle,
+    pub google: Arc<MockGoogle>,
     pub secrets: Arc<super::secrets::TestSecrets>,
     pub secrets_file: PathBuf,
     pub directory: PathBuf,
@@ -39,13 +39,24 @@ impl SystemHarness {
         payload_limit: u64,
         polling: Option<u64>,
     ) -> Result<Self, TestError> {
+        Self::with_google(
+            Arc::new(MockGoogle::start(seed).await?),
+            payload_limit,
+            polling,
+        )
+        .await
+    }
+    pub async fn with_google(
+        google: Arc<MockGoogle>,
+        payload_limit: u64,
+        polling: Option<u64>,
+    ) -> Result<Self, TestError> {
         let temporary = tempfile::Builder::new()
             .prefix("nuncio-system-")
             .tempdir()?;
         let directory = temporary.path().join("profile");
         let secrets_file = temporary.path().join("synthetic-secrets.json");
         let secrets = Arc::new(super::secrets::TestSecrets::new(secrets_file.clone()));
-        let google = MockGoogle::start(seed).await?;
         let clock_origin = std::time::Instant::now();
         let (channel, injector, server) = start_engine(
             &google,
@@ -89,6 +100,12 @@ impl SystemHarness {
         self.server = Some(server);
         self.finished = false;
         Ok(())
+    }
+    pub async fn stop_google(&mut self) -> Result<(), TestError> {
+        Arc::get_mut(&mut self.google)
+            .ok_or_else(|| std::io::Error::other("Google mock still has multiple owners"))?
+            .stop()
+            .await
     }
     pub fn arm(&self, name: &str) -> Result<(), TestError> {
         let directory = self.directory.with_extension("test-barriers");

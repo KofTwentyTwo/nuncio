@@ -550,7 +550,7 @@ async fn prepare_rpc_is_authenticated_account_scoped_offline_and_preserves_conte
         h.mail().prepare_draft(wrong).await.unwrap_err().code(),
         tonic::Code::NotFound
     );
-    h.google.stop().await.unwrap();
+    h.stop_google().await.unwrap();
     let saved = h
         .mail()
         .prepare_draft(request.clone())

@@ -26,9 +26,32 @@ previous daemon (shell66336, exit101, red-e2e.log: exit5 instead of invalid-key
 exit2). Seven-command relevant gate shell7100 is terminal, all commands exit0:
 format/bothClippy, engine128, recoveryE2E5, IMAPE2E13, production-isolation2.
 No failed/ignored tests. Summarizer exit0; exact commands/counts/hashes under
-`test-results/task13-restore-retry/`. Next checkpoint/push this verified fix,
-then create the required multi_engine_system suite with three independent
-profiles against one shared Google mock, followed by security/resource suites.
+`test-results/task13-restore-retry/`. Signed checkpoint
+`57dd648eb383e2aeb726b05aac07d97b131270d8` was committed/pushed; verify-commit and
+ls-remote both passed, exact GitHub hash matched. Staged Gitleaks and diff checks
+passed. No new production code has changed since that checkpoint.
+
+Task14 is now underway. New `tests/multi_engine_system.rs` passes its focused
+runner (shell30577, exit0, one test, no failures/ignored): three real engines,
+separate profiles/accounts/keys, shared independent Google mock, external mail
+add/delete/labels and Calendar update/delete, staggered restarts, paged projection
+comparison, local-only draft, separate send/copy/notification counts and final
+remote-state preservation. SystemHarness now shares the provider through Arc;
+its existing single-owner stop case was updated. The suite is registered in the
+offline verifier. Initial test-only Serialize/coverage-name mistakes were corrected
+against existing API types/current coverage contract; no product assertion was
+weakened. Logs retained as first-compile-* and wrong-*-coverage-*.
+
+Six-command relevant gate shell43253 completed all commands exit0:
+format/bothClippy, multi_engine_system1, google_system21, operation_system6.
+Zero failed/ignored. Counts and changed-source hashes are recorded under
+`test-results/task14-multi-engine/`. No command remains running. Next checkpoint
+this test-only change, then create security_system and resource_system, register
+both, run the full offline verifier, and advance to packaging/CI. Security suite
+can enumerate the existing `nuncio_proto::DESCRIPTOR` to exercise auth for every
+RPC, reuse current system/process harnesses and independent provider observations.
+No production code or dependency changed during this convergence step. Do not
+reopen speculative recovery audits.
 
 ## Hourly status emails
 
@@ -92,9 +115,9 @@ Schema21 explicit reconciliation is durable/scoped/versioned through engine/API/
 
 ## Remaining full scope
 
-Task13: restore-retry verification passed; checkpoint/push next. Existing encrypted WAL backup, rekey/hold, historical schema, projection repair and subprocess recovery evidence covers the functional task. Reconcile any remaining explicit Task13 acceptance gaps against that evidence during the full gate. Earlier artifact-lifetime and caller-owned-helper audit ideas are not an open-ended prerequisite for Task14. Rich send histories10–21 and schema22 migration/crash cases are verified. No destructive account purge.
+Task13: restore-retry verification passed and checkpoint57dd648 is pushed. Existing encrypted WAL backup, rekey/hold, historical schema, projection repair and subprocess recovery evidence covers the functional task. Reconcile any remaining explicit Task13 acceptance gaps against that evidence during the full gate. Earlier artifact-lifetime and caller-owned-helper audit ideas are not an open-ended prerequisite for Task14. Rich send histories10–21 and schema22 migration/crash cases are verified. No destructive account purge.
 
-Task14: create/run named security_system, resource_system and multi_engine_system suites. Require three independent engines,10,000 metadata messages,16MiB attachments,64MiB payload limits, concurrency2, bounded queues, measured RSS/latency, canary scans and independent encryption checks. Audit actual outstanding defects rather than repeat completed fixes: post-submission storage failures, worker failures, parser bounds, aggregate attachments, legacy intents, calendar inheritance/Trash origins; writerWithoutPrivateAccess remains unverified. Run the complete offline verifier after implementing the missing suites.
+Task14: multi_engine_system and the six-command shared-harness gate pass. Create/run named security_system and resource_system suites next. Require three independent engines,10,000 metadata messages,16MiB attachments,64MiB payload limits, concurrency2, bounded queues, measured RSS/latency, canary scans and independent encryption checks. Audit actual outstanding defects rather than repeat completed fixes: post-submission storage failures, worker failures, parser bounds, aggregate attachments, legacy intents, calendar inheritance/Trash origins; writerWithoutPrivateAccess remains unverified. Run the complete offline verifier after implementing the missing suites.
 
 Tasks03/15: explicit test egress denial (Docker bridge alone is not a firewall); external descriptor-generated client and contract freeze/docs; dependency advisory/security/license checks; package.py and extracted artifacts; CI definitions and required-job failure behavior. Task16: final R01–R16 evidence matrix plus operating/recovery/compatibility/risk report. MANUAL-ACCEPTANCE.md exists; all live acceptance is unapproved/unverified. Passing local mocks does not prove live Google/MailPlus compatibility; local checks do not prove remote CI ran.
 

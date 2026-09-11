@@ -1,5 +1,33 @@
 # Verification evidence
 
+## Three-engine convergence — relevant gate verified
+
+`python3 scripts/verify.py --suite multi_engine_system` completed0 (shell30577):
+build-test-harness0, one test passed, zero failures/ignored. Each engine has an
+independent profile, credentials and account UUID while sharing only the external
+stateful Google service. External mail additions/deletion/labels and Calendar
+updates/deletion converge after staggered restarts. Paginated projections agree
+with each other and independent remote mail/event state. Local draft stays in its
+own profile; send, copy and notification counts remain separately zero. Final
+remote state remains unchanged after all engines stop. Implementation:
+`crates/nuncio-test-support/tests/multi_engine_system.rs` and shared provider
+ownership in `tests/support/system.rs`; runner registration in `scripts/verify.py`.
+
+First attempt had a test-only protobuf Serialize compile error; subsequent attempts
+used an incorrect coverage name. They were corrected to generated PartialEq and
+the existing strict `current` coverage contract. Original logs are retained in
+`test-results/multi_engine_system/first-compile-*`, `wrong-coverage-*` and
+`wrong-mail-coverage-*`. No product fix was required. Six-command broader gate shell43253 completed all commands exit0:
+format/bothClippy, multi_engine_system1, google_system21, operation_system6,
+zero failed/ignored. Commands, logs, counts and changed-source hashes are retained
+in `test-results/task14-multi-engine/`. No production/dependency changes; previous
+production artifacts remain applicable. Security/resource suites remain required;
+no full Task14 claim.
+
+Restore checkpoint57dd648eb383e2aeb726b05aac07d97b131270d8 was signed and pushed:
+commit0, verify-commit0, push0, exact ls-remote match0. Staged Gitleaks and diff
+checks passed. This signature/remote verification is not remote-CI evidence.
+
 ## Restore retry capacity — full relevant gate verified
 
 `python3 test-results/task13-restore-retry/run-gate.py`: shell7100 terminal exit0,
