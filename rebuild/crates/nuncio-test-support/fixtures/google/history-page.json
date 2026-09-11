@@ -1,0 +1,11 @@
+{
+  "history": [{
+    "id": "9007199254740997",
+    "labelsAdded": [{
+      "message": {"id": "m-001", "threadId": "t-001"},
+      "labelIds": ["STARRED"]
+    }]
+  }],
+  "historyId": "9007199254741009",
+  "nextPageToken": "page-account-a-2"
+}

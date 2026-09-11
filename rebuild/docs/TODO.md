@@ -1,0 +1,33 @@
+# Rebuild TODO
+
+Full unbudgeted goal is active; inline execution; full offline Google/Synology mocks now. James authorized the initial checkpoint and regular commits/pushes to `feature/nuncio-google-first-rebuild` after relevant checks pass. Merges, releases, installation, remote settings and live acceptance remain unapproved. The executive report email was separately authorized and sent. Exact state, command statuses, paths and next action are in SESSION-STATE.md; dated evidence in VERIFICATION.md.
+
+- [x] Google mail/calendar engine/API/CLI writes and independent mocks, system/E2E at prior checkpoints.
+- [x] IMAP full/delta/fetch/flags, explicit folder copy/move/archive, Trash/restore, exact placement and safe UID-scoped expunge.
+- [x] Client SMTP/Sent with independent delivery/copy receipts, immutable wire/privateBcc, seven process-death cases and negative APPEND copy-only retry.
+- [x] Server Sent unique positive read, fresh durable pre-DATA UID floor, versioned content comparison, separate receipts; storage4 and actual IMAPE2E6 pass. Strict SEARCH10cases pass in1test.
+- [x] Schema18 server Sent full12-command offline gate: engine78/proto4/IMAPcontract2(system18Python)/IMAPsystem17/E2E6/Google21+26, allzero failed/ignored. IndependentAutoSent tag ownership bug fixed using committed authenticatedUsername.
+- [x] Explicit SMTP resend captures new immutable SMTP/Sent intent atomically; fullengine79/IMAPsystem18/Googleoperations6/GoogleE2E26 and bothClippy pass. ActualIMAPE2E7 independently passed; bothSentpolicies, deleted drafts, binary/frozenbody, duplicate-risk and restart evidence.
+- [x] SMTP manual confirmation and abandonment preserve transport history and independent remote effects. The nine-command gate passed: engine 80; proto/CLI 8; API 19; actual IMAP E2E 8; Google suites 6, 21 and 26. Both Sent policies are verified.
+- [x] Missing-UIDPLUS client/server Sent policies and queued SMTP endpoint-change profiles: all5gatecommands0, IMAPsystem21/actualCLI9.
+- [x] Task12 provider paths and strict independent gates verified offline. Cross-cutting legacy-schema, resource and adversarial coverage continues under Tasks13–14.
+- [x] Task 13 projection repair through engine/API/CLI, with independent Google/IMAP system and subprocess checks, transactional rollback and queued-operation retention. Preceding 13-command gate passes.
+- [x] Historical schemas 1–20 migrate and restore with durable payloads; old backup-count bug fixed. Damaged-store API/CLI refusal preserves originals. Eight-command gate passes: full engine 105, proto/CLI/daemon 19, repair E2E 2, recovery E2E 1, IMAP E2E 11; zero failed/ignored.
+- [x] Later historical suite: four tests pass, including injected failures at all 19 upgrade boundaries, followed by fmt/both Clippy. Exact original encrypted bytes/catalog/rows survive each failure and retry succeeds.
+- [x] Actual daemon SIGKILL before/after every migration commit: all40 cases and complete eight-command gate passed; fresh schema20 production binaries exclude test controls.
+- [x] Rich send history across schemas10–20: all operation states and explicit decisions, positive receipts/SMTP state, retained restoration provenance and dispatch holds. Four-command gate6historicaltests passed.
+- [x] Schema21 durable reconciliation through engine/API/CLI, scoped request replay, restoration guards and positive/negative send recovery after lost acknowledgements/SIGKILL. All14 gatecommands pass; fresh production isolation verified.
+- [x] Restored Gmail/calendar mutations: 28 system scenarios and3 actual CLI crash cases, explicit-request retry fix, stable attempt ordinals, notification uncertainty/abandonment. Full13-command gate passes and production rebuilt.
+- [x] Restored IMAP writes:28 system scenarios and2 actualCLI crash cases, independent bytes/copy/flag/expunge/delivery evidence. Six-command gate all0: system24/actualCLI12/Google reconciliation3 and bothClippy.
+- [x] Positive client-Sent/restored accepted-SMTP recovery: full13-command offline gate passes, engine112/IMAPsystem26/actualCLI13; separate proof, atomic publication,12storagecases/7systemscenarios/2newCLIcrashcases. Production artifacts refreshed.
+- [x] Restore path identity: replacement regression reproduced and fixed; six path cases and engine key rollback verified. All7 gatecommands0 (8restore/3Google recovery/13IMAP/2release), production refreshed.
+- [x] Schema 22 streamed-restore crash cleanup: all 12 commands passed. Engine 119; API 20; recovery E2E 4 (five restore crash points); 44 migration SIGKILL cases; Google 21/26; IMAP 26/13; production isolation 2. Encrypted ownership journal, owned key/stage/upload cleanup, activated-key retention, backup authority exclusion and cleanup-failure reporting are verified. Production refreshed.
+- [x] Maintenance artifact profile leases: all7 gatecommands0, engine122/recoveryE2E4/IMAPE2E13/release2, three new lifecycle regressions; production refreshed.
+- [x] Startup cleanup cancellation and relative restore: all7 gatecommands0, engine126/recoveryE2E4/IMAPE2E13/release2 and fmt/bothClippy. Original profile ownership, relative/aliased paths, independent restored keys, symlink and cross-owner rejection verified. Production refreshed.
+- [ ] Task13 current: ordinary failed-restore retirement and earlier upload/backup process-death cleanup; static caller-owned helper boundary. Preserve empty/unrecognized paths without durable ownership. No full Task13 completion.
+- [ ] Task 13 next: complete safe original-operation reconciliation and other write-kind historical payloads; abandoned staging/key cleanup and activation races; disconnect retention/identity and broader storage/export failures. No local account purge is in scope.
+- [ ] Task 14: security, parser and resource audits; identified state/history defects. Calendar permissions include the `writerWithoutPrivateAccess` role. Verify cancellation retains ownership, and bound retries and output.
+- [ ] Task03/15: explicit test egress denial, fresh production artifacts/packages, contract/CLI external-client verification and CI files.
+- [ ] Task16: manual acceptance worksheet prepared (allliveunapproved/unverified); final requirement-to-evidence matrix, operating/recovery/compatibility docs; named live actions only after separate authorization when user resumes live scope.
+
+No R01–R16 marked fully complete. Original approved plan remains authoritative. A provider milestone is progress, not completion.

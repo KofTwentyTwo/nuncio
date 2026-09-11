@@ -1,0 +1,8 @@
+{
+  "id": "alldate02",
+  "status": "confirmed",
+  "summary": "Two-day all-day fixture",
+  "start": {"date": "2026-10-31"},
+  "end": {"date": "2026-11-02"},
+  "extendedProperties": {"private": {"fixture": "all-day-2", "canary": "retain-two-day-fields"}}
+}

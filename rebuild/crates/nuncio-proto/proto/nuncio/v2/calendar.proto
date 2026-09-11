@@ -1,0 +1,81 @@
+syntax = "proto3";
+package nuncio.v2;
+import "nuncio/v2/system.proto";
+import "nuncio/v2/operations.proto";
+
+service Calendar {
+  rpc QueryFreeBusy(FreeBusyRequest) returns (FreeBusyResult);
+  rpc ChangeEvent(ChangeEventRequest) returns (Operation);
+  rpc ListCalendars(ListCalendarsRequest) returns (ListCalendarsResponse);
+  rpc GetEvent(CalendarEventRequest) returns (GetCalendarEventResponse);
+  rpc ListAgenda(ListAgendaRequest) returns (ListAgendaResponse);
+  rpc RefreshAgenda(RefreshAgendaRequest) returns (SyncRun);
+}
+message ListCalendarsRequest { string account_id = 1; uint32 page_size = 2; optional string page_token = 3; }
+message ListCalendarsResponse { uint64 revision = 1; repeated CalendarSummary items = 2; optional string next_page_token = 3; }
+message CalendarSummary {
+  string id = 1; string account_id = 2; string provider_id = 3; optional string summary = 4;
+  optional string time_zone = 5; string access_role = 6; bool is_primary = 7;
+  bool retired = 8; uint64 canonical_revision = 9;
+}
+message CalendarEventRequest { string account_id = 1; string calendar_id = 2; string event_id = 3; }
+message GetCalendarEventResponse { uint64 revision = 1; CalendarEvent event = 2; AgendaCoverage coverage = 3; }
+// Dates are YYYY-MM-DD. The upper date is exclusive, interpreted in each calendar's zone.
+message AgendaWindow { string from = 1; string to = 2; }
+message ListAgendaRequest { string account_id = 1; AgendaWindow window = 2; uint32 page_size = 3; optional string page_token = 4; }
+message ListAgendaResponse { uint64 revision = 1; repeated CalendarEvent items = 2; repeated AgendaCoverage coverage = 3; optional string next_page_token = 4; }
+// An omitted window refreshes the engine's bounded rolling window.
+message RefreshAgendaRequest { string account_id = 1; AgendaWindow window = 2; }
+message AgendaCoverage {
+  string calendar_id = 1; string state = 2; optional string from = 3; optional string to = 4;
+  uint64 canonical_revision = 5; optional uint64 cached_revision = 6; optional int64 refreshed_at_ms = 7;
+}
+message ZonedDateTime { string rfc3339 = 1; string time_zone = 2; }
+message EventTime { oneof value { string date = 1; ZonedDateTime date_time = 2; } }
+message CalendarEvent {
+  string id = 1; string account_id = 2; string calendar_id = 3; string provider_id = 4;
+  optional string summary = 5; optional string etag = 6; string status = 7;
+  EventTime start = 8; EventTime end = 9; EventTime original_start = 10;
+  optional string recurring_provider_id = 11; string provider_json = 12;
+  // Local master ID, when the canonical master is known, for whole-series reads/edits.
+  optional string recurring_event_id = 13;
+}
+
+// Scope and notification policy must both be explicitly selected.
+enum CalendarEditScope { CALENDAR_EDIT_SCOPE_UNSPECIFIED = 0; CALENDAR_EDIT_SCOPE_SINGLE = 1; CALENDAR_EDIT_SCOPE_SERIES = 2; }
+enum CalendarNotificationPolicy { CALENDAR_NOTIFICATION_POLICY_UNSPECIFIED = 0; CALENDAR_NOTIFICATION_POLICY_NONE = 1; CALENDAR_NOTIFICATION_POLICY_ALL = 2; CALENDAR_NOTIFICATION_POLICY_EXTERNAL_ONLY = 3; }
+enum CalendarResponseStatus { CALENDAR_RESPONSE_STATUS_UNSPECIFIED = 0; CALENDAR_RESPONSE_STATUS_NEEDS_ACTION = 1; CALENDAR_RESPONSE_STATUS_ACCEPTED = 2; CALENDAR_RESPONSE_STATUS_DECLINED = 3; CALENDAR_RESPONSE_STATUS_TENTATIVE = 4; }
+message ChangeEventRequest {
+  string account_id = 1; string calendar_id = 2; string request_id = 3;
+  CalendarEditScope scope = 4; CalendarNotificationPolicy notification_policy = 5;
+  oneof action { CalendarCreate create = 6; CalendarUpdate update = 7; CalendarDelete delete = 8; CalendarRespond respond = 9; }
+}
+message CalendarCreate { CalendarEventFields event = 1; }
+message CalendarUpdate {
+  string event_id = 1; string expected_etag = 2; CalendarEventFields fields = 3;
+  // Public field names. A field cannot be both set and cleared.
+  repeated string clear_fields = 4;
+}
+message CalendarDelete { string event_id = 1; string expected_etag = 2; }
+message CalendarRespond { string event_id = 1; string expected_etag = 2; CalendarResponseStatus response = 3; optional string comment = 4; }
+message CalendarRecurrence { repeated string rules = 1; }
+message CalendarAttendees { repeated CalendarAttendee items = 1; }
+message CalendarAttendee { string email = 1; optional string display_name = 2; optional bool optional = 3; optional bool resource = 4; }
+message CalendarReminder { string method = 1; uint32 minutes = 2; }
+message CalendarReminders { bool use_default = 1; repeated CalendarReminder overrides = 2; }
+message CalendarEventFields {
+  optional string summary = 1; optional string description = 2; optional string location = 3;
+  EventTime start = 4; EventTime end = 5; CalendarRecurrence recurrence = 6;
+  CalendarAttendees attendees = 7; CalendarReminders reminders = 8;
+  optional bool guests_can_modify = 9; optional bool guests_can_invite_others = 10;
+  optional bool guests_can_see_other_guests = 11; optional string transparency = 12;
+  optional string visibility = 13; optional string color_id = 14;
+}
+
+// Explicit online query. 1..50 provider calendar IDs (not local UUIDs); groups are unsupported.
+message FreeBusyRequest { string account_id = 1; string from = 2; string to = 3; string time_zone = 4; repeated string provider_calendar_ids = 5; }
+// Coverage applies to [from,to) only. A calendar with errors is never evidence of free time.
+message FreeBusyResult { string from = 1; string to = 2; string time_zone = 3; int64 checked_at_ms = 4; bool complete = 5; repeated CalendarAvailability calendars = 6; }
+message CalendarAvailability { string provider_calendar_id = 1; bool complete = 2; repeated BusyPeriod busy = 3; repeated AvailabilityError errors = 4; }
+message BusyPeriod { string from = 1; string to = 2; }
+message AvailabilityError { string domain = 1; string reason = 2; }

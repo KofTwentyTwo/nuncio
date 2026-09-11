@@ -1,0 +1,26 @@
+[
+  {
+    "id": "alldate01", "status": "confirmed", "summary": "All-day fixture",
+    "start": {"date": "2026-03-09"}, "end": {"date": "2026-03-10"},
+    "extendedProperties": {"private": {"canary": "retain-provider-fields"}}
+  },
+  {
+    "id": "dstseries", "status": "confirmed", "summary": "Weekly across DST",
+    "start": {"dateTime": "2026-03-01T09:00:00-06:00", "timeZone": "America/Chicago"},
+    "end": {"dateTime": "2026-03-01T10:00:00-06:00", "timeZone": "America/Chicago"},
+    "recurrence": ["RRULE:FREQ=WEEKLY;COUNT=3"],
+    "attendees": [{"email": "guest@example.test", "responseStatus": "accepted"}],
+    "reminders": {"useDefault": true}
+  },
+  {
+    "id": "dstseries_20260308T140000Z", "status": "confirmed",
+    "summary": "Moved occurrence", "recurringEventId": "dstseries",
+    "originalStartTime": {"dateTime": "2026-03-08T09:00:00-05:00", "timeZone": "America/Chicago"},
+    "start": {"dateTime": "2026-03-08T10:30:00-05:00", "timeZone": "America/Chicago"},
+    "end": {"dateTime": "2026-03-08T11:30:00-05:00", "timeZone": "America/Chicago"}
+  },
+  {
+    "id": "dstseries_20260315T140000Z", "status": "cancelled", "recurringEventId": "dstseries",
+    "originalStartTime": {"dateTime": "2026-03-15T09:00:00-05:00", "timeZone": "America/Chicago"}
+  }
+]

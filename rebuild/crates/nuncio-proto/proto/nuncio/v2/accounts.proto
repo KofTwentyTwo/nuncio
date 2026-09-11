@@ -1,0 +1,72 @@
+syntax = "proto3";
+package nuncio.v2;
+
+service Accounts {
+  rpc ConnectImap(ConnectImapRequest) returns (ConnectImapResponse);
+  // Local saved configuration and the last authenticated capability snapshot.
+  rpc GetImapConfig(AccountRequest) returns (ImapConfigResponse);
+  rpc BeginGoogleAuth(BeginGoogleAuthRequest) returns (AuthSession);
+  rpc GetAuthStatus(GetAuthStatusRequest) returns (AuthSession);
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+  rpc DisconnectAccount(AccountRequest) returns (DisconnectAccountResponse);
+  // Explicit online credential/identity check; list remains a local query.
+  rpc CheckAccount(AccountRequest) returns (Account);
+}
+message BeginGoogleAuthRequest {
+  string client_id = 1;
+  optional string client_secret = 2;
+  optional string login_hint = 3;
+  optional string account_id = 4;
+}
+message GetAuthStatusRequest { string session_id = 1; }
+message AuthSession {
+  string session_id = 1;
+  string browser_url = 2;
+  int64 expires_at_ms = 3;
+  string state = 4;
+  optional string account_id = 5;
+  optional string error_code = 6;
+  optional string warning_code = 7;
+}
+message Account {
+  string id = 1;
+  string provider = 2;
+  string address = 3;
+  string state = 4;
+}
+message ListAccountsRequest {}
+message ListAccountsResponse { repeated Account accounts = 1; }
+message AccountRequest { string account_id = 1; }
+message DisconnectAccountResponse {}
+
+enum MailTls { MAIL_TLS_UNSPECIFIED = 0; MAIL_TLS_IMPLICIT = 1; MAIL_TLS_START_TLS = 2; }
+enum SentPolicy { SENT_POLICY_UNSPECIFIED = 0; SENT_POLICY_SERVER = 1; SENT_POLICY_CLIENT_APPEND = 2; }
+message MailEndpoint { string host = 1; uint32 port = 2; MailTls tls = 3; string username = 4; }
+message ImapAccountConfig {
+  string address = 1;
+  MailEndpoint imap = 2;
+  MailEndpoint smtp = 3;
+  SentPolicy sent_policy = 4;
+  string sent_folder = 5;
+  optional string archive_folder = 6;
+  optional string trash_folder = 7;
+  // Additional trust roots; certificate and hostname verification remain required.
+  optional string trusted_ca_pem = 8;
+}
+message ImapCredentials { string imap_password = 1; string smtp_password = 2; }
+message ConnectImapRequest {
+  ImapAccountConfig config = 1;
+  ImapCredentials credentials = 2;
+  optional string account_id = 3;
+}
+message ImapCapabilities {
+  bool move_messages = 1;
+  bool uidplus = 2;
+  bool condstore = 3;
+  bool qresync = 4;
+  bool idle = 5;
+  bool smtp_utf8 = 6;
+  bool eight_bit_mime = 7;
+}
+message ConnectImapResponse { Account account = 1; ImapCapabilities capabilities = 2; bool credential_cleanup_pending = 3; }
+message ImapConfigResponse { ImapAccountConfig config = 1; ImapCapabilities capabilities = 2; }

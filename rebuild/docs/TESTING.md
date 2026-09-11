@@ -1,0 +1,31 @@
+# Offline verification
+
+Run from the isolated worktree root:
+
+```sh
+python3 rebuild/scripts/verify.py --suite google_mock_contract
+python3 rebuild/scripts/verify.py --suite google_system
+python3 rebuild/scripts/verify.py --suite google_e2e
+python3 rebuild/scripts/verify.py --suite imap_contract
+python3 rebuild/scripts/verify.py --suite imap_system
+python3 rebuild/scripts/verify.py --suite imap_e2e
+python3 rebuild/scripts/verify.py --suite release_isolation
+python3 rebuild/scripts/verify.py --all
+```
+
+The runner builds actual daemon/CLI test binaries under `rebuild/target/test-harness`; release checks build selected production packages without test features under `rebuild/target/production`. Every subprocess result, command, and exit status is recorded in `rebuild/test-results/<suite>/`. Required missing suites fail with exit 2. All named suite files now exist, including independent IMAP contracts, system tests, and actual CLI reads/recovery and flag writes. Independent IMAP flag tests cover all four desired states, concurrent flags, lost acknowledgements, failed reconciliation reads, account isolation and stale UIDVALIDITY. The actual CLI suite adds three flag-write SIGKILL boundaries with independent server-effect counts. Folder-transfer/SMTP coverage and later maintenance/security/release requirements remain in progress. Never skip required suites to claim full verification.
+
+The independent mock's normal dependencies exclude engine/proto. Its HTTP conformance tests establish provider behavior separately. System tests compose the real engine, SQLCipher, provider HTTP, authenticated RPC, and mock. E2E tests execute the real daemon and CLI; they wait for a private readiness file and authenticated health, use ephemeral ports, and force-kill/restart while preserving profile and remote state. Remote send/copy/notification assertions must use independent provider controls, not the local database or CLI alone.
+
+Child commands clear inherited environments; test HTTP clients disable ambient proxies. Synthetic keystores and profiles are temporary and never use the normal OS keychain. Bounded command/readiness deadlines prevent hanging tests. Failed E2E runs retain profile, readiness files, and redacted logs; successful runs clean their temporary artifacts. Synthetic secret files in retained failures remain private test data and must not be published. Logs redact bearer credentials, mock tokens, and hex key canaries. Test output may include synthetic email content.
+
+With the explicit `test-harness` feature, the daemon accepts `--test-secrets-file FILE --test-config FILE`. Test configuration requires a numeric loopback HTTP `google_base_url` and a synthetic secret store. Optional settings are `request_timeout_ms`, `poll_interval_ms`, `max_payload_bytes`, `now_unix_ms`, and `barriers_directory`. Unknown fields, remote URLs, invalid bounds, and a production keystore fail before profile initialization. The clock can be fixed without pausing Tokio around SQLite. To arm an operation checkpoint, clear old markers, create `NAME.arm` in the private barrier directory, wait for `NAME.entered`, then create `NAME.release`. Checkpoints time out or cancel on shutdown. Operation and sync checkpoints are implemented in the provider/journal paths.
+
+Production binaries reject test flags and `NUNCIO_TEST_*` settings before profile creation. The runner's `NUNCIO_E2E_*` and `NUNCIO_RELEASE_*` variables identify built binaries; they are not forwarded to children. Independent pinned IMAP/SMTP container services are implemented; network-level egress denial remains pending Tasks03/15. Current passing local tests do not establish that CI egress is enforced, remote CI ran, or either live provider is compatible.
+
+Focused manual-sync/fault harnesses explicitly set the test-only background_sync setting false, keeping fault ordinals and crash barriers deterministic. E2eHarness::start_with_polling(seed, Some(interval_ms)) enables actual scheduling at a short interval for scheduler tests. TestConfig defaults background_sync true; production has no flag to disable it. The injected epoch now advances using elapsed monotonic time for sync timestamps, so retry deadlines can expire normally. All provider state remains independently controlled by the mock.
+
+
+Scheduling system and subprocess cases explicitly enable short polling; focused synchronization tests disable background polling through feature-only TestConfig so manual fault boundaries stay deterministic. The synthetic epoch advances across restarts. A bounded `clock-offset-ms` file in the configured private barriers directory advances the synthetic wall clock (maximum 366 days); the wake test advances the independent mock clock separately. This exercises catch-up without pausing Tokio around SQLite. Production builds expose none of these controls.
+
+Mock observations attribute known authorization codes/access/refresh credentials using a private fingerprint-to-account ledger, including expired/revoked attempts. Authentication still uses the separate live grant state. Snapshots reveal account/method/path/count only, never credentials or body/query values. Raw HTTP conformance checks validate this separation before system tests use it to assert that paused accounts stop all requests. Retry faults support either numeric seconds or an exact HTTP-date header.

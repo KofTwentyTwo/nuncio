@@ -1,0 +1,38 @@
+From: Original Sender <sender@example.test>
+Reply-To: Team: Alice <alice@example.test>, Bob <bob@example.test>;
+To: alpha@example.test, Carol <carol@example.test>, Alice <alice@example.test>
+Cc: David <david@example.test>, ALPHA@example.test
+Bcc: hidden@example.test
+Message-ID: <incoming@example.test>
+References: <root@example.test> <parent@example.test>
+Subject: Team question
+Date: Sat, 7 Mar 2026 10:00:00 -0600
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=outer
+
+--outer
+Content-Type: multipart/alternative; boundary=body
+
+--body
+Content-Type: text/plain; charset=utf-8
+
+Original plain body.
+--body
+Content-Type: text/html; charset=utf-8
+
+<p>Original <strong>HTML</strong> body.<img src="cid:logo@example.test"></p>
+--body--
+--outer
+Content-Type: text/plain; charset=windows-1252; format=fixed
+Content-Transfer-Encoding: quoted-printable
+Content-Disposition: attachment; filename=cafe.txt
+
+caf=E9
+--outer
+Content-Type: image/png
+Content-ID: <logo@example.test>
+Content-Disposition: inline; filename=logo.png
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--outer--

@@ -1,0 +1,19 @@
+From: Sender <sender@example.test>
+To: ACCOUNT
+Subject: Multipart fixture
+Message-ID: <multipart@example.test>
+Date: Sat, 7 Mar 2026 09:00:00 -0600
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="nuncio-fixture"
+
+--nuncio-fixture
+Content-Type: text/plain; charset=utf-8
+
+A synthetic attachment and searchable text.
+--nuncio-fixture
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="sample.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKU3ludGhldGljIFBERiBmaXh0dXJlCiUlRU9GCg==
+--nuncio-fixture--

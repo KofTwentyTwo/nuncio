@@ -1,0 +1,56 @@
+services:
+  dovecot:
+    image: dovecot/dovecot:2.4.5@sha256:c807be4fb5a97d9c3a90770569d3a6c4cbdcb36742ad41f90409cbd929166553
+    pull_policy: never
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [SYS_CHROOT]
+    tmpfs:
+      - /tmp:mode=1777
+      - /run/dovecot:uid=1000,gid=1000,mode=0750
+      - /srv/vmail:uid=1000,gid=1000,mode=0700
+    volumes:
+      - ${NUNCIO_MAIL_TEST_DIR:?required}/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ${NUNCIO_MAIL_TEST_DIR:?required}/dovecot-users:/etc/dovecot/test-users:ro
+      - ${NUNCIO_MAIL_TEST_DIR:?required}/server.crt:/etc/dovecot/ssl/tls.crt:ro
+      - ${NUNCIO_MAIL_TEST_DIR:?required}/server.key:/etc/dovecot/ssl/tls.key:ro
+    ports: ["127.0.0.1::31993", "127.0.0.1::31143"]
+    networks: [test]
+  mailpit: &smtp_capture
+    image: axllent/mailpit:v1.31.1@sha256:98b916bd3c8d61f7633a52d3ea2f58d00620cb01ca57ab59edde68c347a95365
+    pull_policy: never
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    tmpfs: [/tmp:mode=1777]
+    environment: &smtp_environment
+      MP_DATABASE: /tmp/mailpit.db
+      MP_DISABLE_VERSION_CHECK: "true"
+      MP_SMTP_TLS_CERT: /cert/server.crt
+      MP_SMTP_TLS_KEY: /cert/server.key
+      MP_SMTP_REQUIRE_STARTTLS: "true"
+      MP_SMTP_AUTH_FILE: /cert/smtp-users
+      MP_UI_AUTH_FILE: /cert/api-user
+      MP_ALLOWED_HOSTS: 127.0.0.1,localhost
+      MP_MAX_MESSAGES: "0"
+      MP_MAX_MESSAGE_SIZE: "70"
+      MP_SMTP_STRICT_RFC_HEADERS: "true"
+      MP_SMTP_DISABLE_RDNS: "true"
+      MP_TAGS_USERNAME: "true"
+    volumes:
+      - ${NUNCIO_MAIL_TEST_DIR:?required}/server.crt:/cert/server.crt:ro
+      - ${NUNCIO_MAIL_TEST_DIR:?required}/server.key:/cert/server.key:ro
+      - ${NUNCIO_MAIL_TEST_DIR:?required}/smtp-users:/cert/smtp-users:ro
+      - ${NUNCIO_MAIL_TEST_DIR:?required}/api-user:/cert/api-user:ro
+    ports: ["127.0.0.1::1025", "127.0.0.1::8025"]
+    networks: [test]
+  mailpit_tls:
+    <<: *smtp_capture
+    environment:
+      <<: *smtp_environment
+      MP_SMTP_REQUIRE_STARTTLS: "false"
+      MP_SMTP_REQUIRE_TLS: "true"
+networks:
+  test:
+    driver: bridge

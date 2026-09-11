@@ -1,0 +1,30 @@
+[package]
+name = "nuncio-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+test-harness = []
+
+[dependencies]
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+thiserror.workspace = true
+http.workspace = true
+zeroize.workspace = true
+subtle.workspace = true
+serde.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,5 @@
+# Rebuild guidance
+
+This subtree implements the September 10, 2026 specification and implementation plan approved by James in the execution request. They govern rebuild scope; the root historical roadmap governs the original application. Read `docs/SESSION-STATE.md`, `docs/TODO.md`, and `docs/VERIFICATION.md` here before resuming. Continue inline. James authorized an initial checkpoint commit and subsequent commits/pushes after coherent changes pass relevant checks, on `feature/nuncio-google-first-rebuild` at `github.com/KofTwentyTwo/nuncio`. Merges, releases, installation, remote settings changes and live-provider acceptance remain unapproved.
+
+Use Rust 2021 / 1.97.1, warnings as errors, and no production unsafe/unwrap/expect/panic. Keep the CLI independent of engine/storage code. All automated provider tests are local with synthetic credentials. SQLCipher encryption, account isolation, durable operation intent, independent provider conformance, and real subprocess E2E are required. Every capability needs engine, authenticated proto, CLI, and tested evidence. Never treat a milestone as completion of the whole goal.

@@ -1,0 +1,61 @@
+syntax = "proto3";
+package nuncio.v2;
+
+service Operations {
+  rpc ReconcileOperation(ReconcileOperationRequest) returns (Operation);
+  rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse);
+  rpc ListAttempts(ListOperationAttemptsRequest) returns (ListOperationAttemptsResponse);
+  rpc GetOperation(OperationRequest) returns (Operation);
+  rpc CancelOperation(OperationRequest) returns (Operation);
+  rpc ResolveOperation(ResolveOperationRequest) returns (Operation);
+}
+message ListOperationsRequest { string account_id = 1; uint32 page_size = 2; optional string page_token = 3; }
+message OperationSummary {
+  string id = 1; string account_id = 2; string request_id = 3; string kind = 4; string resource_id = 5;
+  string state = 6; uint64 version = 7; int64 created_at_ms = 8; int64 updated_at_ms = 9;
+  optional int64 next_attempt_at_ms = 10; bool needs_reconciliation = 11; optional string error_code = 12; optional string disposition = 13;
+}
+message ListOperationsResponse { uint64 revision = 1; repeated OperationSummary items = 2; optional string next_page_token = 3; }
+message ListOperationAttemptsRequest { string account_id = 1; string operation_id = 2; uint32 page_size = 3; optional string page_token = 4; }
+message OperationReceipt { string kind = 1; string source = 2; optional string provider_id = 3; optional string etag = 4; int64 observed_at_ms = 5; }
+message OperationAttempt { uint32 ordinal = 1; string kind = 2; int64 started_at_ms = 3; optional int64 finished_at_ms = 4; optional string outcome = 5; optional string error_code = 6; repeated OperationReceipt receipts = 7; }
+message ListOperationAttemptsResponse { uint64 revision = 1; repeated OperationAttempt items = 2; optional string next_page_token = 3; }
+message OperationRequest { string account_id = 1; string operation_id = 2; }
+enum ReconciliationMode {
+  RECONCILIATION_MODE_UNSPECIFIED = 0;
+  RECONCILIATION_MODE_OBSERVE = 1;
+  RECONCILIATION_MODE_RESUME_SAFE = 2;
+}
+// Idempotent within an account. Reusing request_id with different input conflicts.
+// OBSERVE performs provider reads and records evidence. RESUME_SAFE also allows
+// proven safe continuation; it never authorizes an ambiguous send or COPY replay.
+message ReconcileOperationRequest {
+  string account_id = 1; string operation_id = 2; string request_id = 3;
+  uint64 expected_version = 4; ReconciliationMode mode = 5;
+}
+// Latest durable request, retained across backups. active=false means that a
+// subsequent restore retained the record as history without re-enabling it.
+message OperationReconciliation {
+  string request_id = 1; uint64 expected_version = 2; string mode = 3;
+  int64 requested_at_ms = 4; optional uint32 first_attempt_ordinal = 5;
+  bool active = 6;
+}
+message OperationAbandonment { string reason = 1; }
+message OperationConfirmation { string provider_id = 1; optional string message_id = 2; optional string etag = 3; int64 observed_at_ms = 4; string note = 5; optional string smtp_acceptance_note = 6; }
+message OperationResend { string request_id = 1; bool accept_duplicate_risk = 2; string reason = 3; }
+message ResolveOperationRequest {
+  string account_id = 1; string operation_id = 2; uint64 expected_version = 3;
+  oneof decision { OperationAbandonment abandon = 4; OperationConfirmation confirm_applied = 5; OperationResend resend = 6; }
+}
+message OperationResolution { string decision = 1; int64 decided_at_ms = 2; uint64 expected_version = 3; string evidence_json = 4; optional string replacement_id = 5; }
+message Operation {
+  string id = 1; string account_id = 2; string request_id = 3;
+  string kind = 4; string resource_id = 5; string fingerprint = 6;
+  string state = 7; uint64 version = 8;
+  int64 created_at_ms = 9; int64 updated_at_ms = 10;
+  optional int64 next_attempt_at_ms = 11; bool needs_reconciliation = 12;
+  optional string error_code = 13; optional string disposition = 14;
+  string desired_state_json = 15;
+  repeated OperationResolution resolutions = 16;
+  OperationReconciliation reconciliation = 17;
+}

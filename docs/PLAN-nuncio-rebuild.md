@@ -1,0 +1,5 @@
+# Nuncio Rebuild Plan
+
+Build an engine and CLI first: Google Gmail and Calendar, then Synology MailPlus email through IMAP/SMTP. The proposed full goal includes reads and writes, durable drafts and operations, background sync, encrypted storage, recovery, and verified local release artifacts. Native applications follow separately. An independent stateful mock Gmail/Google provider is required for system and actual daemon/CLI end-to-end tests.
+
+Read the [implementation plan](superpowers/plans/2026-09-10-google-first-rebuild.md) for the 16 ordered tasks, files, interfaces, test gates, and completion evidence; read the [specification](superpowers/specs/2026-09-10-google-first-rebuild.md) for the architecture and behavior contract. Use the copyable prompt in the [execution goal](GOAL-nuncio-rebuild.md) to authorize and start the build. These documents are proposed and implementation has not started; the [audit](reviews/2026-09-10-nuncio-audit-and-rebuild.md) explains the evidence behind the restart.

@@ -1,0 +1,45 @@
+syntax = "proto3";
+package nuncio.v2;
+
+service System {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+  rpc StartSync(StartSyncRequest) returns (SyncRun);
+  rpc GetSyncRun(SyncRunRequest) returns (SyncRun);
+  rpc CancelSync(SyncRunRequest) returns (SyncRun);
+  rpc WatchChanges(WatchChangesRequest) returns (stream ChangeEvent);
+}
+
+message GetStatusRequest {}
+message GetStatusResponse {
+  string version = 1;
+  string api_version = 2;
+  string profile_id = 3;
+  StoreStatus storage = 4;
+  repeated string protected_paths = 5;
+  bool background_sync = 6;
+  optional string scheduler_error = 7;
+  optional string operation_worker_error = 9;
+  repeated SyncScopeStatus sync = 8;
+}
+message SyncScopeStatus {
+  string account_id = 1; string scope = 2; string phase = 3; optional string run_id = 4;
+  uint64 processed = 5; optional int64 last_success_at_ms = 6; optional uint64 age_ms = 7;
+  optional int64 next_attempt_at_ms = 8; optional string error_code = 9; string coverage_state = 10;
+}
+message StoreStatus {
+  uint32 schema_version = 1;
+  uint64 account_count = 2;
+  uint64 revision = 3;
+}
+message ShutdownRequest {}
+message ShutdownResponse {}
+// Revisions older than the retained history or ahead of this store require a new snapshot.
+message WatchChangesRequest { uint64 after_revision = 1; }
+message ChangeEvent { uint64 revision = 1; string kind = 2; optional string account_id = 3; optional string resource_id = 4; }
+message StartSyncRequest { string account_id = 1; bool full = 2; optional string fetch_message_id = 3; }
+message SyncRunRequest { string account_id = 1; string run_id = 2; }
+message SyncRun {
+  string id = 1; string account_id = 2; string scope = 3; string mode = 4; string state = 5;
+  int64 started_at_ms = 6; optional int64 finished_at_ms = 7; uint64 processed = 8; optional string error_code = 9;
+}

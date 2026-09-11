@@ -1,0 +1,126 @@
+syntax = "proto3";
+package nuncio.v2;
+import "nuncio/v2/operations.proto";
+
+service Mail {
+  rpc ChangeMessage(ChangeMessageRequest) returns (Operation);
+  rpc GetCapabilities(MailCapabilitiesRequest) returns (MailCapabilities);
+  rpc SaveDraft(SaveDraftRequest) returns (Draft);
+  rpc GetDraft(DraftRequest) returns (Draft);
+  rpc ListDrafts(ListDraftsRequest) returns (ListDraftsResponse);
+  rpc DeleteDraft(DeleteDraftRequest) returns (DeleteDraftResponse);
+  rpc UploadDraftAttachment(stream DraftUploadChunk) returns (Draft);
+  rpc PrepareDraft(PrepareDraftRequest) returns (Draft);
+  rpc SendDraft(SendDraftRequest) returns (Operation);
+  rpc ListMessages(ListMailRequest) returns (ListMailResponse);
+  rpc GetMessage(MessageRequest) returns (GetMailResponse);
+  rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+  rpc Download(DownloadMailRequest) returns (stream PayloadChunk);
+}
+message MailCapabilitiesRequest { string account_id = 1; }
+message MailCapabilities {
+  string account_id = 1; string provider = 2; string placement_model = 3;
+  bool read_unread = 4; bool star_unstar = 5; bool archive = 6;
+  bool trash_restore = 7; bool existing_labels = 8; bool move_copy = 9;
+}
+// A desired state is committed with its operation. It is independent of cache
+// membership until a provider observation and the receipt commit atomically.
+message ChangeMessageRequest {
+  string account_id = 1; string message_id = 2; string request_id = 3;
+  oneof action {
+    MailReadChange read = 4; MailStarChange star = 5; MailArchiveChange archive = 6;
+    MailTrashChange trash = 7; MailLabelChange label = 8;
+    MailFolderChange move = 9; MailFolderChange copy = 10;
+  }
+}
+message MailReadChange { bool read = 1; }
+message MailStarChange { bool starred = 1; }
+message MailArchiveChange {}
+// IMAP only. An account-scoped active collection ID from ListCollections, never
+// a provider folder name. Its current folder identity/epoch is frozen at enqueue.
+message MailFolderChange { string destination_collection_id = 1; }
+message MailTrashChange { bool trashed = 1; }
+message MailLabelChange { string collection_id = 1; bool present = 2; }
+message MessageRequest { string account_id = 1; string message_id = 2; }
+message ListMailRequest {
+  string account_id = 1; optional string collection_id = 2; optional string query = 3;
+  uint32 page_size = 4; optional string page_token = 5;
+}
+message ListMailResponse { uint64 revision = 1; repeated MailSummary items = 2; optional string next_page_token = 3; MailCoverage coverage = 4; }
+message MailCoverage { string state = 1; optional int64 synchronized_at_ms = 2; optional string cursor = 3; }
+message MailSummary {
+  string id = 1; string account_id = 2; string provider_id = 3; optional string thread_id = 4;
+  optional string history_id = 5; optional int64 internal_date_ms = 6; optional string subject = 7;
+  string body_availability = 8; repeated MailCollection collections = 9;
+}
+message MailCollection { string id = 1; string provider_id = 2; optional string name = 3; string kind = 4; bool retired = 5; }
+message MailHeader { string name = 1; string value = 2; }
+message MailAttachment {
+  string id = 1; uint32 part_index = 2; optional string filename = 3; string mime_type = 4;
+  optional string content_id = 5; uint64 byte_length = 6; string sha256 = 7;
+}
+message GetMailResponse { uint64 revision = 1; MailSummary message = 2; repeated MailHeader headers = 3; repeated MailAttachment attachments = 4; string provider_json = 5; }
+message ListCollectionsRequest { string account_id = 1; }
+message ListCollectionsResponse { uint64 revision = 1; repeated MailCollection items = 2; }
+// kind is raw, text, html, or attachment. An attachment needs its local ID.
+message DownloadMailRequest { string account_id = 1; string message_id = 2; string kind = 3; optional string attachment_id = 4; }
+// Offset and digest cover the complete immutable payload, including empty data.
+message PayloadChunk { uint64 offset = 1; bytes data = 2; uint64 total_bytes = 3; string sha256 = 4; bool eof = 5; }
+
+message DraftRecipient { string address = 1; optional string name = 2; }
+// A stable request_id identifies one immutable submission. An identical retry
+// returns that operation even if the editable draft later changes or is deleted.
+// Success here acknowledges durable enqueue; inspect operation state for delivery.
+message SendDraftRequest { string account_id = 1; string draft_id = 2; string request_id = 3; optional uint64 expected_version = 4; }
+message DraftContent {
+  repeated DraftRecipient to = 1; repeated DraftRecipient cc = 2; repeated DraftRecipient bcc = 3;
+  string subject = 4; optional string text = 5; optional string html = 6;
+}
+// Creation omits draft_id and expected_version; editing requires both.
+message SaveDraftRequest { string account_id = 1; optional string draft_id = 2; optional uint64 expected_version = 3; DraftContent content = 4; }
+message DraftRequest { string account_id = 1; string draft_id = 2; }
+message DeleteDraftRequest { string account_id = 1; string draft_id = 2; uint64 expected_version = 3; }
+message DeleteDraftResponse {}
+message DraftAttachment {
+  string id = 1; optional string filename = 2; string mime_type = 3; optional string content_id = 4;
+  string disposition = 5; uint64 byte_length = 6; string sha256 = 7;
+  map<string,string> parameters = 8;
+}
+message Draft {
+  string id = 1; string account_id = 2; uint64 version = 3;
+  int64 created_at_ms = 4; int64 updated_at_ms = 5; DraftContent content = 6;
+  repeated DraftAttachment attachments = 7;
+  DraftContext context = 8;
+}
+message DraftSummary {
+  string id = 1; string account_id = 2; uint64 version = 3; string subject = 4;
+  int64 created_at_ms = 5; int64 updated_at_ms = 6; uint64 attachment_count = 7;
+}
+message ListDraftsRequest { string account_id = 1; uint32 page_size = 2; optional string page_token = 3; }
+message ListDraftsResponse { uint64 revision = 1; repeated DraftSummary items = 2; optional string next_page_token = 3; }
+
+// First message must contain only a header. Subsequent messages contain only
+// data: contiguous 256 KiB chunks, except the final chunk. Closing the stream
+// commits only after size, SHA-256 and draft version validation. Limit: 64 MiB
+// per draft, four active uploads per profile, 30 seconds per RPC.
+message DraftUploadHeader {
+  string account_id = 1; string draft_id = 2; uint64 expected_version = 3;
+  optional string filename = 4; string mime_type = 5; optional string content_id = 6;
+  string disposition = 7; uint64 byte_length = 8; string sha256 = 9;
+  map<string,string> parameters = 10;
+}
+message DraftUploadData { uint64 offset = 1; bytes data = 2; }
+message DraftUploadChunk {
+  oneof part { DraftUploadHeader header = 1; DraftUploadData data = 2; }
+}
+// kind is reply, reply_all or forward. Only forward accepts explicit To
+// recipients. Preparation uses the downloaded original; it performs no network
+// access and creates an editable local draft, never an outgoing submission.
+message PrepareDraftRequest {
+  string account_id = 1; string message_id = 2; string kind = 3;
+  optional string body = 4; repeated DraftRecipient to = 5;
+}
+message DraftContext {
+  string source_message_id = 1; string kind = 2; string original_subject = 3;
+  optional string thread_id = 4; optional string in_reply_to = 5; repeated string references = 6;
+}

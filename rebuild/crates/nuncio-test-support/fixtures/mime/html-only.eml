@@ -1,0 +1,8 @@
+From: sender@example.test
+To: ACCOUNT
+Subject: HTML-only fixture
+Message-ID: <html@example.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Synthetic HTML content.</p><img src="https://untrusted.example.test/pixel"><script>alert("inert")</script></body></html>
