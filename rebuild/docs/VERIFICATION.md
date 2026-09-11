@@ -1,5 +1,38 @@
 # Verification evidence
 
+## Task14 security system and subprocess coverage verified
+
+Nine-command gate `python3 test-results/task14-security/run-gate.py` completed
+exit0 (shell20194): formatting, both workspace Clippy configurations, security
+system3, securityE2E2, multi-engine1, Google system21/E2E26, operations6. Zero
+failed/ignored. Review then strengthened the HTML resource trap to a counted mock
+route and proved an unauthenticated probe increments its counter before testing
+the CLI. Four-command follow-up `python3 test-results/task14-security-trap/run-gate.py`
+completed exit0 (shell79748): formatting/bothClippy and securityE2E2. Exact commands,
+statuses, counts, final source hashes and audit JSON are retained in those paths.
+No production implementation changed; four existing workspace crates were added
+as test-support dev-dependencies, with no resolved dependency version changes.
+
+`security_system.rs` enumerates all42 methods across6 services and rejects168
+missing/wrong/retired/wrong-scheme authorization requests before payload validation.
+`support/security_inputs.rs` verifies account crossover, header injection, malformed
+provider IDs, oversized frames/declarations, inert filename metadata and unchanged
+independent remote state. `security_e2e.rs` uses actual daemon/CLI subprocesses:
+private body reaches FTS and survives restart;37 files including populated WAL,
+backup and30 original pre-redaction process logs contain none of10 synthetic
+canaries. Python ordinary SQLite and wrong-key SQLCipher independently reject both
+database and backup, preserving original bytes. Explicit synthetic keystore/OAuth
+input files are excluded, not product outputs. Hostile MIME/control/HTML display
+stays inert, explicit downloads preserve exact bytes, and independently counted
+remote requests/effects remain unchanged. The harness retains raw CLI logs until
+audit assertions, then redacts on Drop. Initial test-only compiler, file-mode,
+strict synthetic OAuth, command-name and invented null-HTML expectations were
+corrected against existing contracts; failure logs remain in `security_e2e/`.
+Local authorization has no TTL; retirement is key rotation plus daemon restart.
+Expired/revoked Google OAuth remains covered by the passing Google system suite.
+Resource instrumentation/load tests and the full offline gate remain required;
+this is not full Task14, live-provider or remote-CI evidence.
+
 ## Three-engine convergence — relevant gate verified
 
 `python3 scripts/verify.py --suite multi_engine_system` completed0 (shell30577):

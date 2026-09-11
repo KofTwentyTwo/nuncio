@@ -163,6 +163,9 @@ impl SystemHarness {
     pub fn unauthenticated(&self) -> SystemClient<Channel> {
         SystemClient::new(self.channel.clone())
     }
+    pub fn channel(&self) -> Channel {
+        self.channel.clone()
+    }
     pub fn accounts(
         &self,
     ) -> nuncio_proto::v2::accounts_client::AccountsClient<InterceptedService<Channel, TokenInjector>>

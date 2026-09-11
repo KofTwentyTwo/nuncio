@@ -15,7 +15,8 @@ PRODUCTION = REBUILD / "target/production"
 REQUIRED_SUITES = (
     "google_mock_contract", "google_system", "google_e2e", "operation_system",
     "imap_contract", "imap_system", "imap_e2e", "recovery_e2e", "repair_system",
-    "repair_e2e", "migration_e2e", "reconciliation_system", "multi_engine_system", "release_isolation",
+    "repair_e2e", "migration_e2e", "reconciliation_system", "multi_engine_system",
+    "security_system", "security_e2e", "release_isolation",
 )
 FEATURES = "nunciod/test-harness,nuncio-cli/test-harness"
 

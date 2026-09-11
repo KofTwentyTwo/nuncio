@@ -22,6 +22,7 @@ impl CliOutput {
     }
 }
 pub struct E2eHarness {
+    redact_cli_logs: bool,
     clock_origin: std::time::Instant,
     poll_interval_ms: Option<u64>,
     pub google: MockGoogle,
@@ -178,6 +179,17 @@ impl E2eHarness {
         seed: Seed,
         poll_interval_ms: Option<u64>,
     ) -> Result<Self, TestError> {
+        Self::configured(seed, poll_interval_ms, true).await
+    }
+    /// Security tests inspect original process output before Drop redacts it.
+    pub async fn start_with_raw_cli_logs(seed: Seed) -> Result<Self, TestError> {
+        Self::configured(seed, None, false).await
+    }
+    async fn configured(
+        seed: Seed,
+        poll_interval_ms: Option<u64>,
+        redact_cli_logs: bool,
+    ) -> Result<Self, TestError> {
         let daemon_path = binary("NUNCIO_E2E_DAEMON")?;
         let cli_path = binary("NUNCIO_E2E_CLI")?;
         let temporary = if let Some(path) = std::env::var_os("NUNCIO_TEST_ARTIFACTS") {
@@ -194,6 +206,7 @@ impl E2eHarness {
         std::fs::create_dir(artifacts.join("tmp"))?;
         let google = MockGoogle::start(seed).await?;
         let mut harness = Self {
+            redact_cli_logs,
             poll_interval_ms,
             directory: artifacts.join("profile"),
             secrets_file: artifacts.join("synthetic-secrets.json"),
@@ -373,8 +386,10 @@ impl E2eHarness {
         };
         let stdout = bounded_read(&stdout_path)?;
         let stderr = bounded_read(&stderr_path)?;
-        std::fs::write(stdout_path, redact(&stdout))?;
-        std::fs::write(stderr_path, redact(&stderr))?;
+        if self.redact_cli_logs {
+            std::fs::write(stdout_path, redact(&stdout))?;
+            std::fs::write(stderr_path, redact(&stderr))?;
+        }
         Ok(CliOutput {
             status: status.code().unwrap_or(-1),
             stdout,
