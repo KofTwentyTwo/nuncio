@@ -1,5 +1,43 @@
 # Verification evidence
 
+## Restore retry capacity — full relevant gate verified
+
+`python3 test-results/task13-restore-retry/run-gate.py`: shell7100 terminal exit0,
+all7 commands passed: formatting, both workspace Clippy configurations, engine128,
+actual daemon/CLI recoveryE2E5, IMAPE2E13, release-isolation2 with a fresh normal
+production build. Zero failed/ignored. `summarize.py` exited0 and recorded
+results.json, counts.json, source-hashes.json and artifacts.json in that directory.
+Daemon SHA256 `0f30533cedd8e78acd1196962a5ee908ccdd538cee905f0b7505f2ca26586170`,
+16352624 bytes; CLI SHA256
+`23f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1`,3506544 bytes.
+
+The actual CLI regression first failed against the preceding daemon at attempt65
+(exit5/conflict instead of exit2/invalid key), shell66336/101, red-e2e.log. With the
+fix it completes65 failures and a corrected-passphrase restore without restarting.
+It compares original profile/keys/backup, independently observed whole mock
+provider state (including sends/copies/notifications), and new-profile startup.
+Test: `crates/nuncio-test-support/tests/support/restore_retry_e2e.rs`; engine tests:
+`crates/nuncio-engine/tests/restore_retry.rs`. Production changes:
+`engine/recovery.rs` and `maintenance.rs`. No schema/proto/dependency change.
+This closes the bounded retry defect; Task14 suites and Task15 deliverables are next.
+The following focused entry is historical, not a currently pending verification.
+
+## Restore retries — focused regression verified, broader checks pending
+
+`cargo test --locked -p nuncio-engine --test restore_retry` reproduced cleanup
+capacity exhaustion on attempt65: shell93449, exit101, one failed test;
+`test-results/task13-restore-retry/red.log`. Recovery now retires prior jobs inside
+the blocking restore worker while its input owns maintenance/profile admission.
+Foreign-profile input is rejected before recovery. No schema/proto/dependency change.
+
+`cargo test --locked -p nuncio-engine --test restore_retry --test maintenance
+--test restore_worker_ownership --test restore_upload_cleanup`: shell75313, exit0,
+8 passed, zero failed/ignored; `test-results/task13-restore-retry/green.log`.
+Includes65 wrong-passphrase attempts followed by a correct restore without restart,
+original keys/files, foreign-profile isolation and existing cancellation/cleanup
+tests. Daemon/CLI regression, full relevant gate and fresh production artifacts
+remain pending; this does not supersede the previous artifact hashes.
+
 ## Initial signed checkpoint and remote backup
 
 James explicitly authorized initial and subsequent checkpoint commits/pushes after relevant checks. Commit `2480bf94cdcff15fcf0da886691bd872e38edf31` (`feat(rebuild): checkpoint Google and MailPlus engine and CLI`) contains the rebuild and approved design/audit documents, preserving the original workspace. `git commit -F rebuild/test-results/checkpoint-initial/COMMIT-MESSAGE.txt` exited0; configured OpenPGP signature verified with `git verify-commit HEAD`. `git push --set-upstream origin feature/nuncio-google-first-rebuild` exited0; `git ls-remote origin refs/heads/feature/nuncio-google-first-rebuild` returned the exact same hash. No merge, release, installation or live-provider acceptance action occurred. Remote CI status was not inspected or claimed.

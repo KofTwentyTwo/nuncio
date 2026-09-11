@@ -10,9 +10,50 @@ Read AGENTS→CLAUDE, shared personal rules/style, rebuild/AGENTS, this file, TO
 
 ## Immediate next action
 
-**All known command handles are terminal. Startup gate shell87318 completed all7 commands exit0:** fmt/bothClippy, engine126, recoveryE2E4, IMAPE2E13, release-isolation2 with fresh production. `test-results/task13-startup-cleanup/summarize.py` completed0 and recorded results/counts/source hashes/artifact hashes. Daemon SHA256 `f67a6d53b62cd88d80f3e5b8f51d39fb6d36c0e14de562ba92f79563cf49acb1`; CLI `23f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1`. No failed/ignored tests. No schema/proto/dependency change. The initial checkpoint has been committed/pushed and its signature/remote hash verified. Keep checkpointing coherent verified changes with this standing authorization; merges/releases/install/live acceptance remain unapproved.
+September 11 focus steering: finish the demonstrated restore retry defect, then
+advance to the missing Task14 suites and Task15 packaging/CI deliverables. Further
+hardening requires a demonstrated failure tied to R01–R16. Reconcile stale TODO
+items against existing evidence; do not expand speculative recovery audits.
 
-Next extend Task13 durable cleanup to earlier upload/backup artifact lifetimes and ordinary failed-job retirement. A restore job is currently recorded once staging begins; interrupted earlier uploads/exports have no recovery record. Normal failed restores leave a row until startup; repeated failures can consume the bounded64-row capacity. Start with an actual daemon/CLI crash test at upload/export boundaries or a deterministic repeated-failure regression, then fix with explicit ownership and independently verify source keys/files. Preserve unrecognized empty directories when no durable ownership exists. Do not implement filename-prefix sweeps. Static caller-owned restore helper and broader Task13–16 obligations below remain.
+Current change: `restore_retry.rs` reproduced cleanup-capacity exhaustion on the
+65th failed restore (shell93449, exit101, red.log). Restore now recovers prior
+cleanup jobs while retaining its maintenance/profile lease; foreign-profile input
+rejects before cleanup. Focused shell75313 completed exit0: 8 passed, none failed
+or ignored (restore_retry2, maintenance4, restore_worker_ownership1,
+restore_upload_cleanup1). Logs: `test-results/task13-restore-retry/green.log`.
+Actual CLI regression reproduced the same failure on attempt65 against the
+previous daemon (shell66336, exit101, red-e2e.log: exit5 instead of invalid-key
+exit2). Seven-command relevant gate shell7100 is terminal, all commands exit0:
+format/bothClippy, engine128, recoveryE2E5, IMAPE2E13, production-isolation2.
+No failed/ignored tests. Summarizer exit0; exact commands/counts/hashes under
+`test-results/task13-restore-retry/`. Next checkpoint/push this verified fix,
+then create the required multi_engine_system suite with three independent
+profiles against one shared Google mock, followed by security/resource suites.
+
+## Hourly status emails
+
+James authorized hourly progress emails to james@kof22.com beginning immediately.
+First hourly email sent September11 at approximately22:57UTC/17:57Central using
+connected Gmail, subject `Nuncio rebuild — hourly status — September 11, 2026,
+5:57 p.m. CT`; Gmail ID/thread `1a092b0a4e84f109`, SENT confirmed. Next due:
+September11 23:57UTC/18:57Central. Check the clock during active goal execution;
+send one concise update each hour with actual progress, test results, blockers,
+remaining deliverables and next action, then update this timestamp and message ID.
+Do not send catch-up bursts or infer progress while paused. This authorization is
+for project status mail, not rebuilt-provider acceptance. No persistent schedule
+is configured: no thread scheduling tool is exposed, and Computer Use refuses
+Codex access. The user was told that delivery during pauses/stops is unconfigured.
+
+## Last complete gate
+
+Restore-retry gate shell7100 completed all7 commands exit0. Production daemon:
+`target/production/release/nunciod`,16352624 bytes,SHA256
+`0f30533cedd8e78acd1196962a5ee908ccdd538cee905f0b7505f2ca26586170`.
+CLI:`target/production/release/nuncio-cli`,3506544 bytes,SHA256
+`23f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1`.
+Both exclude production test hooks. These are local binaries, not packaged or
+installed releases. No remote-CI/live-compatibility claim. Older startup evidence
+below remains valid for that earlier checkpoint.
 
 ## Current code changes
 
@@ -51,10 +92,10 @@ Schema21 explicit reconciliation is durable/scoped/versioned through engine/API/
 
 ## Remaining full scope
 
-Task13: earlier maintenance process-death cleanup and ordinary-failure retirement; caller-owned helper boundary; wider storage/WAL/export failures; historical durable payloads for other writes and disconnect retention/same-identity reconnect. Rich send histories10–21 and schema22 migration/crash cases are verified. No destructive account purge.
+Task13: restore-retry verification passed; checkpoint/push next. Existing encrypted WAL backup, rekey/hold, historical schema, projection repair and subprocess recovery evidence covers the functional task. Reconcile any remaining explicit Task13 acceptance gaps against that evidence during the full gate. Earlier artifact-lifetime and caller-owned-helper audit ideas are not an open-ended prerequisite for Task14. Rich send histories10–21 and schema22 migration/crash cases are verified. No destructive account purge.
 
 Task14: create/run named security_system, resource_system and multi_engine_system suites. Require three independent engines,10,000 metadata messages,16MiB attachments,64MiB payload limits, concurrency2, bounded queues, measured RSS/latency, canary scans and independent encryption checks. Audit actual outstanding defects rather than repeat completed fixes: post-submission storage failures, worker failures, parser bounds, aggregate attachments, legacy intents, calendar inheritance/Trash origins; writerWithoutPrivateAccess remains unverified. Run the complete offline verifier after implementing the missing suites.
 
 Tasks03/15: explicit test egress denial (Docker bridge alone is not a firewall); external descriptor-generated client and contract freeze/docs; dependency advisory/security/license checks; package.py and extracted artifacts; CI definitions and required-job failure behavior. Task16: final R01–R16 evidence matrix plus operating/recovery/compatibility/risk report. MANUAL-ACCEPTANCE.md exists; all live acceptance is unapproved/unverified. Passing local mocks does not prove live Google/MailPlus compatibility; local checks do not prove remote CI ran.
 
-Local binary locations: `target/production/release/{nunciod,nuncio-cli}` and feature-only `target/test-harness/debug/{nunciod,nuncio-cli}`. Production hashes were refreshed by the startup-cleanup gate above. These are not installed or packaged releases. No full Task13 or R01–R16 completion claim.
+Local binary locations: `target/production/release/{nunciod,nuncio-cli}` and feature-only `target/test-harness/debug/{nunciod,nuncio-cli}`. Production hashes were refreshed by the restore-retry gate above. These are not installed or packaged releases. No full Task13 or R01–R16 completion claim.

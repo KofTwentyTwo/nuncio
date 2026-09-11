@@ -204,6 +204,10 @@ pub struct BackupInput {
     _lease: MaintenanceLease,
 }
 impl BackupInput {
+    pub(crate) fn belongs_to(&self, profile_lock: &Arc<File>) -> bool {
+        Arc::ptr_eq(&self._lease._profile_lock, profile_lock)
+    }
+
     pub(crate) fn cleanup(mut self) -> Result<(), StoreError> {
         self.directory.disable_cleanup(true);
         let parent = self

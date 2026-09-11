@@ -54,9 +54,13 @@ impl Engine {
         passphrase: Zeroizing<String>,
         new_profile: String,
     ) -> Result<ProfileRestoreReport, EngineError> {
+        if !input.belongs_to(&self._profile_lock) {
+            return Err(StoreError::InvalidPath.into());
+        }
         let config = self.maintenance.restore_config(&new_profile)?;
         let now = self.accounts.http.clock.now_ms();
         let profile_lock = self._profile_lock.clone();
+        let source_id = self.profile_id;
         let journal = journal::Journal {
             store: self.store.clone(),
             owner: journal::canonical_owner(&self.directory)?,
@@ -68,6 +72,15 @@ impl Engine {
             // Cancellation can outlive Engine shutdown. Another engine must
             // not recover this profile while its restore is still mutating it.
             let _profile_lock = profile_lock;
+            // The input owns maintenance admission throughout cleanup and
+            // restore, including if the caller cancels this blocking work.
+            journal.runtime.block_on(recover_restores(
+                &journal.store,
+                journal.owner.clone(),
+                source_id,
+                config.secrets.clone(),
+                _profile_lock.clone(),
+            ))?;
             let result = restore(
                 config,
                 input.path(),

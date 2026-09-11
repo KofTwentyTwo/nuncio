@@ -1,6 +1,8 @@
 #![allow(clippy::unwrap_used)]
 #[path = "support/reconciliation_mutations_e2e.rs"]
 mod reconciliation_mutations_e2e;
+#[path = "support/restore_retry_e2e.rs"]
+mod restore_retry_e2e;
 use nuncio_test_support::{
     google::Seed,
     process::{CliOutput, E2eHarness},
