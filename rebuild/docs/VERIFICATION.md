@@ -1,5 +1,11 @@
 # Verification evidence
 
+## Initial signed checkpoint and remote backup
+
+James explicitly authorized initial and subsequent checkpoint commits/pushes after relevant checks. Commit `2480bf94cdcff15fcf0da886691bd872e38edf31` (`feat(rebuild): checkpoint Google and MailPlus engine and CLI`) contains the rebuild and approved design/audit documents, preserving the original workspace. `git commit -F rebuild/test-results/checkpoint-initial/COMMIT-MESSAGE.txt` exited0; configured OpenPGP signature verified with `git verify-commit HEAD`. `git push --set-upstream origin feature/nuncio-google-first-rebuild` exited0; `git ls-remote origin refs/heads/feature/nuncio-google-first-rebuild` returned the exact same hash. No merge, release, installation or live-provider acceptance action occurred. Remote CI status was not inspected or claimed.
+
+Gitleaks8.30.1 staged scan with default rules and full redaction exited0; staged whitespace check exited0. Initial scanner reports flagged dense test-count prose and Calendar-role prose in TODO, not credentials. Those lines were clarified without rule exclusions; original redacted reports remain under `test-results/checkpoint-initial/`. All389 staged file blobs matched working-tree bytes before commit; per-file SHA256 is recorded in staged-sha256.json. Scoped Git attributes preserve EML CRLF and treat PDF as binary; staged fixture hashes match tested files (EML `e17f0fb14ab4f67071576512415f4c8c760f9b5850e6516b5c9cdc58374dc8eb`, PDF `ffe177d7751be4ef1d7d8f7476736e62edb5f6f7ff325c75ac206997b1a0a372`). These preflight checks do not replace the remaining Task15 dependency/license/security review.
+
 ## Startup ownership and relative restore — full relevant gate verified
 
 `python3 test-results/task13-startup-cleanup/run-gate.py` completed all7 commands exit0 (shell87318): fmt, both Clippy configurations, full engine126, actual recoveryE2E4, actual IMAPE2E13, and release-isolation2 with a fresh production build. Zero failed/ignored. `summarize.py` completed0 and recorded exact commands/results/counts/source hashes/artifact hashes. Daemon SHA256 `f67a6d53b62cd88d80f3e5b8f51d39fb6d36c0e14de562ba92f79563cf49acb1`; CLI `23f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1`. The following focused/paused entries are historical.
