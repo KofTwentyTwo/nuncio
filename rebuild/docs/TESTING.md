@@ -9,11 +9,16 @@ python3 rebuild/scripts/verify.py --suite google_e2e
 python3 rebuild/scripts/verify.py --suite imap_contract
 python3 rebuild/scripts/verify.py --suite imap_system
 python3 rebuild/scripts/verify.py --suite imap_e2e
+python3 rebuild/scripts/verify.py --suite multi_engine_system
+python3 rebuild/scripts/verify.py --suite security_system
+python3 rebuild/scripts/verify.py --suite security_e2e
+python3 rebuild/scripts/verify.py --suite resource_system
+python3 rebuild/scripts/verify.py --suite resource_e2e
 python3 rebuild/scripts/verify.py --suite release_isolation
 python3 rebuild/scripts/verify.py --all
 ```
 
-The runner builds actual daemon/CLI test binaries under `rebuild/target/test-harness`; release checks build selected production packages without test features under `rebuild/target/production`. Every subprocess result, command, and exit status is recorded in `rebuild/test-results/<suite>/`. Required missing suites fail with exit 2. All named suite files now exist, including independent IMAP contracts, system tests, and actual CLI reads/recovery and flag writes. Independent IMAP flag tests cover all four desired states, concurrent flags, lost acknowledgements, failed reconciliation reads, account isolation and stale UIDVALIDITY. The actual CLI suite adds three flag-write SIGKILL boundaries with independent server-effect counts. Folder-transfer/SMTP coverage and later maintenance/security/release requirements remain in progress. Never skip required suites to claim full verification.
+The runner builds actual daemon/CLI test binaries under `rebuild/target/test-harness`; release checks build selected production packages without test features under `rebuild/target/production`. Every subprocess result, command, and exit status is recorded in `rebuild/test-results/<suite>/`. Required missing suites fail with exit 2. Named suites cover independent Google and IMAP/SMTP contracts, authenticated system tests, actual CLI reads/writes/crash recovery, migration/backup/repair, three-engine convergence, security and resource workloads. Resource instrumentation, complete Task14 verification and Task15 release/contract/egress work remain pending; consult SESSION-STATE and VERIFICATION for exact evidence. Never skip required suites to claim full verification.
 
 The independent mock's normal dependencies exclude engine/proto. Its HTTP conformance tests establish provider behavior separately. System tests compose the real engine, SQLCipher, provider HTTP, authenticated RPC, and mock. E2E tests execute the real daemon and CLI; they wait for a private readiness file and authenticated health, use ephemeral ports, and force-kill/restart while preserving profile and remote state. Remote send/copy/notification assertions must use independent provider controls, not the local database or CLI alone.
 
@@ -29,3 +34,5 @@ Focused manual-sync/fault harnesses explicitly set the test-only background_sync
 Scheduling system and subprocess cases explicitly enable short polling; focused synchronization tests disable background polling through feature-only TestConfig so manual fault boundaries stay deterministic. The synthetic epoch advances across restarts. A bounded `clock-offset-ms` file in the configured private barriers directory advances the synthetic wall clock (maximum 366 days); the wake test advances the independent mock clock separately. This exercises catch-up without pausing Tokio around SQLite. Production builds expose none of these controls.
 
 Mock observations attribute known authorization codes/access/refresh credentials using a private fingerprint-to-account ledger, including expired/revoked attempts. Authentication still uses the separate live grant state. Snapshots reveal account/method/path/count only, never credentials or body/query values. Raw HTTP conformance checks validate this separation before system tests use it to assert that paused accounts stop all requests. Retry faults support either numeric seconds or an exact HTTP-date header.
+
+Security subprocess tests inspect original daemon/CLI logs before harness redaction, scan populated encrypted storage/WAL/backup/temp outputs, and independently test ordinary-SQLite and wrong-key rejection. Resource workloads report10,000-message ingestion/pagination timings and owned-daemon RSS while repeatedly fetching/downloading16MiB attachments. A finite post-warm-up growth allowance catches retention regressions; it is not a universal memory/speed guarantee. Only owned test daemon PIDs are sampled via `ps`. Resource and security tests never authorize live-provider access.

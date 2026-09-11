@@ -175,6 +175,9 @@ impl E2eHarness {
     pub async fn start(seed: Seed) -> Result<Self, TestError> {
         Self::start_with_polling(seed, None).await
     }
+    pub fn daemon_pid(&self) -> Option<u32> {
+        self.child.as_ref().and_then(Child::id)
+    }
     pub async fn start_with_polling(
         seed: Seed,
         poll_interval_ms: Option<u64>,

@@ -37,8 +37,27 @@ Test-support adds raw CLI capture with unconditional Drop redaction and a channe
 accessor. Four existing workspace crates are dev-dependencies only; lockfile
 changes only that list. Production code/schema/API are unchanged.
 
-Next: signed security checkpoint/push after staged checks, then resource_system
-and actual subprocess measurements. Required:10,000 metadata messages,16MiB
+Security checkpoint8811acdd14f86784993d525de24c582f3f010563 is signed and pushed;
+commit/signature/push/exact ls-remote all exit0; staged Gitleaks and diff checks0.
+Current next: resource_system and actual subprocess measurements. Initial workload
+test seeds10,000 messages only through the independent provider, then verifies
+100 HTTP pages/100 authenticated API pages/exact IDs/missing-body state/restart.
+Resource workload six-command gate shell34619 is terminal, all0: fmt/bothClippy,
+resource_system2/resource_e2e2/security_e2e2, zero failed/ignored. Commands/counts,
+final source hashes, metadata-load.json and attachment-resources.json are retained
+under `test-results/task14-resource-workloads/`. Configured-body test initially
+expected wrong missing-body API status; corrected to existing NotFound, focused
+shell62253 passed1/0, then full gate passed. No production changes. Workloads cover
+10,000 messages/100 provider pages/100 API pages,4096-byte configured body limit,
+8 exact16MiB attachment fetch/download cycles with actual child RSS/latency, and
+64MiB+1 sparse-file refusal preserving draft/version/remote state across restart.
+No command remains running. Next: checkpoint/push this verified workload step,
+then bounded queue/concurrency and resource instrumentation through engine/API/CLI.
+Existing coordinator limits active account work to2 but needs waiting admission;
+mail/calendar spawned jobs need shared admission64 before persisting/dispatching.
+Store actor queue64 and existing upload4/compose1 limits must remain intact.
+Report actual active requests, queued work, fetched bytes and storage batches;
+ Required:10,000 metadata messages,16MiB
 attachments,64MiB/configured payload refusal, concurrency2, bounded queues,
 queue/request/byte/storage-batch instrumentation and measured child RSS/latency.
 Use existing real harnesses and independent mock counts; do not seed engine storage.

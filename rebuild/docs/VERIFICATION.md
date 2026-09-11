@@ -1,5 +1,33 @@
 # Verification evidence
 
+## Task14 resource workloads — relevant gate verified
+
+Six-command `python3 test-results/task14-resource-workloads/run-gate.py` completed
+exit0 (shell34619): format, both workspaceClippy modes, resource_system2, actual
+resourceE2E2 and securityE2E2; zero failed/ignored. Exact commands/statuses/counts,
+source hashes and load/RSS samples are retained beside the runner. The system
+workload ingests10,000 provider messages through100 HTTP pages and verifies every
+ID exactly once across100 authenticated API pages, missing-body metadata and
+restart preservation. Latest sync=27433ms, list=1638ms. A
+second test lowers the provider payload bound to4096 bytes, retains metadata for
+an8192-byte body and refuses raw download. Initial test expected the wrong API
+status; it was corrected to existing NotFound after inspection, with original
+failure in resource_system/missing-body-status-contract.log. Focused corrected
+case shell62253 passed1/exit0 before the full gate. No production fix was needed.
+
+Actual daemon/CLI resource tests verify eight fetch/download cycles of an exact
+16MiB binary attachment (wire 22958764bytes), independently matching the
+provider bytes and observing no sends/copies/notifications. On macos/aarch64,
+latest sampled peakRSS=388656KiB, baseline=37568KiB.
+Full samples/iteration latencies are in attachment-resources.json. The finite
+repetition check allows128MiB idle-RSS variation after two warm-up cycles (two
+maximum-payload buffers); it is a regression bound, not proof against every leak
+or a universal speed target. Another subprocess test refuses a sparse64MiB+1
+attachment, preserving the draft/version and independent remote state across
+restart. Harness adds only an owned-daemon PID accessor; no production/schema/API
+or dependency change. Queue admission/concurrency/byte/batch instrumentation and
+full Task14 gate remain pending; these workload tests do not complete Task14.
+
 ## Task14 security system and subprocess coverage verified
 
 Nine-command gate `python3 test-results/task14-security/run-gate.py` completed

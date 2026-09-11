@@ -16,7 +16,7 @@ REQUIRED_SUITES = (
     "google_mock_contract", "google_system", "google_e2e", "operation_system",
     "imap_contract", "imap_system", "imap_e2e", "recovery_e2e", "repair_system",
     "repair_e2e", "migration_e2e", "reconciliation_system", "multi_engine_system",
-    "security_system", "security_e2e", "release_isolation",
+    "security_system", "security_e2e", "resource_system", "resource_e2e", "release_isolation",
 )
 FEATURES = "nunciod/test-harness,nuncio-cli/test-harness"
 
