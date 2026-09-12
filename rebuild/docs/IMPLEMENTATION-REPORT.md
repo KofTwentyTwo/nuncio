@@ -1,18 +1,10 @@
 # Nuncio implementation report
 
-Status at September 12, 2026, 2:36 a.m. Central: **implemented; latest mail-promotion performance fix passed full offline regression; clean production artifacts verified; hosted CI and live acceptance pending.** The full R01–R16 goal is incomplete. Google/Synology live checks remain deferred at James's direction. This report covers the approved separate `rebuild/` workspace; native apps, merge, release and normal-environment installation remain outside the work performed.
+Status at September 12, 2026, 3:44 a.m. Central: **engine/API/CLI implemented; IMAP cursor correction passed the complete offline gate; fresh artifacts and hosted verification are next.** The full R01–R16 goal is incomplete. Google/Synology live and native-keystore acceptance remain deferred/unverified. Native apps, merge, release and normal-environment installation are outside the work performed.
 
-The latest hosted run34676397291 completed with9passed jobs and1failure in the
-10,000-message resource-system test; strict IMAP/SMTP suites themselves passed.
-A real SQLCipher reproduction showed mail promotion starving a queued status
-request past30seconds. Replacing repeated per-message FTS scans with one affected
-search reset inside the same transaction reduced that focused case to3.669seconds.
-Original deadlines, workload, cursor semantics and remote-effect assertions remain.
-Full/delta search rollback and account-isolation checks pass. The full offline gate
-passed34commands/307tests per workspace. Signed6a324f9 is pushed and its clean
-production package pair passed22extracted checks each, with identical bytes.
-Hosted34679663120 ended8passed/2failed; the affected diagnostic gate passed; new hosted evidence is next; earlier failed runs/artifacts are retained.
-The current local candidate below includes the production correction.
+The cursor correction passed all34offline commands and308tests in each workspace configuration, with zero failures or ignored tests and399source hashes unchanged. All separate mock/system/actualCLI/independent-server/security/recovery/resource/client/dependency checks passed. The correction retains provider mailbox hints while excluding optional Marked/Unmarked from the coverage fingerprint. Its regression failed before the fix and passes afterward; real mailbox changes still alter coverage. Existing profiles receive a one-time local coverage-token change on next promotion; no schema/API or remote-cursor changes are needed.
+
+Actual prior hosted run [34681263133](https://github.com/KofTwentyTwo/nuncio/actions/runs/34681263133) ended9jobs passed/1IMAP failure and supplied the cause. The earlier Linux transfer timeout did not recur, but its cause remains unexplained. A signed correction checkpoint, fresh clean package pair and actual hosted replacement are next. The preserved clean6a324f9 package below passed22extracted checks per build and repeatability; it predates this cursor correction. Prior failures/artifacts remain retained.
 
 ## Delivered software
 
@@ -28,11 +20,12 @@ The [R01–R16 matrix](REQUIREMENTS.md) links implementation and executable evid
 
 | Check | Observed result | Local evidence under `test-results/` |
 |---|---|---|
-| Latest promotion full gate, shell91408 | 34commands passed;307tests per workspace, zero failed/ignored;399source files unchanged | `ci-promotion-all/{final-summary,exit,source-verification}.json` and `current-all/` |
+| Cursor correction full gate, shell88082 | 34commands passed;308tests per workspace, zero failed/ignored;399source files unchanged | `ci-imap-interest-all/{final-summary,exit,source-verification}.json` and `current-all/` |
+| Prior promotion full gate, shell91408 | 34commands passed;307tests per workspace, zero failed/ignored;399source files unchanged | `ci-promotion-all/{final-summary,exit,source-verification}.json` and `current-all/` |
 | Full integrated egress-denied gate, shell 58495 (prior snapshot) | 34 commands passed; 305 Rust tests in each workspace configuration; zero failed/ignored | `task15-all-green/{results,counts,source-verification}.json` and command logs |
 | Separate named suites in that gate | Google mock 26 / system 22 / E2E 27; operations 6; IMAP contract 2 / system 27 / E2E 13; recovery 5; repair 2 / 2; migration 1; reconciliation 3; three-engine 1; security 3 / 2; resources 4 / 3; production isolation 2 | `task15-all-green/` |
 | Independent services, dependency and client checks | Six Python mail-service scripts passed; dependency advisories/licenses/sources passed; generated-client E2E 1 passed; CLI/client dependency boundaries passed | `task15-all-green/`; `task15-dependencies/`; `task15-contract/` |
-| Current clean6a324f9 package pair, shell14220 | Two fresh builds,22extracted checks each, identical archives/binaries,237notices; unchanged inputs | `task16-promotion-package/` and selected `dist/final-candidate/EVIDENCE.json` |
+| Prior clean6a324f9 package pair, shell14220 | Two fresh builds,22extracted checks each, identical archives/binaries,237notices; unchanged inputs | `task16-promotion-package/` and selected `dist/final-candidate/EVIDENCE.json` |
 | Packaging and final guide correction (prior snapshot) | Eight script regressions passed; final two fresh packages each passed 22 extracted-binary checks and produced identical archive/binary bytes; guide identifies its own metadata/checksum | `task16-package-final/`; prior `task15-repeat-green/`; adjacent archive evidence |
 | Hosted resource-fixture correction, shell 91079 | Six outer / 17 nested commands passed; 56 subprocess tests passed; both Clippy modes and formatting passed; parent/child egress checks passed | `ci-resource-fix/{results,counts,production-source-check}.json` and copied logs |
 | Hosted run 34671490682 on 7f81b73 | macOS lint/mock/release passed; macOS E2E failed its synthetic one-second large-payload deadline; six Ubuntu jobs cancelled when superseded | `remote-ci/34671490682/` |
@@ -44,9 +37,9 @@ The hosted failure was independently reproduced with a 1.25-second response dela
 
 The later Linux failures exposed a separate CI guard defect: filtering the whole runner UID also cut off GitHub control traffic. An independent same-UID controller regression reproduced that cutoff. A dedicated cgroup now limits filtering to test descendants; local IPv4/IPv6 controller continuity, test denial, exit0/17 propagation, detached-child termination and owned-resource cleanup pass. All eight existing script regressions pass under the macOS guard. All six hosted Linux controller checks subsequently passed in34676397291; nine jobs passed and the separate large-mailbox production resource failure is addressed by the current correction.
 
-## Verified local artifact
+## Preserved verified local artifact
 
-From the isolated worktree's `rebuild/` directory:
+This archive passed its recorded checks but predates the current uncommitted IMAP cursor correction. A fresh verified package is required after full regression. From the isolated worktree's `rebuild/` directory:
 
 ```text
 dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-6a324f9d1cb1.tar.gz
@@ -68,7 +61,7 @@ Use [RECOVERY.md](RECOVERY.md) for encrypted backup, passphrase input through a 
 
 ## Remaining completion conditions and risks
 
-1. Checkpoint the locally verified Linux cgroup correction, observe all required jobs on the new hosted head, preserve their command evidence and fix demonstrated failures. Local checks do not prove hosted CI ran or passed.
+1. Complete the current cursor correction's full offline gate, signed checkpoint/push, fresh clean package pair and actual hosted verification. Preserve original assertions and earlier failures. Local checks do not prove hosted CI ran or passed.
 2. When James resumes live scope, complete the [manual worksheet](MANUAL-ACCEPTANCE.md): G01–G10, S01–S05 and X01. All are currently unapproved/unverified. Named accounts, recipients, calendars, actions and secure credential entry require explicit authorization before access.
 3. Record actual Google OAuth/provider behavior, Synology DSM/MailPlus versions/capabilities and Sent policy, and native keystore operation. Passing independent mocks cannot establish those facts.
 

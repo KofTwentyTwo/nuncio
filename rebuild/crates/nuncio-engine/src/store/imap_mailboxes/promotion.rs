@@ -64,14 +64,24 @@ pub(crate) fn finish(c: &Connection, account: &str, run: &str) -> Result<String,
         [account],
     )?;
     let mut hash = Sha256::new();
-    hash.update(b"imap-snapshot-v1");
+    hash.update(b"imap-snapshot-v2");
     let mut stmt = c.prepare(
         "SELECT id,state_json FROM imap_mailboxes WHERE account_id=?1 AND retired=0 ORDER BY id",
     )?;
     let mut rows = stmt.query([account])?;
     while let Some(row) = rows.next()? {
+        let mut state: ImapMailboxState = serde_json::from_str(&row.get::<_, String>(1)?)
+            .map_err(|_| StoreError::KeyOrCorrupt)?;
+        // RFC 9051 section 7.3.1 makes LIST interest hints optional: they may
+        // appear or disappear without a mailbox change.
+        // Keep them in stored provider state, but exclude them from coverage.
+        state.attributes.retain(|attribute| {
+            !attribute.eq_ignore_ascii_case("\\Marked")
+                && !attribute.eq_ignore_ascii_case("\\Unmarked")
+        });
+        let state = serde_json::to_string(&state).map_err(|_| StoreError::InvalidInput)?;
         hash.update(
-            serde_json::to_vec(&(row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            serde_json::to_vec(&(row.get::<_, String>(0)?, state))
                 .map_err(|_| StoreError::InvalidInput)?,
         );
     }

@@ -1,5 +1,11 @@
 # Current release-preparation actions
 
+- [x] Diagnose repeated hosted IMAP cursor failure from actual mailbox-state evidence; optional interest-hint regression red44102/101, green50258/0 (all7projection tests). Preserve original assertions and stored provider hints.
+- [x] Full34-command offline gate88082 passed:308tests per workspace, allseparate/Python/dependency/client checks0,399source hashes unchanged; original IMAP/resource assertions retained.
+- [ ] After full pass, checkpoint/push the cursor correction, verify a fresh clean production package pair and actual hosted run; prior bfc7c8e artifact predates this fix.
+- [x] Collect terminal34681263133 artifacts (9jobs passed/1IMAP failure); bothlint154tests/8commands0, bothrelease8commands0/isolation2/external1/package0. Prior failures retained; no hosted archive hash claim.
+
+
 - [x] Calendar limited-writer fix: full25-command gate passed, checkpoint720081f signed/pushed/verified.
 - [x] Dependency upgrade and affected8-command gate passed; cargo-deny errors/warnings0.
 - [x] Frozen v2 descriptor and independent generated-client smoke verified; normal dependency boundaries checked.
@@ -18,7 +24,8 @@
 - [x] Reproduce and correct hosted10k status starvation with one transactional FTS reset; focused red/green and full34-command gate91408 pass with307tests per workspace and all399source hashes unchanged. Original deadlines/workloads/assertions retained.
 - [x] Signed6a324f9 promotion correction pushed/exact remote verified; clean package pair14220 passed22checks each with identical bfc7c8e archives and unchanged inputs. Prior failures/artifacts retained.
 - [x] Retain actual hosted34679663120 failures and prepare numeric phase/mailbox-state diagnostics; focused Linux/macOS/IMAP comparisons and seven-command affected gate92835 pass without deadline/assertion changes.
-- [ ] Sign/push diagnostics, observe actual replacement hosted run and establish causes for any recurring Linux resource/cursor failure; no product fix claimed yet.
+- [x] Signed275eb42 diagnostic checkpoint pushed/exact remote verified after seven-command affected gate.
+- [x] Observe terminal hosted34681263133 (9passed/1failed): cursor cause confirmed and focused correction passes; full gate remains above. Prior Linux transfer timeout cause remains unexplained.
 - [x] Final guide correction and refreshed local candidate45789 passed two identical fresh builds/22checks each; selected8996085 archive and prior candidates preserved. No product/package-code changes.
 - [x] Implementation report, requirement matrix, artifact hashes and operating/recovery limits prepared;17doc links/fences and whitespace pass. Update hosted results when available.
 - [ ] Live acceptance remains deferred/unapproved/unverified; goal stays active and incomplete.

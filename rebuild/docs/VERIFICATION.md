@@ -1,5 +1,92 @@
 # Verification evidence
 
+## September 12, 2026, 08:44 UTC — cursor correction full gate passed
+
+`python3 test-results/ci-imap-interest-all/run.py`, shell88082, exited0.
+All34commands passed; both workspace configurations passed308tests each, zero
+failed/ignored. All399captured source files remained unchanged. Separate named
+suites: Googlemock26/system22/E2E27;operations6;IMAPcontract2/system27/E2E13;
+recovery5;repair2/2;migration1;reconciliation3;multi-engine1;security3/2;resources4/3;
+release-isolation2;external-client1. All6independent Python service scripts,
+8script regressions, builds/fmt/Ruff/bothClippy and client-boundary checks passed.
+Cargo-deny reported advisories/licenses/sources ok. Parent/child external egress
+denied; loopback allowed. Repeated executions are not additional unique tests.
+
+Exact commands/exits/counts/logs: `test-results/ci-imap-interest-all/{final-summary.json,
+exit.json,source-verification.json,egress.json,current-all/}`. Normal/feature
+metrics were copied separately before later runs. Original10k sync12,675/12,950/
+12,526ms and list1,509/1,508/1,497ms (normal/feature/separate),100API/remote pages each.
+Original16MiB/64MiB+1 cases and memory/concurrency bounds passed unchanged.
+
+The new optional-LIST-hint regression failed before the production correction;
+all7projection tests and original independent-server cases now pass. Full stored
+provider hints remain intact; only coverage-hash input excludes Marked/Unmarked.
+The v2 domain causes a one-time local coverage-token change, no schema/API change.
+Actual hosted34681263133 remains9passed/1IMAP failure on the prior checkpoint.
+A signed correction checkpoint, fresh clean artifact pair and hosted replacement
+are next. Priorbfc7c8e candidate remains preserved, not relabeled as current source.
+Live/native acceptance remains deferred/unverified; next chart03:57Central.
+
+
+At08:31UTC, both full gate88082 workspace configurations passed308tests each,
+zero failed/ignored, both commands0. Original strict IMAPsystem27/E2E13 and
+resource workloads passed in each configuration. Normal10k sync12,675ms/list1,509ms;
+feature12,950ms/list1,508ms, each10k messages/100APIpages/100remote pages.
+Original8x16MiB resource runs passed at36,985ms/36,753ms total with unchanged
+limits. Exact commands/counts/metrics: ci-imap-interest-all/{normal,feature}-*.json.
+Separately named suites and final checks are still running in88082; full gate
+completion, checkpoint, fresh package and hosted replacement remain pending.
+
+
+At08:18UTC, full gate88082 normal workspace passed308tests, zero failed/ignored, command0. Original IMAPsystem27/actualIMAPE2E13 and resource suites passed within that configuration. Feature workspace and separately named suites remain running/pending; no complete-gate claim. Proof: ci-imap-interest-all/normal-workspace-summary.json and all/workspace.log.
+
+## September 12, 2026, 08:06 UTC — IMAP cursor defect reproduced and corrected; full gate running
+
+Hosted diagnostic run34681263133 completed9jobs passed/1failed. Its retained
+IMAPsystem log shows only optional `\Unmarked` LIST hints appearing on three
+empty folders while UIDs/content/other state remain equal. The original cursor
+assertion failed (26passed/1failed); later IMAPE2E/resource checks were not reached.
+Both E2E jobs passed40tests, both mocks26 and Linuxsystem37; both release/lint
+jobs passed. Prior Linux transfer timeout remains unexplained, not declared fixed.
+
+[RFC9051section7.3.1](https://www.rfc-editor.org/rfc/rfc9051.html#section-7.3.1)
+defines Marked/Unmarked as optional interest hints. `store/imap_mailboxes/promotion.rs`
+now removes only those case-insensitive hints from the hash input, retaining full
+provider state. The v2 hash domain produces a one-time local coverage-token change
+on the next promotion for existing profiles; no remote cursor, schema or API changes.
+
+New `engine/tests/imap_projection.rs` regression failed44102/101 before the fix;
+all7projection tests passed50258/0 (0.66s) afterward. It preserves stored hints,
+folder identity and coverage across hint changes, while actual role/delimiter/
+UIDNEXT/HIGHESTMODSEQ/UIDVALIDITY changes alter coverage. Exact commands/exits:
+`test-results/ci-imap-cursor/interest-{red,green}.{json,log}`. Original independent
+server assertions, workload, remote effects and deadlines remain unchanged.
+
+Full34-command egress-denied regression now runs in shell88082 from
+`test-results/ci-imap-interest-all/run.py`; completion is pending. Prior307-test
+full gate and cleanbfc7c8e package remain valid historical evidence but predate this
+production correction. New full gate, signed checkpoint, clean package and hosted
+verification are required. Current source/package qualification updated accordingly.
+
+02:57Central email1a094a25abd21306 independently verified SENT with183972-byte
+inline16-task chart and matching table; exact payload/receipt retained in
+status-emails/2026-09-12-0257*. Estimates3–7offline+3–6deferredlive; next03:57Central.
+
+
+At07:46UTC actual hosted34681263133 has5jobs passed: bothmock contracts,
+bothE2E and Linuxsystem. Linux16MiB resource case now passes unchanged workload,
+40sCLI/30sHTTP deadlines and original assertions. This does not establish the cause
+of prior34679663120 timeout. Remaining IMAP/lint/release jobs are pending. Current
+mock/E2E/system summaries and downloaded proof live in remote-ci/34681263133/.
+
+Signed diagnostic checkpoint275eb427cd2d17807a750884948eb999eb7b6b9e committed/pushed at07:38UTC.
+11files/39,076diff bytes; Gitleaks/whitespace0, signature0, push0, exact remote0.
+Receipt: `test-results/checkpoint-diagnostics/`. Actual hosted run34681263133
+started on that head: https://github.com/KofTwentyTwo/nuncio/actions/runs/34681263133.
+Prior34679663120 remains8passed/2failed; new diagnostics do not establish a fix.
+Production source/artifact bfc7c8e unchanged, original tests/deadlines retained.
+Next hourly report07:57UTC/02:57Central must include current result and all16rows.
+
 ## September 12, 2026, 07:36 UTC — diagnostic checkpoint verification passed
 
 Seven-command affected gate92835 exited0: fmt/bothClippy; complete E2E40;

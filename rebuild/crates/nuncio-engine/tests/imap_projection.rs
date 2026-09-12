@@ -488,3 +488,101 @@ async fn fetch_promotion_cannot_introduce_unobserved_placement_or_replace_mailbo
     }
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn imap_coverage_ignores_optional_interest_hints_but_retains_state_and_real_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path(), Zeroizing::new(vec![0x68; 32]))
+        .await
+        .unwrap();
+    let account = AccountId::generate();
+    store
+        .add_account(AccountRecord {
+            id: account.to_string(),
+            provider: "imap".into(),
+            address: "alpha@example.test".into(),
+        })
+        .await
+        .unwrap();
+    let mut expected_cursor = None;
+    let mut expected_id = None;
+    for hint in [
+        None,
+        Some("\\Unmarked"),
+        None,
+        Some("\\Marked"),
+        Some("\\unmarked"),
+        None,
+    ] {
+        let mut state = mailbox("INBOX", 9001, 1);
+        state.attributes.push("\\HasNoChildren".into());
+        if let Some(hint) = hint {
+            state.attributes.push(hint.into());
+        }
+        let run = begin(&store, account).await;
+        let id = store
+            .stage_imap_mailbox(account.to_string(), run.clone(), state.clone())
+            .await
+            .unwrap();
+        store
+            .promote_mail(account.to_string(), run, None, 20)
+            .await
+            .unwrap();
+        let saved = store.imap_mailboxes(account.to_string()).await.unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            saved[0].state.attributes,
+            state.validated().unwrap().attributes,
+            "the original provider hints must remain stored"
+        );
+        let cursor = store
+            .query_mail(query(account))
+            .await
+            .unwrap()
+            .coverage
+            .cursor;
+        assert!(cursor.is_some());
+        if expected_cursor.is_some() {
+            assert_eq!(
+                cursor, expected_cursor,
+                "optional LIST interest hints must not change synchronized coverage"
+            );
+            assert_eq!(Some(id), expected_id);
+        }
+        expected_cursor = cursor;
+        expected_id = Some(id);
+    }
+    let mut state = mailbox("INBOX", 9001, 1);
+    state.attributes.push("\\HasNoChildren".into());
+    for change in 0..5 {
+        match change {
+            0 => state.attributes.push("\\Sent".into()),
+            1 => state.delimiter = Some('.'),
+            2 => state.uid_next = Some(2),
+            3 => state.highest_mod_seq = Some(17),
+            _ => state.uid_validity = Some(9002),
+        }
+        let run = begin(&store, account).await;
+        let id = store
+            .stage_imap_mailbox(account.to_string(), run.clone(), state.clone())
+            .await
+            .unwrap();
+        store
+            .promote_mail(account.to_string(), run, None, 20)
+            .await
+            .unwrap();
+        let cursor = store
+            .query_mail(query(account))
+            .await
+            .unwrap()
+            .coverage
+            .cursor;
+        assert_ne!(
+            cursor, expected_cursor,
+            "real mailbox state change {change} must change coverage"
+        );
+        assert_eq!(Some(id), expected_id);
+        expected_cursor = cursor;
+    }
+    store.close().await.unwrap();
+}
