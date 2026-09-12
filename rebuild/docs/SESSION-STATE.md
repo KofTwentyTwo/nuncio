@@ -10,70 +10,64 @@ Read AGENTS→CLAUDE, shared personal rules/style, rebuild/AGENTS, this file, TO
 
 ## Immediate next action
 
-September11 focus steering remains authoritative: finish demonstrated requirement
-failures, advance missing Task14/15 deliverables, and do not reopen speculative
-recovery audits. Restore-retry fix57dd648 and three-engine convergencebefc6bb are
-signed/pushed with exact remote hashes verified. Production code has not changed
-since57dd648; prior recovery and provider evidence remains in VERIFICATION.
+Continue the approved goal inline; finish demonstrated R01–R16 failures and missing
+Task14/15 deliverables. Do not reopen speculative recovery audits or completed work.
 
-Security implementation is now verified: `security_system.rs`3 tests,
-`security_e2e.rs`2 actual subprocess tests, plus `support/security_inputs.rs`.
-Nine-command gate shell20194 all0: fmt/bothClippy, security3/2, multi-engine1,
-Google21/26, operations6. Review found the initial HTML trap used an uncounted
-route; it now uses a counted route and proves its counter with an independent
-probe. Four-command follow-up shell79748 all0: fmt/bothClippy/securityE2E2.
-No failures/ignored. Paths: `test-results/task14-security/` and
-`test-results/task14-security-trap/` (counts, final-source hashes, auth168-case
-and confidentiality37-file/30-log audit JSON). No command remains running.
+Last pushed checkpoint: `c1180f1dc8257eabbbb3874e0d692ccf335c5a26` (resource workloads).
+Prior security checkpoint: `8811acdd14f86784993d525de24c582f3f010563`. Both signatures,
+pushes, exact remote hashes, staged Gitleaks and whitespace checks passed. Security
+nine-command plus four-command follow-up gates passed; resource six-command gate
+passed (shell34619, resource_system2/resourceE2E2/securityE2E2 andfmt/bothClippy).
+Evidence: `test-results/task14-security{,-trap}/` and `task14-resource-workloads/`.
+Implementation locations and precise limits/counts are in newest VERIFICATION.
 
-All42 methods reject missing/wrong/retired/wrong-scheme authorization; account,
-header, stream, provider-ID and path boundaries pass. Actual encrypted DB/WAL/FTS,
-backup/temp and original pre-redaction logs pass10-canary checks plus independent
-ordinary SQLite/wrong-key rejection. Hostile HTML/terminal fields remain inert;
-raw/attachment downloads are exact. Provider requests/sends/copies/notifications
-are observed independently. Initial test-only setup/API-assumption mistakes are
-preserved in focused logs; no production or mock validation was weakened.
-Test-support adds raw CLI capture with unconditional Drop redaction and a channel
-accessor. Four existing workspace crates are dev-dependencies only; lockfile
-changes only that list. Production code/schema/API are unchanged.
+Verified changes ready for signed checkpoint/push bound account-request admission to64 (active limit2),
+preallocate bounded Google response buffers to reduce allocator churn, and defer
+queued operation preparation when admission is full. No schema/proto/dependency
+change. Test-only RSS diagnostics retain samples before assertions and optionally
+capture content-free native allocation summaries; the128MiB post-warm-up RSS
+bound remains unchanged.
 
-Security checkpoint8811acdd14f86784993d525de24c582f3f010563 is signed and pushed;
-commit/signature/push/exact ls-remote all exit0; staged Gitleaks and diff checks0.
-Current next: resource_system and actual subprocess measurements. Initial workload
-test seeds10,000 messages only through the independent provider, then verifies
-100 HTTP pages/100 authenticated API pages/exact IDs/missing-body state/restart.
-Resource workload six-command gate shell34619 is terminal, all0: fmt/bothClippy,
-resource_system2/resource_e2e2/security_e2e2, zero failed/ignored. Commands/counts,
-final source hashes, metadata-load.json and attachment-resources.json are retained
-under `test-results/task14-resource-workloads/`. Configured-body test initially
-expected wrong missing-body API status; corrected to existing NotFound, focused
-shell62253 passed1/0, then full gate passed. No production changes. Workloads cover
-10,000 messages/100 provider pages/100 API pages,4096-byte configured body limit,
-8 exact16MiB attachment fetch/download cycles with actual child RSS/latency, and
-64MiB+1 sparse-file refusal preserving draft/version/remote state across restart.
-No command remains running. Next: checkpoint/push this verified workload step,
-then bounded queue/concurrency and resource instrumentation through engine/API/CLI.
-Existing coordinator limits active account work to2 but needs waiting admission;
-mail/calendar spawned jobs need shared admission64 before persisting/dispatching.
-Store actor queue64 and existing upload4/compose1 limits must remain intact.
-Report actual active requests, queued work, fetched bytes and storage batches;
- Required:10,000 metadata messages,16MiB
-attachments,64MiB/configured payload refusal, concurrency2, bounded queues,
-queue/request/byte/storage-batch instrumentation and measured child RSS/latency.
-Use existing real harnesses and independent mock counts; do not seed engine storage.
-Coordinator already has2 active account permits but waiting admission and explicit
-resource metrics need verification/implementation. Store actor queue64, upload4,
-compose1 are existing bounds. Mail/calendar job maps are per-account but lack a
-global admission bound. Add required instrumentation through engine/API/CLI and
-prove rejection/recovery, then run the full offline gate and advance Task15.
+The14-command gate `python3 test-results/task14-resource-admission/run-gate.py`
+completed all0 (shell98949): fmt/bothClippy, engine129, resource system3/E2E2,
+security3/2, Google21/26, operations6, IMAP26/13, production-isolation2. Counts,
+source hashes, artifact hashes, metrics and logs are retained alongside results.json.
+This gate predates the operation-worker fix below. Prior failed RSS gate14707/1
+and investigation evidence remain in task14-queue-admission/; VERIFICATION records
+the failure, allocation evidence and subsequent unchanged-bound passes.
+
+New regression reproduced a direct admission interaction: full account-request
+capacity caused operation preparation to return Busy and permanently stop the
+worker (shell60230/101). It confirms no attempt/send occurred while saturated.
+Minimal fix treats pre-attempt Busy as deferral, keeping durable intent eligible
+for a later worker tick. Focused verification shell49015 passed1/exit0:
+`python3 test-results/task14-operation-admission/run-focused.py green`.
+Test verifies worker health, exactly one applied attempt and independent accepted
+send after capacity returns, without restart. Nine-command affected gate81153
+completed all0: fmt/bothClippy, engine129, resource_system4, operation_system6,
+GoogleE2E26, IMAPE2E13 and release_isolation2. Fresh normal artifacts include the
+fix. Exact results/counts/source/artifact hashes: task14-operation-admission/.
+Immediate action: signed checkpoint/push these verified fixes, then continue below.
+
+After that: shared admission for spawned mail/calendar jobs (including backoff
+waiters), actual request/queue/byte/storage-batch instrumentation through engine,
+API and CLI, independent concurrency saturation and actual process observations.
+Existing Store queue64, upload4 and compose1 limits must remain intact. Completed
+workloads cover10,000 messages/100 provider+API pages, configured body refusal,
+8 exact16MiB attachment cycles with child RSS/latency, and64MiB+1 CLI-file refusal.
+Do not repeat those as new deliverables; integrate their evidence with new metrics.
+Then full offline verifier and Task15 contract/egress/dependency/package/CI work.
 
 ## Hourly status emails
 
 James authorized hourly progress emails to james@kof22.com beginning immediately.
 First hourly email sent September11 at approximately22:57UTC/17:57Central using
 connected Gmail, subject `Nuncio rebuild — hourly status — September 11, 2026,
-5:57 p.m. CT`; Gmail ID/thread `1a092b0a4e84f109`, SENT confirmed. Next due:
-September11 23:57UTC/18:57Central. Check the clock during active goal execution;
+5:57 p.m. CT`; Gmail ID/thread `1a092b0a4e84f109`, SENT confirmed.
+Second hourly email sent September11 23:57UTC/18:57Central, confirmed at23:57:17UTC;
+ID/thread `1a092e77786bec8b`, SENT. Includes verified security/workload checkpoints
+and the new RSS failure. Exact body/receipt: test-results/status-emails/2026-09-11-1857.md.
+Next due: September12 00:57UTC / September11 19:57Central. Check the clock during active goal execution;
 send one concise update each hour with actual progress, test results, blockers,
 remaining deliverables and next action, then update this timestamp and message ID.
 Do not send catch-up bursts or infer progress while paused. This authorization is
@@ -81,24 +75,24 @@ for project status mail, not rebuilt-provider acceptance. No persistent schedule
 is configured: no thread scheduling tool is exposed, and Computer Use refuses
 Codex access. The user was told that delivery during pauses/stops is unconfigured.
 
-## Last complete gate
+## Current local artifact evidence
 
-Restore-retry gate shell7100 completed all7 commands exit0. Production daemon:
+Operation-admission gate shell81153 completed all9 commands exit0. Daemon:
 `target/production/release/nunciod`,16352624 bytes,SHA256
-`0f30533cedd8e78acd1196962a5ee908ccdd538cee905f0b7505f2ca26586170`.
+`a9170b24aa58eabc14e125d28a4f7b50e40609526d19114b54def74a1175d347`.
 CLI:`target/production/release/nuncio-cli`,3506544 bytes,SHA256
 `23f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1`.
 Both exclude production test hooks. These are local binaries, not packaged or
 installed releases. No remote-CI/live-compatibility claim. Older startup evidence
 below remains valid for that earlier checkpoint.
 
-## Current code changes
+## Historical startup-cleanup checkpoint
 
 Startup cancellation: `engine.rs::open_inner` creates Arc<File> profile ownership immediately after profile preparation. `engine/recovery/journal.rs::recover` clones it into each blocking cleanup closure. Cancelling Engine::open therefore cannot allow another engine to overlap still-running cleanup. Existing deterministic SecretStore.delete barrier test proves Locked during cleanup, normal restart afterward, original source keys/manifest, and removal of only owned stage/upload. Direct journal fixtures acquire a real profile file lock.
 
 Relative paths: Journal creation and startup canonicalize the owner using directory-identity validation. `Journal::record` also normalizes the upload's owner before comparison, permitting macOS `/var` aliases while rejecting another owner's input. No final-component owner symlink is accepted. Tests cover failed restore reaching encrypted inspection, an actual persisted cleanup row, startup retirement, successful one-component relative restore with independent identity/API keys, owner symlink preservation, ancestor alias acceptance, and foreign-owner upload rejection. Source locations: `engine/recovery.rs`, `engine/recovery/journal{,_tests}.rs`, `tests/profile_lifecycle.rs`. Schema22, proto and dependencies are unchanged.
 
-## Evidence for this change
+## Historical startup-cleanup evidence
 
 All logs: `test-results/task13-startup-cleanup/`.
 

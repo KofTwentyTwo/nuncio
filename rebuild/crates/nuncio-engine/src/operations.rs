@@ -239,7 +239,12 @@ async fn process(
         Ok::<_, StoreError>((lane, prepared))
     };
     let (_lane, prepared) = tokio::select! {
-        result=preparation=>result?,
+        result=preparation=>match result {
+            Ok(prepared)=>prepared,
+            // No attempt has started; leave durable intent ready for the next tick.
+            Err(StoreError::Busy)=>return Ok(()),
+            Err(error)=>return Err(error),
+        },
         _=stop.changed()=>return Ok(()),
     };
     if *stop.borrow() {

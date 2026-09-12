@@ -26,6 +26,54 @@ fn rss_kib(pid: u32) -> Result<u64, TestError> {
     );
     Ok(std::str::from_utf8(&output.stdout)?.trim().parse()?)
 }
+fn thread_count(pid: u32) -> Result<usize, TestError> {
+    let mode = if cfg!(target_os = "macos") {
+        "-M"
+    } else {
+        "-L"
+    };
+    let output = std::process::Command::new("ps")
+        .args([mode, "-p", &pid.to_string()])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "owned daemon thread sampling failed"
+    );
+    Ok(std::str::from_utf8(&output.stdout)?
+        .lines()
+        .count()
+        .saturating_sub(1))
+}
+async fn allocation_summaries(pid: u32, iteration: usize) -> Result<(), TestError> {
+    if !cfg!(target_os = "macos") || std::env::var_os("REBUILD_ALLOCATION_PROFILES").is_none() {
+        return Ok(());
+    }
+    let root = PathBuf::from(std::env::var_os("NUNCIO_TEST_ARTIFACTS").unwrap())
+        .join(format!("allocations-{pid}"));
+    std::fs::create_dir_all(&root)?;
+    for (tool, args) in [
+        ("heap", vec!["-s", "--noContent"]),
+        ("vmmap", vec!["-summary"]),
+    ] {
+        let mut child = tokio::process::Command::new(format!("/usr/bin/{tool}"))
+            .args(args)
+            .arg(pid.to_string())
+            .kill_on_drop(true)
+            .stdout(std::fs::File::create(
+                root.join(format!("{iteration}-{tool}.stdout.log")),
+            )?)
+            .stderr(std::fs::File::create(
+                root.join(format!("{iteration}-{tool}.stderr.log")),
+            )?)
+            .spawn()?;
+        let status = tokio::time::timeout(Duration::from_secs(30), child.wait()).await??;
+        std::fs::write(
+            root.join(format!("{iteration}-{tool}.status")),
+            status.code().unwrap_or(-1).to_string(),
+        )?;
+    }
+    Ok(())
+}
 struct Sampler {
     task: Option<tokio::task::JoinHandle<Result<Vec<u64>, TestError>>>,
     stop: tokio::sync::watch::Sender<bool>,
@@ -118,7 +166,9 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
     let file = h.artifacts.join("large-download.bin");
     let mut idle = Vec::new();
     let mut iteration_ms = Vec::new();
-    for _ in 0..8 {
+    let mut thread_counts = Vec::new();
+    let mut storage_sizes = Vec::new();
+    for iteration_index in 0..8 {
         let iteration = Instant::now();
         result(
             h.cli(&[
@@ -152,10 +202,28 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
         assert_eq!(std::fs::read(&file)?, payload);
         std::fs::remove_file(&file)?;
         idle.push(rss_kib(pid)?);
+        thread_counts.push(thread_count(pid)?);
+        storage_sizes.push((
+            std::fs::metadata(h.directory.join("store.db"))?.len(),
+            std::fs::metadata(h.directory.join("store.db-wal"))?.len(),
+        ));
+        if matches!(iteration_index, 1 | 7) {
+            allocation_summaries(pid, iteration_index + 1).await?;
+        }
         iteration_ms.push(iteration.elapsed().as_millis());
     }
     let samples = sampler.finish().await?;
     assert!(samples.len() >= 2);
+    if let Some(directory) = std::env::var_os("NUNCIO_TEST_ARTIFACTS") {
+        let directory = PathBuf::from(directory);
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join("attachment-resources.json"),
+            serde_json::to_vec_pretty(
+                &json!({"pid":pid,"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"attachment_bytes":payload.len(),"raw_bytes":raw_len,"baseline_rss_kib":baseline,"peak_rss_kib":samples.iter().max(),"rss_samples_kib":samples,"idle_rss_kib":idle,"thread_counts":thread_counts,"storage_sizes_bytes":storage_sizes,"iteration_ms":iteration_ms,"total_ms":started.elapsed().as_millis(),"post_warmup_growth_limit_kib":2*64*1024}),
+            )?,
+        )?;
+    }
     // Allow allocator/cache reuse of two maximum payload buffers after warm-up.
     // Repeated retained message buffers must not grow with every identical fetch.
     let steady = &idle[2..];
@@ -180,16 +248,6 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
         for calendar in calendars.values() {
             assert!(calendar.notifications.is_empty());
         }
-    }
-    if let Some(directory) = std::env::var_os("NUNCIO_TEST_ARTIFACTS") {
-        let directory = PathBuf::from(directory);
-        std::fs::create_dir_all(&directory)?;
-        std::fs::write(
-            directory.join("attachment-resources.json"),
-            serde_json::to_vec_pretty(
-                &json!({"pid":pid,"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"attachment_bytes":payload.len(),"raw_bytes":raw_len,"baseline_rss_kib":baseline,"peak_rss_kib":samples.iter().max(),"rss_samples_kib":samples,"idle_rss_kib":idle,"iteration_ms":iteration_ms,"total_ms":started.elapsed().as_millis(),"post_warmup_growth_limit_kib":2*64*1024}),
-            )?,
-        )?;
     }
     h.shutdown().await?;
     Ok(())

@@ -182,8 +182,15 @@ impl GoogleHttp {
         if response.content_length().is_some_and(|n| n > limit as u64) {
             return Err(MailError::TooLarge);
         }
+        // Reuse predictable allocation sizes instead of growing from whichever
+        // network chunk happens to arrive first. The advertised size is bounded
+        // above before allocation; streamed bodies remain checked per chunk.
+        let capacity = response
+            .content_length()
+            .map(|n| n as usize)
+            .unwrap_or(limit.min(64 * 1024));
         let mut stream = response.bytes_stream();
-        let mut bytes = Zeroizing::new(Vec::new());
+        let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| MailError::Unavailable)?;
             if chunk.len() > limit.saturating_sub(bytes.len()) {

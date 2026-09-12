@@ -232,3 +232,233 @@ async fn configured_provider_payload_bound_retains_metadata_and_refuses_large_bo
     h.shutdown().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn authenticated_request_flood_is_rejected_at_admission_and_recovers() -> Result<(), TestError>
+{
+    use nuncio_test_support::google::{Fault, FaultAction, Phase};
+    let mut h = SystemHarness::start(Seed::TwoAccounts).await?;
+    let account = finish(&h, &begin(&h, "alpha@example.test", None).await, 200)
+        .await
+        .account_id
+        .unwrap();
+    let control = h.google.control();
+    control
+        .inject(Fault {
+            method: "POST".into(),
+            path: "/calendar/v3/freeBusy".into(),
+            account: Some("alpha@example.test".into()),
+            call: Some(1),
+            phase: Phase::Before,
+            action: FaultAction::Withhold {
+                barrier: "resource-admission".into(),
+            },
+        })
+        .await;
+    let query = FreeBusyRequest {
+        account_id: account,
+        from: "2026-10-02T00:00:00Z".into(),
+        to: "2026-10-04T00:00:00Z".into(),
+        time_zone: "UTC".into(),
+        provider_calendar_ids: vec!["primary".into()],
+    };
+    let mut client = h.calendar();
+    let first_query = query.clone();
+    let first = tokio::spawn(async move { client.query_free_busy(first_query).await });
+    control.wait_for_barrier("resource-admission").await?;
+    let mut waiting = tokio::task::JoinSet::new();
+    for _ in 0..64 {
+        let mut client = h.calendar();
+        let q = query.clone();
+        waiting.spawn(async move { client.query_free_busy(q).await });
+    }
+    let rejected = tokio::time::timeout(Duration::from_millis(750), waiting.join_next()).await?;
+    assert_eq!(
+        rejected.unwrap()?.unwrap_err().code(),
+        tonic::Code::FailedPrecondition
+    );
+    control.release_barrier("resource-admission").await;
+    assert!(first.await??.into_inner().complete);
+    while let Some(result) = waiting.join_next().await {
+        assert!(result??.into_inner().complete);
+    }
+    let before = control.snapshot().await;
+    let requests: u64 = before
+        .requests
+        .iter()
+        .filter(|r| r.path == "/calendar/v3/freeBusy")
+        .map(|r| r.count)
+        .sum();
+    assert_eq!(requests, 64, "rejected request must not reach the provider");
+    assert!(
+        h.calendar()
+            .query_free_busy(query)
+            .await?
+            .into_inner()
+            .complete
+    );
+    let after = control.snapshot().await;
+    assert_eq!(
+        after
+            .requests
+            .iter()
+            .filter(|r| r.path == "/calendar/v3/freeBusy")
+            .map(|r| r.count)
+            .sum::<u64>(),
+        65
+    );
+    for mailbox in after.mail.values() {
+        assert!(mailbox.accepted_sends.is_empty());
+        assert_eq!(mailbox.message_copies, 0);
+    }
+    for calendars in after.calendars.values() {
+        for calendar in calendars.values() {
+            assert!(calendar.notifications.is_empty());
+        }
+    }
+    h.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_send_survives_full_request_admission_without_restart() -> Result<(), TestError> {
+    use nuncio_test_support::google::{Fault, FaultAction, Phase};
+    let mut h = SystemHarness::start(Seed::TwoAccounts).await?;
+    let account = finish(&h, &begin(&h, "alpha@example.test", None).await, 200)
+        .await
+        .account_id
+        .unwrap();
+    let draft = h
+        .mail()
+        .save_draft(SaveDraftRequest {
+            account_id: account.clone(),
+            content: Some(serde_json::from_value(json!({
+                "to":[{"address":"recipient@example.test"}],
+                "subject":"Admission recovery", "text":"Durable queued mail"
+            }))?),
+            ..Default::default()
+        })
+        .await?
+        .into_inner();
+    h.arm("operation_before_dispatch")?;
+    h.arm("operation_job_finished")?;
+    let operation = h
+        .mail()
+        .send_draft(SendDraftRequest {
+            account_id: account.clone(),
+            draft_id: draft.id,
+            request_id: "d4423e88-c724-49bb-a75d-2e993dbfe449".into(),
+            expected_version: Some(1),
+        })
+        .await?
+        .into_inner();
+    h.wait("operation_before_dispatch").await?;
+    let control = h.google.control();
+    control
+        .inject(Fault {
+            method: "POST".into(),
+            path: "/calendar/v3/freeBusy".into(),
+            account: Some("alpha@example.test".into()),
+            call: Some(1),
+            phase: Phase::Before,
+            action: FaultAction::Withhold {
+                barrier: "queued-send-admission".into(),
+            },
+        })
+        .await;
+    let query = FreeBusyRequest {
+        account_id: account.clone(),
+        from: "2026-10-02T00:00:00Z".into(),
+        to: "2026-10-04T00:00:00Z".into(),
+        time_zone: "UTC".into(),
+        provider_calendar_ids: vec!["primary".into()],
+    };
+    let mut client = h.calendar();
+    let first_query = query.clone();
+    let first = tokio::spawn(async move { client.query_free_busy(first_query).await });
+    control.wait_for_barrier("queued-send-admission").await?;
+    let mut waiting = tokio::task::JoinSet::new();
+    for _ in 0..64 {
+        let mut client = h.calendar();
+        let query = query.clone();
+        waiting.spawn(async move { client.query_free_busy(query).await });
+    }
+    let rejected = tokio::time::timeout(Duration::from_millis(750), waiting.join_next()).await?;
+    assert_eq!(
+        rejected.unwrap()?.unwrap_err().code(),
+        tonic::Code::FailedPrecondition
+    );
+    h.release("operation_before_dispatch")?;
+    h.wait("operation_job_finished").await?;
+    let attempts = || ListOperationAttemptsRequest {
+        account_id: account.clone(),
+        operation_id: operation.id.clone(),
+        page_size: 25,
+        page_token: None,
+    };
+    assert!(h
+        .operations()
+        .list_attempts(attempts())
+        .await?
+        .into_inner()
+        .items
+        .is_empty());
+    assert!(control
+        .accepted_sends("alpha@example.test")
+        .await
+        .is_empty());
+    control.release_barrier("queued-send-admission").await;
+    assert!(first.await??.into_inner().complete);
+    while let Some(result) = waiting.join_next().await {
+        assert!(result??.into_inner().complete);
+    }
+    h.release("operation_job_finished")?;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let status = h
+                .authenticated()
+                .get_status(GetStatusRequest {})
+                .await?
+                .into_inner();
+            assert_eq!(
+                status.operation_worker_error, None,
+                "admission refusal must not stop the worker"
+            );
+            let current = h
+                .operations()
+                .get_operation(OperationRequest {
+                    account_id: account.clone(),
+                    operation_id: operation.id.clone(),
+                })
+                .await?
+                .into_inner();
+            if current.state == "applied" {
+                break Ok::<_, TestError>(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
+    let attempts = h.operations().list_attempts(attempts()).await?.into_inner();
+    assert_eq!(attempts.items.len(), 1);
+    assert_eq!(attempts.items[0].outcome.as_deref(), Some("applied"));
+    let after = control.snapshot().await;
+    assert_eq!(after.mail["alpha@example.test"].accepted_sends.len(), 1);
+    assert!(after.mail["beta@example.test"].accepted_sends.is_empty());
+    assert_eq!(
+        after
+            .requests
+            .iter()
+            .filter(|r| r.path == "/calendar/v3/freeBusy")
+            .map(|r| r.count)
+            .sum::<u64>(),
+        64
+    );
+    for calendars in after.calendars.values() {
+        for calendar in calendars.values() {
+            assert!(calendar.notifications.is_empty());
+        }
+    }
+    h.shutdown().await?;
+    Ok(())
+}

@@ -1,5 +1,74 @@
 # Verification evidence
 
+## Resource admission and queued-worker recovery verified
+
+Fourteen-command gate shell98949 completed exit0: format/bothClippy; engine129;
+resource system3/E2E2; security3/2; Google21/26; operations6; IMAP26/13; release
+isolation2. All suites zero failed/ignored. Commands/statuses, canonical counts,
+source/artifact hashes and independent resource/security observations are under
+`test-results/task14-resource-admission/`. Fresh normal daemon16352624bytes,
+SHA25619caa6caae0a5496855abfa14ae901c69bcbf3ff99788c1dbeed5ac83d5cd8f4;
+CLI3506544bytes, SHA25623f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1.
+Local artifacts only; no package/installation/remote-CI/live claim.
+
+After that gate, a new system regression reproduced worker termination when
+64 account-request slots are occupied: queued-send preparation returned Busy,
+propagated to the worker fatal path. Shell60230/101, no dispatched attempts/sends
+at saturation, followed by operation_worker_unavailable. Original red log and
+profile path are retained in task14-operation-admission/red.log. Minimal fix
+defers Busy before attempt creation; all other errors retain prior handling.
+Focused green shell49015 passed1/0. Subsequent9-command gate81153 completed all0:
+fmt/bothClippy, engine129, resource_system4, operations6, GoogleE2E26, IMAPE2E13,
+release_isolation2; zero failed/ignored. The test proves worker health after
+saturation, no premature attempt/send, then one applied attempt and one independent
+accepted send without restart. All64 read requests complete and no calendar
+notifications occur. Evidence: task14-operation-admission/{red,green,results,
+counts,source-hashes,artifacts} (logs/JSON as appropriate). Refreshed daemon:
+16352624bytes,SHA256a9170b24aa58eabc14e125d28a4f7b50e40609526d19114b54def74a1175d347;
+CLI3506544bytes,SHA25623f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1.
+Signed checkpoint/push pending; this completes neither allTask14 nor thegoal.
+
+## Repeated-fetch memory investigation — bounded preallocation verified
+
+The failed admission gate remains evidence of a real RSS-bound failure; no
+assertion was removed or relaxed. Subsequent diagnostics1104 and97219 both passed
+2 tests, but were used for investigation rather than declaring the issue resolved.
+Threads22 and database/WAL sizes stayed constant. Content-free native heap/VM
+summaries after cycles2/8 showed live heap3,924,688→3,927,584bytes while freed
+large-allocation resident regions grew178.1→244.2MiB (16→26 regions). This points
+to allocation churn/caching rather than retention of entire mail objects. Evidence:
+`task14-queue-admission/diagnostic-{1,2}/`. Method reference: Apple's
+[Analyze heap memory](https://developer.apple.com/videos/play/wwdc2024/10173/).
+
+GoogleHttp::read now allocates for an already-validated Content-Length, falling
+back to64KiB, so buffer growth no longer starts from an arbitrary first network
+chunk. Header and streamed-body limits remain unchanged. Profiled shell42408
+passed2: peakRSS257072KiB, empty-large region count5→8. Unprofiled37116 passed2:
+peak262784KiB, idleRSS149472→216528KiB across8cycles. Exact full samples and logs
+are in diagnostic-3-preallocated/ and normal-preallocated/. The14-command
+gate at `test-results/task14-resource-admission/` (shell98949) passed all0,
+including fresh production isolation. The operation-worker follow-up above remains. The original128MiB post-warm-up
+RSS bound and exact payload/provider-effect assertions remain intact.
+
+## Account-request admission — initial failure and focused evidence
+
+`Coordinator::acquire` previously bounded only active work, retaining unlimited
+callers waiting for account sequencing. New unit regression shell39812 exited101
+after the65th caller failed to reject. A64-permit admission guard, held alongside
+account/active permits and released on cancellation, makes the test pass
+(shell99903/0). Existing active-account limit2 is retained. Independent authenticated
+freebusy flood test shell42256 passed1/0:65 incoming RPCs yield1 Busy refusal,
+64 exact observed provider requests, and a subsequent fresh request succeeds.
+No sends/copies/notifications occur. Test/source locations: coordination.rs and
+resource_system.rs; logs `test-results/task14-queue-admission/{red,green,system}.log`.
+The12-command relevant/provider/production gate stopped (shell14707/1) after
+fmt/bothClippy0, engine129/0 and resource_system3/0. ResourceE2E had1pass/1failure:
+idleRSS [199312,218480,245504,304048,372688,425984,430816,515200]KiB exceeded
+the unchanged128MiB post-warm-up variation bound. No later provider/release checks
+ran; no refreshed production hashes. Prior passing resource runs do not override
+this failure. Preserved profile: resource_e2e/runs/google-e2e-ZtHsmp. Subsequent allocation investigation and verified minimal fix are recorded above. This does not
+complete spawned-sync admission or resource instrumentation.
+
 ## Task14 resource workloads — relevant gate verified
 
 Six-command `python3 test-results/task14-resource-workloads/run-gate.py` completed

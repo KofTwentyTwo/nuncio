@@ -36,3 +36,13 @@ Scheduling system and subprocess cases explicitly enable short polling; focused 
 Mock observations attribute known authorization codes/access/refresh credentials using a private fingerprint-to-account ledger, including expired/revoked attempts. Authentication still uses the separate live grant state. Snapshots reveal account/method/path/count only, never credentials or body/query values. Raw HTTP conformance checks validate this separation before system tests use it to assert that paused accounts stop all requests. Retry faults support either numeric seconds or an exact HTTP-date header.
 
 Security subprocess tests inspect original daemon/CLI logs before harness redaction, scan populated encrypted storage/WAL/backup/temp outputs, and independently test ordinary-SQLite and wrong-key rejection. Resource workloads report10,000-message ingestion/pagination timings and owned-daemon RSS while repeatedly fetching/downloading16MiB attachments. A finite post-warm-up growth allowance catches retention regressions; it is not a universal memory/speed guarantee. Only owned test daemon PIDs are sampled via `ps`. Resource and security tests never authorize live-provider access.
+
+For a focused macOS allocation investigation, run
+`REBUILD_ALLOCATION_PROFILES=1 python3 rebuild/scripts/verify.py --suite resource_e2e`.
+This optional test-only setting records content-free `heap` and `vmmap` summaries
+for the owned daemon after attachment cycles2 and8, with30-second tool deadlines.
+It is never forwarded to production processes and does not change assertions.
+Use normal runs for timing evidence because profiler observation adds overhead.
+Resource JSON is written before the RSS assertion so failed runs retain samples,
+thread counts and database/WAL sizes. Passing a diagnostic rerun does not erase an
+earlier failure; preserve the failed gate and establish its cause.
