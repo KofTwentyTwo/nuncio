@@ -15,7 +15,6 @@ services:
       - ${NUNCIO_MAIL_TEST_DIR:?required}/dovecot-users:/etc/dovecot/test-users:ro
       - ${NUNCIO_MAIL_TEST_DIR:?required}/server.crt:/etc/dovecot/ssl/tls.crt:ro
       - ${NUNCIO_MAIL_TEST_DIR:?required}/server.key:/etc/dovecot/ssl/tls.key:ro
-    ports: ["127.0.0.1::31993", "127.0.0.1::31143"]
     networks: [test]
   mailpit: &smtp_capture
     image: axllent/mailpit:v1.31.1@sha256:98b916bd3c8d61f7633a52d3ea2f58d00620cb01ca57ab59edde68c347a95365
@@ -43,7 +42,6 @@ services:
       - ${NUNCIO_MAIL_TEST_DIR:?required}/server.key:/cert/server.key:ro
       - ${NUNCIO_MAIL_TEST_DIR:?required}/smtp-users:/cert/smtp-users:ro
       - ${NUNCIO_MAIL_TEST_DIR:?required}/api-user:/cert/api-user:ro
-    ports: ["127.0.0.1::1025", "127.0.0.1::8025"]
     networks: [test]
   mailpit_tls:
     <<: *smtp_capture
@@ -51,6 +49,29 @@ services:
       <<: *smtp_environment
       MP_SMTP_REQUIRE_STARTTLS: "false"
       MP_SMTP_REQUIRE_TLS: "true"
+  relay:
+    image: haproxy:3.2-alpine@sha256:6343ce34a132a5dceaa24767d739df2bd519f8f7c1079ae39e4821334e8eb42e
+    pull_policy: never
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    sysctls:
+      net.ipv4.ip_forward: "0"
+      net.ipv6.conf.all.forwarding: "0"
+    depends_on: [dovecot, mailpit, mailpit_tls]
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "127.0.0.1::31993"
+      - "127.0.0.1::31143"
+      - "127.0.0.1::11025"
+      - "127.0.0.1::18025"
+      - "127.0.0.1::11026"
+      - "127.0.0.1::18026"
+    networks: [test, ingress]
 networks:
   test:
+    driver: bridge
+    internal: true
+  ingress:
     driver: bridge

@@ -29,7 +29,7 @@ impl SecretStore for OsKeyring {
 
     fn delete(&self, name: &str) -> Result<(), SecretError> {
         let entry = keyring::Entry::new("mx.nuncio.rebuild", name).map_err(|_| SecretError)?;
-        match entry.delete_password() {
+        match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => Err(SecretError),
         }

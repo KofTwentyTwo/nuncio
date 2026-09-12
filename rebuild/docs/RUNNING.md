@@ -1,6 +1,6 @@
 # Running the rebuild
 
-This workspace currently provides daemon lifecycle, Google account connection, Gmail/Calendar synchronization, local mail queries/search, original-content downloads, local drafts with attachments/reply/forward, and durable Google send and label mutations with operation history and resolution. Google Calendar writes and free/busy, Synology mail reads/flags, explicit folder transfers, and SMTP with client/server Sent policies are verified against local independent services. Encrypted backup creation/inspection/new-profile restore are implemented; broader recovery and resilience/release work remain in progress. These are local development artifacts, not a finished release or a claim of live compatibility. All acceptance so far uses synthetic local providers. Google and Synology live access is deferred by the user's instruction.
+This workspace provides daemon lifecycle, Google account connection, Gmail/Calendar synchronization, local mail queries/search, original-content downloads, local drafts with attachments/reply/forward, and durable Google send and label mutations with operation history and resolution. Google Calendar writes and free/busy, Synology mail reads/flags, explicit folder transfers, and SMTP with client/server Sent policies are verified against local independent services. Encrypted backup creation/inspection/new-profile restore, schema migrations, projection repair and crash recovery have offline evidence. A clean local archive is verified; full integrated offline verification passed; local package verification passed; hosted CI remains pending. See [PACKAGING.md](PACKAGING.md) for prerequisites, extraction, operation and later installation/removal. These are local development artifacts, not a finished release or a claim of live compatibility. All acceptance so far uses synthetic local providers. Google and Synology live access is deferred by the user's instruction.
 
 ## Offline development
 
@@ -177,7 +177,7 @@ Each file is one JSON object, at most1MiB, with integer schema_version1, explici
 
 Timed start/end values use `{"date_time":{"rfc3339":"2026-10-02T10:00:00-05:00","time_zone":"America/Chicago"}}`; date-only events have an exclusive end date. Other supported fields are location, recurrence (array of RRULE/RDATE/EXDATE strings), attendees (array with email and optional display_name/optional/resource), reminders (use_default plus overrides containing method/minutes), guests_can_modify, guests_can_invite_others, guests_can_see_other_guests, transparency, visibility and color_id. Only explicitly named fields change. An attendees array explicitly replaces that list; RSVP changes only the selected account's response/comment using Google's partial-response support.
 
-Use scope series with a recurring master; use scope single with an ordinary event or one occurrence. The engine rejects an accidental single edit of a master and an accidental series edit of an occurrence. “This and following,” organizer transfer, sharing administration and local reminder delivery are unsupported. Reader calendars cannot be written. Guest permission/list changes require the organizer copy; the attendee response must match exactly one selected-account email. Current supported write roles are owner/writer. [Google event fields and partial responses](https://developers.google.com/workspace/calendar/api/v3/reference/events).
+Use scope series with a recurring master; use scope single with an ordinary event or one occurrence. The engine rejects an accidental single edit of a master and an accidental series edit of an occurrence. “This and following,” organizer transfer, sharing administration and local reminder delivery are unsupported. Reader calendars cannot be written. Guest permission/list changes require the organizer copy; the attendee response must match exactly one selected-account email. Owner/writer roles can write; writerWithoutPrivateAccess can change non-private events, while existing private events are masked and their mutations denied. [Google event fields and partial responses](https://developers.google.com/workspace/calendar/api/v3/reference/events).
 
 ETag mismatch records a conflict and preserves intent; if a subsequent read succeeds, the observed version appears in a calendar_conflict receipt and the canonical event projection. A crash triggers reconciliation before any new write. A repeat requires an unchanged ETag or absence of the stable create ID. Remote event content cannot prove invitation delivery: an acknowledgement establishes acceptance of the requested policy; a lost acknowledgement with notifications requested leaves calendar_notifications_unconfirmed even when event content is confirmed. The engine does not repeat invitations to eliminate that uncertainty. Use operation show/attempts to inspect the evidence; an audited abandon decision can stop unresolved work and release later changes to that event.
 
@@ -222,7 +222,7 @@ python3 -c 'import getpass,json; print(json.dumps({"imap_password":getpass.getpa
   target/production/release/nuncio-cli --json account connect-imap --config imap-public.json --credentials-stdin
 ```
 
-The production artifact paths above are the final intended operating paths; the existing Task11 production binaries predate these new commands until the next verified production rebuild. Current automated tests build separate feature artifacts under `target/test-harness/debug` with synthetic keystore files.
+The verified local archive includes these commands; see PACKAGING.md for its exact hash and operating limits. Current automated tests build separate feature artifacts under `target/test-harness/debug` with synthetic keystore files.
 
 Connection authenticates IMAP SASL PLAIN and SMTP PLAIN or LOGIN after TLS, then saves credentials in the profile's SecretStore. It sends no mail. The response reports advertised capabilities and any obsolete credential cleanup still pending. Configured folder existence and mail operation support are not established by this account probe yet. `account imap-config --account UUID` reads the saved configuration and last authenticated capability snapshot locally; `account check --account UUID` contacts both endpoints. `account list` stays local. `account disconnect --account UUID` removes access credentials while preserving local data. Reconnect with `--account UUID`; changing the canonical IMAP host/port/TLS or exact username fails identity matching. Address and SMTP configuration may be updated for that same principal.
 
@@ -259,7 +259,7 @@ For an explicit IMAP folder target, get its local collection UUID from `mail col
 
 IMAP `{"schema_version":1,"action":"trash","trashed":true}` moves a placement into the configured Trash folder and retains its original folder identity/UIDVALIDITY. An explicit Move or Copy into configured Trash also records origin; copying within Trash preserves an already-known origin. `trashed:false` restores to that original folder with a new destination UID. Already-Trash is a no-op. Already outside Trash with no pending origin is also a restore no-op. Origin metadata is encrypted and survives process death and full resync; it commits with the destination placement and operation receipt.
 
-Restore rejects an unknown origin, a retired/renamed original folder, or a changed original UIDVALIDITY. Mail put into Trash by another client has no provable original folder here; use an explicit Move to choose its destination. Folder names are not reused as identity after retirement, and neither Message-ID nor matching MIME proves an origin. Restore metadata was introduced in schema16; production binaries still predate Task12 until the next release verification.
+Restore rejects an unknown origin, a retired/renamed original folder, or a changed original UIDVALIDITY. Mail put into Trash by another client has no provable original folder here; use an explicit Move to choose its destination. Folder names are not reused as identity after retirement, and neither Message-ID nor matching MIME proves an origin. Restore metadata was introduced in schema16; the verified local production archive includes Task12 functionality; live MailPlus acceptance remains pending.
 
 ## SMTP submission and the client-managed Sent copy
 
@@ -281,6 +281,33 @@ If the daemon cannot prove acceptance after DATA began, `smtp_acceptance_unknown
 
 For `sent_policy: "server"`, the worker never issues client APPEND. It records the current Sent UIDNEXT immediately before transmitting DATA and requires a successful SMTP acknowledgement followed by a unique matching copy in that account/folder/UIDVALIDITY at or above that floor. It compares selected identity headers and exact body bytes, permits added trace headers and omission of the private Bcc header, and rechecks the candidate set. `server_sent_observed` records that positive placement observation before `sent_copy` publishes it locally. A changed body or missing copy remains unconfirmed and receives bounded observation retries; duplicate matching copies or a changed folder epoch remain uncertain. A Sent copy alone never proves delivery when the SMTP acknowledgement was lost.
 
-The current source schema is18. Older server-Sent operations lacking a stored observation floor/content fingerprint cannot gain invented evidence during migration. Provider capability/configuration profiles are verified offline, including server Sent without UIDPLUS and rejection before SMTP DATA for client Sent without UIDPLUS. Queued sends preserve the captured SMTP endpoint; changing it pauses dispatch with identity_mismatch until restored. Recovery/migration and cross-cutting adversarial/resource checks, final production artifacts and live MailPlus acceptance remain. Consult SESSION-STATE.md for current verification rather than treating development binaries as a packaged release. All automated SMTP tests use independent local Dovecot/Mailpit services, including actual daemon/CLI crash tests; no live provider compatibility is implied.
+The current source schema is22. Older server-Sent operations lacking a stored observation floor/content fingerprint cannot gain invented evidence during migration. Provider capability/configuration profiles are verified offline, including server Sent without UIDPLUS and rejection before SMTP DATA for client Sent without UIDPLUS. Queued sends preserve the captured SMTP endpoint; changing it pauses dispatch with identity_mismatch until restored. Recovery/migration and cross-cutting adversarial/resource checks have passed their offline gates. Final integrated/platform verification and live MailPlus acceptance remain pending. Consult SESSION-STATE.md for current verification rather than treating development binaries as a packaged release. All automated SMTP tests use independent local Dovecot/Mailpit services, including actual daemon/CLI crash tests; no live provider compatibility is implied.
 
 For later explicitly authorized live checks, use [MANUAL-ACCEPTANCE.md](MANUAL-ACCEPTANCE.md). It is currently deferred and unapproved.
+
+## JSON, exit codes and scripts
+
+Normal command output is JSON. `--json` selects compact output; otherwise it is
+indented. Successful responses use `{"schema_version":1,"result":...}`. Errors
+use `{"schema_version":1,"error":{"code":...,"message":...,"retryable":...}}`
+and also write a fixed human-readable message to stderr. Some errors include the
+last durable `operation`, `sync_run` or `recovery` receipt. Parse the error code and
+receipt as well as the process exit. Help/version output is ordinary CLI text.
+
+| Exit | Meaning |
+|---:|---|
+| 0 | Command completed; a queued-operation receipt still requires later status inspection |
+| 1 | Unexpected/internal failure, output failure or failed operation |
+| 2 | Invalid command, input/action file or unsupported test control |
+| 3 | Profile/provider authorization required or permission denied |
+| 4 | Unavailable/timeout/interrupted request or missing requested resource; inspect the error code |
+| 5 | Conflict, failed precondition, uncertainty, invalid replay position or recovery decision required |
+
+`error.retryable` reflects exit4; it does not authorize a fresh send or mutation.
+Reuse the same request UUID and intent to recover an enqueue acknowledgement, or
+inspect the existing durable receipt. Never turn a timeout into a new send UUID.
+`--wait` succeeds only on successful completion, not enqueue alone. JSONL change
+watch emits one versioned envelope per committed change and resumes using the
+last revision. Downloads write a new file and report verified metadata; binary
+payloads are not interleaved with JSON output. Terminal control characters are
+escaped while remaining recoverable by a JSON parser.

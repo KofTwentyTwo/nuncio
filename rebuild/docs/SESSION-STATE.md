@@ -10,138 +10,54 @@ Read AGENTS→CLAUDE, shared personal rules/style, rebuild/AGENTS, this file, TO
 
 ## Immediate next action
 
-Current handoff (September12 01:49UTC): full gate92959 completed all25 commands0,
-304 normal and304 feature workspace test executions;18 named suites all passed.
-Original gate source hashes verified unchanged; task14-all/summarize.py corrected
-ambiguous package-target attribution then passed0. All logs/counts/metrics/artifact
-hashes retained in task14-all/. Checkpoint the Calendar role fix next, then update
-keyring4.2.0 (explicit v1 native backend, same hex storage, delete_credential) and
-replace rustls-pemfile with existing rustls pki_types parser. No OS keychain access.
-Uncommitted Task15 foundations: independently tested clients/smoke and macOS egress;
-Linux egress branch unverified. scripts/package.py and test_package.py added:
-missing-file red1, two manifest/environment unit regressions green0; no archive yet.
-Contract regression prepared in task15-contract/contract.rs awaiting frozen baseline.
+Full local offline implementation/checks and repeatable macOS ARM candidate are
+verified. Next: final staged secret/whitespace/source checks, signed checkpoint and
+push to the authorized feature branch, verify exact remote head, then inspect the
+actual hosted workflow. Resolve demonstrated CI failures inline. Finish final
+requirement/report statuses from actual CI evidence; live/native-keystore acceptance
+remains deferred/unapproved/unverified. Do not mark the full goal complete.
 
-Continue the approved goal inline; finish demonstrated R01–R16 failures and missing
-Task14/15 deliverables. Do not reopen speculative recovery audits or completed work.
+Full integrated egress gate58495 completed0 September12 03:31UTC: all34commands,
+305tests in each workspace configuration,18named suites, six independent Python
+mail-service scripts, six then-current script tests, dependency and external client
+checks. Zero failed/ignored; all396snapshotted source files unchanged. Full logs,
+commands/counts/source verification/metrics: test-results/task15-all-green/.
 
-Last signed/pushed checkpoint: `0805a7dc4b7e544195f3eb14e8c85db54c41a004` (shared resource budgets/status); prior admission/memory/queued-worker checkpoint a29812f. Staged Gitleaks/whitespace, good signature, HTTPS push and exact remote hash verified (shell13278/0).
-Prior security checkpoint: `8811acdd14f86784993d525de24c582f3f010563`. Both signatures,
-pushes, exact remote hashes, staged Gitleaks and whitespace checks passed. Security
-nine-command plus four-command follow-up gates passed; resource six-command gate
-passed (shell34619, resource_system2/resourceE2E2/securityE2E2 andfmt/bothClippy).
-Evidence: `test-results/task14-security{,-trap}/` and `task14-resource-workloads/`.
-Implementation locations and precise limits/counts are in newest VERIFICATION.
+After that gate only scripts/package.py and scripts/test_package.py changed. The
+four broken packaged README links are fixed. Controlled repeat66388 failed1 despite
+22runtime checks passing in each build: only random embedded protobuf/OpenSSL paths,
+OpenSSL date and current metadata differed. Correction uses an exclusive fixed
+fresh build path, Git source epoch and normalized tar/gzip metadata; existing build
+data is refused/preserved. Ruff/format, package4 and fullscript8 pass. Controlled
+repeat31790 completed0: two fresh archives and both binaries are byte-identical,
+no input/file differences,22extracted checks each, all README links resolve.
+Original failure/diagnosis: task15-repeat/; corrected evidence: task15-repeat-green/.
+No running verification process remains at this checkpoint-preparation stage.
 
-Checkpointed changes bound account-request admission to64 (active limit2),
-preallocate bounded Google response buffers to reduce allocator churn, and defer
-queued operation preparation when admission is full. No schema/proto/dependency
-change. Test-only RSS diagnostics retain samples before assertions and optionally
-capture content-free native allocation summaries; the128MiB post-warm-up RSS
-bound remains unchanged.
+Canonical local artifact: dist/final-candidate/
+nuncio-0.1.0-rc-aarch64-apple-darwin-720081f661d0.tar.gz, SHA256
+47d65f00764da1cedb691109bd5b65c402ed253d69a40e2f0fe43fff13c0063f.
+Daemon:db0dce123719b9126b7aa5f09aa47e879d6d8c0759bf6a97dbda991c173e1bc3.
+CLI:1495aa640c31a3b45159005af8f040292af3d03ffacb41448d2b33e22163cac5.
+237third-party notices and frozen six-file v2 descriptor verified. EVIDENCE.json,
+SHA256 sidecar, build JSON and extracted-check JSON are adjacent. Archive metadata
+honestly records uncommitted source based on720081f; source hashes identify it.
+Archived docs are the build-time snapshot; current verification lives in source
+docs and the adjacent evidence. No installation/publication. Repeatability proof
+is for identical recorded platform/toolchain/compiler/SDK/checkout/build-path inputs.
 
-The14-command gate `python3 test-results/task14-resource-admission/run-gate.py`
-completed all0 (shell98949): fmt/bothClippy, engine129, resource system3/E2E2,
-security3/2, Google21/26, operations6, IMAP26/13, production-isolation2. Counts,
-source hashes, artifact hashes, metrics and logs are retained alongside results.json.
-This gate predates the operation-worker fix below. Prior failed RSS gate14707/1
-and investigation evidence remain in task14-queue-admission/; VERIFICATION records
-the failure, allocation evidence and subsequent unchanged-bound passes.
+Latest signed/pushed head still720081f661d0038de661953b5b82da8c4a2c4b44; Task15
+checkpoint/push next. No root Cargo changes; .github/workflows/rebuild-ci.yml is
+the only root integration change. Six named jobs/ten Linux/macOS matrix executions;
+YAML/binding checks, actual exit17 propagation per job and actionlint1.7.12 pass.
+Hosted CI remains unobserved. Staged preflight before latest edits:56approved files,
+356071diff bytes, Gitleaks0/whitespace0; rerun after final staging.
 
-New regression reproduced a direct admission interaction: full account-request
-capacity caused operation preparation to return Busy and permanently stop the
-worker (shell60230/101). It confirms no attempt/send occurred while saturated.
-Minimal fix treats pre-attempt Busy as deferral, keeping durable intent eligible
-for a later worker tick. Focused verification shell49015 passed1/exit0:
-`python3 test-results/task14-operation-admission/run-focused.py green`.
-Test verifies worker health, exactly one applied attempt and independent accepted
-send after capacity returns, without restart. Nine-command affected gate81153
-completed all0: fmt/bothClippy, engine129, resource_system4, operation_system6,
-GoogleE2E26, IMAPE2E13 and release_isolation2. Fresh normal artifacts include the
-fix. Exact results/counts/source/artifact hashes: task14-operation-admission/.
-Signed checkpoint a29812f committed/pushed; good signature and exact remote hash
-verified. SSH push/ls-remote failed because the agent refused signing; existing
-GitHub CLI HTTPS credentials worked with command-only helper (no remote changes).
-Resource-status actual CLI regression shell86524 failed101 as expected (missing
-resources object); artifacts/log: task14-resource-status/red.log. In-progress
-implementation adds process-local ResourceStatus through engine/proto/CLI,
-shared background-job64 admission for mail/calendar/operations, global network
-exchange2 admission with64 active+waiting calls, byte/page counters and queue depth.
-Google HTTP calls and IMAP/SMTP handshakes/command exchanges share one budget;
-idle IMAP/SMTP connections do not hold network permits. No schema/dependency change.
-Feature checks74325/33887 and featureClippy13625 passed; budget unit91489 passed1.
-Test binaries59074 built0; actual status regression85084 passed1/0. Mixed-provider
-system85437 failed because the fixture watched the network queue while CheckAccount
-waited in the earlier account coordinator. Corrected fixture uses actual OAuth
-callback;79577 passed1/0 with2active/1waiting and independent unchanged effects.
-Original failure remains at task14-resource-status/mixed-fixture-account-lane.log.
-
-The15-command gate shell57763 completed exit0 at00:57UTC:
-`python3 test-results/task14-resource-status/run-gate.py`. All15 checks passed:
-fmt/bothClippy, engine130, api-cli20, resource4/3, security3/2, Google21/26,
-operations6, IMAP27/13 and release-isolation2; zero failed/ignored.
-Summarize.py completed0, recording canonical counts, source/artifact hashes and
-independent resource/security metrics. Fresh production binaries verified below.
-Added docs/API.md from current proto/CLI code; local links verified. Descriptor
-freeze/external client/package evidence remains pending, explicitly documented.
-Resource checkpoint0805a7d is signed/pushed and verified. Now finish the explicit
-writerWithoutPrivateAccess Calendar-role gap (confirmed in current official
-Google CalendarList/sharing docs), Task14 --all and Task15 packaging/contract/
-egress/dependency/CI deliverables. Do not reopen completed recovery audits.
-
-Calendar-role fix now implemented, awaiting full gate. Independent mock red25702/101
-(unsupportedRole), entire mock contract green69060/0,26passed. Engine red97361/101;
-system API red78114/101; actual CLI red16362/101. Minimal provider_patch accepts
-limited writer for ordinary events but rejects modifications of private events.
-Mock independently hides private details in get/list/instances and rejects writes.
-Focused75329: engine4/system1/build passed; E2E failed only because new fixture
-called restart without stopping. Retained e2e-green.log; corrected fixture now
-force-kills then restarts, all assertions unchanged, focused53623/0 passed1.
-Evidence: test-results/task14-calendar-role/. Full `python3 scripts/verify.py --all`
-is running in shell92959; wrapper log/exit/source-hashes under task14-all/, runner
-logs/results under test-results/all/. Both builds, fmt and bothClippy passed;
-workspace tests currently running. Poll before rerunning. No role checkpoint yet.
-
-Task15 independent preparation: stricter process-local macOS sandbox-exec probe
-passed0, preserving loopback and rejecting external TEST-NET IPv4/IPv6 with EPERM;
-child inherits denial. Exact JSON at task15-egress/macos-probe.json. Policy:
-`(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*") (remote unix-socket))`.
-No host firewall changes. Runner integration/Linux/CI/container denial still pending.
-Cargo-deny0.19.8 review99059 exited5:3 unmaintained advisories (derivative/instant via
-keyring2→secret-service3→zbus3; direct rustls-pemfile2), plus3 license-policy failures
-(two0BSD, oneCDLA-Permissive-2.0). No vulnerability finding in that run; do not call
-the audit clean. Full JSON/config/current RustSec checkout under task15-dependencies/.
-After Task14 gate, migrate supported keyring backend/version and PEM parsing, review
-and include appropriate permissive license notices, then repeat dependency checks.
-Do not mutate shared Cargo/source/fixtures during the current full run.
-
-Independent Task15 files prepared without changing the running gate's Cargo sources:
-deny.toml and DEPENDENCIES.md; reviewed licenses/sources pass0 with374 license
-helps and zero errors/warnings. Three unmaintained advisories remain unfixed.
-scripts/egress.py now wraps macOS sandbox-exec; real wrapper tests pass0 and preserve
-injected command exit17, with parent/child IPv4/IPv6 EPERM and loopback success.
-Linux hosted-runner owner-filter branch is written but unverified (including
-IPv6 no-route/counter behavior); no local host firewall changes or CI claim.
-Container internal-network integration and verifier/CI integration remain pending.
-
-clients/smoke is a separate Cargo workspace/lockfile generating System client code
-directly from proto. First compilation47447/101 corrected build argument types;
-runtime red49910/101 demonstrated missing client behavior. Actual daemon/mock
-integration green7033/0 passed1, followed by external all-target Clippy0/fmt0.
-Normal/build cargo tree independently excludes engine, store, CLI, daemon, mock
-and nuncio-proto helper dependencies. Auth comes only through bounded stdin; test
-checks status/change identity, invalid token rejection and no remote sends/notifies.
-Evidence: task15-contract/{external-*,external-boundary.json}. Main verifier and
-package integration plus descriptor freezing remain pending; this new client is
-outside the already-running Task14 --all gate and has its own checks.
-
-Finish current Task14 resource implementation and independent concurrency/byte/
-batch observations.
-Existing Store queue64, upload4 and compose1 limits must remain intact. Completed
-workloads cover10,000 messages/100 provider+API pages, configured body refusal,
-8 exact16MiB attachment cycles with child RSS/latency, and64MiB+1 CLI-file refusal.
-Do not repeat those as new deliverables; integrate their evidence with new metrics.
-Then full offline verifier and Task15 contract/egress/dependency/package/CI work.
+Previous full gate98403/1 and sampler failures are preserved. Native numeric
+libproc/procfs sampler passed macOS/Linux real allocation tests; spawn_blocking
+keeps it off the mock runtime. Original1s request deadline,128MiB RSS growth bound
+and remote-effect assertions remain. Full provider egress/relay and dependency
+remediation evidence is in VERIFICATION; do not reopen already-passing foundations.
 
 ## Hourly status emails
 
@@ -162,7 +78,7 @@ search at approximately01:02UTC found no third message; one retry succeeded at
 approximately01:03UTC, Gmail ID/thread `1a0932257375285e`, SENT. Exact body and
 attempt history: test-results/status-emails/2026-09-11-1957.md. Recipient delivery
 or reading is not independently confirmed.
-Next due: September12 01:57UTC / September11 20:57Central. Check the clock during active goal execution;
+Next due: September12 03:57UTC / September11 22:57Central. Check the clock during active goal execution;
 At James's explicit request, a revised third report was sent at01:08UTC with all16
 task bars/percentages/hours. Gmail ID/thread1a09328893b32fa7, SENT; sent-folder read
 confirms the186505-byte inline PNG and matching content ID. Exact report and chart:
@@ -231,3 +147,8 @@ Task14: multi_engine_system and security_system/security_e2e with relevant gates
 Tasks03/15: explicit test egress denial (Docker bridge alone is not a firewall); external descriptor-generated client and contract freeze/docs; dependency advisory/security/license checks; package.py and extracted artifacts; CI definitions and required-job failure behavior. Task16: final R01–R16 evidence matrix plus operating/recovery/compatibility/risk report. MANUAL-ACCEPTANCE.md exists; all live acceptance is unapproved/unverified. Passing local mocks does not prove live Google/MailPlus compatibility; local checks do not prove remote CI ran.
 
 Local binary locations: `target/production/release/{nunciod,nuncio-cli}` and feature-only `target/test-harness/debug/{nunciod,nuncio-cli}`. Production hashes were refreshed by the restore-retry gate above. These are not installed or packaged releases. No full Task13 or R01–R16 completion claim.
+
+Hourly21:57 report sent September12 approximately02:57:13UTC, ID/thread
+1a0938c424bff603, SENT. Embedded184157-byte chart covers all16 tasks; estimates
+7–14offline hours plus3–6deferred live hours. Full58495gate pending; focused
+resource fix passed. Body/chart/estimates/receipt: status-emails/2026-09-11-2157*.

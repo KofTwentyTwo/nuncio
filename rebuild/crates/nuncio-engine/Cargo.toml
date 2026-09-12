@@ -18,7 +18,6 @@ async-imap.workspace = true
 lettre.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
-rustls-pemfile.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

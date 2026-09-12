@@ -10,7 +10,10 @@ use tokio::{
     net::TcpStream,
 };
 use tokio_rustls::{
-    rustls::{self, pki_types::ServerName},
+    rustls::{
+        self,
+        pki_types::{pem::PemObject, CertificateDer, ServerName},
+    },
     TlsConnector,
 };
 
@@ -129,7 +132,7 @@ pub(super) fn trust(pem: Option<&str>) -> Result<Arc<rustls::ClientConfig>, Mail
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     if let Some(pem) = pem {
-        let certs = rustls_pemfile::certs(&mut pem.as_bytes())
+        let certs = CertificateDer::pem_slice_iter(pem.as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| MailError::Invalid)?;
         if certs.is_empty() {

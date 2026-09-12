@@ -1,0 +1,33 @@
+[package]
+name = "stop-token"
+version = "0.7.0"
+authors = ["Aleksey Kladov <aleksey.kladov@gmail.com>", "Yoshua Wuyts <yoshuawuyts@gmail.com>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/async-rs/stop-token"
+homepage = "https://docs.rs/stop-token"
+documentation = "https://docs.rs/stop-token"
+
+description = "Experimental cooperative cancellation for async Rust"
+
+[package.metadata.docs.rs]
+features = ["docs"]
+rustdoc-args = ["--cfg", "feature=\"docs\""]
+
+[features]
+all = ["tokio", "async-io", "async-std"]
+docs = ["async-io"]
+
+[dependencies]
+async-channel = "1.6.1"
+async-global-executor = { version = "2.0.2", optional = true }
+async-io = { version = "1.6.0", optional = true }
+async-std = { version = "1.10.0", optional = true }
+cfg-if = "1.0.0"
+futures-core = "0.3.17"
+pin-project-lite = "0.2.0"
+tokio = { version = "1.9.0", features = ["time"], optional = true }
+
+[dev-dependencies]
+async-std = { version = "1.10.0", features = ["attributes"] }
+tokio = { version = "1.9.0", features = ["rt", "macros"] }

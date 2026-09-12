@@ -6,9 +6,11 @@ of generated protobuf types; other clients should use the same contract and keep
 engine/storage dependencies out of their applications.
 
 The source of truth is [`crates/nuncio-proto/proto/nuncio/v2`](../crates/nuncio-proto/proto/nuncio/v2).
-`nuncio-proto::DESCRIPTOR` embeds the generated file descriptor set. Release
-packaging, descriptor freezing and the standalone generated-client compatibility
-check are still pending; see [VERIFICATION.md](VERIFICATION.md) for actual evidence.
+`nuncio-proto::DESCRIPTOR` embeds the generated file descriptor set. The six-file
+descriptor is frozen and a clean local package has been verified. A standalone generated-client
+status/watch smoke now exists in [clients/smoke](../clients/smoke/README.md), with
+its own workspace/lockfile and no engine or Nuncio client-library dependency.
+The integrated runner is being verified; see [VERIFICATION.md](VERIFICATION.md).
 
 ## Connection and identity
 
@@ -74,3 +76,20 @@ payload examples, JSON/streaming conventions, binary output and exit statuses.
 Secrets use private files or standard input as documented. Automated examples and
 acceptance tests use the independent local providers; live acceptance remains a
 separate, explicitly authorized procedure in [MANUAL-ACCEPTANCE.md](MANUAL-ACCEPTANCE.md).
+
+## Reviewed v2 release freeze
+
+`crates/nuncio-proto/proto/nuncio.v2.bin` freezes the six current descriptors,
+including field numbers/types, reservations, RPC names and streaming modes.
+`cargo test --locked -p nuncio-proto --test contract` compares the generated
+descriptor with that checked-in baseline. The exact freeze intentionally rejects
+additions too: review any contract change before regenerating it. Never reuse a
+field number, change a field wire type, or silently replace a released RPC; reserve
+removed fields and introduce a new API version for incompatible behavior.
+The local package verifies its freshly built descriptor against the same freeze.
+
+The independent [smoke client](../clients/smoke/README.md) generates its own status/
+watch bindings in a separate Cargo workspace. Its normal/build dependency tree
+contains no engine, storage, daemon, mock, CLI, or Nuncio client-helper dependency.
+Its subprocess test authenticates, reads status and a replayed change, rejects a
+bad token, and independently checks that no send/notification occurred.

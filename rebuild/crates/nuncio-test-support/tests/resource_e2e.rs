@@ -168,32 +168,25 @@ async fn resource_status_exposes_held_requests_queues_bytes_and_restart_reset(
     Ok(())
 }
 fn rss_kib(pid: u32) -> Result<u64, TestError> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid.to_string()])
-        .output()?;
-    assert!(
-        output.status.success(),
-        "owned daemon must remain alive while sampling"
-    );
-    Ok(std::str::from_utf8(&output.stdout)?.trim().parse()?)
+    Ok(process_stats(pid)?["rss_kib"].as_u64().unwrap())
 }
 fn thread_count(pid: u32) -> Result<usize, TestError> {
-    let mode = if cfg!(target_os = "macos") {
-        "-M"
-    } else {
-        "-L"
-    };
-    let output = std::process::Command::new("ps")
-        .args([mode, "-p", &pid.to_string()])
+    Ok(usize::try_from(
+        process_stats(pid)?["threads"].as_u64().unwrap(),
+    )?)
+}
+fn process_stats(pid: u32) -> Result<Value, TestError> {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/process_stats.py");
+    let output = std::process::Command::new("python3")
+        .arg(script)
+        .arg(pid.to_string())
         .output()?;
     assert!(
         output.status.success(),
-        "owned daemon thread sampling failed"
+        "owned daemon sampling failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    Ok(std::str::from_utf8(&output.stdout)?
-        .lines()
-        .count()
-        .saturating_sub(1))
+    Ok(serde_json::from_slice(&output.stdout)?)
 }
 async fn allocation_summaries(pid: u32, iteration: usize) -> Result<(), TestError> {
     if !cfg!(target_os = "macos") || std::env::var_os("REBUILD_ALLOCATION_PROFILES").is_none() {
@@ -236,7 +229,10 @@ impl Sampler {
             let mut samples = Vec::new();
             let mut tick = tokio::time::interval(Duration::from_millis(100));
             loop {
-                tokio::select! {_=stopped.changed()=>return Ok(samples),_=tick.tick()=>samples.push(rss_kib(pid)?)};
+                tokio::select! {
+                    _ = stopped.changed() => return Ok(samples),
+                    _ = tick.tick() => samples.push(tokio::task::spawn_blocking(move || rss_kib(pid)).await??),
+                };
             }
         });
         Self {

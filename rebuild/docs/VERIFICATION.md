@@ -1,5 +1,156 @@
 # Verification evidence
 
+## Verified repeatable local candidate
+
+Corrected two-build comparison31790 completed0 September12 03:46UTC. Both builds
+were fresh and each passed22 extracted-binary checks. Source/docs were unchanged;
+no differing packaged files, no broken README links, and byte-identical archives:
+SHA25647d65f00764da1cedb691109bd5b65c402ed253d69a40e2f0fe43fff13c0063f.
+Canonical copy: dist/final-candidate/nuncio-0.1.0-rc-aarch64-apple-darwin-720081f661d0.tar.gz.
+Daemon SHA256db0dce123719b9126b7aa5f09aa47e879d6d8c0759bf6a97dbda991c173e1bc3;
+CLI SHA2561495aa640c31a3b45159005af8f040292af3d03ffacb41448d2b33e22163cac5.
+237third-party notices, descriptor and extracted manifest verified. Commands/logs/
+comparison are in task15-repeat-green/; canonical EVIDENCE.json/build/check/hash
+sidecars are adjacent to the archive. No installation or publication.
+
+Archive metadata records its uncommitted720081f source state and hashes. Its docs
+are the build-time snapshot; this current report and adjacent evidence record the
+completed verification. Same-input repeatability was established on this recorded
+macOS ARM/compiler/SDK/checkout/build-path environment, not across differing build
+environments or platforms. Only package.py/test_package.py changed after full
+34-command gate58495; subsequent Ruff/format, package4/fullscript8 and both actual
+clean packages verify those changes. Original comparison66388/1 is retained below.
+Hosted CI and live/native-keystore acceptance remain pending.
+
+## Controlled package repeatability failure and correction
+
+Two unchanged-input clean packages66388 each passed22 extracted checks and all
+README links resolved. Comparison exited1: archives/binaries differed. Exact
+comparison/differing-string evidence is in task15-repeat/. The differing binary
+strings were random generated-protobuf/OpenSSL build paths and OpenSSL build time;
+metadata differed only by built_at. Sizes were equal;155daemon/88CLI bytes differed.
+No source or documentation changed during the comparison. This is retained as a
+real R16 verification failure, not counted as passing repeatability.
+
+Packaging now recreates a stable exclusive build directory, refuses existing data,
+uses the Git source epoch for OpenSSL and normalized tar/gzip metadata, and records
+actual verification time externally. New regressions failed before helpers existed;
+package4 tests now pass, fullscript8 tests pass under egress denial, Ruff/format0.
+The corrected full two-build comparison is running from task15-repeat-green/run.py;
+repeatability remains unproven until its exact hash comparison succeeds. No normal
+installation or live-provider/native-keystore access occurred.
+
+## Full integrated offline egress gate — passed
+
+September12 03:31UTC: shell58495 completed exit0. All34 commands passed, including
+both builds, Rust/Python formatting/lint, both Clippy configurations, both workspace
+runs (305passed/0failed/0ignored each), all18 named suites, the six-script independent
+mail-provider suite, six script regressions, cargo-deny and external generated
+client/boundary checks. Source verification matched all396 snapshotted files.
+
+Named Rust counts: Google mock26/system22/E2E27, operations6; IMAP contract2/system27/
+E2E13; recovery5, repair2/2, migration1, reconciliation3, multi-engine1; security3/2,
+resources4/3 and production isolation2. External generated-client E2E1. Repeated
+workspace/named executions are not distinct unique tests. Every recorded required
+suite passed without ignored tests. Logs/commands/results/counts/source hashes and
+benchmark JSON are preserved in test-results/task15-all-green/. This proves the
+local integrated run, not hosted CI or live provider/native-keystore acceptance.
+
+The subsequent package-only README correction addresses four links to unshipped
+session/plan files; Ruff/format and package unit2 pass. A fresh archive and controlled
+repeat-build comparison are next. No new production engine change after the gate.
+
+## Workflow static validation
+
+Official actionlint1.7.12, downloaded only into ignored test-results/actionlint-tool,
+passed the new rebuild workflow exit0 with no diagnostics. Archive SHA256 matched
+the publisher's checksum: aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f.
+Receipt, original checksum file and log are retained there. This supplements the
+existing YAML/job-binding and six real-subprocess failure-propagation checks; it
+is not evidence of hosted CI execution. No normal-environment installation.
+
+## Integrated egress gate failure and resource sampler correction
+
+Gate98403/1 stopped at the memory test before workload: setuid /bin/ps spawn was
+EPERM under unchanged Seatbelt policy. The isolated reproduction failed1; an
+unprivileged identical copy was SIGKILLed and discarded. Native libproc numeric
+sampling succeeded under the same restriction. New process_stats regressions:
+red1 missing module; green70517/0 (2tests macOS) and97213/0 (2tests Linux,
+network-disabled container), actual32MiB touched allocation and exited-PID refusal.
+First actual workload43390/1 then hit its1s sync deadline because subprocess
+sampling blocked the current-thread mock runtime. spawn_blocking correction:
+41482/0, all3 actualresourceE2E pass;8cycles16MiB in34.930s, peak255392KiB,
+idle148816–225456KiB. Original1s timeout,128MiB growth bound and independent
+remote bytes/counts assertions retained. No production code change.
+Evidence: task15-all/{exit.json,failed-all/}, task15-egress/{ps-red.*,
+ps-unprivileged.*,sampler-*,resource-sampler-first/,resource-green2.*,
+resource-metrics.json}. Fresh full gate58495 is running; no integrated pass claimed.
+
+## First verified local production archive
+
+Clean packaging80508/0 completed: `dist/task15-notices/
+nuncio-0.1.0-rc-aarch64-apple-darwin-720081f661d0.tar.gz`, SHA256
+`955df7cff297f077c0c3bae0f58a638f5d661088dbec7be3fa941dd4dce244cb`.
+Fresh isolated target build completed in1m41s; no test feature/mock artifact was
+accepted in the build graph. Frozen descriptor matched.237 compiled third-party
+notices verified, including upstream files omitted from crate distributions.
+Extracted manifest hashes matched and22 production-binary help/version/test-control
+checks passed with expected exits0/1/2 and no profile creation. Adjacent build JSON,
+verification JSON and SHA256 sidecar retained. The archive identifies its dirty
+source state and source hashes; it is a local candidate, not installed/published or
+proof of live keychain/provider compatibility. First attempt62175/1 stopped on a
+missing notice; original log retained. Full CI/egress integration remains pending.
+
+Archive executable hashes (also recorded in task15-package/binaries.json):
+- nunciod16,423,360bytes:73ee24c2d8df3af6934fcecd47fbfabee84f1cce5b8f638b89791809bcc8ab2b
+- nuncio-cli3,544,544bytes:ef952632ee7487284b99a492a0881d3d0f049ce022eab3d27dd66968ccfc521a
+
+These binaries include keyring4.2.0/Rustls PEM parsing. They supersede the older
+Task14 binary hashes for this candidate. Final docs will be repackaged after the
+integrated gate. Local documentation-link checks and Markdown fence checks pass0.
+
+## Task15 dependency and contract affected gate — passed
+
+Targeted keyring4.2.0 lock update14944/0 and fetch0 removed derivative, instant and
+rustls-pemfile. Native Rustls PEM parsing retains certificate validation. MacOS
+workspace/all-target check69065/0. Cargo-deny advisories/licenses/sources0: zero
+errors/warnings,352 license helps. Eight-command gate24095 completed all0:
+fmt/bothClippy, core/client tests, actual test binaries, IMAP system27/E2E13 and
+Google system22. Per-run counts/logs: task15-dependencies/. OS keychain access and
+live provider compatibility remain unverified; tests use synthetic stores.
+
+Independent generated client/production CLI/mock normal+build dependency scans0:
+100/142/154 package names; forbidden engine/proto/client dependencies absent as
+appropriate. Descriptor test1/0. Package script unit2/0. CI runner unit2/0 includes
+actual exit17 propagation for all six jobs and complete18-suite group coverage.
+Evidence: task15-contract/. Full newly integrated runner and archive are pending.
+
+Linux egress first attempt16516/2 timed out with default ICMP rejection. Independent
+TCP-reset diagnostic returned ECONNREFUSED with one counted rejection; the corrected
+rule then passed parent/child IPv4/IPv6 refusal with2 independently counted rejects
+per family. Success0/failure17 propagation and separate post-run chain/route cleanup
+checks passed in a disposable network-disabled Debian container. MacOS parent/child
+and actual external-client sandbox tests passed earlier. No host firewall was changed.
+Container evidence: task15-egress/{linux-success.json,linux-exit-0.json,
+linux-exit-17.json,linux-cleanup.log}; original failure retained. This is local
+Linux-container evidence, not a claim about hosted CI execution or Docker service
+network isolation, which still needs implementation/checks.
+
+## Calendar checkpoint and contract freeze
+
+Signed checkpoint720081f661d0038de661953b5b82da8c4a2c4b44 was committed/pushed;
+independent ls-remote matched. Staged Gitleaks35,972bytes/whitespace passed0, GPG
+signature good with unknown local ownertrust. Receipt: checkpoint-calendar/.
+
+Descriptor regression82556/101 rejected an empty freeze (six files expected).
+An attempted freeze lookup correctly refused multiple stale build-directory
+versions; selecting the actual cargo build-script output32938/0 avoids that
+ambiguity. Frozen six-file descriptor27,834bytes SHA256
+21ab39c24af1fd2029001195f3016e03f3da20b1e7ead0462751320012576bf5;
+contract green36458/0 passed1. Package script missing-file red1; manifest-tamper
+and compiler/test-control environment regressions pass2/0. No archive yet.
+These are later Task15 checks, separate from the full gate below.
+
 ## Full Calendar-role regression gate — passed
 
 September12 01:49UTC: `python3 scripts/verify.py --all` completed exit0

@@ -1,0 +1,127 @@
+{
+  "hashify@0.2.9": [
+    {
+      "path": "licenses/upstream/stalwartlabs-hashify-74bd8a251dff/LICENSES/Apache-2.0.txt",
+      "url": "https://github.com/stalwartlabs/hashify/blob/74bd8a251dff8a514039e035a6437eabf1b9fd57/LICENSES/Apache-2.0.txt",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+      "path": "licenses/upstream/stalwartlabs-hashify-74bd8a251dff/LICENSES/MIT.txt",
+      "url": "https://github.com/stalwartlabs/hashify/blob/74bd8a251dff8a514039e035a6437eabf1b9fd57/LICENSES/MIT.txt",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+  ],
+  "imap-proto@0.16.7": [
+    {
+      "path": "licenses/upstream/djc-tokio-imap-6593414bd66f/LICENSE-APACHE",
+      "url": "https://github.com/djc/tokio-imap/blob/6593414bd66f93b3caa5b5f7f24241e53c3d7da4/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+      "path": "licenses/upstream/djc-tokio-imap-6593414bd66f/LICENSE-MIT",
+      "url": "https://github.com/djc/tokio-imap/blob/6593414bd66f93b3caa5b5f7f24241e53c3d7da4/LICENSE-MIT",
+      "sha256": "d8ab53f67f8b31421c425bcebd9f78b689bec5712c83b43fad60a997fd7ac61e"
+    }
+  ],
+  "mail-builder@0.5.0": [
+    {
+      "path": "licenses/upstream/stalwartlabs-mail-builder-1f667e2d81b3/LICENSES/Apache-2.0.txt",
+      "url": "https://github.com/stalwartlabs/mail-builder/blob/1f667e2d81b3621184d798120267a144aad4124a/LICENSES/Apache-2.0.txt",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    {
+      "path": "licenses/upstream/stalwartlabs-mail-builder-1f667e2d81b3/LICENSES/MIT.txt",
+      "url": "https://github.com/stalwartlabs/mail-builder/blob/1f667e2d81b3621184d798120267a144aad4124a/LICENSES/MIT.txt",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    }
+  ],
+  "protoc-bin-vendored@3.2.0": [
+    {
+      "path": "licenses/upstream/stepancheg-rust-protoc-bin-vendored-895c0433c372/LICENSE.txt",
+      "url": "https://github.com/stepancheg/rust-protoc-bin-vendored/blob/895c0433c3727a552970ce961e398e20e52d6353/LICENSE.txt",
+      "sha256": "97647e63047ef75a82ee2928b335df94f45c87e08777dc033393c73294f3a57a"
+    }
+  ],
+  "protoc-bin-vendored-linux-aarch_64@3.2.0": [
+    {
+      "path": "licenses/upstream/stepancheg-rust-protoc-bin-vendored-895c0433c372/LICENSE.txt",
+      "url": "https://github.com/stepancheg/rust-protoc-bin-vendored/blob/895c0433c3727a552970ce961e398e20e52d6353/LICENSE.txt",
+      "sha256": "97647e63047ef75a82ee2928b335df94f45c87e08777dc033393c73294f3a57a"
+    }
+  ],
+  "protoc-bin-vendored-linux-ppcle_64@3.2.0": [
+    {
+      "path": "licenses/upstream/stepancheg-rust-protoc-bin-vendored-895c0433c372/LICENSE.txt",
+      "url": "https://github.com/stepancheg/rust-protoc-bin-vendored/blob/895c0433c3727a552970ce961e398e20e52d6353/LICENSE.txt",
+      "sha256": "97647e63047ef75a82ee2928b335df94f45c87e08777dc033393c73294f3a57a"
+    }
+  ],
+  "protoc-bin-vendored-linux-s390_64@3.2.0": [
+    {
+      "path": "licenses/upstream/stepancheg-rust-protoc-bin-vendored-895c0433c372/LICENSE.txt",
+      "url": "https://github.com/stepancheg/rust-protoc-bin-vendored/blob/895c0433c3727a552970ce961e398e20e52d6353/LICENSE.txt",
+      "sha256": "97647e63047ef75a82ee2928b335df94f45c87e08777dc033393c73294f3a57a"
+    }
+  ],
+  "protoc-bin-vendored-linux-x86_32@3.2.0": [
+    {
+      "path": "licenses/upstream/stepancheg-rust-protoc-bin-vendored-895c0433c372/LICENSE.txt",
+      "url": "https://github.com/stepancheg/rust-protoc-bin-vendored/blob/895c0433c3727a552970ce961e398e20e52d6353/LICENSE.txt",
+      "sha256": "97647e63047ef75a82ee2928b335df94f45c87e08777dc033393c73294f3a57a"
+    }
+  ],
+  "protoc-bin-vendored-linux-x86_64@3.2.0": [
+    {
+      "path": "licenses/upstream/stepancheg-rust-protoc-bin-vendored-895c0433c372/LICENSE.txt",
+      "url": "https://github.com/stepancheg/rust-protoc-bin-vendored/blob/895c0433c3727a552970ce961e398e20e52d6353/LICENSE.txt",
+      "sha256": "97647e63047ef75a82ee2928b335df94f45c87e08777dc033393c73294f3a57a"
+    }
+  ],
+  "protoc-bin-vendored-macos-aarch_64@3.2.0": [
+    {
+      "path": "licenses/upstream/stepancheg-rust-protoc-bin-vendored-895c0433c372/LICENSE.txt",
+      "url": "https://github.com/stepancheg/rust-protoc-bin-vendored/blob/895c0433c3727a552970ce961e398e20e52d6353/LICENSE.txt",
+      "sha256": "97647e63047ef75a82ee2928b335df94f45c87e08777dc033393c73294f3a57a"
+    }
+  ],
+  "protoc-bin-vendored-macos-x86_64@3.2.0": [
+    {
+      "path": "licenses/upstream/stepancheg-rust-protoc-bin-vendored-895c0433c372/LICENSE.txt",
+      "url": "https://github.com/stepancheg/rust-protoc-bin-vendored/blob/895c0433c3727a552970ce961e398e20e52d6353/LICENSE.txt",
+      "sha256": "97647e63047ef75a82ee2928b335df94f45c87e08777dc033393c73294f3a57a"
+    }
+  ],
+  "protoc-bin-vendored-win32@3.2.0": [
+    {
+      "path": "licenses/upstream/stepancheg-rust-protoc-bin-vendored-895c0433c372/LICENSE.txt",
+      "url": "https://github.com/stepancheg/rust-protoc-bin-vendored/blob/895c0433c3727a552970ce961e398e20e52d6353/LICENSE.txt",
+      "sha256": "97647e63047ef75a82ee2928b335df94f45c87e08777dc033393c73294f3a57a"
+    }
+  ],
+  "stop-token@0.7.0": [
+    {
+      "path": "licenses/upstream/async-rs-stop-token-33a32c175f5d/Cargo.toml",
+      "url": "https://github.com/async-rs/stop-token/blob/33a32c175f5d5141e6447381f126622406f295ac/Cargo.toml",
+      "sha256": "fc4c38b6e134c0fe1748f2761018c52d9ed591c6ddd53cc6d85735f125982fb8"
+    },
+    {
+      "path": "licenses/upstream/async-rs-stop-token-33a32c175f5d/LICENSE-APACHE",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
+  ],
+  "tonic-prost@0.14.6": [
+    {
+      "path": "licenses/upstream/hyperium-tonic-6cb6056b5a74/LICENSE",
+      "url": "https://github.com/hyperium/tonic/blob/6cb6056b5a748bc5a29bd48f4602dbc4e552bb7d/LICENSE",
+      "sha256": "e24a56698aa6feaf3a02272b3624f9dc255d982970c5ed97ac4525a95056a5b3"
+    }
+  ],
+  "tonic-prost-build@0.14.6": [
+    {
+      "path": "licenses/upstream/hyperium-tonic-6cb6056b5a74/LICENSE",
+      "url": "https://github.com/hyperium/tonic/blob/6cb6056b5a748bc5a29bd48f4602dbc4e552bb7d/LICENSE",
+      "sha256": "e24a56698aa6feaf3a02272b3624f9dc255d982970c5ed97ac4525a95056a5b3"
+    }
+  ]
+}

@@ -14,6 +14,57 @@ from services import MailServices, run_directory
 
 
 class IndependentMailServices(unittest.TestCase):
+    def test_all_services_use_one_internal_network(self):
+        runs = run_directory()
+        service = MailServices(Path(tempfile.mkdtemp(prefix="isolation-", dir=runs)) / "services")
+        try:
+            service.start()
+            self.assertEqual(len(service.compose("ps", "-q").decode().split()), 4)
+            containers = (
+                service.compose("ps", "-q", "dovecot", "mailpit", "mailpit_tls").decode().split()
+            )
+            self.assertEqual(len(containers), 3)
+            networks = set()
+            for container in containers:
+                attached = json.loads(
+                    service.command(
+                        [
+                            "docker",
+                            "inspect",
+                            "--format",
+                            "{{json .NetworkSettings.Networks}}",
+                            container,
+                        ]
+                    )
+                )
+                self.assertEqual(len(attached), 1)
+                networks.update(value["NetworkID"] for value in attached.values())
+            self.assertEqual(len(networks), 1)
+            for network in networks:
+                internal = json.loads(
+                    service.command(
+                        ["docker", "network", "inspect", "--format", "{{json .Internal}}", network]
+                    )
+                )
+                self.assertIs(internal, True)
+            relay = service.compose("ps", "-q", "relay").decode().strip()
+            attached = json.loads(
+                service.command(
+                    ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", relay]
+                )
+            )
+            self.assertEqual(len(attached), 2)
+            self.assertTrue(networks < {value["NetworkID"] for value in attached.values()})
+            controls = json.loads(
+                service.command(
+                    ["docker", "inspect", "--format", "{{json .HostConfig.Sysctls}}", relay]
+                )
+            )
+            self.assertEqual(controls["net.ipv4.ip_forward"], "0")
+            self.assertEqual(controls["net.ipv6.conf.all.forwarding"], "0")
+        finally:
+            service.stop()
+
     def test_remote_docker_context_is_rejected_before_service_mutation(self):
         service = MailServices(Path("unused-test-directory"))
         with (

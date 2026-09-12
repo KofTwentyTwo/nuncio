@@ -1,3 +1,20 @@
+# Current release-preparation actions
+
+- [x] Calendar limited-writer fix: full25-command gate passed, checkpoint720081f signed/pushed/verified.
+- [x] Dependency upgrade and affected8-command gate passed; cargo-deny errors/warnings0.
+- [x] Frozen v2 descriptor and independent generated-client smoke verified; normal dependency boundaries checked.
+- [x] Clean local archive80508 verified with22 extracted-binary checks and237 third-party notices; no installation/release.
+- [x] macOS egress probes/client smoke and Linux namespace0/17/counter/cleanup checks passed.
+- [x] Fixed pinned ingress relay: independent internal-only topology/TLS checks and all6 Python service scripts pass under egress denial. Strict Rust suites run in the full gate.
+- [x] Independent Python suite and six CI job groups integrated; YAML/binding/failure-propagation checks pass.
+- [x] Native numeric resource sampler passes macOS/Linux allocation tests; actual3resourceE2E pass under egress denial with original bounds/timeouts.
+- [x] Complete34-command integrated egress gate58495 passed;305tests in each workspace, allnamed/Python/dependency/client checks0;396source hashes unchanged. Original98403 retained.
+- [x] Packaged README fixed; two corrected fresh archives/binaries are byte-identical,22extracted checks each, all links valid. Canonical dist/final-candidate and exact proof recorded.
+- [ ] Update operating/recovery/package/compatibility docs and final R01–R16 evidence matrix; verified checkpoint/push and observe actual remote CI.
+- [ ] Live acceptance remains deferred/unapproved/unverified; goal stays active and incomplete.
+
+## Earlier task ledger
+
 # Rebuild TODO
 
 Full unbudgeted goal is active; inline execution; full offline Google/Synology mocks now. James authorized the initial checkpoint and regular commits/pushes to `feature/nuncio-google-first-rebuild` after relevant checks pass. Merges, releases, installation, remote settings and live acceptance remain unapproved. The executive report email was separately authorized and sent. Exact state, command statuses, paths and next action are in SESSION-STATE.md; dated evidence in VERIFICATION.md.
@@ -31,9 +48,9 @@ Full unbudgeted goal is active; inline execution; full offline Google/Synology m
 - [x] Task14 resource workloads:10,000 provider/API-paginated messages; configured body refusal; actual8-cycle16MiB attachment/RSS checks and64MiB+1 input refusal. All6 relevant gatecommands0 (resource system2/E2E2/securityE2E2 plusfmt/bothClippy).
 - [x] Task14 account-request admission/memory fix:14-command gate98949 passed with original RSS bound; new worker saturation failure60230 reproduced/fixed and focused49015 plus9-command81153 gate passed. Engine129/resource_system4/operations6/GoogleE2E26/IMAPE2E13/release2; fresh artifacts verified. Signed checkpoint a29812f pushed; exact remote hash/signature verified.
 - [x] Task14 shared job/network limits and numeric resource status through engine/API/CLI. Budget unit91489, actual resource-status85084 and mixed Google/Dovecot79577 pass;15-command gate57763 all0: engine130, API/CLI20, resources4/3, security3/2, Google21/26, operations6, IMAP27/13, release2 plusfmt/bothClippy. Counter/page/backoff/Synology assertions and fresh production artifacts verified; checkpoint next.
-- [x] Task14 final gate: all25 commands passed92959/0,304 tests per workspace run; preserved task14-all evidence. Historical context: resource instrumentation/security/convergence verified. Limited-writer Calendar fix passes independent mock26, engine4, API1 and actualCLI1; full --all running92959. Preserve all original assertions and provider observations.
+- [x] Task14 final gate: all25 commands passed92959/0,304 tests per workspace run; preserved task14-all evidence. Historical context: resource instrumentation/security/convergence verified. Limited-writer Calendar fix passes independent mock26, engine4, API1 and actualCLI1; full --all92959 passed. Preserve all original assertions and provider observations.
 - [ ] Task03/15: explicit test egress denial, fresh production artifacts/packages, contract/CLI external-client verification and CI files.
-- [ ] Task15 dependency review findings: replace unmaintained rustls-pemfile and keyring2's old derivative/instant dependency chain; review/include0BSD andCDLA-Permissive-2.0 notices; rerun cargo-deny. Review99059/5 recorded, not ignored.
+- [x] Task15 dependency findings resolved: removed rustls-pemfile/derivative/instant paths, reviewed0BSD/CDLA notices; cargo-deny0errors/warnings and8-command affected gate pass. Original99059/5 retained.
 - [ ] Task16: manual acceptance worksheet prepared (allliveunapproved/unverified); final requirement-to-evidence matrix, operating/recovery/compatibility docs; named live actions only after separate authorization when user resumes live scope.
 
-No R01–R16 marked fully complete. Original approved plan remains authoritative. A provider milestone is progress, not completion.
+The matrix distinguishes passed offline checks from pending hosted/live acceptance; the full goal remains incomplete. Original approved plan remains authoritative. A provider milestone is progress, not completion.

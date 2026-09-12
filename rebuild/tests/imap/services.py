@@ -180,13 +180,14 @@ class MailServices:
         self.started = True
         try:
             self.compose("up", "-d", "--pull", "never", "--no-build")
+            self.verify_network_isolation()
             for key, name, port in [
-                ("imaps", "dovecot", 31993),
-                ("imap", "dovecot", 31143),
-                ("smtp", "mailpit", 1025),
-                ("api", "mailpit", 8025),
-                ("smtps", "mailpit_tls", 1025),
-                ("api_tls", "mailpit_tls", 8025),
+                ("imaps", "relay", 31993),
+                ("imap", "relay", 31143),
+                ("smtp", "relay", 11025),
+                ("api", "relay", 18025),
+                ("smtps", "relay", 11026),
+                ("api_tls", "relay", 18026),
             ]:
                 address = self.compose("port", name, str(port)).decode().strip()
                 host, number = address.rsplit(":", 1)
@@ -249,6 +250,71 @@ class MailServices:
             finally:
                 self.stop()
             raise
+
+    def verify_network_isolation(self):
+        containers = self.compose("ps", "-q", "dovecot", "mailpit", "mailpit_tls").decode().split()
+        if len(containers) != 3:
+            raise RuntimeError("expected three independent mail-service containers")
+        networks = set()
+        for container in containers:
+            attached = json.loads(
+                self.command(
+                    [
+                        "docker",
+                        "inspect",
+                        "--format",
+                        "{{json .NetworkSettings.Networks}}",
+                        container,
+                    ]
+                )
+            )
+            if len(attached) != 1:
+                raise RuntimeError("mail-service container must have one isolated network")
+            networks.update(value["NetworkID"] for value in attached.values())
+        if len(networks) != 1:
+            raise RuntimeError("mail services must share one isolated network")
+        network = networks.pop()
+        internal = json.loads(
+            self.command(
+                ["docker", "network", "inspect", "--format", "{{json .Internal}}", network]
+            )
+        )
+        if internal is not True:
+            raise RuntimeError("mail-service network permits external egress")
+        relays = self.compose("ps", "-q", "relay").decode().split()
+        if len(relays) != 1:
+            raise RuntimeError("expected one fixed ingress relay")
+        attached = json.loads(
+            self.command(
+                ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", relays[0]]
+            )
+        )
+        relay_networks = {value["NetworkID"] for value in attached.values()}
+        if len(relay_networks) != 2 or network not in relay_networks:
+            raise RuntimeError("ingress relay must join only the provider and ingress networks")
+        sysctls = json.loads(
+            self.command(
+                ["docker", "inspect", "--format", "{{json .HostConfig.Sysctls}}", relays[0]]
+            )
+        )
+        if any(
+            sysctls.get(key) != "0"
+            for key in ["net.ipv4.ip_forward", "net.ipv6.conf.all.forwarding"]
+        ):
+            raise RuntimeError("ingress relay must not route provider packets")
+        (self.directory / "network-isolation.json").write_text(
+            json.dumps(
+                {
+                    "containers": containers,
+                    "network": network,
+                    "internal": True,
+                    "relay": relays[0],
+                    "relay_networks": sorted(relay_networks),
+                    "ip_forward": False,
+                },
+                indent=2,
+            )
+        )
 
     def api(self, path, *, raw=False, tls=False):
         if not path.startswith("/api/"):

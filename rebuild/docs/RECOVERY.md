@@ -1,6 +1,6 @@
 # Recovery
 
-Task 13 remains in progress. Encrypted backup/inspection/new-profile restore and projection repair work through the engine, authenticated API and CLI. Schema22 recovery has44 actual migration SIGKILL cases and five restore crash boundaries, with original keys/data and independently observed provider effects preserved. Explicit restored-operation reconciliation is implemented across Google mail/calendar and IMAP/SMTP; pending work stays held unless an explicit safe reconciliation or duplicate-risk decision permits progress. Latest startup/relative-path gate passes engine126, recoveryE2E4, IMAPE2E13, release-isolation2 and both Clippy configurations. Earlier upload/export crash cleanup, ordinary failed-job retirement, broader storage/error checks and final acceptance remain open. See [SESSION-STATE.md](SESSION-STATE.md) and [VERIFICATION.md](VERIFICATION.md) for exact evidence and remaining scope.
+Encrypted backup/inspection/new-profile restore and projection repair work through the engine, authenticated API and CLI. Schema22 recovery has44 actual migration SIGKILL cases and five restore crash boundaries, with original keys/data and independently observed provider effects preserved. Explicit restored-operation reconciliation is implemented across Google mail/calendar and IMAP/SMTP; pending work stays held unless an explicit safe reconciliation or duplicate-risk decision permits progress. Latest startup/relative-path gate passes engine126, recoveryE2E4, IMAPE2E13, release-isolation2 and both Clippy configurations. Earlier upload/export crash cleanup, ordinary failed-job retirement, broader storage/error checks and final acceptance remain open. See [SESSION-STATE.md](SESSION-STATE.md) and [VERIFICATION.md](VERIFICATION.md) for exact evidence and remaining scope.
 
 ## Commands and passphrase input
 
@@ -77,7 +77,7 @@ The request is durable and account-scoped. If the response is lost, repeat the i
 
 The default mode observes provider state and records evidence locally. Add `--resume-safe` only to permit safe continuation after the required positive evidence or version check. It does not authorize ambiguous SMTP delivery, IMAP copying or recreation of a missing restored calendar creation. An old “prepared” snapshot cannot establish what happened after the backup. A unique positive Gmail Sent observation can resolve the original send; a negative search leaves it uncertain. SMTP acceptance and Sent-copy evidence remain separate. For a restored SMTP send with a retained acceptance acknowledgement, explicit reconciliation can find a unique current Sent message without repeating delivery or APPEND. A client-managed Sent message must match the exact frozen bytes, including its private Bcc copy, and have a UID at or above the saved pre-DATA floor in the same mailbox epoch. Missing, duplicate, changed, or stale-epoch copies remain uncertain. An automatically held unknown APPEND requires an explicit reconciliation request for this search. Server-managed Sent uses its documented content fingerprint comparison. Existing confirmation, abandonment, and new-send decisions remain available.
 
-`--wait` exits5 when the outcome remains uncertain or conflicts; inspect the operation and its attempts. A lost/unknown RPC outcome exits4 with `request_outcome_unknown`: it does not prove that admission failed. Disconnected accounts retain the admitted request until reconnection. Current schema21 send and Gmail/Calendar mutation system/subprocess tests cover these behaviors with independent delivery, write and notification observations. A Calendar notification outcome stays unknown after event state is observed; explicit abandonment records the decision and preserves that uncertainty without another write. Restored IMAP flag and COPYUID-based transfer continuation now has independent system/subprocess evidence. Queued transfer snapshots stayheld; a retainedCOPYUID permits observation and explicit UID-scoped source removal. Positive client-managed Sent discovery is verified in the schema21 follow-up system/subprocess gate; exact frozen bytes, UID floor/epoch and independent copy/delivery effects are checked.
+`--wait` exits5 when the outcome remains uncertain or conflicts; inspect the operation and its attempts. A lost/unknown RPC outcome exits4 with `request_outcome_unknown`: it does not prove that admission failed. Disconnected accounts retain the admitted request until reconnection. Schema22 send and Gmail/Calendar mutation system/subprocess tests cover these behaviors with independent delivery, write and notification observations. A Calendar notification outcome stays unknown after event state is observed; explicit abandonment records the decision and preserves that uncertainty without another write. Restored IMAP flag and COPYUID-based transfer continuation now has independent system/subprocess evidence. Queued transfer snapshots stayheld; a retainedCOPYUID permits observation and explicit UID-scoped source removal. Positive client-managed Sent discovery is verified in the schema21 follow-up system/subprocess gate; exact frozen bytes, UID floor/epoch and independent copy/delivery effects are checked.
 
 ## Rebuilding provider projections
 
@@ -95,10 +95,19 @@ An actual repair requires a connected account and reads the provider. Mail stage
 
 Without `--wait`, retain the returned `run.id`. Inspect it with `system sync-status --account ACCOUNT_UUID --run RUN_UUID`, or request cancellation using `system cancel-sync` with those same arguments. Cancellation that arrives after publication cannot undo it. A crashed unfinished run becomes failed/interrupted on restart; rerun repair to fetch a fresh generation. Compatible in-progress full scans may be joined; an incompatible active scan reports busy. A corrupt/unreadable store returns a recovery error; repair does not replace the database or reset keys. Preserve originals and use a verified backup for new-profile recovery.
 
-## Work still required
+## Verification and current limits
 
-- Durable process-crash cleanup for backup/upload artifacts created before restore staging and retirement of ordinary failed restore jobs.
-- Historical payload checks for other write kinds, disconnect retention/same-identity reconnection and broader storage/WAL/export failure coverage.
-- Full security/resource/multi-engine acceptance, packages and extracted-artifact verification, and separately authorized live-provider acceptance.
+Historical migrations, process-crash cleanup, corrected-passphrase retry, durable
+state retention and restore reconciliation have passed offline system/subprocess
+checks. The full integrated release/egress run and final report remain pending;
+see [VERIFICATION.md](VERIFICATION.md) for actual counts, hashes and failures.
+The local archive under dist/task15-notices has passed extraction/manifest and
+production-control checks. No package has been installed or publicly released.
 
-Current local production executables are `target/production/release/{nunciod,nuncio-cli}`; the startup-cleanup gate records their hashes in `test-results/task13-startup-cleanup/artifacts.json`. The rebuild is checkpointed on its feature branch. These local artifacts and offline tests do not establish completed packaging, installation, live compatibility or remote CI results.
+A restored profile requires provider reconnection and explicit reconciliation of
+outbound work. Neither a successful local restore nor an empty provider search
+proves an earlier ambiguous send did not happen. Preserve the original operation
+and its receipts; inspect independent provider evidence before choosing manual
+confirmation, abandonment or a newly authorized resend. A missing recovery
+passphrase cannot be reset to decrypt a backup. Live Google/Synology and native
+keystore acceptance remain separately pending.

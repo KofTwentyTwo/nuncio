@@ -1,0 +1,227 @@
+name: Nuncio rebuild
+on:
+  push:
+    branches: [feature/nuncio-google-first-rebuild, dev]
+    paths: ["rebuild/**", ".github/workflows/rebuild-ci.yml"]
+  pull_request:
+    paths: ["rebuild/**", ".github/workflows/rebuild-ci.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: rebuild-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+    working-directory: rebuild
+jobs:
+  rebuild-lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - name: Prepare pinned toolchain and offline dependencies
+        run: |
+          rustup show active-toolchain
+          python3 -m pip install ruff==0.16.7
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path clients/smoke/Cargo.toml
+      - name: Run required offline checks with egress denied
+        run: python3 scripts/egress.py --evidence test-results/rebuild-lint-egress.json -- python3 scripts/verify.py --job rebuild-lint
+      - name: Retain command logs and numeric evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rebuild-lint-${{ matrix.os }}-evidence
+          path: |
+            rebuild/test-results/rebuild-lint/*.log
+            rebuild/test-results/rebuild-lint/results.json
+            rebuild/test-results/*-egress.json
+          if-no-files-found: warn
+          retention-days: 7
+  rebuild-mock-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - name: Prepare pinned toolchain and offline dependencies
+        run: |
+          rustup show active-toolchain
+          python3 -m pip install ruff==0.16.7
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path clients/smoke/Cargo.toml
+      - name: Run required offline checks with egress denied
+        run: python3 scripts/egress.py --evidence test-results/rebuild-mock-contract-egress.json -- python3 scripts/verify.py --job rebuild-mock-contract
+      - name: Retain command logs and numeric evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rebuild-mock-contract-${{ matrix.os }}-evidence
+          path: |
+            rebuild/test-results/rebuild-mock-contract/*.log
+            rebuild/test-results/rebuild-mock-contract/results.json
+            rebuild/test-results/*-egress.json
+          if-no-files-found: warn
+          retention-days: 7
+  rebuild-system:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - name: Prepare pinned toolchain and offline dependencies
+        run: |
+          rustup show active-toolchain
+          python3 -m pip install ruff==0.16.7
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path clients/smoke/Cargo.toml
+      - name: Run required offline checks with egress denied
+        run: python3 scripts/egress.py --evidence test-results/rebuild-system-egress.json -- python3 scripts/verify.py --job rebuild-system
+      - name: Retain command logs and numeric evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rebuild-system-${{ matrix.os }}-evidence
+          path: |
+            rebuild/test-results/rebuild-system/*.log
+            rebuild/test-results/rebuild-system/results.json
+            rebuild/test-results/*-egress.json
+          if-no-files-found: warn
+          retention-days: 7
+  rebuild-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - name: Prepare pinned toolchain and offline dependencies
+        run: |
+          rustup show active-toolchain
+          python3 -m pip install ruff==0.16.7
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path clients/smoke/Cargo.toml
+      - name: Run required offline checks with egress denied
+        run: python3 scripts/egress.py --evidence test-results/rebuild-e2e-egress.json -- python3 scripts/verify.py --job rebuild-e2e
+      - name: Retain command logs and numeric evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rebuild-e2e-${{ matrix.os }}-evidence
+          path: |
+            rebuild/test-results/rebuild-e2e/*.log
+            rebuild/test-results/rebuild-e2e/results.json
+            rebuild/test-results/*-egress.json
+          if-no-files-found: warn
+          retention-days: 7
+  rebuild-imap:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - name: Prepare pinned toolchain and offline dependencies
+        run: |
+          rustup show active-toolchain
+          python3 -m pip install ruff==0.16.7
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path clients/smoke/Cargo.toml
+      - name: Pre-pull independent pinned mail servers
+        run: |
+          docker pull dovecot/dovecot:2.4.5@sha256:c807be4fb5a97d9c3a90770569d3a6c4cbdcb36742ad41f90409cbd929166553
+          docker pull axllent/mailpit:v1.31.1@sha256:98b916bd3c8d61f7633a52d3ea2f58d00620cb01ca57ab59edde68c347a95365
+          docker pull haproxy:3.2-alpine@sha256:6343ce34a132a5dceaa24767d739df2bd519f8f7c1079ae39e4821334e8eb42e
+      - name: Run required offline checks with egress denied
+        run: python3 scripts/egress.py --evidence test-results/rebuild-imap-egress.json -- python3 scripts/verify.py --job rebuild-imap
+      - name: Retain command logs and numeric evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rebuild-imap-${{ matrix.os }}-evidence
+          path: |
+            rebuild/test-results/rebuild-imap/*.log
+            rebuild/test-results/rebuild-imap/results.json
+            rebuild/test-results/*-egress.json
+          if-no-files-found: warn
+          retention-days: 7
+  rebuild-release-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - name: Prepare pinned toolchain and offline dependencies
+        run: |
+          rustup show active-toolchain
+          python3 -m pip install ruff==0.16.7
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path clients/smoke/Cargo.toml
+      - name: Prepare advisory tool and database
+        run: |
+          cargo install cargo-deny --version 0.19.8 --locked
+          cargo deny fetch db
+      - name: Run required offline checks with egress denied
+        run: python3 scripts/egress.py --evidence test-results/rebuild-release-check-egress.json -- python3 scripts/verify.py --job rebuild-release-check
+      - name: Verify local production archive
+        run: python3 scripts/egress.py --evidence test-results/package-egress.json -- python3 scripts/package.py --output dist
+      - name: Retain command logs and numeric evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rebuild-release-check-${{ matrix.os }}-evidence
+          path: |
+            rebuild/test-results/rebuild-release-check/*.log
+            rebuild/test-results/rebuild-release-check/results.json
+            rebuild/test-results/*-egress.json
+          if-no-files-found: warn
+          retention-days: 7
