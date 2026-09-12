@@ -1,13 +1,13 @@
 # Requirement-to-evidence matrix
 
-Current qualification: the optional LIST-hint cursor correction passed full
-34-command offline gate88082,308tests per workspace, all separate suites and
-399unchanged source hashes. New real-SQLCipher regression failed before the fix;
-all7projection tests pass afterward, with full provider state/original assertions
-preserved. Actual prior hosted34681263133 remains9passed/1IMAP failure. Signed
-correction checkpoint, fresh clean artifact and actual hosted replacement are next.
-Priorbfc7c8e package remains historical evidence and predates the correction.
-Exact commands/statuses/locations: [VERIFICATION.md](VERIFICATION.md).
+Current qualification: signed checkpoint `6ff9bb9` passed all 34 offline commands,
+308 tests in each workspace configuration, and all ten actual hosted CI jobs.
+The fresh clean local archive `b26d2c93` passed repeatability and 22 extracted-binary
+checks per build. The optional LIST-hint cursor regression failed before the fix
+and passes afterward; full provider state and original assertions are preserved.
+Exact commands, statuses, and artifact paths are in [VERIFICATION.md](VERIFICATION.md)
+and the [implementation report](IMPLEMENTATION-REPORT.md). Live Google/Synology and
+native-keystore acceptance remain deferred, unapproved, and unverified.
 
 Working matrix for the approved September10specification. The full goal remains
 incomplete. Passed offline is not live-provider sign-off; Google/Synology and
@@ -36,9 +36,9 @@ storage, parsing and provider implementations.
 | R11 Export, encrypted backup/restore, migration and repair | Passed offline | [backup](../crates/nuncio-engine/src/store/backup.rs), [recovery](../crates/nuncio-engine/src/engine/recovery.rs), [Maintenance API](../crates/nuncio-proto/proto/nuncio/v2/maintenance.proto) | `recovery_e2e`, `migration_e2e`, `repair_system`, `repair_e2e`; 44 schema migration SIGKILL cases, five restore crash points, PDF/request fidelity and original preservation | Full integrated regression and final extracted-artifact checks passed |
 | R12 CLI/API parity, paging, byte streams and change replay | Passed offline | [CLI](../crates/nuncio-cli/src/main.rs), [protobuf contract](../crates/nuncio-proto/proto/nuncio/v2), [independent generated client](../clients/smoke/README.md) | Actual CLI suites, `cli_change_watch_replays_jsonl_and_rejects_a_future_revision`; external `clients/smoke/tests/daemon.rs` status/watch test and normal/build dependency-tree check | Frozen descriptor/client/archive verified; full integrated runner passed |
 | R13 Independent stateful Google mock and fault effects | Passed offline | [mock service](../crates/nuncio-test-support/src/google/mod.rs), [contract suite](../crates/nuncio-test-support/tests/google_mock_contract.rs) | 26 independent contract tests pass, including OAuth/HTTP validation, faults, remote state, notifications and limited-writer private-event enforcement | Full integrated regression passed; mocks cannot establish live equivalence |
-| R14 Separate real-store system and daemon/CLI E2E tests | Hosted CI pending | [process harness](../crates/nuncio-test-support/src/process.rs), [system harness](../crates/nuncio-test-support/tests/support/system.rs), [runner](../scripts/verify.py) | All required named suites exist and have prior recorded runs; full `--all` passed. Independent generated-client test also passes under actual macOS egress denial | Full run and independent server egress passed; hosted CI pending |
-| R15 Encryption, key separation, auth/TLS, inert display and test-hook exclusion | Passed offline | [security suites](../crates/nuncio-test-support/tests/security_system.rs), [subprocess security](../crates/nuncio-test-support/tests/security_e2e.rs), [release isolation](../crates/nuncio-test-support/tests/release_isolation.rs) | 168 invalid-auth cases; wrong-key/ordinary-SQLite rejection; encrypted DB/WAL/FTS/backup and original-log canaries; hostile-content/resource bounds; fresh production hook exclusion | Dependency findings resolved; prior clean6a324f9 archive verified; current cursor fix requires full regression/fresh artifact/hosted checks |
-| R16 Reproducible artifacts, CI, operating instructions and final evidence | Hosted CI pending | [API](API.md), [running](RUNNING.md), [recovery](RECOVERY.md), [manual worksheet](MANUAL-ACCEPTANCE.md) | Local production binaries/hashes and signed checkpoints recorded; external-client foundation verified; manual worksheet prepared | Local archive, descriptor and CI definitions exist; integrated/local package checks passed; hosted execution and authorized live acceptance pending |
+| R14 Separate real-store system and daemon/CLI E2E tests | Passed offline | [process harness](../crates/nuncio-test-support/src/process.rs), [system harness](../crates/nuncio-test-support/tests/support/system.rs), [runner](../scripts/verify.py) | All required named suites exist and have prior recorded runs; full `--all` passed. Independent generated-client test also passes under actual macOS egress denial | Full local run and independent-server egress passed; all ten actual hosted jobs passed on 6ff9bb9 |
+| R15 Encryption, key separation, auth/TLS, inert display and test-hook exclusion | Passed offline | [security suites](../crates/nuncio-test-support/tests/security_system.rs), [subprocess security](../crates/nuncio-test-support/tests/security_e2e.rs), [release isolation](../crates/nuncio-test-support/tests/release_isolation.rs) | 168 invalid-auth cases; wrong-key/ordinary-SQLite rejection; encrypted DB/WAL/FTS/backup and original-log canaries; hostile-content/resource bounds; fresh production hook exclusion | Dependency findings resolved; Clean 6ff9bb9 archive, full regression and actual hosted checks passed; native-keystore acceptance remains in R02 |
+| R16 Reproducible artifacts, CI, operating instructions and final evidence | Externally pending | [API](API.md), [running](RUNNING.md), [recovery](RECOVERY.md), [manual worksheet](MANUAL-ACCEPTANCE.md) | Local production binaries/hashes and signed checkpoints recorded; external-client foundation verified; manual worksheet prepared | Local archive, descriptor, full offline gate and all ten actual hosted jobs passed; named live acceptance remains pending |
 
 Live worksheet rows G01–G10, S01–S05 and X01 are all unapproved/unverified. The
 status-email connector is separately authorized and provides no rebuilt-provider

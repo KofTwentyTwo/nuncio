@@ -1,5 +1,54 @@
 # Verification evidence
 
+## September 12, 2026 — all actual hosted checks passed on 6ff9bb9
+
+Run34684158773 completed success; watcher3872 exited0. All ten jobs passed and
+all ten artifact directories were independently inspected. Both lint jobs passed
+155core tests/8commands each; mocks26/2commands each; Linuxsystem37/7commands;
+E2E40/7commands per platform; IMAP46/6commands; release3/8commands per platform,
+plus both package commands0. Zero failed/ignored Rust tests; parent/child egress
+denied and loopback allowed. All six Linux controller regressions passed.
+
+Exact proof: remote-ci/34684158773/{run-final.json,downloaded-summary.json,
+artifacts-final.json,watch-exit.json} and individual job directories. The original
+IMAP cursor test and large-mailbox resource case passed in the actual hosted job.
+Prior failures are retained. Hosted package hashes were not uploaded or inferred.
+Selected localb26d2c93 receipt now records this successful actual CI run.
+Production source remains verified6ff9bb9; only final dated reports/handoff change.
+Remaining completion condition: separately authorized live Google/Synology and
+native-keystore acceptance. Documentation checkpoint and handoff are being closed.
+
+
+03:57Central chart report1a094d6890dada3b independently verified SENT with183943-byte inline16-task PNG, matching table and plain-text fallback. Exact source/payload/receipt: status-emails/2026-09-12-0357*. Reports full34-command/308-per-workspace gate, signed6ff9bb9, freshb26d2c93 package, and5of10hosted jobs passed at03:55Central. No overall hosted/live success claim. Next04:57Central/09:57UTC.
+
+## September 12, 2026, 08:53 UTC — signed cursor checkpoint and fresh package verified
+
+Signed checkpoint6ff9bb9e7be23249c9f448276e08c3062efc44a7 committed/pushed after
+full34-command gate88082.9staged files/47,868diff bytes; source399hashes rechecked,
+doc links/fences, whitespace and Gitleaks0; signature/push/exact remote0.
+Commands/receipt: test-results/checkpoint-interest/. Actual hosted34684158773
+is running under watcher3872; both mocks passed26tests/2commands0 each, all6Linux
+controller steps passed. Eight jobs remain pending; no overall hosted pass yet.
+
+Fresh package pair51959 exited0. Both clean6ff9bb9 archives and binaries are
+identical;22extracted checks each,458manifest entries verified each,237notices,
+no changed inputs/differing files/missing README links. Metadata dirty:false,
+macOS ARM64/Rust1.97.1/Appleclang21, epoch1789202823. Parent/child egress denied.
+Current candidate: dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-6ff9bb9e7be2.tar.gz
+Archive SHA256:b26d2c93b57fbe31123ddaaa31a25fadb520e5d7fd78429ec603ee07078ed105
+Daemon SHA256:0dcdc7223d32a5b3b0f0dc94bf92bf8041796ab69131211094fc0ce2889ca9fa
+CLI SHA256:1495aa640c31a3b45159005af8f040292af3d03ffacb41448d2b33e22163cac5
+Proof: test-results/task16-interest-package/{results.json,comparison.json,
+receipt-validation.json,verified-candidate.json,a-egress.json,b-egress.json}.
+Selected dist/final-candidate/EVIDENCE.json preserves priorbfc7c8e receipt/archive.
+Repeatability covers identical recorded source/platform/compiler/SDK/paths only.
+Package source freeze is released; later dated docs do not relabel archived reports.
+
+Next: retain actual hosted outcomes, update final report/matrix, resolve only
+observed failures. Next16-task chart email03:57Central/08:57UTC;2–5offline active
+hours plus3–6deferredlive. No live/native-keystore acceptance, install/merge/release.
+
+
 ## September 12, 2026, 08:44 UTC — cursor correction full gate passed
 
 `python3 test-results/ci-imap-interest-all/run.py`, shell88082, exited0.

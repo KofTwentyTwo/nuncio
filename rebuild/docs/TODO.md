@@ -1,34 +1,22 @@
-# Current release-preparation actions
+# Current delivery and acceptance state
 
-- [x] Diagnose repeated hosted IMAP cursor failure from actual mailbox-state evidence; optional interest-hint regression red44102/101, green50258/0 (all7projection tests). Preserve original assertions and stored provider hints.
-- [x] Full34-command offline gate88082 passed:308tests per workspace, allseparate/Python/dependency/client checks0,399source hashes unchanged; original IMAP/resource assertions retained.
-- [ ] After full pass, checkpoint/push the cursor correction, verify a fresh clean production package pair and actual hosted run; prior bfc7c8e artifact predates this fix.
-- [x] Collect terminal34681263133 artifacts (9jobs passed/1IMAP failure); bothlint154tests/8commands0, bothrelease8commands0/isolation2/external1/package0. Prior failures retained; no hosted archive hash claim.
+- [x] Tasks 01–14 software implementation and independent mock/system/actual daemon-CLI coverage, including mail/calendar writes, recovery, security, and resource bounds.
+- [x] Full 34-command offline gate passed on 6ff9bb9: 308 tests per workspace configuration, all separate/Python/dependency/client checks passed, zero failed/ignored, 399 source hashes unchanged.
+- [x] Signed software checkpoint 6ff9bb9 pushed; signature and exact remote head verified.
+- [x] Fresh clean production package pair passed: identical b26d2c93 archives/binaries, 22 extracted checks and 458 manifest entries each, 237 notices; prior artifacts preserved.
+- [x] Actual hosted run 34684158773 passed all ten jobs; every job artifact was downloaded and checked. Prior failures remain recorded.
+- [x] Final implementation report, R01–R16 matrix, operating/recovery/compatibility guides, and manual worksheet prepared with actual evidence and precise limits.
+- [ ] Named Google live acceptance G01–G10: deferred, unapproved, unverified.
+- [ ] Named Synology/MailPlus acceptance S01–S05: deferred, unapproved, unverified.
+- [ ] Native-keystore behavior and final approved cleanup/sign-off X01: unverified; full goal remains incomplete.
 
-
-- [x] Calendar limited-writer fix: full25-command gate passed, checkpoint720081f signed/pushed/verified.
-- [x] Dependency upgrade and affected8-command gate passed; cargo-deny errors/warnings0.
-- [x] Frozen v2 descriptor and independent generated-client smoke verified; normal dependency boundaries checked.
-- [x] Clean local archive80508 verified with22 extracted-binary checks and237 third-party notices; no installation/release.
-- [x] macOS egress probes/client smoke and Linux namespace0/17/counter/cleanup checks passed.
-- [x] Fixed pinned ingress relay: independent internal-only topology/TLS checks and all6 Python service scripts pass under egress denial. Strict Rust suites run in the full gate.
-- [x] Independent Python suite and six CI job groups integrated; YAML/binding/failure-propagation checks pass.
-- [x] Native numeric resource sampler passes macOS/Linux allocation tests; actual3resourceE2E pass under egress denial with original bounds/timeouts.
-- [x] Complete34-command integrated egress gate58495 passed;305tests in each workspace, allnamed/Python/dependency/client checks0;396source hashes unchanged. Original98403 retained.
-- [x] Packaged README fixed; two corrected fresh archives/binaries are byte-identical,22extracted checks each, all links valid. Canonical dist/final-candidate and exact proof recorded.
-- [x] Operating/recovery/package/compatibility docs and working R01–R16 matrix recorded; signed7f81b73 checkpoint pushed/exact remote verified.
-- [x] Affected gate91079: all6outer/17nested commands passed; all56 subprocess tests passed, no failures/ignored. Production244files unchanged.
-- [x] Signed resource-fixture checkpoint2e4d30e pushed; exact remote head verified.
-- [x] Retain terminal hosted34672641999 failure:4macOS passes/6Linux control-connection failures; same-user controller regression reproduces cause.
-- [x] Verify cgroup egress fix locally, strict denial/controller continuity/exit/cleanup, script/style/workflow gates; signed1a0d954 checkpoint pushed/exact remote verified.
-- [x] Reproduce and correct hosted10k status starvation with one transactional FTS reset; focused red/green and full34-command gate91408 pass with307tests per workspace and all399source hashes unchanged. Original deadlines/workloads/assertions retained.
-- [x] Signed6a324f9 promotion correction pushed/exact remote verified; clean package pair14220 passed22checks each with identical bfc7c8e archives and unchanged inputs. Prior failures/artifacts retained.
-- [x] Retain actual hosted34679663120 failures and prepare numeric phase/mailbox-state diagnostics; focused Linux/macOS/IMAP comparisons and seven-command affected gate92835 pass without deadline/assertion changes.
-- [x] Signed275eb42 diagnostic checkpoint pushed/exact remote verified after seven-command affected gate.
-- [x] Observe terminal hosted34681263133 (9passed/1failed): cursor cause confirmed and focused correction passes; full gate remains above. Prior Linux transfer timeout cause remains unexplained.
-- [x] Final guide correction and refreshed local candidate45789 passed two identical fresh builds/22checks each; selected8996085 archive and prior candidates preserved. No product/package-code changes.
-- [x] Implementation report, requirement matrix, artifact hashes and operating/recovery limits prepared;17doc links/fences and whitespace pass. Update hosted results when available.
-- [ ] Live acceptance remains deferred/unapproved/unverified; goal stays active and incomplete.
+Documentation delivery receipts and any resulting CI handle are in
+`test-results/checkpoint-final/`; [SESSION-STATE.md](SESSION-STATE.md) gives the
+conditional next action. If the receipt already records the documentation push,
+do not create another equivalent checkpoint. Report-only changes do not require
+another production package. Continue existing verification, then honor the live
+deferral and blocked-state rules. Native apps, merge/release/installation, and
+remote settings changes are outside the authorization.
 
 ## Earlier task ledger
 
@@ -66,8 +54,8 @@ Full unbudgeted goal is active; inline execution; full offline Google/Synology m
 - [x] Task14 account-request admission/memory fix:14-command gate98949 passed with original RSS bound; new worker saturation failure60230 reproduced/fixed and focused49015 plus9-command81153 gate passed. Engine129/resource_system4/operations6/GoogleE2E26/IMAPE2E13/release2; fresh artifacts verified. Signed checkpoint a29812f pushed; exact remote hash/signature verified.
 - [x] Task14 shared job/network limits and numeric resource status through engine/API/CLI. Budget unit91489, actual resource-status85084 and mixed Google/Dovecot79577 pass;15-command gate57763 all0: engine130, API/CLI20, resources4/3, security3/2, Google21/26, operations6, IMAP27/13, release2 plusfmt/bothClippy. Counter/page/backoff/Synology assertions and fresh production artifacts verified; checkpoint next.
 - [x] Task14 final gate: all25 commands passed92959/0,304 tests per workspace run; preserved task14-all evidence. Historical context: resource instrumentation/security/convergence verified. Limited-writer Calendar fix passes independent mock26, engine4, API1 and actualCLI1; full --all92959 passed. Preserve all original assertions and provider observations.
-- [ ] Task03/15: explicit test egress denial, fresh production artifacts/packages, contract/CLI external-client verification and CI files.
+- [x] Task03/15: egress denial, fresh production packages, frozen contract/external client, and actual CI verified on 6ff9bb9; see the current delivery evidence.
 - [x] Task15 dependency findings resolved: removed rustls-pemfile/derivative/instant paths, reviewed0BSD/CDLA notices; cargo-deny0errors/warnings and8-command affected gate pass. Original99059/5 retained.
-- [ ] Task16: manual acceptance worksheet prepared (allliveunapproved/unverified); final requirement-to-evidence matrix, operating/recovery/compatibility docs; named live actions only after separate authorization when user resumes live scope.
+- [x] Task16 documentation: manual worksheet, final matrix and operating/recovery/compatibility guides prepared. Task16 itself remains incomplete: named live/native checks are the unchecked items in the current section above.
 
 The matrix distinguishes passed offline checks from pending hosted/live acceptance; the full goal remains incomplete. Original approved plan remains authoritative. A provider milestone is progress, not completion.
