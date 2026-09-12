@@ -359,14 +359,13 @@ fn resolved_name(
     resolve: &ResolveResult<'_>,
     element: &BytesStart<'_>,
 ) -> Result<Qname, MultistatusError> {
-    let local = String::from_utf8_lossy(element.local_name().into_inner()).into_owned();
+    let local = element.local_name().into_inner().to_string();
     let namespace = match resolve {
-        ResolveResult::Bound(ns) => Some(String::from_utf8_lossy(ns.0).into_owned()),
+        ResolveResult::Bound(ns) => Some(ns.0.to_string()),
         ResolveResult::Unbound => None,
         ResolveResult::Unknown(prefix) => {
             return Err(MultistatusError::Malformed(format!(
-                "undeclared namespace prefix `{}` on element `{local}`",
-                String::from_utf8_lossy(prefix)
+                "undeclared namespace prefix `{prefix}` on element `{local}`"
             )))
         }
     };
@@ -410,27 +409,19 @@ pub fn parse_multistatus(
                 walker.end(&name);
             }
             Event::Text(text) => {
-                let decoded = text
-                    .decode()
-                    .map_err(|e| MultistatusError::Malformed(e.to_string()))?;
-                walker.push_text(&decoded);
+                walker.push_text(text);
             }
             Event::CData(cdata) => {
-                let decoded = cdata
-                    .decode()
-                    .map_err(|e| MultistatusError::Malformed(e.to_string()))?;
-                walker.push_text(&decoded);
+                walker.push_text(cdata);
             }
             Event::GeneralRef(reference) => {
-                let name = reference
-                    .decode()
-                    .map_err(|e| MultistatusError::Malformed(e.to_string()))?;
+                let name: &str = reference;
                 if let Some(character) = reference
                     .resolve_char_ref()
                     .map_err(|e| MultistatusError::Malformed(e.to_string()))?
                 {
                     walker.push_text(&character.to_string());
-                } else if let Some(expansion) = resolve_predefined_entity(&name) {
+                } else if let Some(expansion) = resolve_predefined_entity(name) {
                     walker.push_text(expansion);
                 } else {
                     // Nuncio declares no DTD, so an unknown entity has no expansion; a

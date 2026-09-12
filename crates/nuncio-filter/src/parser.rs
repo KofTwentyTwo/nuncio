@@ -23,6 +23,9 @@ pub enum ParseError {
     /// AST depth limit exceeded (MAX_AST_DEPTH = 10).
     #[error("AST recursion depth limit exceeded (max 10)")]
     MaxDepthExceeded,
+    /// The operating system could not supply a random rule identifier.
+    #[error("cannot generate rule identifier: {0}")]
+    Randomness(String),
 }
 
 /// Custom SQL Dialect for Nuncio SQL (NSQL).
@@ -65,7 +68,7 @@ impl NsqlParser {
 
         let now = chrono::Utc::now().timestamp();
         Ok(FilterRule {
-            id: format!("rule-{}", generate_rule_id()),
+            id: format!("rule-{}", generate_rule_id()?),
             name: name_str,
             target_account,
             priority,
@@ -611,17 +614,16 @@ fn split_comma_outside_quotes(text: &str) -> Vec<String> {
 }
 
 /// Generates a fresh, collision-resistant rule id from the same CSPRNG
-/// (`aes-gcm`'s `OsRng`) that `nuncio-store` uses to source key material,
+/// (the operating system) that `nuncio-store` uses to source key material,
 /// rather than deriving the id from the rule's name/NSQL text. Two rules
 /// created with identical name and NSQL text MUST still get distinct ids --
 /// deriving the id from their content would make the second `CreateRule`
 /// silently overwrite the first via `save_filter_rule`'s `INSERT OR
 /// REPLACE`.
-fn generate_rule_id() -> String {
-    use aes_gcm::aead::{rand_core::RngCore, OsRng};
+fn generate_rule_id() -> Result<String, ParseError> {
     let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
-    hex::encode(bytes)
+    getrandom::fill(&mut bytes).map_err(|e| ParseError::Randomness(e.to_string()))?;
+    Ok(hex::encode(bytes))
 }
 
 #[cfg(test)]

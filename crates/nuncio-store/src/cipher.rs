@@ -1,6 +1,6 @@
 //! Cryptographic payload encryption and `age` streaming attachment cipher.
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use std::io::{Read, Write};
 use thiserror::Error;
@@ -28,12 +28,12 @@ impl PayloadCipher {
     pub fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CipherError> {
         let cipher = Aes256Gcm::new(key.into());
         let mut nonce_bytes = [0u8; Self::NONCE_LEN];
-        use aes_gcm::aead::rand_core::RngCore;
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        getrandom::fill(&mut nonce_bytes)
+            .map_err(|e| CipherError::EncryptionFailed(format!("OS randomness failed: {e}")))?;
+        let nonce = Nonce::from(nonce_bytes);
 
         let mut encrypted = cipher
-            .encrypt(nonce, plaintext)
+            .encrypt(&nonce, plaintext)
             .map_err(|e| CipherError::EncryptionFailed(e.to_string()))?;
 
         let mut output = Vec::with_capacity(Self::NONCE_LEN + encrypted.len());
@@ -53,10 +53,11 @@ impl PayloadCipher {
 
         let (nonce_bytes, payload) = ciphertext.split_at(Self::NONCE_LEN);
         let cipher = Aes256Gcm::new(key.into());
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes)
+            .map_err(|e| CipherError::DecryptionFailed(format!("invalid nonce: {e}")))?;
 
         cipher
-            .decrypt(nonce, payload)
+            .decrypt(&nonce, payload)
             .map_err(|e| CipherError::DecryptionFailed(e.to_string()))
     }
 
@@ -117,18 +118,17 @@ impl PayloadCipher {
         passphrase: &str,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, CipherError> {
-        let decryptor = match age::Decryptor::new(ciphertext) {
-            Ok(age::Decryptor::Passphrase(d)) => d,
-            Ok(_) => {
-                return Err(CipherError::DecryptionFailed(
-                    "unexpected age header format".to_string(),
-                ))
-            }
-            Err(e) => return Err(CipherError::DecryptionFailed(e.to_string())),
-        };
+        let decryptor = age::Decryptor::new(ciphertext)
+            .map_err(|e| CipherError::DecryptionFailed(e.to_string()))?;
+        if !decryptor.is_scrypt() {
+            return Err(CipherError::DecryptionFailed(
+                "unexpected age header format".to_string(),
+            ));
+        }
+        let identity = age::scrypt::Identity::new(secret_service_passphrase(passphrase));
 
         let mut reader = decryptor
-            .decrypt(&secret_service_passphrase(passphrase), None)
+            .decrypt(std::iter::once(&identity as &dyn age::Identity))
             .map_err(|e| CipherError::DecryptionFailed(e.to_string()))?;
 
         let mut plaintext = Vec::new();
@@ -141,12 +141,29 @@ impl PayloadCipher {
 }
 
 fn secret_service_passphrase(raw: &str) -> age::secrecy::SecretString {
-    age::secrecy::SecretString::new(raw.to_string())
+    age::secrecy::SecretString::from(raw.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decrypts_payload_written_by_aes_gcm_0_10() {
+        let encrypted = include_bytes!("../tests/fixtures/aes-gcm-0.10.bin");
+        let decrypted = PayloadCipher::decrypt_bytes(&[42u8; 32], encrypted)
+            .expect("existing AES-GCM payload remains readable");
+        assert_eq!(decrypted, b"Nuncio synthetic migration fixture");
+    }
+
+    #[test]
+    fn decrypts_attachment_written_by_age_0_10() {
+        let encrypted = include_bytes!("../tests/fixtures/age-0.10.bin");
+        let decrypted =
+            PayloadCipher::decrypt_attachment_stream("synthetic-test-passphrase-only", encrypted)
+                .expect("existing age attachment remains readable");
+        assert_eq!(decrypted, b"Nuncio synthetic migration fixture");
+    }
 
     #[test]
     fn aes_256_gcm_encrypt_decrypt_roundtrip() {

@@ -22,6 +22,7 @@ tracing.workspace = true
 keyring.workspace = true
 age.workspace = true
 aes-gcm.workspace = true
+getrandom.workspace = true
 tempfile.workspace = true
 zeroize.workspace = true
 hex = "0.4"

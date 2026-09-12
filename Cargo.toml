@@ -35,39 +35,40 @@ unreachable = "deny"
 
 [workspace.dependencies]
 tokio = { version = "1.38", features = ["full"] }
-async-trait = "0.1"
+async-trait = "0.1.92"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
-clap = { version = "4.5", features = ["derive", "env"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
 zeroize = { version = "1.8", features = ["derive"] }
 tempfile = "3.10"
-keyring = "2.3"
-age = "0.10"
-aes-gcm = "0.10"
-mail-parser = "0.9"
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
+age = "0.12.1"
+aes-gcm = "0.11.1"
+getrandom = "0.4"
+mail-parser = "0.11.9"
 bytes = "1.6"
-lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
+lettre = { version = "0.11.23", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
-tokio-rustls = "0.26"
+tokio-rustls = "0.26.5"
 rustls = { version = "0.23", features = ["ring"] }
 webpki-roots = "1.0"
 rustls-pki-types = "1.7"
 tokio-stream = "0.1"
-futures = "0.3"
+futures = "0.3.34"
 wiremock = "0.6"
 icalendar = "0.17"
 chrono-tz = "0.10"
 rrule = "0.10"
 chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-quick-xml = "0.41"
+quick-xml = "0.42.0"
 html2text = "0.12"
 rpassword = "7.3"
 sqlparser = "0.54"
@@ -76,7 +77,7 @@ regex = "1.10"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
-flate2 = "1.0"
+flate2 = "1.1.10"
 tar = "0.4"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 tonic = "0.14"
@@ -91,6 +92,3 @@ tonic-prost-build = "0.14"
 protoc-bin-vendored = "3.2"
 subtle = "2.6"
 fs4 = "0.13"
-
-
-

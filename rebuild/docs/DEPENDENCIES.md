@@ -1,5 +1,21 @@
 # Dependency review
 
+## September 12 repository-wide follow-up
+
+[DEPENDENCY-SECURITY-REPORT.md](DEPENDENCY-SECURITY-REPORT.md) records the current
+GitHub inventory, all eleven open dependency-update PRs, and remediation across
+the original workspace, rebuild, and independent client. GitHub reported zero
+open Dependabot security alerts, but the original workspace still required h2,
+keyring, age, event-listener, and optional SQLx/RSA remediation. These original
+workspace changes do not alter the rebuild/client lockfiles. Their fresh
+advisory checks remain clean. All three complete lockfiles also pass cargo-audit
+0.22.2 with zero vulnerabilities/warnings, and the final original workspace passes
+790 tests plus formatting/Clippy. Receipts and GitHub closure conditions are
+tracked in that report. Existing package notices below describe the earlier
+rebuild artifact, not a rebuilt original-workspace distribution.
+
+## Earlier rebuild checkpoint
+
 Dependency review and all237 packaged third-party notices passed after remediation. Hosted platform checks and native-keystore acceptance remain separate pending conditions. The first cargo-deny0.19.8 scan of the locked
 workspace completed on September12,2026UTC with exit5. Its current RustSec database
 reported three unmaintained packages: derivative2.2.0 (RUSTSEC-2024-0388) and

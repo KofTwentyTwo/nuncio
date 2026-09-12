@@ -1,4 +1,3 @@
-use aes_gcm::aead::{rand_core::RngCore, OsRng};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -163,7 +162,7 @@ impl SecretVault for OsKeyring {
     fn delete_secret(&self, key: &str) -> Result<(), VaultError> {
         let entry = keyring::Entry::new(&self.service, key)
             .map_err(|e| VaultError::StorageFailed(e.to_string()))?;
-        match entry.delete_password() {
+        match entry.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Err(VaultError::NotFound(key.to_string())),
             Err(e) => Err(VaultError::StorageFailed(e.to_string())),
@@ -212,7 +211,7 @@ impl SecretManager {
     }
 
     /// Retrieve raw key material stored under `account`, generating and persisting
-    /// `len` bytes of cryptographically random key material via a CSPRNG (`OsRng`) on
+    /// `len` bytes of cryptographically random key material via the OS CSPRNG on
     /// first use if none exists yet.
     ///
     /// This implements the mandatory key lifecycle: on first run a random key is minted
@@ -230,7 +229,8 @@ impl SecretManager {
             }),
             Err(VaultError::NotFound(_)) => {
                 let mut bytes = vec![0u8; len];
-                OsRng.fill_bytes(&mut bytes);
+                getrandom::fill(&mut bytes)
+                    .map_err(|e| VaultError::StorageFailed(format!("OS randomness failed: {e}")))?;
                 self.set_secret(account, &hex::encode(&bytes))?;
                 // Lifecycle visibility only: which purpose got a key minted, and how long it
                 // is, never the key material itself.
