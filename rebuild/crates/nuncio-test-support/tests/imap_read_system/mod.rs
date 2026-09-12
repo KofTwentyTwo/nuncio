@@ -60,6 +60,27 @@ pub(super) async fn list(
         .await?
         .into_inner())
 }
+fn mailbox_snapshot(h: &SystemHarness, account: &str) -> Result<Vec<(String, String)>, TestError> {
+    use nuncio_engine::secrets::SecretStore;
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(h.directory.join("profile.json"))?)?;
+    let id = manifest["id"].as_str().ok_or("profile ID missing")?;
+    let key = h
+        .secrets
+        .get(&format!("{id}/profile/database"))?
+        .ok_or("synthetic key missing")?;
+    let connection = rusqlite::Connection::open_with_flags(
+        h.directory.join("store.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    connection.pragma_update(None, "key", format!("x'{}'", hex::encode(key.as_slice())))?;
+    let mut query = connection.prepare("SELECT name,state_json FROM imap_mailboxes WHERE account_id=?1 AND retired=0 ORDER BY name")?;
+    let rows = query
+        .query_map([account], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 #[tokio::test]
 async fn imap_full_and_delta_preserve_exact_remote_placements_flags_and_uid_epochs(
 ) -> Result<(), TestError> {
@@ -170,10 +191,14 @@ async fn imap_full_and_delta_preserve_exact_remote_placements_flags_and_uid_epoc
         sync(&h, &mut mock, &account, false).await?;
         let empty = list(&h, &account).await?;
         assert!(empty.items.is_empty());
+        let before_empty_repeat = mailbox_snapshot(&h, &account)?;
         sync(&h, &mut mock, &account, false).await?;
+        let after_empty_repeat = mailbox_snapshot(&h, &account)?;
+        eprintln!("empty_mailboxes_before={before_empty_repeat:?} after={after_empty_repeat:?}");
         assert_eq!(
             list(&h, &account).await?.coverage.as_ref().unwrap().cursor,
-            empty.coverage.as_ref().unwrap().cursor
+            empty.coverage.as_ref().unwrap().cursor,
+            "empty mailbox states: before={before_empty_repeat:?} after={after_empty_repeat:?}"
         );
         assert_eq!(
             mock.control(json!({"command":"snapshot"})).await?["requests"]["imap UID FETCH"],

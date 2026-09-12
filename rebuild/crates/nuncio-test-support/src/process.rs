@@ -393,7 +393,9 @@ impl E2eHarness {
             Err(_) => {
                 child.kill().await?;
                 let _ = child.wait().await;
-                return Err(error("CLI deadline exceeded"));
+                return Err(error(format!(
+                    "CLI deadline exceeded at invocation {index}"
+                )));
             }
         };
         let stdout = bounded_read(&stdout_path)?;

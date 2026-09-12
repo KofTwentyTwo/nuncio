@@ -1,6 +1,6 @@
 # Delivery progress estimates
 
-As of September12,2026 01:57Central. These are engineering estimates for the
+As of September12,2026 02:08Central. These are engineering estimates for the
 approved sixteen implementation tasks, not measured percentages, R01–R16 sign-off,
 or a delivery promise. 100% means implementation and applicable offline checks
 passed; final integrated regression and live-provider acceptance remain separate.
@@ -23,15 +23,15 @@ and unknown defects. Shared remaining work is counted once. Native apps excluded
 | 12 Synology IMAP/SMTP mail support | 100% | 0 | Local Dovecot/Mailpit checks passed; live MailPlus is Task 16. |
 | 13 Export, backup, restore and repair | 100% | 0 | Implemented; migration and subprocess crash recovery checked. |
 | 14 Adversarial checks and resource bounds | 100% | 0 | Production promotion correction and full34-command offline gate passed,307tests per workspace; original bounds preserved. |
-| 15 Local packages, API contract and CI | 90% | 1–3 | 9/10 hosted jobs passed; one resource failure corrected locally. New production package and hosted verification needed after full regression. |
+| 15 Local packages, API contract and CI | 90% | 1–3 | Clean6a324f9 package pair passed22checks each, identical bytes. Hosted34679663120 ended8passed/2intermittent Linux failures; diagnostics under relevant verification. |
 | 16 Provider acceptance and final report | 50% | 4–8* | 1–2 h final report/CI evidence; 3–6 h live checks remain deferred/unapproved. |
 
 Offline remaining:2–5hours (Task15 artifact/hosted CI1–3, Task16 report1–2).
 Live acceptance:3–6hours after separate named-account approval, currently deferred.
 Total active effort:5–11hours; external waiting and unknown new defects excluded.
 The full promotion correction gate passed all34commands; focused SQLCipher improves
-from30s timeout to3.669s with unchanged deadline. New artifact pair and replacement
-hosted run remain pending. Existing8996085 archive is the preserved prior candidate.
+from30s timeout to3.669s with unchanged deadline. New artifact pair passed; diagnostic verification for two intermittent hosted failures remains. Current
+candidate bfc7c8e is verified;8996085 remains the preserved prior candidate.
 
 James requested this chart/table in every hourly email. Refresh estimates against
 current SESSION-STATE/TODO/VERIFICATION evidence before sending; explain material

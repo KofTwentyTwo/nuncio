@@ -297,9 +297,17 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
             action: nuncio_test_support::google::FaultAction::Delay { millis: 1250 },
         })
         .await;
+    eprintln!(
+        "resource_phase=initial_sync elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     result(
         h.cli(&["--json", "sync", "--account", &account, "--wait"])
             .await?,
+    );
+    eprintln!(
+        "resource_phase=metadata_query elapsed_ms={}",
+        started.elapsed().as_millis()
     );
     let listing = result(
         h.cli(&["--json", "mail", "list", "--account", &account])
@@ -334,6 +342,11 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
     let mut storage_sizes = Vec::new();
     for iteration_index in 0..8 {
         let iteration = Instant::now();
+        eprintln!(
+            "resource_phase=fetch iteration={} elapsed_ms={}",
+            iteration_index,
+            started.elapsed().as_millis()
+        );
         result(
             h.cli(&[
                 "--json",
@@ -346,6 +359,11 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
                 "--wait",
             ])
             .await?,
+        );
+        eprintln!(
+            "resource_phase=attachment iteration={} elapsed_ms={}",
+            iteration_index,
+            started.elapsed().as_millis()
         );
         result(
             h.cli(&[
@@ -365,6 +383,11 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
         );
         assert_eq!(std::fs::read(&file)?, payload);
         std::fs::remove_file(&file)?;
+        eprintln!(
+            "resource_phase=sample iteration={} elapsed_ms={}",
+            iteration_index,
+            started.elapsed().as_millis()
+        );
         idle.push(rss_kib(pid)?);
         thread_counts.push(thread_count(pid)?);
         storage_sizes.push((

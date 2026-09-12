@@ -1,6 +1,6 @@
 # Nuncio implementation report
 
-Status at September 12, 2026, 1:57 a.m. Central: **implemented; latest mail-promotion performance fix passed full offline regression; refreshed artifacts, hosted CI and live acceptance pending.** The full R01–R16 goal is incomplete. Google/Synology live checks remain deferred at James's direction. This report covers the approved separate `rebuild/` workspace; native apps, merge, release and normal-environment installation remain outside the work performed.
+Status at September 12, 2026, 2:36 a.m. Central: **implemented; latest mail-promotion performance fix passed full offline regression; clean production artifacts verified; hosted CI and live acceptance pending.** The full R01–R16 goal is incomplete. Google/Synology live checks remain deferred at James's direction. This report covers the approved separate `rebuild/` workspace; native apps, merge, release and normal-environment installation remain outside the work performed.
 
 The latest hosted run34676397291 completed with9passed jobs and1failure in the
 10,000-message resource-system test; strict IMAP/SMTP suites themselves passed.
@@ -9,10 +9,10 @@ request past30seconds. Replacing repeated per-message FTS scans with one affecte
 search reset inside the same transaction reduced that focused case to3.669seconds.
 Original deadlines, workload, cursor semantics and remote-effect assertions remain.
 Full/delta search rollback and account-isolation checks pass. The full offline gate
-passed all34commands/307tests per workspace in ci-promotion-all/; the correction
-is ready for its authorized signed checkpoint. Existing8996085
-archive is retained as the prior candidate and must be refreshed after this production
-change. These new results supersede the earlier build-time snapshot below.
+passed34commands/307tests per workspace. Signed6a324f9 is pushed and its clean
+production package pair passed22extracted checks each, with identical bytes.
+Hosted34679663120 ended8passed/2failed; the affected diagnostic gate passed; new hosted evidence is next; earlier failed runs/artifacts are retained.
+The current local candidate below includes the production correction.
 
 ## Delivered software
 
@@ -32,7 +32,8 @@ The [R01–R16 matrix](REQUIREMENTS.md) links implementation and executable evid
 | Full integrated egress-denied gate, shell 58495 (prior snapshot) | 34 commands passed; 305 Rust tests in each workspace configuration; zero failed/ignored | `task15-all-green/{results,counts,source-verification}.json` and command logs |
 | Separate named suites in that gate | Google mock 26 / system 22 / E2E 27; operations 6; IMAP contract 2 / system 27 / E2E 13; recovery 5; repair 2 / 2; migration 1; reconciliation 3; three-engine 1; security 3 / 2; resources 4 / 3; production isolation 2 | `task15-all-green/` |
 | Independent services, dependency and client checks | Six Python mail-service scripts passed; dependency advisories/licenses/sources passed; generated-client E2E 1 passed; CLI/client dependency boundaries passed | `task15-all-green/`; `task15-dependencies/`; `task15-contract/` |
-| Packaging and final guide correction | Eight script regressions passed; final two fresh packages each passed 22 extracted-binary checks and produced identical archive/binary bytes; guide identifies its own metadata/checksum | `task16-package-final/`; prior `task15-repeat-green/`; adjacent archive evidence |
+| Current clean6a324f9 package pair, shell14220 | Two fresh builds,22extracted checks each, identical archives/binaries,237notices; unchanged inputs | `task16-promotion-package/` and selected `dist/final-candidate/EVIDENCE.json` |
+| Packaging and final guide correction (prior snapshot) | Eight script regressions passed; final two fresh packages each passed 22 extracted-binary checks and produced identical archive/binary bytes; guide identifies its own metadata/checksum | `task16-package-final/`; prior `task15-repeat-green/`; adjacent archive evidence |
 | Hosted resource-fixture correction, shell 91079 | Six outer / 17 nested commands passed; 56 subprocess tests passed; both Clippy modes and formatting passed; parent/child egress checks passed | `ci-resource-fix/{results,counts,production-source-check}.json` and copied logs |
 | Hosted run 34671490682 on 7f81b73 | macOS lint/mock/release passed; macOS E2E failed its synthetic one-second large-payload deadline; six Ubuntu jobs cancelled when superseded | `remote-ci/34671490682/` |
 | Hosted rerun 34672641999 on 2e4d30e | all four macOS jobs passed, including the package command; all six Ubuntu jobs failed with runner communication loss; no overall pass claimed | [Actual workflow](https://github.com/KofTwentyTwo/nuncio/actions/runs/34672641999) |
@@ -43,21 +44,21 @@ The hosted failure was independently reproduced with a 1.25-second response dela
 
 The later Linux failures exposed a separate CI guard defect: filtering the whole runner UID also cut off GitHub control traffic. An independent same-UID controller regression reproduced that cutoff. A dedicated cgroup now limits filtering to test descendants; local IPv4/IPv6 controller continuity, test denial, exit0/17 propagation, detached-child termination and owned-resource cleanup pass. All eight existing script regressions pass under the macOS guard. All six hosted Linux controller checks subsequently passed in34676397291; nine jobs passed and the separate large-mailbox production resource failure is addressed by the current correction.
 
-## Prior verified local artifact — refresh pending
+## Verified local artifact
 
 From the isolated worktree's `rebuild/` directory:
 
 ```text
-dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-2e4d30ef9434.tar.gz
+dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-6a324f9d1cb1.tar.gz
 ```
 
 | Item | SHA-256 |
 |---|---|
-| Archive | `8996085e4e698383e11625d848b287616b165c0a9b33fb4430c8ab872cedc1be` |
-| `bin/nunciod` | `f64aad27cb3c75eebd05822f73f8439f4ae9fc0e52e9b8cc6e0bb0642c47b7de` |
+| Archive | `bfc7c8e70d8a0e68bd843a811e7dc9a49018f052c204fa4128991ab695ff1784` |
+| `bin/nunciod` | `7fd338ff1ccd3e5b0b8b1184a0dec1da23070b59f2822aad41498c9ad1e64476` |
 | `bin/nuncio-cli` | `1495aa640c31a3b45159005af8f040292af3d03ffacb41448d2b33e22163cac5` |
 
-The archive includes 237 third-party notices, protobuf sources/descriptor, operating documentation and a manifest. Adjacent `EVIDENCE.json`, checksum, build JSON and extraction-check JSON retain proof. Metadata honestly identifies the tested dirty source snapshot based on 2e4d30e with uncommitted documentation; it is not relabeled as a clean build. Repeatability applies to identical recorded source, platform, compiler, SDK and checkout/build paths. Linux/Windows artifacts and cross-platform byte equality are not inferred.
+The archive includes 237 third-party notices, protobuf sources/descriptor, operating documentation and a manifest. Adjacent `EVIDENCE.json`, checksum, build JSON and extraction-check JSON retain proof. Metadata identifies clean checkpoint6a324f9 with dirty:false; included reports retain their build-time timestamps. Current hosted results are recorded separately in this checkout. Repeatability applies to identical recorded source, platform, compiler, SDK and checkout/build paths. Linux/Windows artifacts and cross-platform byte equality are not inferred.
 
 ## Operation and recovery
 

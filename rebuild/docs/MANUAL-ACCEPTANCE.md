@@ -73,7 +73,7 @@ Do not inject production crashes or network failures during these minimal live c
 
 ## Sign-off
 
-- Software/offline gate and package evidence: pending full rebuild completion.
+- Software/offline gate and local package evidence: full34-command gate passed; clean6a324f9 package pair passed22checks each with identical hashes. Hosted34679663120 ended8passed/2failed; diagnostic verification is in progress; see current selected receipt.
 - Named live authorization: absent; user deferred live scope.
 - Google compatibility: unverified.
 - Synology/MailPlus compatibility and server versions: unverified.

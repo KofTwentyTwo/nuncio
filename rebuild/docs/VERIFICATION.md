@@ -1,5 +1,71 @@
 # Verification evidence
 
+## September 12, 2026, 07:36 UTC — diagnostic checkpoint verification passed
+
+Seven-command affected gate92835 exited0: fmt/bothClippy; complete E2E40;
+IMAPsystem27/actualIMAPE2E13; release-isolation2/external-client1;19nested commands0,
+83test executions, zero failed/ignored. No deadlines, remote-effect assertions or
+production source changed. Parent/child egress denied, loopback allowed. Proof:
+`test-results/ci-hosted-diagnostics/{results.json,summary.json,command-evidence/}`.
+Fresh existing artifact bfc7c8e retained; package174captured production src/proto/
+rootCargo inputs still match, and Git changes are limited to diagnostic tests/docs.
+
+The diagnostics add numeric phase/iteration/elapsed and CLI invocation index to
+resource failures, and read-only synthetic mailbox state around the original empty
+cursor assertion. Hosted34679663120 remains8passed/2failed; focused local Linux/
+macOS/independent-server cases passed, so no cause or product fix is claimed.
+Next: signed diagnostic checkpoint/push and actual hosted phase/state evidence.
+
+Hosted34679663120 is terminal8passed/2failed; watcher38369/1. New IMAPsystem
+failure:26passed/1failed at empty quiet cursor assertion line174, distinct SHA256
+cursors; independent service/contract passed, later suites in that job did not run.
+Local numeric diagnostic reproductions: macOS resource8636/0 (38.13s), isolated
+LinuxARM64twoCPU30860/0 (41.49s), original8x16MiB workload/40sCLI/30sHTTP/128MiB
+bounds unchanged. IMAPcursor76302/0 (6.87s,both capabilities), before/after mailbox
+states equal. Neither hosted cause proven; diagnostic-only changes undergo relevant
+seven-command gate ci-hosted-diagnostics before checkpoint. Source/package unchanged.
+
+At07:10UTC hosted34679663120 Linux E2E artifact reports resource_e2e2passed/1failed
+at actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_fetches:
+CLI deadline exceeded,55.45s total, cargo101/envelope1. Other named E2E suites pass.
+`gh run view --job --log-failed` returned1 because overall run is still active;
+artifact download returned0 and supplies authoritative test logs. No root cause
+claimed. Added numeric-only phase/iteration elapsed and CLI invocation diagnostics;
+no deadlines/assertions changed. Isolated Linux preparation in ci-linux-transfer/.
+
+## September 12, 2026, 07:08 UTC — clean checkpoint and production package pair
+
+Signed checkpoint `6a324f9d1cb142ffc08bc999367c33a15485600e` committed/pushed after the full34-command gate.
+Gitleaks and staged whitespace0, signature0, push0, exact remote head matched.
+12staged files/63,829diff bytes; commands and receipts in `test-results/checkpoint-promotion/`.
+Actual hosted run34679663120 is in progress on that head; watcher38369, evidence
+`test-results/remote-ci/34679663120/`. Both mock jobs passed; macOS downloaded proof
+confirms26tests/2commands0 and parent/child external denial. No overall CI pass yet.
+
+`python3 test-results/task16-promotion-package/run.py`, shell14220, exited0.
+Two fresh production builds from the clean checkpoint passed22extracted checks each
+and produced identical archives/binaries, with no tracked input changes or differing
+manifest files. All included manifest entries and package README links verified.
+Metadata: macOS ARM64/Rust1.97.1/Appleclang21, dirty:false, epoch1789196514,
+237third-party packages, no test features. Production flags/environment reject;
+normal help/version pass. Independent egress evidence records parent/child denial.
+
+Current candidate: `dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-6a324f9d1cb1.tar.gz`
+Archive SHA256: `bfc7c8e70d8a0e68bd843a811e7dc9a49018f052c204fa4128991ab695ff1784`.
+Daemon SHA256: `7fd338ff1ccd3e5b0b8b1184a0dec1da23070b59f2822aad41498c9ad1e64476`.
+CLI SHA256: `1495aa640c31a3b45159005af8f040292af3d03ffacb41448d2b33e22163cac5`.
+Exact proof: `test-results/task16-promotion-package/{results.json,comparison.json,
+a.log,b.log,a-egress.json,b-egress.json,verified-candidate.json}` and adjacent
+archive checksum/build/extracted-check receipts. `dist/final-candidate/EVIDENCE.json`
+selects this candidate; previous receipt/archive8996085 remain preserved.
+Repeatability is limited to identical recorded source/platform/compiler/SDK/paths.
+Nothing installed, merged or released. Live/native-keystore acceptance unverified.
+
+An ad hoc post-build receipt check first exited1 because it assumed CLI environment
+rejection used daemon exit1; the package contract specifies daemon1/CLI2. Corrected
+receipt inspection exited0, without product/test changes; receipt-validation.json
+retains that bookkeeping correction. The original package runner exited0 throughout.
+
 ## September 12, 2026, 06:57 UTC — promotion correction full gate passed
 
 `python3 test-results/ci-promotion-all/run.py` (shell91408) completed with exit0;
@@ -1432,3 +1498,7 @@ accept owner/writer only. This explicit compatibility gap remains pending after
 the resource checkpoint; tests must independently enforce private-event limits.
 Sources: [CalendarList](https://developers.google.com/workspace/calendar/api/v3/reference/calendarList)
 and [calendar sharing](https://developers.google.com/workspace/calendar/api/concepts/sharing).
+
+Diagnostic gate36484 stopped at Clippy101: unnecessary borrow of format! in new
+timeout text. Removed only that borrow; first logs/results retained in
+ci-hosted-diagnostics/first-lint-failure/. No product/deadline/assertion change.

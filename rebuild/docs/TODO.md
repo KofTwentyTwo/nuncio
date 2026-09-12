@@ -16,7 +16,9 @@
 - [x] Retain terminal hosted34672641999 failure:4macOS passes/6Linux control-connection failures; same-user controller regression reproduces cause.
 - [x] Verify cgroup egress fix locally, strict denial/controller continuity/exit/cleanup, script/style/workflow gates; signed1a0d954 checkpoint pushed/exact remote verified.
 - [x] Reproduce and correct hosted10k status starvation with one transactional FTS reset; focused red/green and full34-command gate91408 pass with307tests per workspace and all399source hashes unchanged. Original deadlines/workloads/assertions retained.
-- [ ] Sign/push verified promotion correction, verify replacement hosted run and two fresh current-source production packages; retain prior failures/artifacts.
+- [x] Signed6a324f9 promotion correction pushed/exact remote verified; clean package pair14220 passed22checks each with identical bfc7c8e archives and unchanged inputs. Prior failures/artifacts retained.
+- [x] Retain actual hosted34679663120 failures and prepare numeric phase/mailbox-state diagnostics; focused Linux/macOS/IMAP comparisons and seven-command affected gate92835 pass without deadline/assertion changes.
+- [ ] Sign/push diagnostics, observe actual replacement hosted run and establish causes for any recurring Linux resource/cursor failure; no product fix claimed yet.
 - [x] Final guide correction and refreshed local candidate45789 passed two identical fresh builds/22checks each; selected8996085 archive and prior candidates preserved. No product/package-code changes.
 - [x] Implementation report, requirement matrix, artifact hashes and operating/recovery limits prepared;17doc links/fences and whitespace pass. Update hosted results when available.
 - [ ] Live acceptance remains deferred/unapproved/unverified; goal stays active and incomplete.
