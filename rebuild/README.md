@@ -13,6 +13,15 @@ all 34 commands: 322 tests in each workspace configuration, zero failed/ignored,
 `164b021` also passed fresh repeatable local packaging. All ten current-source hosted rebuild jobs, seven security jobs and the actual
 testing-download/temporary installation passed; [the report](docs/IMPLEMENTATION-REPORT.md) records the evidence.
 
+Install the latest Apple Silicon testing build without cloning or compiling:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-google-first-rebuild/install-testing.sh | bash
+```
+
+Requires macOS 15+, Python 3.11+ and authenticated GitHub CLI 2.100+;
+[details and custom prefix](docs/TESTING-INSTALL.md).
+
 - [Run locally](docs/RUNNING.md) and [verify/use local packages](docs/PACKAGING.md)
 - [Account management](docs/ACCOUNT-MANAGEMENT.md)
 - [Download a testing build without compiling](docs/TESTING-INSTALL.md) — actual CI download/install verified

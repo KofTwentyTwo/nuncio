@@ -1,5 +1,11 @@
 # Current delivery and acceptance state
 
+## Curl bootstrap follow-up
+
+- [x] Implement the public Bash entry point with a pinned/checksummed Python installer and unchanged latest-successful-build selection.
+- [x] Add nine offline subprocess regressions for verification, failures, arguments, prerequisites and cleanup; RED/GREEN receipts retained.
+- [ ] Complete script/documentation quality checks, signed checkpoint/push, and actual public curl-to-Bash installation into a fresh private temporary prefix.
+
 ## Final acceptance handoff
 
 - [x] Documentation checkpoint `c662e48`: ten rebuild and seven security jobs passed; no watcher remains active.

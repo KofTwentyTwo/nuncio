@@ -22,6 +22,15 @@ The reference `nuncio-cli` consumes that API independently of engine/storage cod
 Native applications are outside this workspace's implementation scope. Contacts,
 JMAP, and CalDAV/CardDAV remain outside the active rebuild's approved provider set.
 
+Install the latest Apple Silicon testing build without cloning or compiling:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-google-first-rebuild/install-testing.sh | bash
+```
+
+Requires macOS 15+, Python 3.11+ and authenticated GitHub CLI 2.100+;
+[details and custom prefix](rebuild/docs/TESTING-INSTALL.md).
+
 For Apple Silicon laptop testing, the [testing installer](rebuild/docs/TESTING-INSTALL.md)
 downloads an eligible verified CI package without compiling locally. The first real download/temporary installation is verified at `164b021`; it
 selects a fully successful retained testing-branch run. It installs into a separate versioned prefix without starting a

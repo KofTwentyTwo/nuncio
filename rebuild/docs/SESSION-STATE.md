@@ -1,5 +1,28 @@
 # Rebuild session state
 
+Latest status email: September 12, 13:04 Central, message/thread
+`1a096ca869a72de3`, independently verified SENT to james@kof22.com with a
+220474-byte inline 21-task chart. The report acknowledges the missed 12:40
+update and tracks the new bootstrap at 75%, 0.5–1 remaining active hour.
+Receipt/body/chart: `test-results/status-emails/2026-09-12-1303*`.
+Next due 14:04 Central / 19:04 UTC during active execution.
+
+## Current follow-up — curl-to-Bash testing installation
+
+James requested a public `curl | bash` entry point so a laptop does not need a
+checkout. Root is implementing `../install-testing.sh` as a thin bootstrap of
+the existing verified Python installer. The Python source is pinned by commit
+and SHA-256, while application selection remains the newest successful retained
+testing run. No automatic prerequisite installation, daemon startup or live
+account action is included. The existing goal tool remains blocked on deferred
+live/native acceptance; this explicitly authorized installer follow-up is active.
+
+Nine offline bootstrap tests first failed on the missing entry point and now
+pass; all 31 script regressions, Ruff lint/format, Bash syntax and ShellCheck
+also pass. Next: finish document/secret checks, checkpoint/push, then verify the
+actual public curl pipeline into a fresh private temporary prefix. Record exact commands/exits and any resulting CI runs
+in `test-results/curl-bootstrap/`. Do not install into the normal environment.
+
 ## Final continuation — documentation CI passed; live acceptance deferred
 
 Documentation checkpoint `c662e48` passed all ten rebuild jobs in run

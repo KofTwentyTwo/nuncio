@@ -1,5 +1,24 @@
 # Verification evidence
 
+## Curl-to-Bash bootstrap follow-up
+
+Nine new subprocess tests failed before the root `install-testing.sh` existed
+(`test-results/curl-bootstrap/red.json`, exit1), then passed with the bootstrap
+(`green-initial.json`, exit0). They exercise Bash via stdin with synthetic
+network responses and a harmless Python payload: HTTPS-only fetch parameters,
+checksum refusal, partial-download refusal, private temporary cleanup, literal
+argument forwarding, isolated Python, exit propagation and prerequisite errors.
+A separate assertion ties the production checksum to the actual reviewed
+Python installer. No test contacts a provider or installs software.
+
+The Bash wrapper pins Python installer source13dbe549 and SHA256d786aa95;
+that installer continues selecting the newest fully successful retained CI
+application build. All 31 script regressions, Ruff lint/format, Bash syntax and ShellCheck passed
+(`checks-final.json`, all five commands exit0). The initial Ruff-format exit1
+and environment setup diagnostics remain retained; formatting was corrected
+without changing assertions. Actual public pipeline verification remains pending. Exact commands and receipts are in
+`test-results/curl-bootstrap/`; prior engine/provider evidence is unchanged.
+
 ## Final documentation CI and native acceptance worksheet
 
 Watcher `38391` exited 0. Actual documentation run `34706301412` passed all ten
