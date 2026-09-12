@@ -198,6 +198,9 @@ impl Drop for WorkerOwner {
 }
 
 impl Store {
+    pub fn queue_depth(&self) -> u64 {
+        (self.sender.max_capacity() - self.sender.capacity()) as u64
+    }
     async fn execute<T: Send + 'static>(
         &self,
         job: impl FnOnce(&mut rusqlite::Connection) -> Result<T, StoreError> + Send + 'static,

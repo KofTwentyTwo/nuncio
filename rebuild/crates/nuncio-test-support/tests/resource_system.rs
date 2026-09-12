@@ -109,6 +109,27 @@ async fn ten_thousand_provider_messages_ingest_and_paginate_without_loss() -> Re
         .map(|r| r.count)
         .sum();
     assert_eq!(message_pages, 100);
+    let resources = h
+        .authenticated()
+        .get_status(GetStatusRequest {})
+        .await?
+        .into_inner()
+        .resources
+        .unwrap();
+    let history_pages: u64 = remote
+        .requests
+        .iter()
+        .filter(|r| r.path == "/gmail/v1/users/me/history")
+        .map(|r| r.count)
+        .sum();
+    assert_eq!(
+        resources.storage_page_batches,
+        message_pages + history_pages
+    );
+    assert_eq!(resources.requests_active, 0);
+    assert!(resources.requests_peak <= 2);
+    assert!(resources.bytes_received > 0);
+
     for mailbox in remote.mail.values() {
         assert!(mailbox.accepted_sends.is_empty());
         assert_eq!(mailbox.message_copies, 0);
@@ -124,7 +145,7 @@ async fn ten_thousand_provider_messages_ingest_and_paginate_without_loss() -> Re
         std::fs::write(
             directory.join("metadata-load.json"),
             serde_json::to_vec_pretty(
-                &json!({"messages":observed.len(),"api_pages":pages,"remote_message_pages":message_pages,"sync_ms":sync_ms,"list_ms":listed.elapsed().as_millis(),"rss":"measured separately in actual subprocess suite"}),
+                &json!({"messages":observed.len(),"api_pages":pages,"remote_message_pages":message_pages,"sync_ms":sync_ms,"list_ms":listed.elapsed().as_millis(),"resources":resources,"rss":"measured separately in actual subprocess suite"}),
             )?,
         )?;
     }

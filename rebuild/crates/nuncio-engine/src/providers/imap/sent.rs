@@ -81,6 +81,11 @@ async fn append_inner(
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
     let session = &mut connection.session;
+    let resources = session.get_mut().resources();
+    let _request = resources
+        .request()
+        .await
+        .map_err(|_| MailError::Unavailable)?;
     session
         .get_mut()
         .set_limits(256 * 1024, 0)

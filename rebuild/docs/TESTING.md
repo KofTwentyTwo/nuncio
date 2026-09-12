@@ -46,3 +46,14 @@ Use normal runs for timing evidence because profiler observation adds overhead.
 Resource JSON is written before the RSS assertion so failed runs retain samples,
 thread counts and database/WAL sizes. Passing a diagnostic rerun does not erase an
 earlier failure; preserve the failed gate and establish its cause.
+
+
+Resource status has an actual daemon/CLI regression that holds two Google requests,
+observes a third account-sequenced job, cancels it before provider access, and checks
+counter reset while cached messages survive restart. A separate mixed-provider
+system case holds Google and Dovecot exchanges, requires another Google identity
+request to wait, then compares independent unchanged mailbox/effect observations.
+The10,000-message workload compares stored-page counters with independently counted
+HTTP pages. IMAP/SMTP subprocess checks retain resource snapshots alongside their
+existing exact delivery/copy/MIME crash evidence. Current verification status and
+any failed attempts remain in VERIFICATION; this description is not a full-gate claim.

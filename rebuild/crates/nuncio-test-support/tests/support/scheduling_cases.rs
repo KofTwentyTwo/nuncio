@@ -376,6 +376,12 @@ async fn polling_honors_remote_retry_deadlines_across_restart_and_keeps_other_sc
         1,
         "explicit sync bypassed retry guidance"
     );
+    let resources = status(&h).await.resources.unwrap();
+    assert!(
+        resources.background_jobs >= 1,
+        "provider-backoff waiters must retain job admission"
+    );
+    assert!(resources.background_jobs <= 64);
     let cancelled = h
         .authenticated()
         .cancel_sync(SyncRunRequest {

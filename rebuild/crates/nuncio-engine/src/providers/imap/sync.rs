@@ -88,6 +88,7 @@ pub(crate) async fn sync(
                 .store
                 .sync_run_progress(run.account_id.clone(), run.id.clone(), processed, None)
                 .await?;
+            service.accounts.http.resources.page_stored();
         }
         // A reset, append or expunge during collection invalidates this generation.
         // Nothing staged becomes visible until every mailbox finished positively.

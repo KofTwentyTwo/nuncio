@@ -1,5 +1,52 @@
 # Verification evidence
 
+## Resource telemetry and shared provider budget — full affected gate passed
+
+Fifteen-command gate shell57763 completed exit0 atSeptember12 00:57UTC.
+`python3 test-results/task14-resource-status/run-gate.py`: fmt/bothClippy;
+engine130; API/CLI/daemon20; resource system4/E2E3; security3/2; Google21/26;
+operations6; IMAP27/13; production-isolation2. Zero failed/ignored. Summarize.py
+completed0; exact commands/statuses, canonical counts, source hashes, independent
+resource/security observations and artifact hashes are under that evidence root.
+Fresh local daemon16402304bytes,SHA256
+24b7c7aa3521ffe871b7a6488829dc825b28566e0abc386d88bb1ba705d0b1fc;
+CLI3506544bytes,SHA256
+9715785d0c29467b9e477499308e3b7c35fbea6aeff3099b47aeb076e661808d.
+Original RSS bound and independent remote-effect assertions remain unchanged.
+These are local binaries; packaging, remote CI and live compatibility remain
+unverified. API.md describes the implemented contract, with descriptor freeze
+and external generated-client smoke explicitly pending.
+
+New actual daemon/CLI regression failed101 (shell86524) because status omitted
+resources; `task14-resource-status/red.log` retains the original failure. Engine
+now exposes numeric process-local counters through new additive GetStatusResponse
+field10/ResourceStatus and CLI JSON. Shared job admission64 covers mail/calendar/
+operation tasks including backoff. Shared network admission allows2 exchanges and
+at most64 active+waiting callers; RAII releases permits on cancellation. IMAP/SMTP
+hold permits for commands/handshakes, not idle connection lifetimes, preserving
+server-Sent pre-DATA checks. HTTP bodies/decrypted mail-wire bytes and successfully
+staged pages/batches are counted without content labels. Store channel depth and
+account-sequence admission are reported separately. No schema/dependency change.
+
+New budget unit test91489 passed1/0 (64jobs,64request admissions,twoactive,
+cancelled waiter release, counters). All-target feature checks74325/33887 passed;
+featureClippy13625 passed. Fresh test binaries59074 built0. Actual focused status
+regression85084 passed1/0: two independently held Google requests, third queuedjob,
+cancel before Calendar request, unchanged remote effects, numeric byte/page growth,
+zero active work afterward, restart counter reset with mail preserved. Evidence:
+`task14-resource-status/{build,green}.log` and runs/google-e2e-*/resource-status.json.
+Initial mixed Google/Dovecot test85437 failed101: it expected a network waiter
+from CheckAccount, but that RPC correctly waits in the outer account coordinator.
+Both provider holds were established; the new test timed out waiting at the wrong
+queue, then performed bounded fixture cleanup. Original log retained as
+mixed-fixture-account-lane.log. Corrected fixture uses an actual OAuth callback
+for the third request, which directly contends at shared network admission;
+assertions still require2active/1networkwaiter and no third provider request.
+Corrected mixed case79577 passed1/exit0 in2.20s; actual OAuth callback waited
+behind held Google and Dovecot exchanges. Independent mailbox/effects remain
+unchanged. Broader15-command gate passed as recorded above. New assertions also cover load page-count parity,
+backoff job retention and IMAP/SMTP subprocess resource snapshots.
+
 ## Resource admission and queued-worker recovery verified
 
 Fourteen-command gate shell98949 completed exit0: format/bothClippy; engine129;
@@ -26,7 +73,13 @@ notifications occur. Evidence: task14-operation-admission/{red,green,results,
 counts,source-hashes,artifacts} (logs/JSON as appropriate). Refreshed daemon:
 16352624bytes,SHA256a9170b24aa58eabc14e125d28a4f7b50e40609526d19114b54def74a1175d347;
 CLI3506544bytes,SHA25623f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1.
-Signed checkpoint/push pending; this completes neither allTask14 nor thegoal.
+Signed checkpoint `a29812fadee371890972506ef2acae41ec9d3f11` committed (exit0),
+verified with git verify-commit (exit0), and pushed (HTTPS exit0). Exact ls-remote
+hash matched. SSH initially failed128 (agent refused signing); gh auth status
+outside the network sandbox confirmed valid existing KofTwentyTwo credentials.
+A command-only credential helper enabled HTTPS without changing remote settings.
+Staged Gitleaks reported no leaks; staged whitespace check passed. No remote CI
+inspection/merge/release/install/live action. Task14 and the full goal remain open.
 
 ## Repeated-fetch memory investigation — bounded preallocation verified
 
@@ -866,3 +919,13 @@ New bounded SMTP component `providers/imap/smtp/submission.rs` with typestate Se
 Next immediately: poll16098/fix component failures; implement schema17 immutable SMTP/Sent intent + durable phases and worker consumer. Preserve separate SMTP accepted and APPEND proof. Prepared(before DATA bytes) can retry after crash; Started without SMTP receipt stays unknown; accepted SMTP never repeats for Sent failure; SentStarted without APPEND proof never blindly repeats; known APPENDUID permits positive target observation/publication. Add negative-reply evidence to reset only proven unaccepted SMTP, and independently test those invariants. Server AutoSent and broader E2E remain required, not waived.
 
 Primary references read September11: RFC5321 sections4.2.5/4.5.2 (2xx after terminator accepts responsibility;4xx/5xx prohibit subsequent delivery; add one dot at each line start), RFC6531 section3.2 (SMTPUTF8 required for internationalized envelope or headers at any MIME depth), RFC4315 APPENDUID/UIDNOTSTICKY. URLs https://www.rfc-editor.org/rfc/rfc5321.html , https://www.rfc-editor.org/rfc/rfc6531.html , https://www.rfc-editor.org/rfc/rfc4315.html . Missing APPENDUID is not acceptance proof of identity; no guessed repeated copies.
+
+
+Remaining Calendar-role check: current official Google documentation includes
+writerWithoutPrivateAccess for non-private event writes, while private events are
+visible only as busy blocks and cannot be modified under that role. Production
+CalendarAction::provider_patch and the independent mock write policy currently
+accept owner/writer only. This explicit compatibility gap remains pending after
+the resource checkpoint; tests must independently enforce private-event limits.
+Sources: [CalendarList](https://developers.google.com/workspace/calendar/api/v3/reference/calendarList)
+and [calendar sharing](https://developers.google.com/workspace/calendar/api/concepts/sharing).

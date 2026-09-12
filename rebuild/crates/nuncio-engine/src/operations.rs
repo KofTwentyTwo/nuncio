@@ -120,9 +120,12 @@ async fn run(service: Arc<Service>, stop: watch::Sender<bool>) -> Result<(), Sto
                     Ok(pending)=>pending,Err(error)=>break Err(error),
                 };
                 for work in pending {
+                    if accounts.contains(&work.account_id) { continue; }
+                    let Ok(admission)=service.accounts.http.resources.job() else { break; };
                     if !accounts.insert(work.account_id.clone()) { continue; }
                     let service=service.clone();let stopped=stop.subscribe();
                     jobs.spawn(async move {
+                        let _admission=admission;
                         let account=work.account_id.clone();
                         let result=process(service.clone(),work,stopped.clone()).await;
                         let _=service.checkpoint("operation_job_finished",stopped).await;

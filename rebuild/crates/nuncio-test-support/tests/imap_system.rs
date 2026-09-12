@@ -76,6 +76,184 @@ async fn request(
 }
 
 #[tokio::test]
+async fn google_and_imap_share_two_network_slots_and_preserve_remote_state() -> Result<(), TestError>
+{
+    use nuncio_test_support::google::{Fault, FaultAction, Phase};
+    use support::auth::{begin, finish};
+    let mut mock = MockMailPlus::start(&[]).await?;
+    let mut h = SystemHarness::start(Seed::TwoAccounts).await?;
+    let alpha = finish(&h, &begin(&h, "alpha@example.test", None).await, 200)
+        .await
+        .account_id
+        .unwrap();
+    let auth = begin(&h, "beta@example.test", None).await;
+    let callback = support::auth::consent(&auth.browser_url).await;
+    let imap = h
+        .accounts()
+        .connect_imap(request(&mock, false, "alpha@example.test").await?)
+        .await?
+        .into_inner()
+        .account
+        .unwrap()
+        .id;
+    let before = mock
+        .control(json!({"command":"mailbox","account":"alpha@example.test","mailbox":"INBOX"}))
+        .await?;
+    mock.control(json!({"command":"inject","name":"resource-fetch","protocol":"imap","verb":"UID FETCH","phase":"before","action":"withhold"})).await?;
+    let run = h
+        .authenticated()
+        .start_sync(v2::StartSyncRequest {
+            account_id: imap.clone(),
+            full: true,
+            fetch_message_id: None,
+        })
+        .await?
+        .into_inner();
+    mock.control(json!({"command":"wait_fault","name":"resource-fetch"}))
+        .await?;
+    let control = h.google.control();
+    let beta_checks = control
+        .snapshot()
+        .await
+        .requests
+        .iter()
+        .filter(|r| r.account.as_deref() == Some("beta@example.test") && r.path == "/token")
+        .map(|r| r.count)
+        .sum::<u64>();
+    control
+        .inject(Fault {
+            method: "POST".into(),
+            path: "/calendar/v3/freeBusy".into(),
+            account: Some("alpha@example.test".into()),
+            call: Some(1),
+            phase: Phase::Before,
+            action: FaultAction::Withhold {
+                barrier: "shared-network".into(),
+            },
+        })
+        .await;
+    let mut calendar = h.calendar();
+    let busy = tokio::spawn(async move {
+        calendar
+            .query_free_busy(v2::FreeBusyRequest {
+                account_id: alpha,
+                from: "2026-10-02T00:00:00Z".into(),
+                to: "2026-10-04T00:00:00Z".into(),
+                time_zone: "UTC".into(),
+                provider_calendar_ids: vec!["primary".into()],
+            })
+            .await
+    });
+    control.wait_for_barrier("shared-network").await?;
+    let check = tokio::spawn(async move { support::auth::browser().get(callback).send().await });
+    let held = tokio::time::timeout(std::time::Duration::from_millis(750), async {
+        loop {
+            let status = h
+                .authenticated()
+                .get_status(v2::GetStatusRequest {})
+                .await?
+                .into_inner();
+            let resources = status.resources.unwrap();
+            if resources.requests_waiting == 1 {
+                return Ok::<_, TestError>(resources);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await??;
+    assert_eq!(held.requests_active, 2);
+    assert_eq!(held.requests_peak, 2);
+    assert_eq!(
+        control
+            .snapshot()
+            .await
+            .requests
+            .iter()
+            .filter(|r| r.account.as_deref() == Some("beta@example.test") && r.path == "/token")
+            .map(|r| r.count)
+            .sum::<u64>(),
+        beta_checks
+    );
+    mock.control(json!({"command":"release","name":"resource-fetch"}))
+        .await?;
+    control.release_barrier("shared-network").await;
+    assert!(busy.await??.into_inner().complete);
+    assert_eq!(check.await??.status(), 200);
+    assert!(h
+        .accounts()
+        .get_auth_status(v2::GetAuthStatusRequest {
+            session_id: auth.session_id
+        })
+        .await?
+        .into_inner()
+        .account_id
+        .is_some());
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let current = h
+                .authenticated()
+                .get_sync_run(v2::SyncRunRequest {
+                    account_id: imap.clone(),
+                    run_id: run.id.clone(),
+                })
+                .await?
+                .into_inner();
+            if current.state == "succeeded" {
+                return Ok::<_, TestError>(());
+            }
+            assert!(
+                matches!(current.state.as_str(), "queued" | "running"),
+                "{current:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    let after = h
+        .authenticated()
+        .get_status(v2::GetStatusRequest {})
+        .await?
+        .into_inner()
+        .resources
+        .unwrap();
+    assert_eq!(after.requests_active, 0);
+    assert_eq!(after.requests_waiting, 0);
+    assert_eq!(after.requests_peak, 2);
+    assert!(after.bytes_received > held.bytes_received);
+    assert!(after.storage_page_batches > 0);
+    assert_eq!(
+        mock.control(json!({"command":"mailbox","account":"alpha@example.test","mailbox":"INBOX"}))
+            .await?,
+        before
+    );
+    assert_eq!(
+        mock.control(json!({"command":"snapshot"})).await?["smtp_deliveries"],
+        json!([])
+    );
+    let remote = control.snapshot().await;
+    for mailbox in remote.mail.values() {
+        assert!(mailbox.accepted_sends.is_empty());
+        assert_eq!(mailbox.message_copies, 0);
+    }
+    for calendars in remote.calendars.values() {
+        for calendar in calendars.values() {
+            assert!(calendar.notifications.is_empty());
+        }
+    }
+    if let Some(directory) = std::env::var_os("NUNCIO_TEST_ARTIFACTS") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join("shared-network-resources.json"),
+            serde_json::to_vec_pretty(&json!({"held":held,"after":after}))?,
+        )?;
+    }
+    h.shutdown().await?;
+    mock.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn imap_account_authenticates_both_tls_servers_and_reopens_without_sending(
 ) -> Result<(), TestError> {
     let mut mock = MockMailPlus::start(&["MOVE", "CONDSTORE", "QRESYNC"]).await?;

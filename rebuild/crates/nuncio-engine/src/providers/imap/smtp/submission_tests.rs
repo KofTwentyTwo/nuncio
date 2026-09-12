@@ -59,7 +59,7 @@ async fn data_is_dot_stuffed_once_and_only_complete_final_replies_classify_deliv
             data
         });
         let session = Session {
-            wire: Wire::Plain(socket),
+            wire: Wire::test(socket),
             caps: BTreeSet::new(),
         };
         let prepared = session
@@ -103,7 +103,7 @@ async fn partial_recipient_rejection_never_sends_data() {
         commands
     });
     let session = Session {
-        wire: Wire::Plain(socket),
+        wire: Wire::test(socket),
         caps: BTreeSet::new(),
     };
     let result = session

@@ -103,6 +103,33 @@ Transient failures use exponential backoff with jitter, bounded at five minutes 
 
 `sync --wait` and `calendar refresh --wait` exit successfully only on a completed run. A failed wait, timeout, or RPC disconnection includes the last known `error.sync_run` receipt in JSON; use its account/id with `system sync-status` to inspect the durable result. A timeout or stopped CLI does not cancel the daemon's work. Plain `sync` returns a queue receipt, whose state is distinct from success.
 
+## Resource status
+
+`system status` includes a process-local `resources` object. Counters contain only
+numbers and reset when the daemon restarts; they are diagnostics, not durable
+operation receipts. The existing `sync` and `operation` results remain authoritative
+for completed work. A status snapshot can span concurrent changes in these counters.
+
+| Field | Meaning |
+|---|---|
+| requests_active / requests_waiting | Provider exchanges holding one of two network slots / admitted exchanges waiting for a slot. At most64 exchanges may be active or waiting. |
+| requests_peak / requests_started | Highest observed simultaneous exchanges / cumulative exchanges started by this process. |
+| request_limit | Two globally shared provider-network slots. |
+| bytes_received | HTTP response-body bytes and decrypted IMAP/SMTP protocol bytes read, including partial or rejected responses; excludes TLS framing and outbound bytes. |
+| background_jobs / background_job_limit | Spawned mail/calendar/operation jobs retained, including retry waits; global limit64. Idle connections do not consume a network slot. |
+| account_requests / account_request_limit | Active or waiting account-sequenced requests; limit64, with at most two active account sequences. |
+| store_queue_depth / store_queue_limit | Requests currently buffered for the SQLCipher worker / buffer capacity64; excludes the request executing on that worker and callers awaiting channel capacity. |
+| storage_page_batches | Completed Gmail message/history pages, Calendar catalog/event pages, and IMAP UID batches staged in storage. Staging is not final projection promotion. |
+
+A Google exchange is one HTTP request through its consumed response body. IMAP
+counts its initial handshake/authentication and each tagged command; SMTP counts
+connection/TLS handshakes, command/reply exchanges and DATA transmission/final reply.
+Idle SMTP readiness and an idle IMAP connection do not reserve slots: a server-Sent
+pre-DATA check can therefore run without waiting on its own SMTP connection.
+Admission refusal before an operation attempt leaves durable intent queued for a
+later worker tick. Explicit sync requests can be refused before creating a run
+when background-job admission is full; cancel or await existing work, then retry.
+
 ## Gmail message changes
 
 Use `mail capabilities --account ID` to inspect supported actions. Google exposes label membership; arbitrary folder move/copy and permanent purge are not available. Obtain local message IDs with `mail list` and local user-label IDs with `mail collections`.

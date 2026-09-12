@@ -40,6 +40,11 @@ async fn complete_inner<T>(
     if command.is_empty() || command.len() > 65536 || command.contains(['\r', '\n', '\0']) {
         return Err(MailError::Invalid);
     }
+    let resources = session.get_mut().resources();
+    let _request = resources
+        .request()
+        .await
+        .map_err(|_| MailError::Unavailable)?;
     session
         .get_mut()
         .set_limits(bytes, literal)

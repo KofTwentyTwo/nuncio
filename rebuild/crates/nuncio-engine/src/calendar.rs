@@ -98,6 +98,7 @@ impl CalendarSync {
             }
             return Err(StoreError::Busy.into());
         }
+        let admission = self.accounts.http.resources.job()?;
         let run = self
             .store
             .start_calendar_run(account.clone(), self.now()?)
@@ -107,6 +108,7 @@ impl CalendarSync {
         let job_window = window.clone();
         let (stop, mut stopped) = watch::channel(false);
         let task = tokio::spawn(async move {
+            let _admission = admission;
             let work_stop = stopped.clone();
             let work = async {
                 let _permit = service
@@ -201,6 +203,7 @@ impl CalendarSync {
                     .await?;
             }
             page = next(&response, &mut seen)?;
+            self.accounts.http.resources.page_stored();
             if page.is_none() {
                 break;
             }
@@ -463,6 +466,7 @@ impl CalendarSync {
                 *processed += 1;
             }
             page = next(&response, &mut seen)?;
+            self.accounts.http.resources.page_stored();
             self.store
                 .sync_run_progress(
                     run.account_id.clone(),

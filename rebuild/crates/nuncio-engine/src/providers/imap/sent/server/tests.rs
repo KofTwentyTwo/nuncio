@@ -119,7 +119,7 @@ async fn sent_search_is_bounded_by_sequence_windows_and_rejects_stale_or_ambiguo
             }).await.unwrap();
         });
         let wire = ImapWire::new(
-            Wire::Plain(tcp),
+            Wire::test(tcp),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             262144,
             0,

@@ -38,7 +38,7 @@ async fn copyuid_evidence_requires_exact_identity_and_survives_only_valid_lost_a
             let (tag,command)=line.trim_end().split_once(' ').unwrap();assert_eq!(command,"UID MOVE 11 \"Archive\"");
             peer.get_mut().write_all(response.replace("{tag}",tag).as_bytes()).await.unwrap();
         });
-        let wire=ImapWire::new(Wire::Plain(tcp),std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),262144,0).unwrap();
+        let wire=ImapWire::new(Wire::test(tcp),std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),262144,0).unwrap();
         let session=async_imap::Client::new(wire).authenticate("PLAIN",Plain{bytes:zeroize::Zeroizing::new(b"\0synthetic\0synthetic".to_vec()),used:false}).await.map_err(|(e,_)|e).unwrap();
         let mut connection=Connection{session,capabilities:Default::default()};
         let source=ImapPlacement::new(AccountId::generate(),ImapMailboxId::generate(),9001,11).unwrap();

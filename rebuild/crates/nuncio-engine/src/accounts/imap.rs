@@ -45,7 +45,7 @@ impl Accounts {
         {
             return Err(AccountError::IdentityMismatch);
         }
-        match crate::providers::imap::open(&config, &credentials)
+        match crate::providers::imap::open(&config, &credentials, self.http.resources.clone())
             .await
             .map_err(AccountError::from)
         {
@@ -103,9 +103,10 @@ impl Accounts {
         let credentials: ImapCredentials =
             serde_json::from_slice(&secret).map_err(|_| AccountError::Secret)?;
         credentials.validate().map_err(|_| AccountError::Secret)?;
-        let result = crate::providers::imap::open_smtp(&config, &credentials)
-            .await
-            .map_err(AccountError::from);
+        let result =
+            crate::providers::imap::open_smtp(&config, &credentials, self.http.resources.clone())
+                .await
+                .map_err(AccountError::from);
         if matches!(result, Err(AccountError::Authorization)) {
             self.store
                 .set_account_state(id.into(), "needs_auth".into())
@@ -165,7 +166,7 @@ impl Accounts {
         }
         let capabilities = tokio::select! {
             _=stop.changed()=>return Err(AccountError::Unavailable),
-            result=probe(&config,&credentials)=>result.map_err(AccountError::from)?,
+            result=probe(&config,&credentials,self.http.resources.clone())=>result.map_err(AccountError::from)?,
         };
         let reference = format!(
             "{}/account/{id}/imap/{}",
@@ -237,7 +238,7 @@ impl Accounts {
         }
         let result = tokio::select! {
             _=stop.changed()=>return Err(AccountError::Unavailable),
-            result=probe(&config,&credentials)=>result.map_err(AccountError::from),
+            result=probe(&config,&credentials,self.http.resources.clone())=>result.map_err(AccountError::from),
         };
         match result {
             Ok(caps) => {

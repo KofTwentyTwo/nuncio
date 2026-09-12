@@ -43,11 +43,12 @@ impl From<MailError> for crate::accounts::AccountError {
 pub(crate) async fn probe(
     config: &ImapAccountConfig,
     credentials: &ImapCredentials,
+    resources: std::sync::Arc<crate::resources::Resources>,
 ) -> Result<ImapCapabilities, MailError> {
     let trust = wire::trust(config.trusted_ca_pem.as_deref())?;
     tokio::time::timeout(
         Duration::from_secs(30),
-        probe_inner(config, credentials, trust),
+        probe_inner(config, credentials, trust, resources),
     )
     .await
     .map_err(|_| MailError::Unavailable)?
@@ -56,10 +57,12 @@ async fn probe_inner(
     config: &ImapAccountConfig,
     credentials: &ImapCredentials,
     trust: std::sync::Arc<tokio_rustls::rustls::ClientConfig>,
+    resources: std::sync::Arc<crate::resources::Resources>,
 ) -> Result<ImapCapabilities, MailError> {
-    let mut connection = open_inner(config, credentials, trust.clone()).await?;
+    let mut connection = open_inner(config, credentials, trust.clone(), resources.clone()).await?;
     drop(connection.session);
-    let smtp = smtp::authenticate(&config.smtp, &credentials.smtp_password, trust).await?;
+    let smtp =
+        smtp::authenticate(&config.smtp, &credentials.smtp_password, trust, resources).await?;
     connection.capabilities.smtp_utf8 = smtp.0;
     connection.capabilities.eight_bit_mime = smtp.1;
     Ok(connection.capabilities)
@@ -72,11 +75,12 @@ pub(crate) struct Connection {
 pub(crate) async fn open(
     config: &ImapAccountConfig,
     credentials: &ImapCredentials,
+    resources: std::sync::Arc<crate::resources::Resources>,
 ) -> Result<Connection, MailError> {
     let trust = wire::trust(config.trusted_ca_pem.as_deref())?;
     tokio::time::timeout(
         Duration::from_secs(30),
-        open_inner(config, credentials, trust),
+        open_inner(config, credentials, trust, resources),
     )
     .await
     .map_err(|_| MailError::Unavailable)?
@@ -85,8 +89,13 @@ async fn open_inner(
     config: &ImapAccountConfig,
     credentials: &ImapCredentials,
     trust: std::sync::Arc<tokio_rustls::rustls::ClientConfig>,
+    resources: std::sync::Arc<crate::resources::Resources>,
 ) -> Result<Connection, MailError> {
-    let mut wire = wire::Wire::connect(&config.imap).await?;
+    let handshake = resources
+        .request()
+        .await
+        .map_err(|_| MailError::Unavailable)?;
+    let mut wire = wire::Wire::connect(&config.imap, resources).await?;
     if config.imap.tls == MailTls::Implicit {
         wire = wire.encrypt(&config.imap.host, trust.clone()).await?;
     }
@@ -144,6 +153,7 @@ async fn open_inner(
             async_imap::error::Error::Bad(_) => MailError::Unsupported,
             _ => MailError::Protocol,
         })?;
+    drop(handshake);
     let mut session = session;
     let capabilities = read_capabilities(&mut session).await?;
     Ok(Connection {
@@ -209,11 +219,12 @@ impl async_imap::Authenticator for Plain {
 pub(crate) async fn open_smtp(
     config: &ImapAccountConfig,
     credentials: &ImapCredentials,
+    resources: std::sync::Arc<crate::resources::Resources>,
 ) -> Result<smtp::Session, MailError> {
     let trust = wire::trust(config.trusted_ca_pem.as_deref())?;
     tokio::time::timeout(
         Duration::from_secs(30),
-        smtp::connect(&config.smtp, &credentials.smtp_password, trust),
+        smtp::connect(&config.smtp, &credentials.smtp_password, trust, resources),
     )
     .await
     .map_err(|_| MailError::Unavailable)?
@@ -262,7 +273,7 @@ mod tests {
                     .unwrap();
             });
             let wire = wire::ImapWire::new(
-                wire::Wire::Plain(tcp),
+                wire::Wire::test(tcp),
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 256 * 1024,
                 0,

@@ -40,6 +40,11 @@ async fn response(wire: &mut Wire) -> Result<Response, MailError> {
     Err(MailError::Protocol)
 }
 async fn command(wire: &mut Wire, bytes: &[u8]) -> Result<Response, MailError> {
+    let _request = wire
+        .resources
+        .request()
+        .await
+        .map_err(|_| MailError::Unavailable)?;
     wire.write_all(bytes)
         .await
         .map_err(|_| MailError::Unavailable)?;
@@ -64,8 +69,9 @@ pub(super) async fn authenticate(
     endpoint: &MailEndpoint,
     password: &str,
     trust: Arc<rustls::ClientConfig>,
+    resources: Arc<crate::resources::Resources>,
 ) -> Result<(bool, bool), MailError> {
-    let session = connect(endpoint, password, trust).await?;
+    let session = connect(endpoint, password, trust, resources).await?;
     Ok((
         session.caps.contains("SMTPUTF8"),
         session.caps.contains("8BITMIME"),
@@ -75,14 +81,20 @@ pub(super) async fn connect(
     endpoint: &MailEndpoint,
     password: &str,
     trust: Arc<rustls::ClientConfig>,
+    resources: Arc<crate::resources::Resources>,
 ) -> Result<Session, MailError> {
-    let mut wire = Wire::connect(endpoint).await?;
+    let handshake = resources
+        .request()
+        .await
+        .map_err(|_| MailError::Unavailable)?;
+    let mut wire = Wire::connect(endpoint, resources.clone()).await?;
     if endpoint.tls == MailTls::Implicit {
         wire = wire.encrypt(&endpoint.host, trust.clone()).await?;
     }
     if !response(&mut wire).await?.has_code(220) {
         return Err(MailError::Protocol);
     }
+    drop(handshake);
     let mut caps = ehlo(&mut wire).await?;
     if endpoint.tls == MailTls::StartTls {
         if !caps.contains("STARTTLS") {
@@ -91,7 +103,13 @@ pub(super) async fn connect(
         if !command(&mut wire, b"STARTTLS\r\n").await?.has_code(220) {
             return Err(MailError::Tls);
         }
-        wire = wire.encrypt(&endpoint.host, trust).await?;
+        {
+            let _handshake = resources
+                .request()
+                .await
+                .map_err(|_| MailError::Unavailable)?;
+            wire = wire.encrypt(&endpoint.host, trust).await?;
+        }
         caps = ehlo(&mut wire).await?;
     }
     let mechanisms: BTreeSet<_> = caps
@@ -167,7 +185,7 @@ mod tests {
             }
             commands
         });
-        (Wire::Plain(socket), peer)
+        (Wire::test(socket), peer)
     }
     #[tokio::test]
     async fn login_temporary_rejection_at_each_challenge_keeps_credentials() {
@@ -208,7 +226,7 @@ mod tests {
             peer.await.unwrap();
         }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut wire = Wire::Plain(
+        let mut wire = Wire::test(
             TcpStream::connect(listener.local_addr().unwrap())
                 .await
                 .unwrap(),

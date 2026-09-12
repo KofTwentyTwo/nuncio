@@ -31,6 +31,7 @@ pub(crate) enum GoogleRead<'a> {
 
 #[derive(Clone)]
 pub(crate) struct GoogleHttp {
+    pub resources: std::sync::Arc<crate::resources::Resources>,
     pub clock: std::sync::Arc<crate::clock::Clock>,
     pub(super) client: reqwest::Client,
     pub authorization_url: String,
@@ -81,6 +82,7 @@ impl GoogleHttp {
     }
     pub fn production() -> Result<Self, AccountError> {
         Ok(Self {
+            resources: crate::resources::Resources::new(),
             clock: std::sync::Arc::new(crate::clock::Clock::new(None)),
             client: Self::client(30_000)?,
             authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
@@ -99,6 +101,7 @@ impl GoogleHttp {
         config.validate().map_err(|_| AccountError::Invalid)?;
         let base = config.google_base_url.trim_end_matches('/');
         Ok(Self {
+            resources: crate::resources::Resources::new(),
             clock: std::sync::Arc::new(crate::clock::Clock::new(config.now_unix_ms)),
             client: Self::client(config.request_timeout_ms)?,
             authorization_url: format!("{base}/o/oauth2/v2/auth"),
@@ -153,6 +156,7 @@ impl GoogleHttp {
             GoogleRead::Get { .. } => self.client.get(url).query(query),
             GoogleRead::FreeBusy(body) => self.client.post(url).json(body),
         };
+        let _request = self.resources.request().await?;
         let response = request
             .bearer_auth(token)
             .send()
@@ -193,6 +197,7 @@ impl GoogleHttp {
         let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| MailError::Unavailable)?;
+            self.resources.received(chunk.len());
             if chunk.len() > limit.saturating_sub(bytes.len()) {
                 return Err(MailError::TooLarge);
             }
@@ -259,6 +264,11 @@ impl GoogleHttp {
         fields: &[(&str, &str)],
         initial: bool,
     ) -> Result<TokenResponse, AccountError> {
+        let _request = self
+            .resources
+            .request()
+            .await
+            .map_err(|_| AccountError::Unavailable)?;
         let response = self
             .client
             .post(&self.token_url)
@@ -270,7 +280,7 @@ impl GoogleHttp {
         if status.as_u16() == 429 || status.is_server_error() {
             return Err(self.account_unavailable(&response));
         }
-        let bytes = body(response, 65536).await?;
+        let bytes = body(response, 65536, &self.resources).await?;
         if !status.is_success() {
             #[derive(Deserialize)]
             struct TokenError {
@@ -323,6 +333,11 @@ impl GoogleHttp {
         Ok(token)
     }
     pub async fn userinfo(&self, token: &str) -> Result<UserInfo, AccountError> {
+        let _request = self
+            .resources
+            .request()
+            .await
+            .map_err(|_| AccountError::Unavailable)?;
         let response = self
             .client
             .get(&self.userinfo_url)
@@ -337,7 +352,7 @@ impl GoogleHttp {
             200 => {}
             _ => return Err(AccountError::Provider),
         }
-        let info: UserInfo = serde_json::from_slice(&body(response, 65536).await?)
+        let info: UserInfo = serde_json::from_slice(&body(response, 65536, &self.resources).await?)
             .map_err(|_| AccountError::Provider)?;
         if info.sub.is_empty()
             || info.sub.len() > 255
@@ -389,6 +404,7 @@ fn valid_token(token: &str) -> bool {
 async fn body(
     response: reqwest::Response,
     limit: usize,
+    resources: &crate::resources::Resources,
 ) -> Result<Zeroizing<Vec<u8>>, AccountError> {
     if response
         .content_length()
@@ -400,6 +416,7 @@ async fn body(
     let mut bytes = Zeroizing::new(Vec::new());
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| AccountError::Unavailable)?;
+        resources.received(chunk.len());
         if chunk.len() > limit.saturating_sub(bytes.len()) {
             return Err(AccountError::Provider);
         }

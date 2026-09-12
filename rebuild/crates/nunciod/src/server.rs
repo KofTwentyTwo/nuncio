@@ -126,6 +126,21 @@ impl System for SystemService {
             .await
             .map_err(|_| Status::unavailable("Engine status unavailable"))?;
         Ok(Response::new(GetStatusResponse {
+            resources: Some(nuncio_proto::v2::ResourceStatus {
+                requests_active: status.resources.requests_active,
+                requests_waiting: status.resources.requests_waiting,
+                requests_peak: status.resources.requests_peak,
+                requests_started: status.resources.requests_started,
+                request_limit: status.resources.request_limit,
+                bytes_received: status.resources.bytes_received,
+                background_jobs: status.resources.background_jobs,
+                background_job_limit: status.resources.background_job_limit,
+                account_requests: status.resources.account_requests,
+                account_request_limit: status.resources.account_request_limit,
+                store_queue_depth: status.resources.store_queue_depth,
+                store_queue_limit: status.resources.store_queue_limit,
+                storage_page_batches: status.resources.storage_page_batches,
+            }),
             sync: status
                 .sync
                 .into_iter()

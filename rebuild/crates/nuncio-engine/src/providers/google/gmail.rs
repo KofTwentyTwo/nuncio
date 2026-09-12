@@ -142,6 +142,7 @@ async fn full(
                 next.clone(),
             )
             .await?;
+        service.accounts.http.resources.page_stored();
         page = next;
         if page.is_none() {
             return Ok(processed);
@@ -200,6 +201,7 @@ async fn history(
                 next.clone(),
             )
             .await?;
+        service.accounts.http.resources.page_stored();
         page = next;
         if page.is_none() {
             return opaque(&response, "historyId");

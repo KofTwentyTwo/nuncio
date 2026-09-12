@@ -16,6 +16,9 @@ pub(crate) struct AccountPermit {
     _sequence: OwnedMutexGuard<()>,
 }
 impl Coordinator {
+    pub fn admitted_requests(&self) -> u64 {
+        (64 - self.admitted.available_permits()) as u64
+    }
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             active: Arc::new(Semaphore::new(2)),

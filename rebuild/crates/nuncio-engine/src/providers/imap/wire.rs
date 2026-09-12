@@ -14,9 +14,13 @@ use tokio_rustls::{
     TlsConnector,
 };
 
-pub(super) enum Wire {
+enum Transport {
     Plain(TcpStream),
     Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+pub(super) struct Wire {
+    transport: Transport,
+    pub resources: Arc<crate::resources::Resources>,
 }
 impl std::fmt::Debug for Wire {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -24,28 +28,43 @@ impl std::fmt::Debug for Wire {
     }
 }
 impl Wire {
+    #[cfg(test)]
+    pub fn test(tcp: TcpStream) -> Self {
+        Self {
+            transport: Transport::Plain(tcp),
+            resources: crate::resources::Resources::new(),
+        }
+    }
+
     pub async fn connect(
         endpoint: &crate::domain::imap_account::MailEndpoint,
+        resources: Arc<crate::resources::Resources>,
     ) -> Result<Self, MailError> {
         let tcp = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
             .await
             .map_err(|_| MailError::Unavailable)?;
         tcp.set_nodelay(true).map_err(|_| MailError::Unavailable)?;
-        Ok(Self::Plain(tcp))
+        Ok(Self {
+            transport: Transport::Plain(tcp),
+            resources,
+        })
     }
     pub async fn encrypt(
         self,
         host: &str,
         roots: Arc<rustls::ClientConfig>,
     ) -> Result<Self, MailError> {
-        let Self::Plain(tcp) = self else {
+        let Transport::Plain(tcp) = self.transport else {
             return Err(MailError::Protocol);
         };
         let name = ServerName::try_from(host.to_owned()).map_err(|_| MailError::Invalid)?;
         TlsConnector::from(roots)
             .connect(name, tcp)
             .await
-            .map(|tls| Self::Tls(Box::new(tls)))
+            .map(|tls| Self {
+                transport: Transport::Tls(Box::new(tls)),
+                resources: self.resources,
+            })
             .map_err(|_| MailError::Tls)
     }
     // Reading only to CRLF avoids carrying pre-STARTTLS bytes across the trust boundary.
@@ -71,10 +90,14 @@ impl AsyncRead for Wire {
         cx: &mut Context<'_>,
         b: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match &mut *self {
-            Self::Plain(s) => Pin::new(s).poll_read(cx, b),
-            Self::Tls(s) => Pin::new(&mut **s).poll_read(cx, b),
-        }
+        let before = b.filled().len();
+        let result = match &mut self.transport {
+            Transport::Plain(s) => Pin::new(s).poll_read(cx, b),
+            Transport::Tls(s) => Pin::new(&mut **s).poll_read(cx, b),
+        };
+        self.resources
+            .received(b.filled().len().saturating_sub(before));
+        result
     }
 }
 impl AsyncWrite for Wire {
@@ -83,21 +106,21 @@ impl AsyncWrite for Wire {
         cx: &mut Context<'_>,
         b: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match &mut *self {
-            Self::Plain(s) => Pin::new(s).poll_write(cx, b),
-            Self::Tls(s) => Pin::new(&mut **s).poll_write(cx, b),
+        match &mut self.transport {
+            Transport::Plain(s) => Pin::new(s).poll_write(cx, b),
+            Transport::Tls(s) => Pin::new(&mut **s).poll_write(cx, b),
         }
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut *self {
-            Self::Plain(s) => Pin::new(s).poll_flush(cx),
-            Self::Tls(s) => Pin::new(&mut **s).poll_flush(cx),
+        match &mut self.transport {
+            Transport::Plain(s) => Pin::new(s).poll_flush(cx),
+            Transport::Tls(s) => Pin::new(&mut **s).poll_flush(cx),
         }
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut *self {
-            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Tls(s) => Pin::new(&mut **s).poll_shutdown(cx),
+        match &mut self.transport {
+            Transport::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            Transport::Tls(s) => Pin::new(&mut **s).poll_shutdown(cx),
         }
     }
 }
@@ -144,6 +167,10 @@ impl std::fmt::Debug for ImapWire {
     }
 }
 impl ImapWire {
+    pub fn resources(&self) -> Arc<crate::resources::Resources> {
+        self.wire.resources.clone()
+    }
+
     pub fn set_limits(&mut self, total: usize, literal: usize) -> io::Result<()> {
         if total == 0
             || total > 70 * 1024 * 1024
@@ -330,7 +357,7 @@ mod tests {
         });
         (
             ImapWire::new(
-                Wire::Plain(socket),
+                Wire::test(socket),
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 256 * 1024,
                 0,

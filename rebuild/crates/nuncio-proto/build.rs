@@ -3,6 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
     config.skip_source_info();
     for name in [
+        "ResourceStatus",
         "BackupInspection",
         "RepairProjectionResponse",
         "ProjectionCounts",

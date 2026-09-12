@@ -10,6 +10,7 @@ mod maintenance;
 mod operations;
 mod profile;
 mod providers;
+pub mod resources;
 mod scheduler;
 pub mod secrets;
 pub mod store;

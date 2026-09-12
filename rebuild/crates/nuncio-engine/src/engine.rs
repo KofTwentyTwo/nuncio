@@ -63,6 +63,7 @@ pub struct Engine {
 
 #[derive(Serialize)]
 pub struct EngineStatus {
+    pub resources: crate::resources::ResourceStatus,
     pub operation_worker_error: Option<String>,
     pub sync: Vec<crate::sync_status::SyncScopeStatus>,
     pub background_sync: bool,
@@ -552,7 +553,13 @@ impl Engine {
         let (storage, schedules) = self.store.status_with_schedules().await?;
         let now = self.accounts.http.clock.now_ms();
         let (poll, enabled) = self.accounts.http.sync_policy();
+        let mut resources = self.accounts.http.resources.snapshot();
+        resources.account_requests = self.mail.coordinator.admitted_requests();
+        resources.account_request_limit = 64;
+        resources.store_queue_depth = self.store.queue_depth();
+        resources.store_queue_limit = 64;
         Ok(EngineStatus {
+            resources,
             operation_worker_error: self.operations.error(),
             sync: schedules
                 .into_iter()

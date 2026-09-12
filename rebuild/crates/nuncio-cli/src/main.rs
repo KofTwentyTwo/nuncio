@@ -154,7 +154,7 @@ async fn run(args: Args) -> Result<serde_json::Value, AppError> {
             Ok(
                 serde_json::json!({"version":response.version, "api_version":response.api_version, "profile_id":response.profile_id,
                 "storage":{"schema_version":storage.schema_version,"account_count":storage.account_count,"revision":storage.revision},
-                "protected_paths":response.protected_paths,"background_sync":response.background_sync,"scheduler_error":response.scheduler_error,"operation_worker_error":response.operation_worker_error,"sync":response.sync}),
+                "protected_paths":response.protected_paths,"background_sync":response.background_sync,"scheduler_error":response.scheduler_error,"operation_worker_error":response.operation_worker_error,"sync":response.sync,"resources":response.resources}),
             )
         }
         Command::System {

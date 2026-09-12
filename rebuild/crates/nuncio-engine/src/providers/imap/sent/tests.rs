@@ -86,7 +86,7 @@ async fn appenduid_requires_exact_epoch_single_uid_and_valid_tag() {
                 .unwrap();
         });
         let wire = ImapWire::new(
-            Wire::Plain(tcp),
+            Wire::test(tcp),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             262144,
             0,

@@ -21,6 +21,23 @@ message GetStatusResponse {
   optional string scheduler_error = 7;
   optional string operation_worker_error = 9;
   repeated SyncScopeStatus sync = 8;
+  ResourceStatus resources = 10;
+}
+// Process-local counters reset on restart; no account identifiers or content.
+message ResourceStatus {
+  uint64 requests_active = 1;
+  uint64 requests_waiting = 2;
+  uint64 requests_peak = 3;
+  uint64 requests_started = 4;
+  uint64 request_limit = 5;
+  uint64 bytes_received = 6;
+  uint64 background_jobs = 7;
+  uint64 background_job_limit = 8;
+  uint64 account_requests = 9;
+  uint64 account_request_limit = 10;
+  uint64 store_queue_depth = 11;
+  uint64 store_queue_limit = 12;
+  uint64 storage_page_batches = 13;
 }
 message SyncScopeStatus {
   string account_id = 1; string scope = 2; string phase = 3; optional string run_id = 4;

@@ -48,7 +48,7 @@ async fn sparse_high_uids_are_bounded_by_message_count_not_uid_number_space() {
                 .unwrap();
         });
         let wire = ImapWire::new(
-            Wire::Plain(tcp),
+            Wire::test(tcp),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             262144,
             0,

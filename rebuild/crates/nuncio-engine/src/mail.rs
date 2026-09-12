@@ -63,6 +63,7 @@ impl MailSync {
             }
             return Err(StoreError::Busy.into());
         }
+        let admission = self.accounts.http.resources.job()?;
         let run = self
             .store
             .start_mail_run(account.clone(), mode.into(), self.now()?)
@@ -72,6 +73,7 @@ impl MailSync {
         let work_run = run.clone();
         let job_fetch = fetch.clone();
         let task = tokio::spawn(async move {
+            let _admission = admission;
             let work_stop = stopped.clone();
             let work = async {
                 let _permit = service

@@ -71,6 +71,9 @@ impl Prepared<'_> {
     /// Once called, only a complete final reply proves acceptance or rejection.
     /// An interrupted write/read leaves outcome uncertainty for the journal.
     pub(crate) async fn transmit(mut self) -> DataResult {
+        let Ok(_request) = self.wire.resources.request().await else {
+            return DataResult::Unknown;
+        };
         if write_data(&mut self.wire, self.raw).await.is_err() {
             return DataResult::Unknown;
         }

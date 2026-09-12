@@ -228,6 +228,20 @@ async fn smtp_and_sent_copy_crashes_preserve_independent_effects_and_frozen_bcc_
             );
             assert_eq!(std::fs::read(downloaded)?, raw);
         }
+
+        if boundary == "operation_after_attempt" {
+            let status = h.cli(&["--json", "system", "status"]).await?;
+            assert_eq!(status.status, 0);
+            let metrics = status.json()?["result"]["resources"].clone();
+            assert_eq!(metrics["requests_active"], 0);
+            assert_eq!(metrics["requests_peak"], 1);
+            assert!(metrics["requests_started"].as_u64().unwrap() > 1);
+            assert!(metrics["bytes_received"].as_u64().unwrap() > 0);
+            std::fs::write(
+                h.artifacts.join("smtp-resources.json"),
+                serde_json::to_vec_pretty(&metrics)?,
+            )?;
+        }
         h.force_kill().await?;
         h.restart().await?;
         assert_eq!(h.cli(&args).await?.json()?["result"]["id"], id);

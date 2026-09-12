@@ -84,6 +84,18 @@ async fn actual_cli_mailplus_reads_and_writes_survive_crashes() -> Result<(), Te
     assert_eq!(read.json()?["result"]["config"], public);
     assert!(!String::from_utf8_lossy(&read.stdout).contains(&password));
     imap_read_e2e::reads(&mut harness, &mut mock, &account).await?;
+    let metrics = harness.cli(&["--json", "system", "status"]).await?;
+    assert_eq!(metrics.status, 0);
+    let metrics = metrics.json()?["result"]["resources"].clone();
+    assert_eq!(metrics["requests_active"], 0);
+    assert_eq!(metrics["requests_peak"], 1);
+    assert!(metrics["bytes_received"].as_u64().unwrap() > 0);
+    assert!(metrics["storage_page_batches"].as_u64().unwrap() > 0);
+    std::fs::write(
+        harness.artifacts.join("imap-resources.json"),
+        serde_json::to_vec_pretty(&metrics)?,
+    )?;
+
     imap_flags_e2e::flags(&mut harness, &mut mock, &account).await?;
     imap_transfer_e2e::archive(&mut harness, &mut mock, &account).await?;
     let mut bad = public.clone();

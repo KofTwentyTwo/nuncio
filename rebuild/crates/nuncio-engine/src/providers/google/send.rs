@@ -53,6 +53,16 @@ impl GoogleHttp {
                 authorization: false,
             };
         };
+        let _request = match self.resources.request().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return WriteResult::Rejected {
+                    code: "provider_busy",
+                    retry_at_ms: Some(retry_at_ms),
+                    authorization: false,
+                }
+            }
+        };
         let response = match self
             .client
             .post(url)
@@ -108,6 +118,9 @@ impl GoogleHttp {
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
+            if let Ok(chunk) = &chunk {
+                self.resources.received(chunk.len());
+            }
             match chunk {
                 Ok(chunk) if chunk.len() <= 262144_usize.saturating_sub(bytes.len()) => {
                     bytes.extend_from_slice(&chunk)
