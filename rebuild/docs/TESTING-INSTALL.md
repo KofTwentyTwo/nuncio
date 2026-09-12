@@ -17,6 +17,22 @@ manager or changing your environment. The default testing prefix is
 curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-google-first-rebuild/install-testing.sh | bash -s -- --prefix "$HOME/.local/opt/nuncio-testing"
 ```
 
+The public pipeline was verified on September 12 using bootstrap checkpoint
+`57c619e`: it selected successful build `c662e48`, run `34706301412` attempt 1,
+and installed into a fresh private temporary prefix. All 467 file-manifest
+entries and both ARM64 binaries were independently checked; both `--version`
+commands passed. Normal-environment snapshots were unchanged. No local build,
+daemon startup or provider action occurred. The new bootstrap has nine offline
+subprocess regressions; all 31 installer/script tests and static checks passed.
+Exact commands, hashes and retained installation path are in
+`test-results/curl-bootstrap/public-verification.json` and [VERIFICATION.md](VERIFICATION.md).
+Bootstrap checkpoint `57c619e` subsequently passed all ten jobs in
+[rebuild run 34710211208](https://github.com/KofTwentyTwo/nuncio/actions/runs/34710211208)
+and all seven jobs in
+[security run 34710211290](https://github.com/KofTwentyTwo/nuncio/actions/runs/34710211290).
+The public pipeline receipt above identifies the build selected at its own run
+time; later installation may select a newer successful build.
+
 The public Bash bootstrap downloads the reviewed Python installer from an
 immutable source commit and checks its SHA-256 before executing it in isolated
 Python mode. Downloads use HTTPS and a private temporary directory that is

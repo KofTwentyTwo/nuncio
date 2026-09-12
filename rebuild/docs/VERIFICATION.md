@@ -1,5 +1,45 @@
 # Verification evidence
 
+## Actual public curl-to-Bash installation verified
+
+The requested installation/testing email was sent September 12 at 13:23 Central,
+message/thread `1a096dc5b5c3290a`. Independent full-message readback matched the
+recipient, subject, SENT label and exact body. The guide separates the installed
+production package from development mock services and explains the deferred
+live/native acceptance. Evidence: `test-results/curl-bootstrap/installation-email*`.
+Actual packaged `repair --help` exited 0; its mail/calendar scopes match engine
+`repair_projection`, authenticated `Maintenance.RepairProjection` and CLI repair
+handling. No provider/cache mutation was executed for the user's question.
+
+Signed/pushed bootstrap checkpoint `57c619e` passed all 31 script tests (nine
+new bootstrap tests), Ruff lint/format, Bash syntax and ShellCheck. All eight
+checkpoint files passed scope/input/secret/whitespace checks, with 51 local
+links and 411 unchanged prior source hashes. Signature and exact remote head
+were verified. RED, formatting and setup diagnostics remain retained in
+`test-results/curl-bootstrap/`; no assertions were weakened.
+
+Actual public pipeline shell `46985` exited 0 from a fresh temporary directory:
+`curl -fsSL PUBLIC_BOOTSTRAP_URL | tee EVIDENCE_FILE | bash -s -- --prefix TEMP_PREFIX`.
+The tee retained exactly the bytes executed; SHA256
+`7b9d666a47365d664500c975f98d69fbb7bf601668c830afa2d4348fa7819be0`
+matched the reviewed bootstrap. It fetched the pinned Python source13dbe549,
+verified its checksum, then selected successful sourcec662e48/run34706301412
+attempt1/artifact10302106519. Installed package SHA256:
+`ec7e02d16d02f0206f364d76400f94837231ac5039ed00a01077bb759d331bde`.
+All 467 manifest entries, clean metadata and both ARM64 headers were checked
+independently; both binaries' `--version` exited0. Normal-environment snapshots
+stayed unchanged. No compiler, daemon or provider action ran.
+
+Exact public URL, argv, retained prefix, metadata/hashes and output are in
+`test-results/curl-bootstrap/{public-pipeline.json,public-verification.json,TESTING-INSTALL.json}`.
+The new push passed all ten rebuild jobs in run34710211208 and all seven
+security jobs in run34710211290 at57c619e. Watcher63008 exited0 at13:25Central;
+actual terminal API/job receipts are in `test-results/curl-bootstrap/hosted-final.json`.
+These results are separate from the earlier artifact selected by the public
+pipeline. Final documentation-only
+checks/receipt are retained in `test-results/curl-bootstrap/final-docs/`;
+`[skip ci]` avoids starting another build merely to record these results.
+
 ## Curl-to-Bash bootstrap follow-up
 
 Nine new subprocess tests failed before the root `install-testing.sh` existed

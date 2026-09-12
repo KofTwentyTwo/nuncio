@@ -7,21 +7,51 @@ update and tracks the new bootstrap at 75%, 0.5–1 remaining active hour.
 Receipt/body/chart: `test-results/status-emails/2026-09-12-1303*`.
 Next due 14:04 Central / 19:04 UTC during active execution.
 
-## Current follow-up — curl-to-Bash testing installation
+## Curl-to-Bash testing installation delivered
 
-James requested a public `curl | bash` entry point so a laptop does not need a
-checkout. Root is implementing `../install-testing.sh` as a thin bootstrap of
-the existing verified Python installer. The Python source is pinned by commit
-and SHA-256, while application selection remains the newest successful retained
-testing run. No automatic prerequisite installation, daemon startup or live
-account action is included. The existing goal tool remains blocked on deferred
-live/native acceptance; this explicitly authorized installer follow-up is active.
+The requested Apple Silicon installation/testing guide was emailed at 13:23
+Central to james@kof22.com, message/thread `1a096dc5b5c3290a`. Independent readback
+verified SENT, recipient, subject and complete body. It includes the public
+installer, prerequisites, fresh-profile startup/status/restart/shutdown checks,
+account/provider boundaries, updates and cache repair. Exact body and receipt:
+`test-results/curl-bootstrap/installation-email*`. This separate how-to email
+does not replace the hourly chart schedule above.
 
-Nine offline bootstrap tests first failed on the missing entry point and now
-pass; all 31 script regressions, Ruff lint/format, Bash syntax and ShellCheck
-also pass. Next: finish document/secret checks, checkpoint/push, then verify the
-actual public curl pipeline into a fresh private temporary prefix. Record exact commands/exits and any resulting CI runs
-in `test-results/curl-bootstrap/`. Do not install into the normal environment.
+Cache question: engine/API/CLI expose `Maintenance.RepairProjection` through
+`repair --account ID --scope mail|calendar`, with local `--dry-run` and awaited
+provider rebuilds via `--wait`. Existing drafts and durable operations survive;
+failed staging preserves the visible projection. There is no immediate
+discard/refetch-later or per-object eviction command. Actual packaged help was
+checked (`test-results/curl-bootstrap/repair-help.json`); no repair was executed.
+
+Signed/pushed `57c619e` publishes the root `install-testing.sh`; both READMEs and
+TESTING-INSTALL.md give the one-line command. It pins the reviewed Python
+installer by immutable commit and SHA-256, while selecting the newest successful
+retained application build. Nine new offline subprocess tests, all 31 script
+regressions, Ruff lint/format, Bash syntax and ShellCheck passed. Source, exact
+staged scope, signature, push, links and scoped Gitleaks were checked; prior
+411 captured source hashes stayed unchanged.
+
+Actual public pipeline shell `46985` exited 0. Bootstrap bytes matched the
+checked source; the installer selected `c662e48`, run `34706301412` attempt 1,
+artifact `10302106519`. The 467-entry installed manifest, clean metadata and
+both ARM64 headers were independently verified; both version commands passed.
+The retained installation is under `/private/tmp/nuncio-curl-acceptance-wtxpbkos/`.
+Normal-environment snapshots were unchanged, with no build, daemon or provider
+action. Exact full hashes, commands and installation path:
+`test-results/curl-bootstrap/public-verification.json`.
+
+Hosted rebuild `34710211208` passed all ten jobs and security `34710211290`
+passed all seven jobs at `57c619e`. Watcher `63008` exited 0 at 13:25 Central;
+actual terminal API outcomes, exact heads and job results are retained in
+`test-results/curl-bootstrap/hosted-final.json`. No watcher remains active.
+The public pipeline's earlier successful `c662e48` artifact remains separately
+identified; no new download or native/provider compatibility is inferred.
+This final report-only checkpoint uses `[skip ci]`; its receipt belongs in
+`test-results/curl-bootstrap/final-docs/`. Native/live acceptance remains
+explicitly deferred, and the full goal tool retains its prior blocked status.
+No native apps, normal installation, release, merge or remote setting change
+is included. Latest exact continuation: `test-results/checkpoint-final/current-execution.json`.
 
 ## Final continuation — documentation CI passed; live acceptance deferred
 

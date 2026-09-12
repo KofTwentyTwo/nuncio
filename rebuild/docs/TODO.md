@@ -4,7 +4,9 @@
 
 - [x] Implement the public Bash entry point with a pinned/checksummed Python installer and unchanged latest-successful-build selection.
 - [x] Add nine offline subprocess regressions for verification, failures, arguments, prerequisites and cleanup; RED/GREEN receipts retained.
-- [ ] Complete script/documentation quality checks, signed checkpoint/push, and actual public curl-to-Bash installation into a fresh private temporary prefix.
+- [x] Complete script/documentation quality checks, signed checkpoint/push, and actual public curl-to-Bash installation into a fresh private temporary prefix.
+- [x] Send the requested installation/testing instructions to james@kof22.com and independently verify the complete sent message; include account-free startup checks, provider limitations and cache-repair commands.
+- [x] Actual rebuild34710211208 passed all ten jobs and security34710211290 passed all seven at57c619e. Watcher63008 exited0; exact terminal results retained in curl-bootstrap/hosted-final.json. The installer selects the latest eligible completed build.
 
 ## Final acceptance handoff
 
