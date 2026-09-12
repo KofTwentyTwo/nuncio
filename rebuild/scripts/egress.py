@@ -85,9 +85,45 @@ def linux_ci(command: list[str], evidence: Path) -> int:
     if os.getuid() == 0:
         raise RuntimeError("Run as the unprivileged hosted-runner user")
     chain = f"NUNCIO-{os.getpid()}"
+    cgroup = Path("/sys/fs/cgroup") / chain
+    cgroup_created = False
     installed = []
     probe_routes = []
     observed = {}
+
+    def group(action: str) -> int:
+        payload = {
+            "uid": os.getuid(),
+            "environment": dict(os.environ),
+            "cwd": os.getcwd(),
+            "argv": [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--inside",
+                "--evidence",
+                str(evidence.resolve()),
+                "--",
+                *command,
+            ],
+        }
+        result = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                "/usr/bin/python3",
+                str(Path(__file__).with_name("egress_cgroup.py").resolve()),
+                action,
+                str(cgroup),
+            ],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=action != "run",
+            timeout=None if action == "run" else 20,
+            check=False,
+        )
+        if action != "run" and result.returncode:
+            raise RuntimeError(f"Owned cgroup {action} failed: {result.stderr.strip()}")
+        return result.returncode
 
     def firewall(program: str, *args: str) -> str:
         return subprocess.run(
@@ -103,6 +139,8 @@ def linux_ci(command: list[str], evidence: Path) -> int:
 
     previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
+        group("create")
+        cgroup_created = True
         # Dedicated TEST-NET routes ensure even an IPv6-disconnected runner sends
         # probes through OUTPUT. They cannot contact a real remote endpoint.
         for family, destination in [("-4", "192.0.2.1/32"), ("-6", "2001:db8::1/128")]:
@@ -113,16 +151,35 @@ def linux_ci(command: list[str], evidence: Path) -> int:
                 timeout=10,
             )
             probe_routes.append((family, destination))
-        for program, loopback in [("iptables", "127.0.0.0/8"), ("ip6tables", "::1/128")]:
+        for program, loopback in [
+            ("iptables", "127.0.0.0/8"),
+            ("ip6tables", "::1/128"),
+        ]:
             firewall(program, "-N", chain)
             installed.append((program, False))
             firewall(program, "-A", chain, "-d", loopback, "-j", "RETURN")
             # Docker's published localhost ports are DNATed before OUTPUT filtering.
             firewall(
-                program, "-A", chain, "-m", "conntrack", "--ctorigdst", loopback, "-j", "RETURN"
+                program,
+                "-A",
+                chain,
+                "-m",
+                "conntrack",
+                "--ctorigdst",
+                loopback,
+                "-j",
+                "RETURN",
             )
             firewall(
-                program, "-A", chain, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"
+                program,
+                "-A",
+                chain,
+                "-p",
+                "tcp",
+                "-j",
+                "REJECT",
+                "--reject-with",
+                "tcp-reset",
             )
             firewall(program, "-A", chain, "-j", "REJECT")
             firewall(
@@ -131,14 +188,16 @@ def linux_ci(command: list[str], evidence: Path) -> int:
                 "OUTPUT",
                 "1",
                 "-m",
-                "owner",
-                "--uid-owner",
-                str(os.getuid()),
+                "cgroup",
+                "--path",
+                chain,
                 "-j",
                 chain,
             )
             installed[-1] = (program, True)
-        result = run_inside(command, evidence)
+        # The runner's control process shares our UID. Only this child hierarchy
+        # may be filtered; applying an owner rule also disconnects the runner.
+        result = group("run")
         for program, _ in installed:
             rules = firewall(program, "-L", chain, "-n", "-v", "-x")
             packets = sum(
@@ -150,12 +209,27 @@ def linux_ci(command: list[str], evidence: Path) -> int:
                 raise RuntimeError(f"{program} did not independently count both external probes")
             observed[program] = {"rejected_packets": packets, "rules": rules}
         data = json.loads(evidence.read_text())
+        if data.get("exit_status") != result:
+            raise RuntimeError("Test command ended without matching completion evidence")
+        data["isolation"] = {
+            "kind": "cgroup-v2",
+            "path": str(cgroup),
+            "uid": os.getuid(),
+        }
         data["firewall"] = observed
         evidence.write_text(json.dumps(data, indent=2) + "\n")
         return result
     finally:
         failures = []
-        for program, attached in reversed(installed):
+        empty = not cgroup_created
+        if cgroup_created:
+            try:
+                group("kill")
+                empty = True
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                failures.append(f"cgroup kill: {type(error).__name__}")
+        # Keep the filters attached if remaining test processes cannot be stopped.
+        for program, attached in reversed(installed) if empty else []:
             try:
                 if attached:
                     firewall(
@@ -163,9 +237,9 @@ def linux_ci(command: list[str], evidence: Path) -> int:
                         "-D",
                         "OUTPUT",
                         "-m",
-                        "owner",
-                        "--uid-owner",
-                        str(os.getuid()),
+                        "cgroup",
+                        "--path",
+                        chain,
                         "-j",
                         chain,
                     )
@@ -173,10 +247,25 @@ def linux_ci(command: list[str], evidence: Path) -> int:
                 firewall(program, "-X", chain)
             except (OSError, subprocess.SubprocessError) as error:
                 failures.append(f"{program}: {type(error).__name__}")
+        if cgroup_created and empty and not failures:
+            try:
+                group("remove")
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                failures.append(f"cgroup remove: {type(error).__name__}")
         for family, destination in reversed(probe_routes):
             try:
                 subprocess.run(
-                    ["sudo", "-n", "ip", family, "route", "del", destination, "dev", "lo"],
+                    [
+                        "sudo",
+                        "-n",
+                        "ip",
+                        family,
+                        "route",
+                        "del",
+                        destination,
+                        "dev",
+                        "lo",
+                    ],
                     check=True,
                     capture_output=True,
                     timeout=10,

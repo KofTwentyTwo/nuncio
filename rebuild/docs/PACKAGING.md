@@ -1,13 +1,18 @@
 # Local packages and operation
 
-The verified candidate is a local macOS ARM64 archive, not an installed or public
-release: `dist/final-candidate/nuncio-0.1.0-rc-aarch64-apple-darwin-720081f661d0.tar.gz`,
-SHA256 `47d65f00764da1cedb691109bd5b65c402ed253d69a40e2f0fe43fff13c0063f`.
-Two fresh builds produced identical archives and binaries; each passed22 extracted
-checks with237 dependency notices. `BUILD-METADATA.json` records uncommitted source
-based on720081f, source hashes and build environment. The adjacent `EVIDENCE.json`
-and check/build/hash sidecars record validation. Hosted CI and live/native-keystore
-acceptance remain separate; no Linux/Windows artifact compatibility is inferred.
+Candidates are versioned local archives, not installed or public releases. Use the
+archive's adjacent SHA-256 sidecar to verify it before extraction. The adjacent
+`-build.jsonl` and `-verification.json` files record the build and extracted-binary
+checks. For the selected local candidate, `dist/final-candidate/EVIDENCE.json`
+records its exact path, archive/binary hashes, repeatability result and remaining
+acceptance conditions. Preserve those files with the archive.
+
+Inside the archive, `BUILD-METADATA.json` identifies its source state, platform and
+build inputs; `SHA256.json` hashes its contents. Developer reports are dated
+build-time snapshots and may describe earlier verification artifacts. Use the
+archive's own metadata/manifest and adjacent evidence to identify the binaries you
+are inspecting. Hosted CI and live/native-keystore acceptance are separate facts;
+no additional platform or provider compatibility is inferred.
 
 ## Build prerequisites and command
 

@@ -12,7 +12,11 @@
 - [x] Packaged README fixed; two corrected fresh archives/binaries are byte-identical,22extracted checks each, all links valid. Canonical dist/final-candidate and exact proof recorded.
 - [x] Operating/recovery/package/compatibility docs and working R01–R16 matrix recorded; signed7f81b73 checkpoint pushed/exact remote verified.
 - [x] Affected gate91079: all6outer/17nested commands passed; all56 subprocess tests passed, no failures/ignored. Production244files unchanged.
-- [ ] Signed checkpoint/push resource-fixture correction and complete hosted CI verification. Preserve original34671490682 failure and inspect other jobs.
+- [x] Signed resource-fixture checkpoint2e4d30e pushed; exact remote head verified.
+- [x] Retain terminal hosted34672641999 failure:4macOS passes/6Linux control-connection failures; same-user controller regression reproduces cause.
+- [ ] Verify dedicated-cgroup egress fix, preserving runner connectivity and strict test denial/exit/cleanup; checkpoint/push and verify replacement hosted run.
+- [x] Final guide correction and refreshed local candidate45789 passed two identical fresh builds/22checks each; selected8996085 archive and prior candidates preserved. No product/package-code changes.
+- [x] Implementation report, requirement matrix, artifact hashes and operating/recovery limits prepared;17doc links/fences and whitespace pass. Update hosted results when available.
 - [ ] Live acceptance remains deferred/unapproved/unverified; goal stays active and incomplete.
 
 ## Earlier task ledger

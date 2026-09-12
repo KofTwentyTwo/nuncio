@@ -1,5 +1,98 @@
 # Verification evidence
 
+Final CI-fix preflight: configured Ruff check/fmt24files, actionlint and whitespace
+all0;13changed/current docs have valid local links and balanced fences. Exact
+commands/statuses: ci-runner-egress/final-checks.json. Linux explicit-path/cleanup
+regression11985/0 and macOS8script tests0 complete the applicable local gate.
+
+## Linux runner connection loss — reproduced and corrected locally
+
+Hosted34672641999 ended failure:4macOS jobs passed and6Ubuntu jobs failed with
+runner communication loss. Watcher59190/1, run-final.json and all6annotations
+retain the terminal result. Log downloads404 were unavailable evidence, not
+failing command logs. Local same-UID controller regression failed1 exactly
+during owner-UID filtering (baseline passed and test child was denied).
+ci-runner-egress/control-red.json records command/exit1, copy0 and removal0.
+
+Cgroup-v2 correction passes independent local Linux regression28824/0: controller
+IPv4/IPv6 reachable before/during/after, test descendants denied, sameUID1000 and
+exit0/17 preserved. Extended26231/0 also proves detached descendants stopped and
+owned rules/routes/cgroups removed on normal return and SIGTERM (wrapper2 expected).
+Exact Docker commands, numeric evidence and logs: ci-runner-egress/cgroup-green*
+and cgroup-cleanup*. Private network/cgroup namespaces only; no host firewall or
+cgroup edits. Cgroup image build82350/0. Existing8script tests pass under macOS
+egress (macos-scripts.log/envelope, exit0). Configured Ruff check/fmt24files0;
+a preliminary unconfigured invocation1 used unrelated global shebang rules,
+recorded separately without changing file modes. No production source changed.
+Controller regression now precedes all6Linux CI jobs and retains numeric evidence.
+Final explicit-guard-path regression11985/0 passed; cgroup-final.json/artifacts
+retain commands/exit0, evidence copy0 and owned removal0. Actionlint0 checks the
+updated workflow. Replacement hosted verification remains pending; local success
+is not hosted proof.
+
+## Final operating-guide package — passed
+
+Shell45789 completed0 at04:55UTC. Two fresh packages each passed22 extracted
+checks and produced byte-identical archives/binaries; zero changed inputs,
+differing packaged files or README link failures. Canonical selected archive:
+dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-2e4d30ef9434.tar.gz,
+SHA2568996085e4e698383e11625d848b287616b165c0a9b33fb4430c8ab872cedc1be.
+Daemon SHA256f64aad27cb3c75eebd05822f73f8439f4ae9fc0e52e9b8cc6e0bb0642c47b7de;
+CLI SHA2561495aa640c31a3b45159005af8f040292af3d03ffacb41448d2b33e22163cac5.
+237notices/frozen descriptor verified. Metadata:2e4d30e, dirty:true, source epoch
+1789186687. Production244files unchanged. Proof/commands/statuses/inputs/comparison:
+task16-package-final/; adjacent and selected-root EVIDENCE.json retain exact results.
+
+Earlier documentation refresh30482 also passed (two e49121a archives/22checks each),
+but inspection found PACKAGING hard-coding its predecessor. Retained guidance-red
+inspection1 led to a generic metadata/checksum guide, verified in45789. No package
+code or production code changed. First inspection-reader attempt1 assumed an object
+instead of the actual verification list; corrected reader0 confirmed all22 expected
+exits. Both are recorded separately from package/build success. Earlier47d65f and
+e49121a archives/receipts are preserved. Archived developer reports are dated
+snapshots; current source/external evidence records later outcomes. No installation,
+publication, native-keystore or live-provider acceptance occurred.
+
+## Corrected hosted macOS lint/release — passed
+
+All4macOS jobs passed on2e4d30e by04:41UTC. Downloaded lint artifact confirms
+8commands0 and152core tests; release artifact confirms8commands0, isolation2
+and external-client1. Separate package-egress.json records the actual package
+command exiting0 under parent/child egress denial. No ignored/failed Rust tests.
+Evidence: remote-ci/34672641999/{lint-macos,release-macos}/ and summary JSON.
+Hosted archive hashes/extraction-check JSON were not uploaded; local archive
+hashes/checks remain the independently retained artifact proof. Six Ubuntu jobs
+are still running; no overall hosted success or live/native-keystore claim.
+GitHub's watcher reports a Node20 deprecation annotation for pinned upload-artifact,
+executed by GitHub on Node24. Artifact uploads succeeded; no runtime/action change
+was made during the run. Retain this observed maintenance warning separately from
+passing Rust/dependency checks.
+
+## Corrected hosted macOS mock and E2E — passed
+
+Workflow34672641999 on2e4d30e: macOS mock-contract and E2E jobs passed by04:30UTC.
+Downloaded artifacts independently confirm mock26 (2commands0) and actual E2E40
+(7commands0: Google27/recovery5/repair2/migration1/security2/resources3). Zero
+failed/ignored. Both parent/child probes deny external IPv4/IPv6, allow loopback,
+and report underlying command0. Artifacts/summary JSON: remote-ci/34672641999/.
+This verifies the resource deadline correction on hosted macOS. Eight jobs remain
+running; no overall hosted or live/native-keystore acceptance claim.
+
+## Resource-fixture checkpoint and hosted rerun
+
+Signed2e4d30ef9434638db4a5b824b490cdb4278bf13c committed/pushed after affected
+local gate91079 passed. Signature/push/exact ls-remote checks0; staged7files/
+27974diff bytes passed Gitleaks and whitespace0. Receipt: checkpoint-resource/.
+Actual hosted run34672641999 has all10jobs running at04:25UTC on that exact head; do not infer success:
+https://github.com/KofTwentyTwo/nuncio/actions/runs/34672641999.
+The superseded run terminated cancelled04:23UTC:3macOS passes/1macOS failure/
+6Ubuntu cancellations. Final job ledger: remote-ci/34671490682/run-final.json.
+The macOS lint artifact confirms8commands0 and152core tests passed; no failed/ignored.
+Linux partial-log retrieval returned1 (log not found); no partial Linux evidence claimed.
+The previous run's macOS release-check artifact independently confirms all8
+commands0, production isolation2 and external-client1; preserved in
+remote-ci/34671490682/release-macos/. No live/native-keystore acceptance claim.
+
 ## Hosted macOS resource-fixture failure
 
 Original workflow34671490682 macOS E2E job103493548592 failed its large-message

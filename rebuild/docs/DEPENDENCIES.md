@@ -1,13 +1,13 @@
 # Dependency review
 
-Dependency review passed after remediation; package notice and platform runtime verification remain in progress. The first cargo-deny0.19.8 scan of the locked
+Dependency review and all237 packaged third-party notices passed after remediation. Hosted platform checks and native-keystore acceptance remain separate pending conditions. The first cargo-deny0.19.8 scan of the locked
 workspace completed on September12,2026UTC with exit5. Its current RustSec database
 reported three unmaintained packages: derivative2.2.0 (RUSTSEC-2024-0388) and
 instant0.1.13 (RUSTSEC-2024-0384), through keyring2/secret-service3/zbus3; and the
 direct rustls-pemfile2.2.0 dependency (RUSTSEC-2025-0134). No vulnerability advisory
 was reported in that run. This does not make the failed audit clean or prove the
 absence of vulnerabilities. Raw diagnostics and database checkout are retained in
-`test-results/task15-dependencies/`; fixes and a final clean check remain pending.
+`test-results/task15-dependencies/`; remediation and subsequent passing checks are recorded below.
 
 The initial license policy also rejected0BSD (mailparse/quoted_printable, test
 dependencies) andCDLA-Permissive-2.0 (webpki-roots trust data). The reviewed policy
@@ -15,7 +15,7 @@ in [deny.toml](../deny.toml) permits those licenses and retains all advisory err
 [0BSD](https://spdx.org/licenses/0BSD.html) is a permissive software license.
 [CDLA-Permissive-2.0](https://cdla.dev/permissive-2-0/) requires distributing its
 agreement with redistributed data; packaging must include the trust-data license.
-Archive license notices and native vendored-library notices remain to be verified.
+The verified archive includes the trust-data and native vendored-library notices; see the inventory evidence below.
 
 Run `cargo deny --locked check advisories licenses sources` from rebuild/. Fetch
 the public advisory database before enabling test egress denial; offline checking

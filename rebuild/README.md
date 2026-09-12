@@ -6,8 +6,9 @@ Independent Rust workspace for the approved engine-and-CLI rebuild. The implemen
 - [Offline testing](docs/TESTING.md)
 - [Mock Google service](docs/MOCK-GOOGLE.md)
 - [API contract](docs/API.md) and [task progress estimates](docs/PROGRESS.md)
+- [Implementation report](docs/IMPLEMENTATION-REPORT.md)
 - [Requirement evidence matrix](docs/REQUIREMENTS.md) and [compatibility limits](docs/COMPATIBILITY.md)
 - [Session state](docs/SESSION-STATE.md), [remaining work](docs/TODO.md), and [verification evidence](docs/VERIFICATION.md)
 - [Approved specification](../docs/superpowers/specs/2026-09-10-google-first-rebuild.md) and [implementation plan](../docs/superpowers/plans/2026-09-10-google-first-rebuild.md)
 
-All automated acceptance uses synthetic local services. No live-provider compatibility or remote CI execution is claimed. Native apps are outside this workspace's implementation goal.
+All automated acceptance uses synthetic local services. Four hosted macOS jobs passed; six Linux jobs failed because the test firewall disconnected the runner. A locally verified cgroup correction awaits hosted verification; no live-provider compatibility or overall hosted-CI success is claimed. Native apps are outside this workspace's implementation goal.

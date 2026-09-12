@@ -1,6 +1,11 @@
 # Rebuild session state
 
-Updated September 11, 2026. Full Tasks01–16/R01–R16 goal is active and unbudgeted. Continue inline from this worktree; do not recreate the goal or restart planning. Full local Google and Synology mocks are the current provider scope. Live acceptance remains deferred/unapproved/unverified; it does not block remaining offline work. Native apps are excluded.
+Updated September 12, 2026. Full Tasks01–16/R01–R16 goal is active and unbudgeted. Continue inline from this worktree; do not recreate the goal or restart planning. Full local Google and Synology mocks are the current provider scope. Live acceptance remains deferred/unapproved/unverified; it does not block remaining offline work. Native apps are excluded.
+
+Final CI-fix preflight: configured Ruff check/fmt24files, actionlint and whitespace
+all0;13changed/current docs have valid local links and balanced fences. Exact
+commands/statuses: ci-runner-egress/final-checks.json. Linux explicit-path/cleanup
+regression11985/0 and macOS8script tests0 complete the applicable local gate.
 
 ## Authorization and workspace
 
@@ -10,6 +15,77 @@ Read AGENTS→CLAUDE, shared personal rules/style, rebuild/AGENTS, this file, TO
 
 ## Immediate next action
 
+Latest signed checkpoint2e4d30ef9434638db4a5b824b490cdb4278bf13c is pushed;
+independent ls-remote and signature checks passed0. Seven staged files/27974diff
+bytes passed Gitleaks/whitespace0. Logs/receipt: test-results/checkpoint-resource/.
+Hosted run34672641999 completed failure: all4macOS jobs passed; all6Ubuntu
+jobs failed with hosted-runner communication loss. Watcher59190 ended1.
+https://github.com/KofTwentyTwo/nuncio/actions/runs/34672641999.
+Terminal ledger: remote-ci/34672641999/run-final.json; annotations retained.
+Earlier log-download404 responses were observation failures, not command logs.
+
+Confirmed root cause: owner-UID iptables filtering also catches the runner's
+same-user control connection. Independent local controller regression failed1
+at its during-test socket, after baseline connectivity and test-child denial;
+proof: ci-runner-egress/control-red.json/log/artifacts. Current uncommitted fix
+uses a dedicated cgroup-v2 path for the test hierarchy, preserving UID and
+runner connectivity. Privileged helper drops privileges before exec and kills
+remaining test processes before detaching filters. Linux cgroup matcher support
+was verified in a private disposable container; no host firewall was modified.
+Local28824/0 and extended26231/0 pass controller continuity, strict denial,
+exit0/17, detached-child stop and owned cleanup on return/SIGTERM. Eight existing
+script regressions pass under macOS egress0; configured Ruff check/fmt24files0.
+Controller check is added before each Linux CI job. Final explicit-path regression11985/0 passed; actionlint0. No local test running.
+Next: final gate/docs/whitespace/Gitleaks,
+signed checkpoint/push, then verify actual replacement hosted run.
+Production source and selected archive remain unchanged. Do not repackage for
+CI-script or dated-report edits. No product/build/test process remains running.
+
+Corrected-head hosted artifacts independently confirm mock26/2commands0,
+lint152/8commands0, actual E2E40/7commands0, release-isolation2/external-client1
+with8release commands0, plus separate package-command egress exit0. All recorded
+Rust results have zero failed/ignored; parent/child externalIPv4/IPv6 denial and
+allowed loopback confirmed. Artifacts and summaries: remote-ci/34672641999/.
+Hosted archive hashes/check JSON were not uploaded; do not invent them.
+Old34671490682 terminated cancelled04:23UTC:3macOS passes/1macOS failure/6Ubuntu
+cancellations. Final ledger retained; unavailable Linux partial log returned1.
+
+Final local documentation refresh45789 completed0 at04:55UTC: two fresh packages,
+22extracted checks each, byte-identical archive/binaries, zero changed inputs or
+README link failures. Canonical selected archive:
+dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-2e4d30ef9434.tar.gz
+SHA2568996085e4e698383e11625d848b287616b165c0a9b33fb4430c8ab872cedc1be.
+Daemon SHA256f64aad27cb3c75eebd05822f73f8439f4ae9fc0e52e9b8cc6e0bb0642c47b7de;
+CLI SHA2561495aa640c31a3b45159005af8f040292af3d03ffacb41448d2b33e22163cac5.
+237notices and frozen descriptor verified; all244production source files unchanged.
+Metadata honestly records dirty documentation based on2e4d30e and source epoch
+1789186687. Current EVIDENCE.json points to this selected archive; prior47d65f and
+intermediatee49121a archives/receipts remain preserved. Proof: task16-package-final/.
+
+Intermediate30482 already proved equal e49121a archives, but a final guide inspection
+found PACKAGING declaring the preceding artifact current. Generic guide now points
+to adjacent metadata/checksum/evidence, avoiding a self-referential archive hash.
+No package code or product feature changed. Corrected45789 proved the guide matches
+source and contains no obsolete candidate declaration. Do not rebuild merely for
+later dated report updates; operating guidance now identifies its own artifact.
+Archived developer reports are explicit build-time snapshots; current source report
+and external receipts retain later evidence. No installation/publication/live use.
+
+Implementation report and requirement/operating/dependency/mock guides are current;
+latest documentation edits remain uncommitted pending hosted results. Updated source
+report names the selected8996085 archive. All17current source docs pass local links/fences and git diff --check0
+(task16-package-final/current-docs-check.json). Run staged Gitleaks/whitespace
+before the authorized documentation checkpoint/push when hosted results settle.
+
+23:57Central hourly report sent04:57UTC, Gmail ID/thread1a093fa2c99cabb4, SENT;
+independent read confirms183443-byte inline16-task PNG/CIDnuncio-progress-2357.
+Exact report/chart/estimates/payload/receipt: status-emails/2026-09-11-2357*.
+Estimates remain2–6offline active hours plus3–6deferred live; external waiting excluded.
+Next email05:57UTC / September12 00:57Central while active. Last report includes
+all4macOS passes,6Ubuntu pending and final8996085 artifact. Live/native-keystore
+acceptance remains deferred/unapproved; no account request now. Full goal active.
+
+Previous checkpoint context:
 Signed checkpoint7f81b735b593c3e86caf64d59964fedfa3ffb2fc is pushed to the approved
 feature branch; independent ls-remote matched exactly. Final staging56files/
 365648diff bytes, Gitleaks0, whitespace0, clean worktree before commit. Initial
@@ -24,8 +100,8 @@ and external generated-client1; zero failed/ignored. Parent/child egress checks
 passed. Commands/counts/copied suite logs: test-results/ci-resource-fix/.
 All244 production source files still match the verified packaged candidate.
 
-Current action: stage/scan/sign/push the verified test-only correction and updated
-evidence, then observe the new hosted run. Original hosted workflow34671490682
+The verified test-only correction and updated evidence are now checkpointed in
+2e4d30e; observe its hosted run as specified above. Original hosted workflow34671490682
 on7f81b73: macOS mock-contract, lint and release-check passed; macOS E2E failed in
 initial large-message sync (CLI4); Ubuntu jobs still running at04:15UTC.
 Preserved artifacts: remote-ci/34671490682/{e2e-macos,mock-macos,release-macos}/.
@@ -105,7 +181,7 @@ search at approximately01:02UTC found no third message; one retry succeeded at
 approximately01:03UTC, Gmail ID/thread `1a0932257375285e`, SENT. Exact body and
 attempt history: test-results/status-emails/2026-09-11-1957.md. Recipient delivery
 or reading is not independently confirmed.
-Next due: September12 04:57UTC / September11 23:57Central. Check the clock during active goal execution;
+Next due: September12 05:57UTC / September12 00:57Central. Check the clock during active goal execution;
 At James's explicit request, a revised third report was sent at01:08UTC with all16
 task bars/percentages/hours. Gmail ID/thread1a09328893b32fa7, SENT; sent-folder read
 confirms the186505-byte inline PNG and matching content ID. Exact report and chart:

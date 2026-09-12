@@ -73,11 +73,28 @@ and require early failure; required missing suites also fail closed.
 
 The macOS wrapper uses a process/child sandbox permitting loopback and Unix
 sockets while denying external outbound traffic. Hosted Linux runners install
-owned per-user IPv4/IPv6 reject chains and temporary TEST-NET probe routes, then
-remove only those objects. Parent and child loopback checks must pass; external
-probes must fail and Linux packet counters independently confirm both rejections.
-Local Linux validation uses tests/egress/Dockerfile and check.py inside a disposable
-network-disabled namespace; it does not prove a hosted CI run occurred.
+owned IPv4/IPv6 reject chains matching only a dedicated cgroup-v2 test hierarchy.
+The same-user runner controller stays outside that group. A narrow sudo helper
+creates it, moves the test launcher into it, restores the original unprivileged
+UID/environment, and executes the command. Cleanup kills all remaining test
+processes before detaching filters and removing the empty group. If that fails,
+filters stay attached. No user-wide firewall fallback or external-network
+allowlist is permitted. The Linux runner must support cgroup-v2, cgroup.kill and
+iptables cgroup --path. Semantics: [kernel cgroup-v2 documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+and [iptables cgroup matcher](https://man7.org/linux/man-pages/man8/iptables-extensions.8.html).
+
+Parent and child loopback checks must pass; external IPv4/IPv6 probes must fail,
+and Linux packet counters independently confirm both rejections. Before each
+Linux CI job, control_plane.py verifies an unrelated same-UID controller can
+reach actual synthetic listeners before/during/after the guard while test
+children cannot, for command exit0 and17. Evidence is retained independently.
+Local tests/egress/check.py also verifies detached descendants are stopped and
+owned filters/routes/cgroups removed on normal exit and SIGTERM. These run in
+the disposable tests/egress/Dockerfile image with network none, private cgroup
+namespace and namespace-local NET_ADMIN/SYS_ADMIN capabilities; its cgroup
+mount is remounted writable only inside that container. No host cgroup bind or
+Docker socket is mounted. Exact local commands/results are retained in
+ci-runner-egress/. Passing local checks does not prove a hosted CI run passed.
 
 Independent Dovecot/Mailpit containers attach only to one internal network. Docker29
 does not publish ports for that topology, so a pinned, unprivileged HAProxy relay

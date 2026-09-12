@@ -1,6 +1,6 @@
 # Independent local MailPlus test services
 
-The local MailPlus test environment uses independent Dovecot IMAP and Mailpit SMTP implementations. Neither imports Nuncio engine/provider types. `tests/imap/services.py` owns their disposable Docker composition, credentials, certificate authority, protocol readiness and cleanup. `tests/imap/proxy.py` adds deterministic protocol fault boundaries without owning mailbox or delivery state. The standalone mock and Rust control harness are implemented. Production IMAP account authentication and ingestion now have separate system and actual daemon/CLI suites. Durable IMAP/SMTP mutations remain in progress.
+The local MailPlus test environment uses independent Dovecot IMAP and Mailpit SMTP implementations. Neither imports Nuncio engine/provider types. `tests/imap/services.py` owns their disposable Docker composition, credentials, certificate authority, protocol readiness and cleanup. `tests/imap/proxy.py` adds deterministic protocol fault boundaries without owning mailbox or delivery state. The standalone mock and Rust control harness are implemented. Production IMAP account authentication and ingestion now have separate system and actual daemon/CLI suites. Durable IMAP/SMTP mutations and both Sent policies also have separate system/subprocess evidence, including independently checked delivery/copy effects after lost acknowledgements and process crashes.
 
 ## Pinned services and local operation
 
