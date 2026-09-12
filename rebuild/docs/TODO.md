@@ -14,7 +14,9 @@
 - [x] Affected gate91079: all6outer/17nested commands passed; all56 subprocess tests passed, no failures/ignored. Production244files unchanged.
 - [x] Signed resource-fixture checkpoint2e4d30e pushed; exact remote head verified.
 - [x] Retain terminal hosted34672641999 failure:4macOS passes/6Linux control-connection failures; same-user controller regression reproduces cause.
-- [ ] Verify dedicated-cgroup egress fix, preserving runner connectivity and strict test denial/exit/cleanup; checkpoint/push and verify replacement hosted run.
+- [x] Verify cgroup egress fix locally, strict denial/controller continuity/exit/cleanup, script/style/workflow gates; signed1a0d954 checkpoint pushed/exact remote verified.
+- [x] Reproduce and correct hosted10k status starvation with one transactional FTS reset; focused red/green and full34-command gate91408 pass with307tests per workspace and all399source hashes unchanged. Original deadlines/workloads/assertions retained.
+- [ ] Sign/push verified promotion correction, verify replacement hosted run and two fresh current-source production packages; retain prior failures/artifacts.
 - [x] Final guide correction and refreshed local candidate45789 passed two identical fresh builds/22checks each; selected8996085 archive and prior candidates preserved. No product/package-code changes.
 - [x] Implementation report, requirement matrix, artifact hashes and operating/recovery limits prepared;17doc links/fences and whitespace pass. Update hosted results when available.
 - [ ] Live acceptance remains deferred/unapproved/unverified; goal stays active and incomplete.

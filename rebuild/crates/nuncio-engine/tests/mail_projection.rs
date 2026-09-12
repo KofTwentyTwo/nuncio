@@ -290,3 +290,138 @@ async fn full_repair_rebuilds_all_account_search_rows_only_on_success() {
     drop(connection);
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn delta_search_replacement_is_atomic_and_preserves_untouched_messages_and_accounts() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path(), Zeroizing::new(vec![0x39; 32]))
+        .await
+        .unwrap();
+    let account = uuid::Uuid::new_v4().to_string();
+    let other = uuid::Uuid::new_v4().to_string();
+    for id in [&account, &other] {
+        store
+            .add_account(AccountRecord {
+                id: id.clone(),
+                provider: "google".into(),
+                address: "synthetic@example.test".into(),
+            })
+            .await
+            .unwrap();
+        let run = begin(&store, id).await;
+        for (provider, subject) in [
+            ("one", "Supersededtitle"),
+            ("two", "Deleted"),
+            ("three", "Untouched"),
+        ] {
+            store
+                .stage_mail(
+                    id.clone(),
+                    run.clone(),
+                    message(provider, subject, &["INBOX"]),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .promote_mail(id.clone(), run, Some("10".into()), 2)
+            .await
+            .unwrap();
+    }
+    let connection = rusqlite::Connection::open(temp.path().join("store.db")).unwrap();
+    connection
+        .pragma_update(None, "key", format!("x'{}'", hex::encode([0x39; 32])))
+        .unwrap();
+    let search_rows = |id: &str| {
+        let mut statement = connection.prepare("SELECT message_id,subject FROM message_search WHERE account_id=?1 ORDER BY message_id,subject").unwrap();
+        statement
+            .query_map([id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let original = search_rows(&account);
+    let untouched = search_rows(&other);
+    let original_id = original
+        .iter()
+        .find(|(_, subject)| subject == "Supersededtitle")
+        .unwrap()
+        .0
+        .clone();
+    let run = store
+        .start_mail_run(account.clone(), "delta".into(), 3)
+        .await
+        .unwrap();
+    store
+        .begin_sync_run(account.clone(), run.id.clone(), Some("10".into()))
+        .await
+        .unwrap();
+    for (id, subject) in [("one", "Updated"), ("four", "Created")] {
+        store
+            .stage_mail(
+                account.clone(),
+                run.id.clone(),
+                message(id, subject, &["INBOX"]),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .stage_mail_deletion(account.clone(), run.id.clone(), "two".into())
+        .await
+        .unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_delta BEFORE UPDATE ON messages BEGIN SELECT RAISE(ABORT,'synthetic delta failure'); END;").unwrap();
+    assert!(store
+        .promote_mail(account.clone(), run.id.clone(), Some("20".into()), 4)
+        .await
+        .is_err());
+    assert_eq!(
+        search_rows(&account),
+        original,
+        "failed promotion must roll back search changes"
+    );
+    assert_eq!(search_rows(&other), untouched);
+    connection
+        .execute_batch("DROP TRIGGER reject_delta")
+        .unwrap();
+    store
+        .promote_mail(account.clone(), run.id, Some("20".into()), 5)
+        .await
+        .unwrap();
+    assert_eq!(search_rows(&other), untouched);
+    assert_eq!(search_rows(&account).len(), 3);
+    let mut all = query(&account);
+    all.page_size = 100;
+    let items = store.query_mail(all).await.unwrap().items;
+    let subjects: std::collections::BTreeMap<_, _> = items
+        .iter()
+        .map(|item| (item.provider_id.as_str(), item.subject.as_deref().unwrap()))
+        .collect();
+    assert_eq!(
+        subjects,
+        [
+            ("one", "Updated"),
+            ("three", "Untouched"),
+            ("four", "Created")
+        ]
+        .into()
+    );
+    let mut search = query(&account);
+    search.query = Some("Updated".into());
+    let updated = store.query_mail(search.clone()).await.unwrap();
+    assert_eq!(updated.items.len(), 1);
+    assert_eq!(updated.items[0].id, original_id);
+    for absent in ["Supersededtitle", "Deleted"] {
+        search.query = Some(absent.into());
+        assert!(store
+            .query_mail(search.clone())
+            .await
+            .unwrap()
+            .items
+            .is_empty());
+    }
+    drop(connection);
+    store.close().await.unwrap();
+}

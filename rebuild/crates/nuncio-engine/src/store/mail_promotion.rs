@@ -36,13 +36,16 @@ impl Store {
             if full {
                 // A full generation also repairs search rows with no surviving message.
                 tx.execute("DELETE FROM message_search WHERE account_id=?1",[&account])?;
+            } else {
+                // FTS account/message columns are unindexed. Clear affected rows once;
+                // repeating a full index scan per message starves the store worker.
+                tx.execute("DELETE FROM message_search WHERE account_id=?1 AND message_id IN (SELECT m.id FROM messages m JOIN staged_messages s ON s.account_id=m.account_id AND s.provider_id=m.provider_id WHERE s.account_id=?1 AND s.run_id=?2)",params![account,run])?;
             }
             let mut items=tx.prepare("SELECT provider_id FROM staged_messages WHERE account_id=?1 AND run_id=?2 AND deleted=0 ORDER BY provider_id")?;
             let mut rows=items.query(params![account,run])?;
             while let Some(row)=rows.next()? {let provider:String=row.get(0)?;promote_one(&tx,&account,&run,&provider)?;}
             drop(rows);drop(items);
             // Only a completed full generation is authoritative for absence.
-            tx.execute("DELETE FROM message_search WHERE account_id=?1 AND message_id IN (SELECT m.id FROM messages m WHERE m.account_id=?1 AND ((?3 AND NOT EXISTS(SELECT 1 FROM staged_messages s WHERE s.account_id=?1 AND s.run_id=?2 AND s.provider_id=m.provider_id AND s.deleted=0)) OR EXISTS(SELECT 1 FROM staged_messages s WHERE s.account_id=?1 AND s.run_id=?2 AND s.provider_id=m.provider_id AND s.deleted=1)))",params![account,run,full])?;
             tx.execute("DELETE FROM messages WHERE account_id=?1 AND ((?3 AND NOT EXISTS(SELECT 1 FROM staged_messages s WHERE s.account_id=?1 AND s.run_id=?2 AND s.provider_id=messages.provider_id AND s.deleted=0)) OR EXISTS(SELECT 1 FROM staged_messages s WHERE s.account_id=?1 AND s.run_id=?2 AND s.provider_id=messages.provider_id AND s.deleted=1))",params![account,run,full])?;
             if full {
                 tx.execute("UPDATE collections SET retired=1 WHERE account_id=?1 AND provider_id NOT IN (SELECT provider_id FROM staged_collections WHERE account_id=?1 AND run_id=?2 UNION SELECT label_id FROM staged_memberships WHERE account_id=?1 AND run_id=?2)",params![account,run])?;
@@ -86,10 +89,6 @@ fn promote_one(c: &Connection, account: &str, run: &str, provider: &str) -> Resu
             params![account,uuid::Uuid::new_v4().to_string(),id,row.get::<_,u32>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,String>(4)?])?;
     }
     c.execute("DELETE FROM attachments WHERE account_id=?1 AND message_id=?4 AND part_index NOT IN (SELECT part_index FROM staged_attachments WHERE account_id=?1 AND run_id=?2 AND provider_id=?3)",params![account,run,provider,id])?;
-    c.execute(
-        "DELETE FROM message_search WHERE account_id=?1 AND message_id=?2",
-        params![account, id],
-    )?;
     c.execute("INSERT INTO message_search(account_id,message_id,subject,body) SELECT account_id,?4,subject,search_text FROM staged_messages WHERE account_id=?1 AND run_id=?2 AND provider_id=?3",params![account,run,provider,id])?;
     Ok(())
 }

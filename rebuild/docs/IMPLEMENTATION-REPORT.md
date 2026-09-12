@@ -1,6 +1,18 @@
 # Nuncio implementation report
 
-Status at September 12, 2026, 12:45 a.m. Central: **implemented and verified against local independent providers; hosted CI and live acceptance pending.** The full R01–R16 goal is incomplete. Google/Synology live checks remain deferred at James's direction. This report covers the approved separate `rebuild/` workspace; native apps, merge, release and normal-environment installation remain outside the work performed.
+Status at September 12, 2026, 1:57 a.m. Central: **implemented; latest mail-promotion performance fix passed full offline regression; refreshed artifacts, hosted CI and live acceptance pending.** The full R01–R16 goal is incomplete. Google/Synology live checks remain deferred at James's direction. This report covers the approved separate `rebuild/` workspace; native apps, merge, release and normal-environment installation remain outside the work performed.
+
+The latest hosted run34676397291 completed with9passed jobs and1failure in the
+10,000-message resource-system test; strict IMAP/SMTP suites themselves passed.
+A real SQLCipher reproduction showed mail promotion starving a queued status
+request past30seconds. Replacing repeated per-message FTS scans with one affected
+search reset inside the same transaction reduced that focused case to3.669seconds.
+Original deadlines, workload, cursor semantics and remote-effect assertions remain.
+Full/delta search rollback and account-isolation checks pass. The full offline gate
+passed all34commands/307tests per workspace in ci-promotion-all/; the correction
+is ready for its authorized signed checkpoint. Existing8996085
+archive is retained as the prior candidate and must be refreshed after this production
+change. These new results supersede the earlier build-time snapshot below.
 
 ## Delivered software
 
@@ -16,7 +28,8 @@ The [R01–R16 matrix](REQUIREMENTS.md) links implementation and executable evid
 
 | Check | Observed result | Local evidence under `test-results/` |
 |---|---|---|
-| Full integrated egress-denied gate, shell 58495 | 34 commands passed; 305 Rust tests in each workspace configuration; zero failed/ignored | `task15-all-green/{results,counts,source-verification}.json` and command logs |
+| Latest promotion full gate, shell91408 | 34commands passed;307tests per workspace, zero failed/ignored;399source files unchanged | `ci-promotion-all/{final-summary,exit,source-verification}.json` and `current-all/` |
+| Full integrated egress-denied gate, shell 58495 (prior snapshot) | 34 commands passed; 305 Rust tests in each workspace configuration; zero failed/ignored | `task15-all-green/{results,counts,source-verification}.json` and command logs |
 | Separate named suites in that gate | Google mock 26 / system 22 / E2E 27; operations 6; IMAP contract 2 / system 27 / E2E 13; recovery 5; repair 2 / 2; migration 1; reconciliation 3; three-engine 1; security 3 / 2; resources 4 / 3; production isolation 2 | `task15-all-green/` |
 | Independent services, dependency and client checks | Six Python mail-service scripts passed; dependency advisories/licenses/sources passed; generated-client E2E 1 passed; CLI/client dependency boundaries passed | `task15-all-green/`; `task15-dependencies/`; `task15-contract/` |
 | Packaging and final guide correction | Eight script regressions passed; final two fresh packages each passed 22 extracted-binary checks and produced identical archive/binary bytes; guide identifies its own metadata/checksum | `task16-package-final/`; prior `task15-repeat-green/`; adjacent archive evidence |
@@ -26,11 +39,11 @@ The [R01–R16 matrix](REQUIREMENTS.md) links implementation and executable evid
 
 Repeated workspace and named executions are not distinct unique tests. All automated provider tests use synthetic accounts with external egress denied. The migration test includes 44 actual SIGKILL cases; restore coverage includes five process-death boundaries. Security checks include 168 invalid-auth cases across 42 RPCs, encrypted-store/log canaries, TLS rejection and hostile content. Resource workloads include 10,000 messages and eight 16 MiB attachment cycles with the original 128 MiB post-warm-up growth bound.
 
-The hosted failure was independently reproduced with a 1.25-second response delay. Only the large-resource fixture now uses the existing 30-second production HTTP deadline; other short fault-test deadlines, mock validation and remote-effect assertions are unchanged. The correction passed locally and in the hosted macOS E2E job (40 tests, seven commands, parent/child egress checks). It was signed/pushed as 2e4d30ef9434638db4a5b824b490cdb4278bf13c. All 244 production source files still match the verified packaged candidate. Original failed runs remain recorded in [VERIFICATION.md](VERIFICATION.md).
+The hosted failure was independently reproduced with a 1.25-second response delay. Only the large-resource fixture now uses the existing 30-second production HTTP deadline; other short fault-test deadlines, mock validation and remote-effect assertions are unchanged. The correction passed locally and in the hosted macOS E2E job (40 tests, seven commands, parent/child egress checks). It was signed/pushed as 2e4d30ef9434638db4a5b824b490cdb4278bf13c. That earlier source snapshot matched the prior packaged candidate; the current production correction requires a fresh package. Original failed runs remain recorded in [VERIFICATION.md](VERIFICATION.md).
 
-The later Linux failures exposed a separate CI guard defect: filtering the whole runner UID also cut off GitHub control traffic. An independent same-UID controller regression reproduced that cutoff. A dedicated cgroup now limits filtering to test descendants; local IPv4/IPv6 controller continuity, test denial, exit0/17 propagation, detached-child termination and owned-resource cleanup pass. All eight existing script regressions pass under the macOS guard. This CI-only correction still needs its own hosted run; it changes no production source or selected package.
+The later Linux failures exposed a separate CI guard defect: filtering the whole runner UID also cut off GitHub control traffic. An independent same-UID controller regression reproduced that cutoff. A dedicated cgroup now limits filtering to test descendants; local IPv4/IPv6 controller continuity, test denial, exit0/17 propagation, detached-child termination and owned-resource cleanup pass. All eight existing script regressions pass under the macOS guard. All six hosted Linux controller checks subsequently passed in34676397291; nine jobs passed and the separate large-mailbox production resource failure is addressed by the current correction.
 
-## Verified local artifact
+## Prior verified local artifact — refresh pending
 
 From the isolated worktree's `rebuild/` directory:
 

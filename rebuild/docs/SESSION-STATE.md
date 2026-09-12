@@ -2,10 +2,6 @@
 
 Updated September 12, 2026. Full Tasks01–16/R01–R16 goal is active and unbudgeted. Continue inline from this worktree; do not recreate the goal or restart planning. Full local Google and Synology mocks are the current provider scope. Live acceptance remains deferred/unapproved/unverified; it does not block remaining offline work. Native apps are excluded.
 
-Final CI-fix preflight: configured Ruff check/fmt24files, actionlint and whitespace
-all0;13changed/current docs have valid local links and balanced fences. Exact
-commands/statuses: ci-runner-egress/final-checks.json. Linux explicit-path/cleanup
-regression11985/0 and macOS8script tests0 complete the applicable local gate.
 
 ## Authorization and workspace
 
@@ -13,7 +9,146 @@ Worktree: `/Users/james.maes/Git.Local/KofTwentyTwo/nuncio/.worktrees/nuncio-goo
 
 Read AGENTS→CLAUDE, shared personal rules/style, rebuild/AGENTS, this file, TODO and newest VERIFICATION entries after reset. Approved spec/plan and September10 engineering audit live in the worktree's `docs/`, one above Cargo cwd. User instructions override issue/replanning/delegation/commit defaults.
 
-## Immediate next action
+## Current execution — September 12, 2026, 06:57 UTC
+
+- Full offline gate shell91408 is complete: **exit0, all34 commands passed**,307tests in each workspace configuration, all separate named/system/E2E/Python/dependency/client checks0. Source399files unchanged. Evidence: `test-results/ci-promotion-all/{final-summary.json,exit.json,current-all/,source-verification.json,egress.json}`. No active test process remains.
+- Production correction in `crates/nuncio-engine/src/store/mail_promotion.rs` batches affected FTS replacement in the same transaction. Focused encrypted10k+10k queued status improved30,003ms timeout→3,669ms; original system10k sync now12,547ms. Original deadlines/workloads/assertions preserved. New resource and delta rollback/account-isolation tests passed.
+- Latest signed/pushed checkpoint remains1a0d954d90cdc5094891587ba57cfb2ad74a7e8f; its actual hosted34676397291 ended9jobs passed/1resource failure. All6Linux controller checks passed. Current production fix is ready for authorized checkpoint; replacement hosted run not started.
+- Next concrete action: update/scan/stage/sign/push the verified correction and evidence; verify signature/exact remote head, observe new hosted run, then execute two fresh packages with `test-results/task16-promotion-package/run.py` (prepare from existing final runner). Freeze all tracked inputs during package pair. Record process handle in ignored active.json; do not restart completed gates.
+- Prior artifact preserved: `dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-2e4d30ef9434.tar.gz`, SHA2568996085e4e698383e11625d848b287616b165c0a9b33fb4430c8ab872cedc1be. It predates the production correction and must be refreshed; no installation/release.
+- Hourly email0157 independently verified SENT to james@kof22.com:1a0946862c1afe82, inlinePNG183589bytes, all16task percentages/hours. Renderer/receipt: `test-results/status-emails/render-progress-0157.py` / `2026-09-12-0157*`. Next07:57UTC/02:57Central. Estimates2–5offline active hours plus3–6deferred live.
+- Live Google/Synology/native-keystore acceptance is deferred/unapproved/unverified. Do not request accounts now or mark goal complete. Inline implementation; no blocked audit while offline work remains.
+
+## September 12 chronology — historical snapshots
+
+Entries below record earlier observations; the current execution section above governs the next action.
+
+Final CI-fix preflight: configured Ruff check/fmt24files, actionlint and whitespace
+all0;13changed/current docs have valid local links and balanced fences. Exact
+commands/statuses: ci-runner-egress/final-checks.json. Linux explicit-path/cleanup
+regression11985/0 and macOS8script tests0 complete the applicable local gate.
+
+Signed checkpoint1a0d954d90cdc5094891587ba57cfb2ad74a7e8f committed/pushed after
+applicable local checks.19staged files/92633diff bytes, Gitleaks/whitespace0;
+signature and exact remote-head verification0. Receipt: checkpoint-cgroup/.
+Actual hosted run34676397291 started05:45UTC on that head and is in progress:
+https://github.com/KofTwentyTwo/nuncio/actions/runs/34676397291.
+Next: observe this exact run, verify each Linux controller regression and required
+job outcome, retain evidence and resolve demonstrated failures. No doc-only push
+while it runs. Selected8996085 archive and244production source files unchanged;
+no installation/publication/live acceptance.
+
+At05:47UTC all6Linux controller checks passed on hosted1a0d954; all10jobs still
+in progress. first-controller-results.json retains the exact job/step outcomes.
+Watcher33838 ended1 on a local GitHub TLS handshake timeout at05:53UTC; its
+log is retained. Fresh job API succeeded0 and still shows the workflow running,
+so this observation failure is not a job failure. Resume a watcher on the same run.
+Worksheet now references the verified local archive/binary hashes, keeping exact
+future extraction paths and all live actions pending separate approval.
+
+At05:52UTC new hosted34676397291 has mock jobs passed on both Linux/macOS
+(26tests and2commands0 each) and macOS E2E passed (40tests/7commands0).
+Downloaded artifacts independently confirm those counts, zero failed/ignored,
+parent/child egress denial and loopback access. Linux evidence additionally
+confirms cgroup scope/reject counters and same-UID controller success in all
+6address/phase exchanges for exit0 and17, with test-child denial.
+remote-ci/34676397291/{mock-linux,mock-macos,e2e-macos} and summary JSON.
+Seven jobs remain in progress; no overall hosted success claimed.
+
+At05:54UTC hosted Linux system and macOS lint also passed: downloaded artifacts
+confirm7commands/37system tests (Google22/operations6/repair2/reconciliation3/
+multi-engine1/security3) and8commands/152core tests, respectively. Zero failed or
+ignored. Egress evidence0 with parent/child denial; Linux cgroup counters verified.
+Five hosted jobs passed; five running. New watcher60587 monitors the same run
+following33838's TLS observation error. Summary JSON and artifact directories are
+remote-ci/34676397291/{system-linux,lint-macos}.
+
+00:57Central hourly chart report sent05:57UTC to james@kof22.com, Gmail ID/thread
+1a094310f51ac411, SENT; independent read confirms183475-byte inline16-task PNG
+and CIDnuncio-progress-0057. Exact body/chart/estimates/payload/receipt:
+status-emails/2026-09-12-0057*. Report records7hosted jobs passed/3running and
+2–6offline active hours plus3–6deferred live; full goal remains incomplete.
+Next email06:57UTC /01:57Central during active execution. Linux E2E40tests/7commands0
+and lint152tests/8commands0 additionally confirmed in downloaded artifacts;
+parent/child denial, loopback and Linux cgroup reject counters verified. Remaining
+hosted jobs: IMAP and both release-check jobs; watcher60587 remains active.
+
+New hosted IMAP job failed: independent Python services, IMAPcontract2/system27/
+actual E2E13 passed; resource_system3passed/1failed (cargo101). The10,000-message
+case times out polling GetSyncRun at resource_system.rs:62 using the production
+30-second gRPC timeout; suite duration76.56s. Egress isolation still passes and
+wrapper propagates1. Retained imap-linux/results/logs and imap-linux-failed.log.
+Do not increase the timeout, reduce workload or weaken independent assertions.
+
+Current hypothesis: mail_promotion.rs::promote_one deletes FTS rows by two
+UNINDEXED columns for every message, even after full-generation clearing, making
+promotion quadratic and blocking the serialized store worker/status calls.
+Independent SQLite FTS5 diagnostic confirms full scan and1k=.057s/5k=1.273s/
+10k=4.952s (non-SQLCipher; diagnostic only). Proof: ci-runner-resource/
+fts-repeated-delete-diagnostic.json. No production fix yet. Next: measure actual
+SQLCipher promotion and compare a single account-scoped batch delete; preserve
+atomicity/identity/search isolation and run original load/crash/E2E gates.
+If production changes, rebuild/reverify a new package; preserve existing8996085.
+Watcher60587 ended1; fetch final job ledger before claiming remaining release status.
+
+Focused real-SQLCipher regression19128 fails101 at30,003ms: a10,000-message staged
+promotion with10,000 indexed messages in another account starves queued status.
+Full test41.94s; production30s deadline retained. Proof: ci-runner-resource/
+promotion-red.log/envelope. New permanent test: engine/tests/mail_promotion_resources.rs.
+Original10k system baseline1256 passes locally (sync24,545ms/list1,420ms; total
+42.76s including14.09s compilation), preserving all workload/count/effect assertions.
+This does not negate hosted failure. baseline.json/log/metrics retain evidence.
+New delta-preservation test first failed21158 because its expected-absent subject
+term Original also exists in every fixture body. Corrected only that subject to
+Supersededtitle; unchanged assertions test the intended index replacement.
+No production fix yet; run corrected delta baseline, then batch-clear affected
+search rows once in the existing promotion transaction and rerun both regressions.
+Final hosted34676397291:9jobs passed/1IMAP resource failure. Both release artifacts
+confirm8commands0, isolation2/external1 and package command0; no hosted archive
+hashes uploaded. source/package refresh will be needed after a production fix.
+
+Production correction now in store/mail_promotion.rs: one affected-account search
+reset per promotion transaction, removing per-message FTS full scans. Delta
+clears only staged message IDs; full clears its account as before. Same transaction,
+identity/cursor semantics and all original timeouts/workloads/assertions retained.
+Corrected delta baseline30313/0 passed after the fixture-term correction.
+Focused11591/0 passes3projection tests plus new promotion resource test:
+encrypted promotion+queued status3,669ms versus red19128 timeout30,003ms.
+Exact logs/envelopes: ci-runner-resource/{promotion-red,promotion-green,delta-baseline-corrected}*.
+New test verifies10k staged plus10k preserved other-account index rows; added delta
+test proves unchanged messages/other account, deletion/update/add, old-index removal,
+identity preservation and transaction rollback. Production change is uncommitted.
+Next: full --all offline gate with source hashes, verify new actual10k timings,
+then signed checkpoint/push/hosted run and fresh verified package pair. Existing
+8996085 artifact is preserved but predates this production fix. No CI watcher or
+local test remains running at06:13UTC; next email06:57UTC/01:57Central.
+
+Full offline gate is now running from test-results/ci-promotion-all/run.py.
+Poll shell91408; do not change crates/scripts/tests/clients/licenses
+while its source snapshot is active. It retains prior all/command logs and metrics
+before running --all and copies the new results afterward, checks source hashes,
+and records envelope/exit. Continue this gate, resolve actual failures, then update
+counts/docs, create signed checkpoint/push and observe a new hosted run. New package
+pair is required after this production change; preserve the old candidate.
+
+Full gate91408: normal workspace passed307tests, zero failed/ignored, command0
+at06:31UTC. Actual original10k system workload now sync13022ms/list1506ms,
+with100APIpages/100remote pages and all independent effects/resource assertions.
+Normal baseline before the fix: sync24,545ms/list1,420ms. Exact current metrics
+and counts retained in ci-promotion-all/normal-*.json. Feature-workspace and
+separate named suites remain pending/running; full gate not complete.
+
+Resume at06:38UTC: full gate91408 remains active. Normal workspace307passed,
+feature workspace currently in IMAP system/recovery checks with no reported
+failure. Code/source freeze remains in effect. Poll91408 and inspect
+ci-promotion-all/run.log plus all/results.json; active.json names the handle.
+Next email06:57UTC/01:57Central with all16tasks; current estimates in PROGRESS.md
+are3–8offline plus3–6deferred live. Last chart email0057 was sent and independently
+verified (1a094310f51ac411). No additional source edits, checkpoint, hosted run or
+package refresh has occurred since starting the full gate.
+
+
+## Earlier checkpoints and execution records
 
 Latest signed checkpoint2e4d30ef9434638db4a5b824b490cdb4278bf13c is pushed;
 independent ls-remote and signature checks passed0. Seven staged files/27974diff

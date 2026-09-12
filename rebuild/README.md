@@ -1,6 +1,6 @@
 # Nuncio rebuild
 
-Independent Rust workspace for the approved engine-and-CLI rebuild. The implementation includes SQLCipher storage, authenticated local gRPC, independent Google and MailPlus test services, Google mail/calendar reads and writes, IMAP folder/flag operations, SMTP with separate delivery/Sent-copy receipts, encrypted backup/restore, migration and projection repair. Resource budgets and process-local status are exposed through the engine, API and CLI. The v2 contract and first local package are verified; the full34-command integrated offline gate passed; repeatable local packages passed; hosted CI and provider acceptance remain pending.
+Independent Rust workspace for the approved engine-and-CLI rebuild. The implementation includes SQLCipher storage, authenticated local gRPC, independent Google and MailPlus test services, Google mail/calendar reads and writes, IMAP folder/flag operations, SMTP with separate delivery/Sent-copy receipts, encrypted backup/restore, migration and projection repair. Resource budgets and process-local status are exposed through the engine, API and CLI. The v2 contract and first local package are verified; an earlier full34-command integrated offline gate and repeatable local packages passed. The latest mail-promotion performance fix passed the full34-command gate with307tests per workspace; refreshed artifacts, hosted CI and provider acceptance remain pending.
 
 - [Run locally](docs/RUNNING.md) and [verify/use local packages](docs/PACKAGING.md)
 - [Offline testing](docs/TESTING.md)
@@ -11,4 +11,4 @@ Independent Rust workspace for the approved engine-and-CLI rebuild. The implemen
 - [Session state](docs/SESSION-STATE.md), [remaining work](docs/TODO.md), and [verification evidence](docs/VERIFICATION.md)
 - [Approved specification](../docs/superpowers/specs/2026-09-10-google-first-rebuild.md) and [implementation plan](../docs/superpowers/plans/2026-09-10-google-first-rebuild.md)
 
-All automated acceptance uses synthetic local services. Four hosted macOS jobs passed; six Linux jobs failed because the test firewall disconnected the runner. A locally verified cgroup correction awaits hosted verification; no live-provider compatibility or overall hosted-CI success is claimed. Native apps are outside this workspace's implementation goal.
+All automated acceptance uses synthetic local services. The cgroup correction passed hosted controller checks; nine jobs in34676397291 passed, while a resource test exposed large-mailbox status starvation. A focused SQLCipher regression reproduces that failure and passes with the current promotion fix; no live-provider compatibility or overall hosted-CI success is claimed. Native apps are outside this workspace's implementation goal.

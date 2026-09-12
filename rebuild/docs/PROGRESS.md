@@ -1,6 +1,6 @@
 # Delivery progress estimates
 
-As of September12,2026 00:44Central. These are engineering estimates for the
+As of September12,2026 01:57Central. These are engineering estimates for the
 approved sixteen implementation tasks, not measured percentages, R01–R16 sign-off,
 or a delivery promise. 100% means implementation and applicable offline checks
 passed; final integrated regression and live-provider acceptance remain separate.
@@ -22,26 +22,21 @@ and unknown defects. Shared remaining work is counted once. Native apps excluded
 | 11 Calendar writes, RSVP and free/busy | 100% | 0 | Limited-writer writes and private-event denial passed mock, API and actual CLI checks. |
 | 12 Synology IMAP/SMTP mail support | 100% | 0 | Local Dovecot/Mailpit checks passed; live MailPlus is Task 16. |
 | 13 Export, backup, restore and repair | 100% | 0 | Implemented; migration and subprocess crash recovery checked. |
-| 14 Adversarial checks and resource bounds | 100% | 0 | Security, resource, migration and recovery suites passed in both configurations and named runs. |
-| 15 Local packages, API contract and CI | 90% | 1–4 | Final refreshed local archive and all local gates passed; four hosted macOS jobs passed; Linux runner-disconnection fix passes locally and awaits hosted verification. |
+| 14 Adversarial checks and resource bounds | 100% | 0 | Production promotion correction and full34-command offline gate passed,307tests per workspace; original bounds preserved. |
+| 15 Local packages, API contract and CI | 90% | 1–3 | 9/10 hosted jobs passed; one resource failure corrected locally. New production package and hosted verification needed after full regression. |
 | 16 Provider acceptance and final report | 50% | 4–8* | 1–2 h final report/CI evidence; 3–6 h live checks remain deferred/unapproved. |
 
-Offline remaining:2–6hours. Live acceptance:3–6hours after separate named-account
-authorization (currently deferred). Total active effort:5–12hours; Task16's4–8
-comprises1–2offline and3–6live. Do not convert deferred acceptance into passed.
-Calendar role work and the full local regression are complete. Final guide and
-package refresh45789 passed two identical archives/22checks each, selected8996085
-artifact. Signed checkpoint2e4d30e is pushed; hosted34672641999 has all4macOS jobs
-passed and6Ubuntu jobs failed with runner communication loss. The same-UID
-filter defect is independently reproduced; cgroup-scoped correction passes local
-controller continuity, denial and detached-child cleanup tests. The next checkpoint
-will run it on hosted Linux. Existing remaining-work range is retained because the
-demonstrated correction is already locally verified; unknown new defects excluded.
+Offline remaining:2–5hours (Task15 artifact/hosted CI1–3, Task16 report1–2).
+Live acceptance:3–6hours after separate named-account approval, currently deferred.
+Total active effort:5–11hours; external waiting and unknown new defects excluded.
+The full promotion correction gate passed all34commands; focused SQLCipher improves
+from30s timeout to3.669s with unchanged deadline. New artifact pair and replacement
+hosted run remain pending. Existing8996085 archive is the preserved prior candidate.
 
 James requested this chart/table in every hourly email. Refresh estimates against
 current SESSION-STATE/TODO/VERIFICATION evidence before sending; explain material
 changes or newly discovered defects. Current renderer and MIME/example artifacts:
-`test-results/status-emails/render-progress-2357.py` and `2026-09-11-2357*`.
+`test-results/status-emails/render-progress-0157.py` and `2026-09-12-0157*`.
 The renderer is a local reporting aid using existing Pillow; it is outside the
 production app. Update its snapshot data/text/time for each report, then render
 and inspect the chart. Send embedded PNG plus HTML table/plain-text fallback.

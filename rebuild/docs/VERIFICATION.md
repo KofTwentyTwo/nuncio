@@ -1,9 +1,154 @@
 # Verification evidence
 
+## September 12, 2026, 06:57 UTC — promotion correction full gate passed
+
+`python3 test-results/ci-promotion-all/run.py` (shell91408) completed with exit0;
+all34 commands passed. Both workspace configurations passed307 tests each, zero
+failed/ignored. Separate named suites: Google mock26/system22/E2E27; operations6;
+IMAP contract2/system27/E2E13; recovery5; repair2/2; migration1 (44SIGKILL cases);
+reconciliation3; multi-engine1; security3/2; resource4/3; release-isolation2;
+external-client1. All6 independent Python service scripts,8script regressions,
+builds/format/Ruff/bothClippy/dependency/client-boundary checks passed. Repeated
+executions are not unique additional tests. Parent/child external egress denied,
+loopback allowed, and all399 captured source hashes remained unchanged.
+
+Exact commands/exits/logs: `test-results/ci-promotion-all/{exit.json,run.log,
+final-summary.json,source-verification.json,egress.json,current-all/}`.
+Original10k workload: normal sync13,022ms/list1,506ms; feature12,675ms/1,477ms;
+separate system12,547ms/1,468ms, each10,000messages/100APIpages/100remote pages.
+The focused SQLCipher starvation regression improved from30,003ms timeout to
+3,669ms, preserving the production30s deadline. Its delta companion verifies
+rollback, identities, replacement/deletion and untouched accounts/messages.
+Production correction: `crates/nuncio-engine/src/store/mail_promotion.rs`;
+tests: `crates/nuncio-engine/tests/{mail_promotion_resources,mail_projection}.rs`.
+
+Prior hosted34676397291 remains9passed/1resource failure. This full local pass is
+not replacement hosted evidence. Current-source checkpoint, two fresh production
+packages and actual hosted verification are next. Prior8996085 archive is retained.
+Live Google/Synology/native-keystore acceptance remains deferred/unverified.
+
+Hourly email0157 sent to james@kof22.com and independently read back as SENT:
+message/thread1a0946862c1afe82, inlinePNG183589bytes/CIDnuncio-progress-0157.
+All16task estimates included;2–5offline hours plus3–6deferred live. Exact report,
+chart, payload, estimates and receipt: `test-results/status-emails/2026-09-12-0157*`.
+Next email07:57UTC/02:57Central while execution remains active.
+
+## Earlier verification records
+
 Final CI-fix preflight: configured Ruff check/fmt24files, actionlint and whitespace
 all0;13changed/current docs have valid local links and balanced fences. Exact
 commands/statuses: ci-runner-egress/final-checks.json. Linux explicit-path/cleanup
 regression11985/0 and macOS8script tests0 complete the applicable local gate.
+
+Signed checkpoint1a0d954d90cdc5094891587ba57cfb2ad74a7e8f committed/pushed after
+applicable local checks.19staged files/92633diff bytes, Gitleaks/whitespace0;
+signature and exact remote-head verification0. Receipt: checkpoint-cgroup/.
+Actual hosted run34676397291 started05:45UTC on that head and is in progress:
+https://github.com/KofTwentyTwo/nuncio/actions/runs/34676397291.
+Next: observe this exact run, verify each Linux controller regression and required
+job outcome, retain evidence and resolve demonstrated failures. No doc-only push
+while it runs. Selected8996085 archive and244production source files unchanged;
+no installation/publication/live acceptance.
+
+Hosted34676397291: all6Linux controller-connectivity regressions passed by05:47UTC;
+all10required jobs remain in progress. This is verified step progress, not an overall
+pass. Snapshot: remote-ci/34676397291/first-controller-results.json.
+
+At05:52UTC new hosted34676397291 has mock jobs passed on both Linux/macOS
+(26tests and2commands0 each) and macOS E2E passed (40tests/7commands0).
+Downloaded artifacts independently confirm those counts, zero failed/ignored,
+parent/child egress denial and loopback access. Linux evidence additionally
+confirms cgroup scope/reject counters and same-UID controller success in all
+6address/phase exchanges for exit0 and17, with test-child denial.
+remote-ci/34676397291/{mock-linux,mock-macos,e2e-macos} and summary JSON.
+Seven jobs remain in progress; no overall hosted success claimed.
+
+At05:54UTC hosted Linux system and macOS lint also passed: downloaded artifacts
+confirm7commands/37system tests (Google22/operations6/repair2/reconciliation3/
+multi-engine1/security3) and8commands/152core tests, respectively. Zero failed or
+ignored. Egress evidence0 with parent/child denial; Linux cgroup counters verified.
+Five hosted jobs passed; five running. New watcher60587 monitors the same run
+following33838's TLS observation error. Summary JSON and artifact directories are
+remote-ci/34676397291/{system-linux,lint-macos}.
+
+00:57Central hourly chart report sent05:57UTC to james@kof22.com, Gmail ID/thread
+1a094310f51ac411, SENT; independent read confirms183475-byte inline16-task PNG
+and CIDnuncio-progress-0057. Exact body/chart/estimates/payload/receipt:
+status-emails/2026-09-12-0057*. Report records7hosted jobs passed/3running and
+2–6offline active hours plus3–6deferred live; full goal remains incomplete.
+Next email06:57UTC /01:57Central during active execution. Linux E2E40tests/7commands0
+and lint152tests/8commands0 additionally confirmed in downloaded artifacts;
+parent/child denial, loopback and Linux cgroup reject counters verified. Remaining
+hosted jobs: IMAP and both release-check jobs; watcher60587 remains active.
+
+New hosted IMAP job failed: independent Python services, IMAPcontract2/system27/
+actual E2E13 passed; resource_system3passed/1failed (cargo101). The10,000-message
+case times out polling GetSyncRun at resource_system.rs:62 using the production
+30-second gRPC timeout; suite duration76.56s. Egress isolation still passes and
+wrapper propagates1. Retained imap-linux/results/logs and imap-linux-failed.log.
+Do not increase the timeout, reduce workload or weaken independent assertions.
+
+Current hypothesis: mail_promotion.rs::promote_one deletes FTS rows by two
+UNINDEXED columns for every message, even after full-generation clearing, making
+promotion quadratic and blocking the serialized store worker/status calls.
+Independent SQLite FTS5 diagnostic confirms full scan and1k=.057s/5k=1.273s/
+10k=4.952s (non-SQLCipher; diagnostic only). Proof: ci-runner-resource/
+fts-repeated-delete-diagnostic.json. No production fix yet. Next: measure actual
+SQLCipher promotion and compare a single account-scoped batch delete; preserve
+atomicity/identity/search isolation and run original load/crash/E2E gates.
+If production changes, rebuild/reverify a new package; preserve existing8996085.
+Watcher60587 ended1; fetch final job ledger before claiming remaining release status.
+
+Focused real-SQLCipher regression19128 fails101 at30,003ms: a10,000-message staged
+promotion with10,000 indexed messages in another account starves queued status.
+Full test41.94s; production30s deadline retained. Proof: ci-runner-resource/
+promotion-red.log/envelope. New permanent test: engine/tests/mail_promotion_resources.rs.
+Original10k system baseline1256 passes locally (sync24,545ms/list1,420ms; total
+42.76s including14.09s compilation), preserving all workload/count/effect assertions.
+This does not negate hosted failure. baseline.json/log/metrics retain evidence.
+New delta-preservation test first failed21158 because its expected-absent subject
+term Original also exists in every fixture body. Corrected only that subject to
+Supersededtitle; unchanged assertions test the intended index replacement.
+No production fix yet; run corrected delta baseline, then batch-clear affected
+search rows once in the existing promotion transaction and rerun both regressions.
+Final hosted34676397291:9jobs passed/1IMAP resource failure. Both release artifacts
+confirm8commands0, isolation2/external1 and package command0; no hosted archive
+hashes uploaded. source/package refresh will be needed after a production fix.
+
+Production correction now in store/mail_promotion.rs: one affected-account search
+reset per promotion transaction, removing per-message FTS full scans. Delta
+clears only staged message IDs; full clears its account as before. Same transaction,
+identity/cursor semantics and all original timeouts/workloads/assertions retained.
+Corrected delta baseline30313/0 passed after the fixture-term correction.
+Focused11591/0 passes3projection tests plus new promotion resource test:
+encrypted promotion+queued status3,669ms versus red19128 timeout30,003ms.
+Exact logs/envelopes: ci-runner-resource/{promotion-red,promotion-green,delta-baseline-corrected}*.
+New test verifies10k staged plus10k preserved other-account index rows; added delta
+test proves unchanged messages/other account, deletion/update/add, old-index removal,
+identity preservation and transaction rollback. Production change is uncommitted.
+Next: full --all offline gate with source hashes, verify new actual10k timings,
+then signed checkpoint/push/hosted run and fresh verified package pair. Existing
+8996085 artifact is preserved but predates this production fix. No CI watcher or
+local test remains running at06:13UTC; next email06:57UTC/01:57Central.
+
+Full gate91408: both harness/production builds, Ruff check/format, Rustfmt,
+both Clippy modes and8script regressions passed by06:17UTC. Workspace and
+named suites remain running; source freeze still applies. Manual worksheet now
+uses the selected archive’s own metadata/checksum/receipt, avoiding stale embedded
+candidate hashes when a production correction requires a new package.
+
+Full gate91408: normal workspace passed307tests, zero failed/ignored, command0
+at06:31UTC. Actual original10k system workload now sync13022ms/list1506ms,
+with100APIpages/100remote pages and all independent effects/resource assertions.
+Normal baseline before the fix: sync24,545ms/list1,420ms. Exact current metrics
+and counts retained in ci-promotion-all/normal-*.json. Feature-workspace and
+separate named suites remain pending/running; full gate not complete.
+
+Full gate91408: feature workspace also passed307tests, zero failed/ignored,
+command0 at06:43UTC. Actual original10k workload sync12675ms/list1477ms,
+100APIpages/100remote pages and independent effects intact. Both configurations
+now pass; independent Python and18separate named suites remain. Counts/metrics:
+ci-promotion-all/feature-*.json. Full gate remains incomplete.
 
 ## Linux runner connection loss — reproduced and corrected locally
 

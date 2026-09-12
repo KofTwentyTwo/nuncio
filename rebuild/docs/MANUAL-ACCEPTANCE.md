@@ -4,12 +4,21 @@ Status: **deferred and not authorized**. James currently requires full local Goo
 
 Use verified extracted production artifacts in a new disposable profile. Current feature artifacts and passing mocks do not prove Google or Synology compatibility. Record the production artifact SHA-256 and actual provider versions; never infer that remote CI ran from local results.
 
+Identify the selected artifact using its adjacent archive checksum and extracted-check
+receipt, then copy its exact archive and binary hashes into the approval record.
+`BUILD-METADATA.json` and `SHA256.json` inside that same archive identify its source
+state and contents. In the checkout, `dist/final-candidate/EVIDENCE.json` selects
+the current verified candidate and records any remaining conditions. Follow
+[PACKAGING.md](PACKAGING.md) to extract a new acceptance copy. Historical report
+hashes are not a substitute for verifying the selected archive; all live rows below
+remain unapproved and unverified.
+
 ## Approval record to complete later
 
 | Field | Required value before live work |
 |---|---|
 | Approval text, author, date and expiry | Pending James's explicit approval of the completed worksheet |
-| Production daemon and CLI paths + SHA-256 | Pending final local package verification |
+| Production daemon and CLI paths + SHA-256 | Record the selected verified archive hash, exact newly extracted binary paths and their hashes before approval; use that archive’s metadata and receipt. |
 | New disposable data directory and endpoint | Exact absolute directory; numeric loopback endpoint |
 | Google account address and OAuth registration path | Disposable identity; local Desktop-client JSON path only |
 | Google calendars | Exact provider IDs for owned scratch calendar and separately authorized RSVP fixture |

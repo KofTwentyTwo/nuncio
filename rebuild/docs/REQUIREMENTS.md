@@ -1,12 +1,17 @@
 # Requirement-to-evidence matrix
 
-Working matrix for the approved September 10 specification. The goal is incomplete.
-“Passed offline” identifies verified local scope; it is not live-provider sign-off.
-The full34-command integrated egress gate passed, including305 tests in each
-workspace configuration and all required named/Python/dependency/client checks.
-Final local archives/binaries passed two identical fresh builds (selected8996085). All four hosted macOS jobs passed on2e4d30e, including the corrected E2E resource fixture; all six Ubuntu jobs in34672641999 failed with runner communication loss; local same-user reproduction and cgroup isolation correction pass, replacement hosted verification remains pending. The prior7f81b73 failure is preserved. Live Google/Synology acceptance is deferred and unverified. Existing
-offline evidence below is not final sign-off. Task completion estimates are a
-separate planning view in [PROGRESS.md](PROGRESS.md).
+Current qualification: the production promotion correction passed the complete
+34-command egress-denied offline gate,307tests in each workspace configuration and
+all separate named/Python/dependency/external-client checks. All399source hashes
+remained unchanged. Exact evidence is `test-results/ci-promotion-all/` and the newest
+[VERIFICATION.md](VERIFICATION.md) entry. Hosted34676397291 remains9passed/1resource
+failure; a signed correction checkpoint, fresh artifact pair and replacement hosted
+run are next. Prior8996085 package is retained and predates this production fix.
+
+Working matrix for the approved September10specification. The full goal remains
+incomplete. Passed offline is not live-provider sign-off; Google/Synology and
+native-keystore acceptance remain deferred/unverified. Task estimates are separate
+in [PROGRESS.md](PROGRESS.md). Historical evidence retains its original snapshots.
 
 All test paths below are under `crates/nuncio-test-support/tests/` unless stated
 otherwise. [VERIFICATION.md](VERIFICATION.md) records dated command/exit evidence;
@@ -31,7 +36,7 @@ storage, parsing and provider implementations.
 | R12 CLI/API parity, paging, byte streams and change replay | Passed offline | [CLI](../crates/nuncio-cli/src/main.rs), [protobuf contract](../crates/nuncio-proto/proto/nuncio/v2), [independent generated client](../clients/smoke/README.md) | Actual CLI suites, `cli_change_watch_replays_jsonl_and_rejects_a_future_revision`; external `clients/smoke/tests/daemon.rs` status/watch test and normal/build dependency-tree check | Frozen descriptor/client/archive verified; full integrated runner passed |
 | R13 Independent stateful Google mock and fault effects | Passed offline | [mock service](../crates/nuncio-test-support/src/google/mod.rs), [contract suite](../crates/nuncio-test-support/tests/google_mock_contract.rs) | 26 independent contract tests pass, including OAuth/HTTP validation, faults, remote state, notifications and limited-writer private-event enforcement | Full integrated regression passed; mocks cannot establish live equivalence |
 | R14 Separate real-store system and daemon/CLI E2E tests | Hosted CI pending | [process harness](../crates/nuncio-test-support/src/process.rs), [system harness](../crates/nuncio-test-support/tests/support/system.rs), [runner](../scripts/verify.py) | All required named suites exist and have prior recorded runs; full `--all` passed. Independent generated-client test also passes under actual macOS egress denial | Full run and independent server egress passed; hosted CI pending |
-| R15 Encryption, key separation, auth/TLS, inert display and test-hook exclusion | Passed offline | [security suites](../crates/nuncio-test-support/tests/security_system.rs), [subprocess security](../crates/nuncio-test-support/tests/security_e2e.rs), [release isolation](../crates/nuncio-test-support/tests/release_isolation.rs) | 168 invalid-auth cases; wrong-key/ordinary-SQLite rejection; encrypted DB/WAL/FTS/backup and original-log canaries; hostile-content/resource bounds; fresh production hook exclusion | Dependency findings resolved; repeatable final archive verified; integrated checks passed; hosted platform checks pending |
+| R15 Encryption, key separation, auth/TLS, inert display and test-hook exclusion | Passed offline | [security suites](../crates/nuncio-test-support/tests/security_system.rs), [subprocess security](../crates/nuncio-test-support/tests/security_e2e.rs), [release isolation](../crates/nuncio-test-support/tests/release_isolation.rs) | 168 invalid-auth cases; wrong-key/ordinary-SQLite rejection; encrypted DB/WAL/FTS/backup and original-log canaries; hostile-content/resource bounds; fresh production hook exclusion | Dependency findings resolved; prior repeatable archive verified; new artifact pending; integrated checks passed; hosted platform checks pending |
 | R16 Reproducible artifacts, CI, operating instructions and final evidence | Hosted CI pending | [API](API.md), [running](RUNNING.md), [recovery](RECOVERY.md), [manual worksheet](MANUAL-ACCEPTANCE.md) | Local production binaries/hashes and signed checkpoints recorded; external-client foundation verified; manual worksheet prepared | Local archive, descriptor and CI definitions exist; integrated/local package checks passed; hosted execution and authorized live acceptance pending |
 
 Live worksheet rows G01–G10, S01–S05 and X01 are all unapproved/unverified. The
