@@ -1,5 +1,16 @@
 # Current delivery and acceptance state
 
+## Final acceptance handoff
+
+- [x] Documentation checkpoint `c662e48`: ten rebuild and seven security jobs passed; no watcher remains active.
+- [x] Manual worksheet explicitly covers native Keychain creation, restart reuse, credential persistence and approved deletion, with metadata-only observations and named approval boundaries.
+- [ ] Execute the deferred named Google/Synology/native acceptance and obtain final sign-off when James resumes that scope.
+
+The final four-file Markdown checkpoint has local documentation/source checks;
+its `[skip ci]` marker avoids a repeat build for reporting prior results. Exact
+receipt: `test-results/acceptance-handoff/`. Software and artifacts retain their
+independent `164b021` qualification; no new hosted result is inferred.
+
 ## Active account-management follow-up
 
 - [x] Post-engine PO/PM roadmap delivered in POST-ENGINE-ROADMAP.md; future scope only.

@@ -1,5 +1,28 @@
 # Rebuild session state
 
+## Final continuation — documentation CI passed; live acceptance deferred
+
+Documentation checkpoint `c662e48` passed all ten rebuild jobs in run
+`34706301412` and all seven security jobs in run `34706301536`. Watcher `38391`
+exited 0; exact heads, job outcomes and logs are retained in
+`test-results/account-management-final-docs/hosted-final.json`. The 411 tested
+source hashes remain unchanged. Software/artifact/installer qualification at
+`164b021` remains separately recorded below.
+
+The final worksheet review added explicit native Keychain creation, restart,
+credential persistence and approved deletion observations. No native or live
+check ran. This last change affects four Markdown files only. Its documentation
+checks and signed/pushed receipt are in `test-results/acceptance-handoff/`.
+The commit uses `[skip ci]` to avoid repeating unchanged software builds after
+recording their results; it is not claimed to have its own hosted run.
+
+No implementation, packaging, installer or offline verification remains active.
+The next action requires James to resume the named live/native checks in
+MANUAL-ACCEPTANCE.md. He requested full mocks for now; do not ask for accounts
+again or begin native-app work. Keep the goal incomplete and use
+`test-results/checkpoint-final/current-execution.json` for the exact blocked
+turn count, last checkpoint and hourly email deadline.
+
 Latest hourly email: September12,11:40Central, message/thread1a0967dcff0032a4 independently verified SENT to james@kof22.com with211603-byte inline20-task PNG (original16 plus dependency/security/API-design/future-roadmap deliverables). Receipt and report: test-results/status-emails/2026-09-12-1140*. Nextdue12:40Central/17:40UTC duringactive execution. The report records all current software/artifact/CI/installer checks passed, with0.5–1hour finalcheckpoint/handoff and3–6hours deferredlive/native acceptance estimated.
 
 ## Current handoff — account and testing delivery verified at 164b021

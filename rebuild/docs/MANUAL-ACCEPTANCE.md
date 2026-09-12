@@ -30,7 +30,7 @@ remain unapproved and unverified.
 | Authorized fixture preparation | Exact synthetic messages/events/folders and which account owner creates them |
 | Allowed reads | Exact accounts, folders/calendars and date windows; full sync implies access throughout that scope |
 | Allowed writes and maximum counts | Per-row actions below, including cleanup; blanks mean no authorization |
-| Recovery and cleanup | Exact object IDs to retain/remove and whether local disposable profile cleanup is permitted |
+| Recovery and cleanup | Exact object IDs to retain/remove, local test-account archive/credential cleanup, and whether disposable profile/key cleanup is permitted |
 
 A provider policy change, OAuth consent change, new recipient/calendar, additional resend or different Sent policy requires a new explicit authorization. Do not infer consent from credentials being available. Enter passwords through hidden terminal input or protected pipes as described in [RUNNING.md](RUNNING.md); OAuth secrets remain in the local registration file and OS keystore.
 
@@ -61,6 +61,40 @@ Commands below are CLI suffixes. Every invocation uses the approved extracted bi
 
 The proposed write count is one Google send, one Google reply, one Synology SMTP send, and separately enumerated scratch-calendar and mailbox mutations. Each remains unauthorized until the approval record names the exact recipient/resource and approves that row. Invitation and RSVP counts must be explicitly stated; do not silently choose an external recipient or a notification policy.
 
+## Native macOS Keychain evidence
+
+These checks share the approval record above and remain deferred. Record the
+exact production binary hashes, macOS version, disposable profile ID, account
+IDs, and Keychain entry identifiers. Inspect entry metadata only in Keychain
+Access; never reveal, export, screenshot or log secret values. The production
+service name is `mx.nuncio.rebuild`; synthetic keystore test results do not prove
+these native operations.
+
+1. Before G01/S01, start the approved extracted daemon with
+   `--data-dir APPROVED_PROFILE --bind APPROVED_BIND_ADDRESS`, using the approved
+   numeric loopback address and port. Use the CLI prefix defined above for
+   `system status` and `system shutdown`, then restart that same daemon/profile.
+   Record any native permission prompts and verify the same profile ID, successful
+   authenticated status, and retained profile-key entry metadata. This uses the
+   production keystore without test flags or a file-backed secret substitute.
+2. During G01/S01, record creation of credentials belonging to the approved
+   profile/account. After restart, use local `account show --account ACCOUNT_ID`
+   and the already approved `account check --account ACCOUNT_ID` to verify that
+   secured credentials remain usable. G10 separately verifies OAuth refresh at
+   natural expiry. A local connected flag alone is insufficient evidence.
+3. During X01, only if the approval record includes local test-account archive,
+   run `account remove --account ACCOUNT_ID`. Inspect `account show` and
+   `account list --include-archived`: the account is archived and credential
+   cleanup must finish. Independently confirm removal of only its credential
+   entries, with profile keys and unrelated entries retained; cached reads must
+   remain available. A pending cleanup field is an unresolved result. Do not
+   infer deletion from the local archived flag alone.
+4. Record pass/fail/unverified for native key creation, reuse after restart,
+   account credential persistence, and approved deletion. Unexpected permission
+   denial or cleanup failure remains a defect until resolved and rechecked.
+   Do not lock the normal Keychain, change access policies, delete profile keys,
+   or force failure conditions without separately approved actions.
+
 ## Action files and decision points
 
 Use the versioned examples in [RUNNING.md](RUNNING.md) for drafts, mail changes, calendar changes and free/busy. Draft save, reply preparation, and event action-file creation are review steps; dispatch is a separate command. Before each live dispatch, verify the prepared recipient list, attachment hash, local/provider identity mapping, calendar scope, ETag, notification policy and maximum expected effects against the approved row.
@@ -73,8 +107,9 @@ Do not inject production crashes or network failures during these minimal live c
 
 ## Sign-off
 
-- Software/offline gate and local package evidence: use the current [implementation report](IMPLEMENTATION-REPORT.md), [verification record](VERIFICATION.md) and selected artifact receipt. The IMAP cursor correction passed full regression, the clean 6ff9bb9 package pair passed 22 checks each, and all ten actual hosted CI jobs passed. Prior artifacts are preserved. All live rows below remain unverified until individually authorized and executed.
+- Software/offline gate and local package evidence: use the current [implementation report](IMPLEMENTATION-REPORT.md), [verification record](VERIFICATION.md) and selected artifact receipt. Use the source and hashes in those current receipts; prior artifacts remain preserved separately. All live and native-keystore checks remain unverified until individually authorized and executed.
 - Named live authorization: absent; user deferred live scope.
+- Native-keystore creation, reuse, credential persistence and approved deletion: unverified.
 - Google compatibility: unverified.
 - Synology/MailPlus compatibility and server versions: unverified.
 - Remaining defects, operating limits and precise follow-up: record in VERIFICATION and SESSION-STATE.

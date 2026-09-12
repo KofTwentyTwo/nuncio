@@ -1,5 +1,30 @@
 # Verification evidence
 
+## Final documentation CI and native acceptance worksheet
+
+Watcher `38391` exited 0. Actual documentation run `34706301412` passed all ten
+rebuild jobs; `34706301536` passed all seven security jobs, both at `c662e48`.
+Final API responses, all job conclusions, watcher commands/logs and unchanged
+411-source-hash proof are in `test-results/account-management-final-docs/`.
+These results are separate from the fully inspected software/installer artifact
+receipts at `164b021`; no new archive-byte inspection is inferred.
+
+A final worksheet review found native-keystore acceptance was named as pending
+without explicit execution observations. MANUAL-ACCEPTANCE.md now spells out
+production key creation, restart reuse, account credential persistence and
+separately approved deletion using metadata-only inspection. The old hard-coded
+baseline paragraph now points to the selected current artifact evidence.
+No provider, native Keychain, binary or credential action was executed.
+
+This final change is four Markdown files only; local links, fences, whitespace,
+scoped secret scanning and the unchanged 411 tested-source hashes are checked
+before its signed checkpoint. Exact commands/exits are retained in
+`test-results/acceptance-handoff/`. `[skip ci]` prevents another unchanged-source
+build for this report-only commit; it does not claim hosted validation at that
+new documentation SHA. GitHub documents the marker's scope and pending-check
+behavior in [Skipping workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs).
+The live/native acceptance condition remains deferred and unverified.
+
 11:40Central report1a0967dcff0032a4 independently read as SENT to james@kof22.com, with211603-byte PNG/CIDnuncio-progress-1140 and20-task matching table/plaintext. All current delivery evidence, finalcheckpointestimate and deferredlive boundary are explicit. Exact renderer/payload/receipt: test-results/status-emails/2026-09-12-1140*. Next17:40UTC.
 
 ## September 12 — actual current CI and hosted installer passed
