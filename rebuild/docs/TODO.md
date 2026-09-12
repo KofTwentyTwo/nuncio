@@ -10,7 +10,9 @@
 - [x] Native numeric resource sampler passes macOS/Linux allocation tests; actual3resourceE2E pass under egress denial with original bounds/timeouts.
 - [x] Complete34-command integrated egress gate58495 passed;305tests in each workspace, allnamed/Python/dependency/client checks0;396source hashes unchanged. Original98403 retained.
 - [x] Packaged README fixed; two corrected fresh archives/binaries are byte-identical,22extracted checks each, all links valid. Canonical dist/final-candidate and exact proof recorded.
-- [ ] Update operating/recovery/package/compatibility docs and final R01–R16 evidence matrix; verified checkpoint/push and observe actual remote CI.
+- [x] Operating/recovery/package/compatibility docs and working R01–R16 matrix recorded; signed7f81b73 checkpoint pushed/exact remote verified.
+- [x] Affected gate91079: all6outer/17nested commands passed; all56 subprocess tests passed, no failures/ignored. Production244files unchanged.
+- [ ] Signed checkpoint/push resource-fixture correction and complete hosted CI verification. Preserve original34671490682 failure and inspect other jobs.
 - [ ] Live acceptance remains deferred/unapproved/unverified; goal stays active and incomplete.
 
 ## Earlier task ledger

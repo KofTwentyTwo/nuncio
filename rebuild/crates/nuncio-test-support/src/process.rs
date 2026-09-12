@@ -25,6 +25,7 @@ pub struct E2eHarness {
     redact_cli_logs: bool,
     clock_origin: std::time::Instant,
     poll_interval_ms: Option<u64>,
+    request_timeout_ms: u64,
     pub google: MockGoogle,
     pub directory: PathBuf,
     pub secrets_file: PathBuf,
@@ -182,16 +183,23 @@ impl E2eHarness {
         seed: Seed,
         poll_interval_ms: Option<u64>,
     ) -> Result<Self, TestError> {
-        Self::configured(seed, poll_interval_ms, true).await
+        Self::configured(seed, poll_interval_ms, true, 1000).await
+    }
+    pub async fn start_with_request_timeout(
+        seed: Seed,
+        request_timeout_ms: u64,
+    ) -> Result<Self, TestError> {
+        Self::configured(seed, None, true, request_timeout_ms).await
     }
     /// Security tests inspect original process output before Drop redacts it.
     pub async fn start_with_raw_cli_logs(seed: Seed) -> Result<Self, TestError> {
-        Self::configured(seed, None, false).await
+        Self::configured(seed, None, false, 1000).await
     }
     async fn configured(
         seed: Seed,
         poll_interval_ms: Option<u64>,
         redact_cli_logs: bool,
+        request_timeout_ms: u64,
     ) -> Result<Self, TestError> {
         let daemon_path = binary("NUNCIO_E2E_DAEMON")?;
         let cli_path = binary("NUNCIO_E2E_CLI")?;
@@ -211,6 +219,7 @@ impl E2eHarness {
         let mut harness = Self {
             redact_cli_logs,
             poll_interval_ms,
+            request_timeout_ms,
             directory: artifacts.join("profile"),
             secrets_file: artifacts.join("synthetic-secrets.json"),
             endpoint: String::new(),
@@ -245,7 +254,7 @@ impl E2eHarness {
         std::fs::write(
             &test_config,
             serde_json::to_vec(&serde_json::json!({
-                "google_base_url":self.google.base_url(),"request_timeout_ms":1000,"poll_interval_ms":self.poll_interval_ms.unwrap_or(60000),"background_sync":self.poll_interval_ms.is_some(),"now_unix_ms":1772895600000_i64 + i64::try_from(self.clock_origin.elapsed().as_millis()).map_err(|_|error("test clock overflow"))?,"barriers_directory":barriers
+                "google_base_url":self.google.base_url(),"request_timeout_ms":self.request_timeout_ms,"poll_interval_ms":self.poll_interval_ms.unwrap_or(60000),"background_sync":self.poll_interval_ms.is_some(),"now_unix_ms":1772895600000_i64 + i64::try_from(self.clock_origin.elapsed().as_millis()).map_err(|_|error("test clock overflow"))?,"barriers_directory":barriers
             }))?,
         )?;
         let stdout = private_file(

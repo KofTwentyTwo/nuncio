@@ -13,7 +13,11 @@ use std::{
 
 #[track_caller]
 fn result(output: CliOutput) -> Value {
-    assert_eq!(output.status, 0, "CLI failed");
+    let diagnostic = output.json().ok().map(|value| {
+        json!({"code":value["error"]["code"],"sync_error":value["error"]["sync_run"]["error_code"],
+            "started_at_ms":value["error"]["sync_run"]["started_at_ms"],"finished_at_ms":value["error"]["sync_run"]["finished_at_ms"]})
+    });
+    assert_eq!(output.status, 0, "CLI failed: {diagnostic:?}");
     output.json().unwrap()["result"].clone()
 }
 
@@ -256,7 +260,9 @@ impl Drop for Sampler {
 #[tokio::test]
 async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_fetches(
 ) -> Result<(), TestError> {
-    let mut h = E2eHarness::start(Seed::TwoAccounts).await?;
+    // Measure large transfers with production's deadline; short fault-test
+    // deadlines must not turn runner throughput into a provider outage.
+    let mut h = E2eHarness::start_with_request_timeout(Seed::TwoAccounts, 30_000).await?;
     let account = h.connect_google("alpha@example.test").await?;
     let pid = h.daemon_pid().unwrap();
     let baseline = rss_kib(pid)?;
@@ -280,6 +286,17 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
             ["INBOX".into()].into(),
         )
         .await?;
+    h.google
+        .control()
+        .inject(nuncio_test_support::google::Fault {
+            method: "GET".into(),
+            path: "/gmail/v1/users/me/messages/large-resource".into(),
+            account: Some("alpha@example.test".into()),
+            call: Some(2),
+            phase: nuncio_test_support::google::Phase::Before,
+            action: nuncio_test_support::google::FaultAction::Delay { millis: 1250 },
+        })
+        .await;
     result(
         h.cli(&["--json", "sync", "--account", &account, "--wait"])
             .await?,
@@ -367,7 +384,7 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
         std::fs::write(
             directory.join("attachment-resources.json"),
             serde_json::to_vec_pretty(
-                &json!({"pid":pid,"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"attachment_bytes":payload.len(),"raw_bytes":raw_len,"baseline_rss_kib":baseline,"peak_rss_kib":samples.iter().max(),"rss_samples_kib":samples,"idle_rss_kib":idle,"thread_counts":thread_counts,"storage_sizes_bytes":storage_sizes,"iteration_ms":iteration_ms,"total_ms":started.elapsed().as_millis(),"post_warmup_growth_limit_kib":2*64*1024}),
+                &json!({"pid":pid,"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"attachment_bytes":payload.len(),"raw_bytes":raw_len,"baseline_rss_kib":baseline,"peak_rss_kib":samples.iter().max(),"rss_samples_kib":samples,"idle_rss_kib":idle,"thread_counts":thread_counts,"storage_sizes_bytes":storage_sizes,"iteration_ms":iteration_ms,"total_ms":started.elapsed().as_millis(),"post_warmup_growth_limit_kib":2*64*1024,"request_timeout_ms":30_000,"injected_response_delay_ms":1250}),
             )?,
         )?;
     }

@@ -1,5 +1,41 @@
 # Verification evidence
 
+## Hosted macOS resource-fixture failure
+
+Original workflow34671490682 macOS E2E job103493548592 failed its large-message
+initial sync (CLI4) after Google27/recovery5/repair2/migration1/security2 passed.
+The other2resource tests passed. Retained artifacts are under remote-ci/34671490682/
+e2e-macos/. MacOS mock-contract, lint and release-check jobs passed; overall hosted success is not
+established. The mock artifact independently confirms26tests,2commands0 and
+parent/child egress refusal; remaining original jobs are still being observed.
+
+A1250ms independent response-delay regression reproduced the synthetic1s deadline
+failure87753 at1007ms with provider_unavailable. Compile attempt79865 had an incorrect
+fault variant; its log is separate and is not the behavioral red result. Production
+already uses30000ms. Only the resource fixture now uses that production deadline;
+fast fault-test defaults remain1000ms. Payload/loop/RSS/remote-effect assertions and
+mock validation are unchanged. Focused71160 passed3tests in36.450s; failure output
+now records only structured error codes/timestamps. Affected gate91079 completed exit0: all6outer/17nested commands passed.
+Google27/recovery5/repair2/migration1/security2/resources3/IMAP13/release2/external1
+passed with zero failed/ignored. Both Clippy configurations/fmt and parent/child
+egress checks passed. Exact commands/counts/copied logs: ci-resource-fix/.
+Candidate source comparison: all244production files unchanged.
+No production source changed; candidate remains the verified production artifact.
+Local correction is not proof that the hosted rerun will pass.
+
+## Release-preparation checkpoint and actual hosted run
+
+Signed checkpoint7f81b735b593c3e86caf64d59964fedfa3ffb2fc committed/pushed;
+independent GitHub ls-remote matched exactly. Staged56files/365648diff bytes passed
+Gitleaks and whitespace0. Initial signature verification1 was a filesystem-sandbox
+refusal opening local GPG trustdb; narrow escalation verified the signature0.
+No remote/authentication configuration changed. Logs/receipt: checkpoint-release/.
+Actual hosted workflow34671490682 was observed in_progress at03:52UTC:
+https://github.com/KofTwentyTwo/nuncio/actions/runs/34671490682.
+Hosted success remains unverified; inspect this exact run/head rather than inferring
+it from the local full gate. Local archive still honestly records its720081f dirty
+source snapshot; no post-build rewriting of the archive or its provenance.
+
 ## Verified repeatable local candidate
 
 Corrected two-build comparison31790 completed0 September12 03:46UTC. Both builds
@@ -36,8 +72,8 @@ Packaging now recreates a stable exclusive build directory, refuses existing dat
 uses the Git source epoch for OpenSSL and normalized tar/gzip metadata, and records
 actual verification time externally. New regressions failed before helpers existed;
 package4 tests now pass, fullscript8 tests pass under egress denial, Ruff/format0.
-The corrected full two-build comparison is running from task15-repeat-green/run.py;
-repeatability remains unproven until its exact hash comparison succeeds. No normal
+The corrected comparison subsequently passed31790/0; see the newer verified
+candidate entry above for exact hashes and scope. No normal
 installation or live-provider/native-keystore access occurred.
 
 ## Full integrated offline egress gate — passed

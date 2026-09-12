@@ -10,12 +10,39 @@ Read AGENTS→CLAUDE, shared personal rules/style, rebuild/AGENTS, this file, TO
 
 ## Immediate next action
 
-Full local offline implementation/checks and repeatable macOS ARM candidate are
-verified. Next: final staged secret/whitespace/source checks, signed checkpoint and
-push to the authorized feature branch, verify exact remote head, then inspect the
-actual hosted workflow. Resolve demonstrated CI failures inline. Finish final
-requirement/report statuses from actual CI evidence; live/native-keystore acceptance
-remains deferred/unapproved/unverified. Do not mark the full goal complete.
+Signed checkpoint7f81b735b593c3e86caf64d59964fedfa3ffb2fc is pushed to the approved
+feature branch; independent ls-remote matched exactly. Final staging56files/
+365648diff bytes, Gitleaks0, whitespace0, clean worktree before commit. Initial
+signature verification could not open GPG trustdb under the sandbox; narrowly
+escalated verification passed0. No auto-review rejection or remote config change.
+Receipt/logs: test-results/checkpoint-release/.
+
+Affected gate91079 completed exit0: all6 outer commands passed (fmt/bothClippy,
+E2E7commands, IMAPE2E2commands, release8commands). Actual suites: Google27,
+recovery5, repair2, migration1, security2, resources3, IMAP13, release-isolation2
+and external generated-client1; zero failed/ignored. Parent/child egress checks
+passed. Commands/counts/copied suite logs: test-results/ci-resource-fix/.
+All244 production source files still match the verified packaged candidate.
+
+Current action: stage/scan/sign/push the verified test-only correction and updated
+evidence, then observe the new hosted run. Original hosted workflow34671490682
+on7f81b73: macOS mock-contract, lint and release-check passed; macOS E2E failed in
+initial large-message sync (CLI4); Ubuntu jobs still running at04:15UTC.
+Preserved artifacts: remote-ci/34671490682/{e2e-macos,mock-macos,release-macos}/.
+
+Deterministic slow-response repro87753 failed at1007ms with provider_unavailable,
+confirming the one-second synthetic harness deadline. Initial79865 compile mistake
+is recorded separately. Production uses30s. Only the large-payload fixture now
+uses that existing production deadline; all fast fault-test defaults remain1s.
+Added1250ms independent response delay, retained16MiB/eight cycles/128MiB growth
+bound and all remote send/copy/notification assertions. Focused71160 passed3;
+affected91079 subsequently passed. No mock validation or production timeout changed.
+Inspect remaining original jobs for other defects before replacing its run.
+New pushes cancel the old run via existing workflow concurrency policy.
+
+Actual run URL: https://github.com/KofTwentyTwo/nuncio/actions/runs/34671490682.
+Full goal is incomplete; live/native-keystore acceptance remains deferred/unapproved.
+No new account request now. Do not equate a running workflow with passing CI.
 
 Full integrated egress gate58495 completed0 September12 03:31UTC: all34commands,
 305tests in each workspace configuration,18named suites, six independent Python
@@ -46,17 +73,17 @@ Archived docs are the build-time snapshot; current verification lives in source
 docs and the adjacent evidence. No installation/publication. Repeatability proof
 is for identical recorded platform/toolchain/compiler/SDK/checkout/build-path inputs.
 
-Latest signed/pushed head still720081f661d0038de661953b5b82da8c4a2c4b44; Task15
-checkpoint/push next. No root Cargo changes; .github/workflows/rebuild-ci.yml is
+Latest signed/pushed head is7f81b735b593c3e86caf64d59964fedfa3ffb2fc; actual hosted
+workflow34671490682 is running. No root Cargo changes; .github/workflows/rebuild-ci.yml is
 the only root integration change. Six named jobs/ten Linux/macOS matrix executions;
 YAML/binding checks, actual exit17 propagation per job and actionlint1.7.12 pass.
-Hosted CI remains unobserved. Staged preflight before latest edits:56approved files,
-356071diff bytes, Gitleaks0/whitespace0; rerun after final staging.
+Hosted CI has three passing macOS jobs and one failed macOS E2E job; Ubuntu
+jobs remain pending. Rerun staged scans before the next checkpoint.
 
 Previous full gate98403/1 and sampler failures are preserved. Native numeric
 libproc/procfs sampler passed macOS/Linux real allocation tests; spawn_blocking
-keeps it off the mock runtime. Original1s request deadline,128MiB RSS growth bound
-and remote-effect assertions remain. Full provider egress/relay and dependency
+keeps it off the mock runtime. Historical full gate used1s; the latest large-resource fixture correction is
+documented above. The128MiB RSS growth bound and remote-effect assertions remain. Full provider egress/relay and dependency
 remediation evidence is in VERIFICATION; do not reopen already-passing foundations.
 
 ## Hourly status emails
@@ -78,7 +105,7 @@ search at approximately01:02UTC found no third message; one retry succeeded at
 approximately01:03UTC, Gmail ID/thread `1a0932257375285e`, SENT. Exact body and
 attempt history: test-results/status-emails/2026-09-11-1957.md. Recipient delivery
 or reading is not independently confirmed.
-Next due: September12 03:57UTC / September11 22:57Central. Check the clock during active goal execution;
+Next due: September12 04:57UTC / September11 23:57Central. Check the clock during active goal execution;
 At James's explicit request, a revised third report was sent at01:08UTC with all16
 task bars/percentages/hours. Gmail ID/thread1a09328893b32fa7, SENT; sent-folder read
 confirms the186505-byte inline PNG and matching content ID. Exact report and chart:
@@ -152,3 +179,11 @@ Hourly21:57 report sent September12 approximately02:57:13UTC, ID/thread
 1a0938c424bff603, SENT. Embedded184157-byte chart covers all16 tasks; estimates
 7–14offline hours plus3–6deferred live hours. Full58495gate pending; focused
 resource fix passed. Body/chart/estimates/receipt: status-emails/2026-09-11-2157*.
+
+Hourly22:57 report sent at approximately03:57:08UTC, ID/thread1a093c31c36b8bba,
+SENT with independently confirmed183517-byte inline chart. All16 tasks included;
+estimates2–6offline active hours plus3–6deferred live. Evidence: status-emails/
+2026-09-11-2257*. Next04:57UTC/23:57Central during active execution.
+Hosted macOS mock-contract job passed; downloaded artifacts independently show
+26tests/0failed/0ignored,2commands0, parent/child egress denial and underlying exit0.
+Other jobs remain pending; exact artifacts: test-results/remote-ci/34671490682/mock-macos/.
