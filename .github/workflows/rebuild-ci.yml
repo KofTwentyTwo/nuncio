@@ -1,7 +1,7 @@
 name: Nuncio rebuild
 on:
   push:
-    branches: [feature/nuncio-google-first-rebuild, dev]
+    branches: [feature/nuncio-google-first-rebuild, main, dev, develop, rc]
     paths: ["rebuild/**", ".github/workflows/rebuild-ci.yml"]
   pull_request:
     paths: ["rebuild/**", ".github/workflows/rebuild-ci.yml"]

@@ -2,7 +2,10 @@ version: 2
 updates:
   # 1. Rust Workspace Crates (Cargo)
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories:
+      - "/"
+      - "/rebuild"
+      - "/rebuild/clients/smoke"
     schedule:
       interval: "daily"
       time: "04:00"

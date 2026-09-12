@@ -2,26 +2,36 @@ name: "CodeQL Security Analysis"
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main, dev, develop, rc, feature/nuncio-google-first-rebuild]
   pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
   schedule:
     - cron: '30 1 * * 1' # Every Monday at 01:30 UTC
 
 permissions:
-  actions: read
   contents: read
-  security-events: write
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
     name: Analyze CodeQL (${{ matrix.language }})
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
         include:
+          - language: rust
+            build-mode: none
+          - language: python
+            build-mode: none
           - language: javascript-typescript
             build-mode: none
           - language: actions
@@ -29,15 +39,72 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare pinned Rust toolchain
+        if: matrix.language == 'rust'
+        run: rustup show active-toolchain
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           category: "/language:${{ matrix.language }}"
+
+  dependency-advisories:
+    name: Dependency advisories (${{ matrix.workspace }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NUNCIO_ADVISORY_DB: ${{ github.workspace }}/rebuild/test-results/advisory-db
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workspace: original
+            manifest: Cargo.toml
+            lockfile: Cargo.lock
+          - workspace: rebuild
+            manifest: rebuild/Cargo.toml
+            lockfile: rebuild/Cargo.lock
+          - workspace: client
+            manifest: rebuild/clients/smoke/Cargo.toml
+            lockfile: rebuild/clients/smoke/Cargo.lock
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare advisory scanners and locked dependencies
+        env:
+          NUNCIO_MANIFEST: ${{ matrix.manifest }}
+        run: |
+          rustup show active-toolchain
+          cargo install cargo-deny --version 0.19.8 --locked
+          cargo install cargo-audit --version 0.22.2 --locked --no-default-features
+          cargo fetch --locked --manifest-path "$NUNCIO_MANIFEST"
+          cargo deny --manifest-path "$NUNCIO_MANIFEST" fetch -c rebuild/deny.toml db
+      - name: Reject vulnerable dependencies using the fetched advisory database
+        env:
+          NUNCIO_MANIFEST: ${{ matrix.manifest }}
+        run: cargo deny --manifest-path "$NUNCIO_MANIFEST" --locked --offline check -c rebuild/deny.toml advisories
+      - name: Reject advisories in the complete lockfile, including optional dependencies
+        shell: bash
+        env:
+          NUNCIO_LOCKFILE: ${{ matrix.lockfile }}
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          # Reuse cargo-deny's fetched RustSec checkout without hardcoding its directory hash.
+          databases=("$NUNCIO_ADVISORY_DB"/advisory-db-*)
+          test "${#databases[@]}" -eq 1
+          test -d "${databases[0]}/.git"
+          test -f "$NUNCIO_LOCKFILE"
+          cargo audit --file "$NUNCIO_LOCKFILE" --db "${databases[0]}" --no-fetch --deny warnings
