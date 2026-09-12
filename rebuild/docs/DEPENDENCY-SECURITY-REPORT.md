@@ -1,5 +1,13 @@
 # Dependency security remediation — September 12, 2026
 
+Current hosted confirmation: [security run 34704460237](https://github.com/KofTwentyTwo/nuncio/actions/runs/34704460237)
+passed all seven jobs at signed/pushed `164b021`. The corrected original complete
+lock passed cargo-audit (509 packages), and rebuild/client advisory jobs passed.
+Nine action findings are verified fixed. The earlier failure and local evidence
+below remain historical; no PR was merged or closed. See [SECURITY-CI.md](SECURITY-CI.md)
+for the actual code-scanning findings and their limits.
+
+
 The read-only GitHub inventory returned **zero open Dependabot security alerts**
 and **eleven open Dependabot version-update pull requests**, all targeting `main`.
 Those are different queues: a zero alert count did not make the original

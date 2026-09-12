@@ -1,11 +1,12 @@
 # Local packages and operation
 
 For a laptop download without compiling, use [TESTING-INSTALL.md](TESTING-INSTALL.md).
-That installer requires an eligible successful CI archive; its first upload is
-pending. This page describes local packaging and the verified `6ff9bb9` baseline.
-Current schema-23 account changes require a fresh full gate and package; the old
-baseline archive does not contain them. Baseline software and documentation
-checkpoint `7390e77` passed hosted CI, but those runs uploaded evidence only.
+The current local schema-23 account/CLI package is verified at signed/pushed
+`164b021`. The full 34-command gate passed; two fresh clean builds produced the
+same `4a9e33a9` archive, with 22 extracted checks and 467 manifest entries each.
+The selected path and full hashes are in [IMPLEMENTATION-REPORT.md](IMPLEMENTATION-REPORT.md).
+Its current hosted CI/testing download also passed. Older schema-22 packages
+and their receipts remain preserved; use each archive's own metadata.
 
 Candidates are versioned local archives, not installed or public releases. Use the
 archive's adjacent SHA-256 sidecar to verify it before extraction. The adjacent
@@ -102,7 +103,8 @@ directory beneath the explicit `~/.local/opt/nuncio-testing` prefix and refuses
 existing destinations. It verifies CI provenance, digests, package contents and
 architecture without compiling or executing the downloaded binaries. Use the
 printed binary paths; it does not modify PATH, profiles, production executables
-or login services. Its first usable CI archive is still pending. For a manually
+or login services. Download and temporary installation of the `164b021` CI archive
+have passed the checks in [TESTING-INSTALL.md](TESTING-INSTALL.md). For a manually
 extracted local candidate, likewise choose a new version-specific directory and
 preserve older candidates. No normal-environment installation has been performed
 here. Native application packaging is outside this goal.

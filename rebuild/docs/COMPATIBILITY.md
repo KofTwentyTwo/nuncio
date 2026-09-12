@@ -5,10 +5,10 @@ Dovecot/Mailpit servers. Live Gmail/Calendar, Synology DSM/MailPlus versions and
 native OS-keychain operation remain unverified. The separate
 [manual worksheet](MANUAL-ACCEPTANCE.md) identifies the exact checks and approvals
 required. A passing mock or local CI-equivalent run cannot fill those evidence gaps.
-Baseline `6ff9bb9` and documentation checkpoint `7390e77` passed hosted Linux/macOS
-CI. Current schema-23 account changes have focused tests; full current-source
-verification and fresh packages remain pending. The selected baseline archive is
-Apple Silicon macOS and does not contain those account additions.
+Current schema-23 account source passed its full offline gate, and the selected
+Apple Silicon archive at `164b021` passed fresh repeatable packaging. Its hosted
+Linux/macOS CI and actual testing-download checks also passed. Historical hosted
+baseline runs remain separately recorded in [VERIFICATION.md](VERIFICATION.md).
 
 | Area | Implemented behavior and current limits |
 |---|---|
@@ -21,7 +21,7 @@ Apple Silicon macOS and does not contain those account additions.
 | Synology calendar | Calendar functionality in this goal uses Google Calendar. Synology Calendar/CalDAV is not part of the approved MailPlus IMAP/SMTP adapter. |
 | IMAP servers | The adapter is exercised against local independent implementations; compatibility with arbitrary IMAP/SMTP servers is not inferred. Renamed/retired folders and UID epochs retain separate identities. A message trashed by another client has no provable local original folder; choose an explicit Move instead of guessed restore. |
 | Payload/resource limits | Default64MiB per payload, bounded streams/queues,2 concurrent network exchanges and64 active/waiting admissions. Metadata/RSS workloads have machine-specific results; these are not universal latency or memory guarantees. |
-| Native credentials/platforms | Native macOS Keychain and Linux Secret Service are the selected production stores; automated tests use synthetic stores. Both Ubuntu 24.04 and macOS 15 baseline CI and packaging commands passed. The retained verified local archive is macOS ARM64; old hosted archive bytes were not uploaded. Native-keystore acceptance, Windows, and additional package architectures are not established. The [testing installer](TESTING-INSTALL.md) supports native Apple Silicon macOS 15+ only and awaits its first eligible CI archive. |
+| Native credentials/platforms | Native macOS Keychain and Linux Secret Service are the selected production stores; automated tests use synthetic stores. Current Ubuntu 24.04 and macOS 15 CI and packaging commands passed at `164b021`. The retained local archive is macOS ARM64; the hosted ARM64 archive was independently downloaded, verified and installed into a temporary prefix. Native-keystore acceptance, Windows, and additional package architectures are not established. The [testing installer](TESTING-INSTALL.md) supports native Apple Silicon macOS 15+ only. |
 | API clients | Versioned authenticated `nuncio.v2`, opaque local IDs, scoped page/revision tokens, byte streams and committed-change replay. A separately generated status/watch client passes baseline actual-daemon tests without engine/storage dependencies. New account methods require the current source; publication/SemVer tooling remains a [proposal](API-PUBLICATION-PLAN.md). Native apps remain outside scope. |
 
 Polling and provider reads establish eventual local convergence; this tool does

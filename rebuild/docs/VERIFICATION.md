@@ -1,5 +1,27 @@
 # Verification evidence
 
+11:40Central report1a0967dcff0032a4 independently read as SENT to james@kof22.com, with211603-byte PNG/CIDnuncio-progress-1140 and20-task matching table/plaintext. All current delivery evidence, finalcheckpointestimate and deferredlive boundary are explicit. Exact renderer/payload/receipt: test-results/status-emails/2026-09-12-1140*. Next17:40UTC.
+
+## September 12 — actual current CI and hosted installer passed
+
+Run34704460234 at signed/pushed164b021/attempt1 passed all10jobs; watcher62703/0. Capture97079/0 retained all11artifacts with independent GitHub SHA256/size and ZIP CRC verification; ten evidence command sets all exit0. Hosted totals: core162perplatform; mock26perplatform; E2E43perplatform; system39; IMAP/resource48; release/client3perplatform. Both production archive commands passed. Root independently parsed the retained logs: test-results/account-management-final-docs/hosted-counts.json.
+
+Actual installer55011/0 selected run34704460234/attempt1, artifact10301603739 (9,602,280bytes; ZIP SHA2562dc2926f53a6c92b256125fb1a5b41fdaba8f83b8a1132eb1e105c26249ffbe0; packagea9e9a1f7a9ee9672591252580ee1f47c453bd1627c043b7d2b0eba5692b3fa76). It installed into a new private temporary prefix. The467-entry installed manifest, clean metadata,22extracted checks and bothARM64headers were verified;27help/version/account parser checks all exit0. Normal-environment snapshot and installer source unchanged; no compiler, daemon or liveprovider ran. Exact commands, path, checks and allbytes: test-results/testing-installer-current/{verification-summary.json,installer.json,installer.stdout.log,TESTING-INSTALL.json,installed-integrity.json,normal-environment-comparison.json,downloaded-summary.json,hosted-test-summary.json,downloads/}. Hosted and local archives have different recorded environments and are not assumed byte-identical.
+
+Run34704460237 at164b021 passed all7securityjobs; watcher60584/0. All3advisory logs verify cargo-deny and full-lock cargo-audit ran (original509packages, rebuild375, client249). Four uploaded CodeQL analyses: Rust42findings/Python2/Actions0/JS0. Nine prior action alerts nowfixed; no newfindings,44prior classified open findings retained. Rust435files/412without-errors;23warnings only archivedreferencefiles. Exact summary/SARIF/deltas/7logs in test-results/security-ci/hosted-34704460237/. No suppressions or dismissals. SECURITY-CI.md records the implications and limits.
+
+All account/installer/software verification is complete. Current dated docs/handoff are being checkpointed; source411hashes and production164b021 remain the qualification boundary. Live/native acceptance remains separately deferred/unverified.
+
+
+## September 12 — signed account checkpoint and fresh local artifacts
+
+Account checkpoint `164b021750a70b49a1e060602f653f22cd14a46c` signed/pushed after gate4169. The explicit 73-file staged set, 411 unchanged tested sources, 203 local links, balanced fences, scoped Gitleaks and final staged whitespace checks passed; signature and exact remote head verified (push9299/0). Initial staged whitespace exit2 identified two API-plan Markdown hard-break spaces; blank-line correction retained the content and source hashes. Receipts/logs preserve that failure and successful correction in `test-results/checkpoint-account-management/`.
+
+Fresh pair36678 exited0: both clean production archives SHA256 `4a9e33a91c11d3dbdf376ebd01827f9bd645f4fbbce03517fa8fad04f13af7cc`; identical daemon `402d81018ee2a98ea43e928711844aac3045f1df92a0d84c994c42669ab288e5` and CLI `68462388004977f37c24ddde391be118991c5220d4ba869631815acb3673478d`. Each passed22extracted checks and independent467-entry manifest, descriptor, clean/no-feature metadata, source/sidecar validation;237notices, no missing README links. Exact commands/comparison/receipts: `test-results/account-management-package/`. Selected new archive/sidecars/build logs are in `dist/final-candidate/verified/`; old b26d2c93 bytes and EVIDENCE-before-account-management-164b021.json are preserved. Repeatability is limited to the recorded platform/compiler/SDK/paths.
+
+New actual CI runs34704460234(rebuild/installer) and34704460237(security) remain active at164b021. Their ignored receipts are separate from local package evidence. No current hosted/installer completion claim yet; live/native acceptance remains deferred.
+
+
 ## September 12 — current account/installer full offline gate passed
 
 `python3 test-results/account-management-final-all/run.py`, shell 4169, exited 0. Its egress-denied `scripts/verify.py --all` passed all 34 commands. Both workspace configurations passed 322 tests, zero failed/ignored; all 411 captured source hashes stayed unchanged. Separate Google suites: mock 26, system 22, actual CLI 30, operations 8. IMAP/SMTP: contract 2, system 28, actual CLI 14. Recovery 5; repair 2/2; migration 1; reconciliation 3; multi-engine 1; security 3/2; resources 4/3; release isolation 2; independent generated client 1. Six local-service scripts, 22 script regressions, formatting, both Clippy modes, dependency and client-boundary gates passed. Repeated suites are not additional unique tests.

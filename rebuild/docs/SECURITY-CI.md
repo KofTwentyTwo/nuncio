@@ -1,6 +1,39 @@
 # Security scanning in development
 
-September 12, 2026. The first hosted security run at checkpoint `549a5983db507670274422d6f702122b56210702` completed with six successful jobs and one dependency-policy failure. Its results and open findings are recorded below. This document distinguishes scan coverage from required merge checks and from provider acceptance.
+September 12, 2026. The corrected hosted security run at signed/pushed
+`164b021750a70b49a1e060602f653f22cd14a46c` passed all seven jobs. The earlier failed
+run and all finding classifications remain below. Scan success, mandatory merge
+enforcement, and provider acceptance are separate facts.
+
+## Current hosted verification at 164b021
+
+[Run 34704460237](https://github.com/KofTwentyTwo/nuncio/actions/runs/34704460237)
+completed successfully at 16:23:04 UTC. All three advisory jobs passed and their
+logs confirm both selected-graph cargo-deny and complete-lock cargo-audit ran.
+The original audit scanned 509 locked packages with chacha20 0.10.2; rebuild/client
+audits scanned 375/249. The earlier yanked-lock failure is corrected, not ignored.
+
+All four CodeQL categories uploaded at the exact source commit: Rust 42 results,
+Python 2, Actions 0, JavaScript 0. All nine prior action alerts (11–19) now have
+GitHub state `fixed`; no alert was dismissed or suppressed. No new findings were
+introduced. The 44 remaining open findings are the previously classified 20
+synthetic Rust test credentials, 18 test logging paths, one intended original CLI
+account-output path, two production-HTTPS Google flows, one SQLCipher-encrypted
+restore path, and two private-directory Python test-credential fixtures. Their
+source/sink traces and locations were compared with the earlier analysis; no
+production credential exposure was demonstrated in those reported paths.
+
+Rust scanned 435 files: 412 without errors and the same 23 archived reference files
+with semantic/macro-expansion limitations. There were no corresponding active
+workspace extraction warnings. Empty top-level API error/warning strings alone
+were not used to claim full semantic coverage.
+
+Exact summary, all seven job logs, paginated analysis/alert responses, current
+SARIF, normalized deltas, source-blob comparisons and classification receipts:
+`test-results/security-ci/hosted-34704460237/`. This is actual feature-branch
+execution; the workflow must reach `dev`/other target branches through authorized
+integration before those branches use the new coverage. Required checks/rulesets
+and remote settings remain unchanged.
 
 ## Development means `dev`
 
@@ -92,7 +125,7 @@ Gitleaks scanned a temporary copy of tracked files plus new source/docs/scripts,
 
 No local CodeQL CLI or actionlint executable was available. Workflow structure and command execution were checked locally; actual CodeQL extraction/query execution/upload is evidenced by the hosted run below. The cargo-audit installation stayed in the ignored task-local evidence directory. No live account was accessed and no repository settings were modified.
 
-## Hosted evidence and enforcement still to verify
+## Historical hosted evidence and remaining enforcement decisions
 
 ### First feature-branch run and findings
 

@@ -5,8 +5,9 @@
 > **Status: pre-alpha; active implementation is in [`rebuild/`](rebuild/README.md)
 > (September 12, 2026).** The current engine/API/CLI, account-management additions,
 > and testing installer passed all 34 offline gate commands, with 322 tests in
-> each workspace configuration and no failures or ignored tests. Fresh packaging,
-> current-source hosted CI, and the first eligible testing download remain pending.
+> each workspace configuration and no failures or ignored tests. Signed/pushed
+> `164b021` also passed fresh repeatable local packaging. All ten current-source rebuild CI jobs, seven security jobs
+> and the actual testing-download/temporary installation passed.
 > Earlier schema-22 checkpoints passed Linux/macOS CI. Live Google,
 > Synology MailPlus, and native-keystore acceptance remain unverified.
 > See the [implementation report](rebuild/docs/IMPLEMENTATION-REPORT.md) for the
@@ -22,9 +23,8 @@ Native applications are outside this workspace's implementation scope. Contacts,
 JMAP, and CalDAV/CardDAV remain outside the active rebuild's approved provider set.
 
 For Apple Silicon laptop testing, the [testing installer](rebuild/docs/TESTING-INSTALL.md)
-downloads an eligible verified CI package without compiling locally. Its first
-download requires a successful testing-branch CI run containing the new artifact
-upload step. It installs into a separate versioned prefix without starting a
+downloads an eligible verified CI package without compiling locally. The first real download/temporary installation is verified at `164b021`; it
+selects a fully successful retained testing-branch run. It installs into a separate versioned prefix without starting a
 service. No public release or live-provider readiness is implied.
 
 The [proposed post-engine roadmap](rebuild/docs/POST-ENGINE-ROADMAP.md) starts

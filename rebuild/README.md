@@ -9,13 +9,13 @@ and repeatable local Apple Silicon packaging; documentation checkpoint `7390e77`
 also passed all ten CI jobs. Current account-management additions use schema 23
 and seven additive account RPCs (49 total). The current full offline gate passed
 all 34 commands: 322 tests in each workspace configuration, zero failed/ignored,
-22 script regressions, and all 411 captured source hashes unchanged. Fresh
-packaging, current-source hosted CI, and the first eligible testing download
-remain pending; [the report](docs/IMPLEMENTATION-REPORT.md) records the evidence.
+22 script regressions, and all 411 captured source hashes unchanged. Signed/pushed
+`164b021` also passed fresh repeatable local packaging. All ten current-source hosted rebuild jobs, seven security jobs and the actual
+testing-download/temporary installation passed; [the report](docs/IMPLEMENTATION-REPORT.md) records the evidence.
 
 - [Run locally](docs/RUNNING.md) and [verify/use local packages](docs/PACKAGING.md)
 - [Account management](docs/ACCOUNT-MANAGEMENT.md)
-- [Download a testing build without compiling](docs/TESTING-INSTALL.md) — first eligible CI archive pending
+- [Download a testing build without compiling](docs/TESTING-INSTALL.md) — actual CI download/install verified
 - [Offline testing](docs/TESTING.md)
 - [Mock Google service](docs/MOCK-GOOGLE.md)
 - [API contract](docs/API.md), [API publication proposal](docs/API-PUBLICATION-PLAN.md), and [task progress estimates](docs/PROGRESS.md)
@@ -31,5 +31,5 @@ Synology MailPlus, and native-keystore acceptance remain deferred and unverified
 native apps are excluded. Earlier failures and later corrections remain in the
 verification history. The old archive does not qualify new account-management
 source. The testing installer and API publication proposal are repository work;
-no new testing download, public API distribution, or release is claimed available
-until its respective checks and delivery steps complete.
+the testing download is verified at164b021. Public API distribution and a formal
+release remain separate future work.

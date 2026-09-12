@@ -1,5 +1,13 @@
 # Open PR review — September 12, 2026
 
+Current hosted confirmation: [security run 34704460237](https://github.com/KofTwentyTwo/nuncio/actions/runs/34704460237)
+passed all seven jobs at signed/pushed `164b021`. The corrected original complete
+lock passed cargo-audit (509 packages), and rebuild/client advisory jobs passed.
+Nine action findings are verified fixed. The earlier failure and local evidence
+below remain historical; no PR was merged or closed. See [SECURITY-CI.md](SECURITY-CI.md)
+for the actual code-scanning findings and their limits.
+
+
 The complete open queue contains **11 PRs**, all Dependabot updates already
 incorporated or superseded by the checked dependency/security work. There are no
 additional human contribution or native-app PRs to recover. Each current diff,
@@ -79,8 +87,7 @@ establish freshness. That failure was preserved.
 The bounded follow-up updates only the original lock entry to unyanked 0.10.2
 and its reference. Formatting, strict Clippy, all **790 tests**, and cargo-deny
 pass again. Cargo-audit 0.22.2 explicitly refreshes RustSec and crates.io and
-passes with zero vulnerabilities/warnings; a corrected hosted rerun remains
-pending. Details and exact current lock hash are in the dependency report.
+passes with zero vulnerabilities/warnings; the corrected hosted rerun passed at 164b021. Details and exact current lock hash are in the dependency report.
 
 The label correction is validated against the live label list and parsed YAML;
 all configured labels exist and all three Cargo directories remain covered.

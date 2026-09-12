@@ -21,6 +21,6 @@ James authorized design and implementation on September 12, 2026, before alpha d
 4. [x] Extend authenticated v2 account API and CLI, including add/reauth/wait UX and retained aliases.
 5. [x] Add independent system and subprocess tests for both providers, queued/uncertain work, crashes, isolation and credential cleanup failures.
 6. [x] Extend historical migration/restore, RPC-auth coverage and frozen descriptor verification; run formatting, both Clippy modes and affected suites.
-7. [ ] Run full offline gate, build and verify fresh production packages, checkpoint/push after checks, retain actual CI results and refresh alpha handoff.
+7. [x] Run full offline gate, build and verify fresh production packages, checkpoint/push after checks, retain actual CI results and refresh alpha handoff.
 
 Use existing dependencies and durability patterns. Do not expand into native apps, OAuth-console automation, provider grant revocation, public release infrastructure or unrelated audits.

@@ -1,16 +1,13 @@
 # Running the rebuild
 
 This workspace provides the daemon, authenticated local API, and reference CLI
-for Google Gmail/Calendar and IMAP/SMTP mail. Baseline `6ff9bb9` passed the full
-offline gate, Linux/macOS hosted CI, and repeatable local Apple Silicon packaging;
-the later documentation checkpoint `7390e77` also passed hosted CI. Current
-schema-23 account-management additions have focused offline evidence and await
-full current-source verification and fresh artifacts. Commands added below are
-not present in the old baseline archive. Provider acceptance uses independent
-synthetic services; live Google/Synology and native-keystore acceptance remain
-deferred and unverified. For build-free laptop setup, see the
-[testing installer](TESTING-INSTALL.md), whose first eligible CI archive is still
-pending. [PACKAGING.md](PACKAGING.md) covers local builds and archived evidence.
+for Google Gmail/Calendar and IMAP/SMTP mail. Current schema-23 account management
+passed the full offline gate and fresh repeatable local Apple Silicon packaging
+at signed/pushed `164b021`. Its ten-job hosted CI and first eligible testing-download/temporary installation
+verification also passed. Provider tests use independent synthetic services;
+live Google/Synology and native-keystore acceptance remain deferred/unverified.
+See the [testing installer](TESTING-INSTALL.md) for download instructions and
+[PACKAGING.md](PACKAGING.md) for the verified local artifact and its evidence.
 
 ## Offline development
 
@@ -98,7 +95,7 @@ Access-token refresh is serialized per account. A returned rotated refresh token
 
 Credential replacement uses a durable SQLCipher cleanup intent before the keystore write, then atomically publishes the new reference. Disconnect first persists the disconnected credential state and cleanup intent. If secret removal fails, the command reports failure but provider dispatch stays disabled; retry disconnect or restart after the keystore becomes available. Startup completes pending cleanup without deleting account data. A crash during browser consent loses the in-memory authorization session: inspect account list after restart and start a new consent flow if it did not finish. Sessions admit at most 16 pending flows, retain at most 64 recent statuses, and expire after five minutes. `account auth-wait --session ID` waits for a terminal result; `account auth-cancel --session ID` explicitly cancels pending consent.
 
-Keep original profiles untouched. If the database key is missing, SQLCipher rejects the file, or the schema is newer than the binary, startup fails without replacing the data. For encrypted backup creation, inspection, new-profile restore and `repair --scope mail|calendar` with a local `--dry-run` preview, follow [RECOVERY.md](RECOVERY.md). Baseline recovery, packaging and hosted CI passed; schema-23 full verification and fresh artifacts are separate current work. Live acceptance remains pending.
+Keep original profiles untouched. If the database key is missing, SQLCipher rejects the file, or the schema is newer than the binary, startup fails without replacing the data. For encrypted backup creation, inspection, new-profile restore and `repair --scope mail|calendar` with a local `--dry-run` preview, follow [RECOVERY.md](RECOVERY.md). Current schema-23 recovery, full offline verification and fresh local packaging passed; current-source hosted delivery also passed. Live acceptance remains pending.
 
 When credential replacement has committed but deletion of the previous secret fails, auth status reports success with `warning_code=credential_cleanup_pending`. The new account is usable; the obsolete secret remains queued for cleanup on restart. This differs from a failed initial credential write, which creates no connected account. Profiles currently admit up to 100 connected or retained accounts.
 

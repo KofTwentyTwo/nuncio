@@ -6,8 +6,8 @@ test-harness workspace configurations passed 322 tests each with zero failed or
 ignored, and all 411 captured source hashes stayed unchanged. All named suites,
 six Python mail-service scripts, and 22 script regressions passed. Receipts are
 under `test-results/account-management-final-all/{final-summary.json,exit.json,source-verification.json,current-all/}`.
-Fresh packaging, current-source hosted CI, and the first eligible testing download
-remain pending. Earlier schema-22 CI and archive evidence retain their historical
+Fresh clean packaging at `164b021` also passed twice with identical archive bytes;
+current-source hosted CI and the first eligible testing download also passed. Earlier schema-22 CI and archive evidence retain their historical
 scope; [SESSION-STATE.md](SESSION-STATE.md) records subsequent delivery progress.
 
 Run from the isolated worktree root:

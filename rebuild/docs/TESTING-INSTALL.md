@@ -1,5 +1,9 @@
 # Download a testing build on Apple Silicon
 
+The script currently lives on `feature/nuncio-google-first-rebuild`; it has not
+been merged into `dev` or `main`. Use a checkout of that branch for the command
+below. The downloaded package is selected independently from successful CI runs.
+
 Use macOS 15 or newer, native ARM64 Python 3.11+, and GitHub CLI (`gh`) 2.100+.
 Authenticate with `gh auth login --hostname github.com`; artifact downloads need
 Actions read access. From this repository's root, run the command below. It
@@ -30,9 +34,16 @@ testing-profile/account actions. To remove an unused build, delete only its prin
 installation directory; retain profiles, backups, and Keychain entries. Choosing
 older binaries is not a database-schema downgrade. Builds expire after 14 days:
 if none is available, the installer reports that honestly and installs nothing.
-The first download requires a checkpoint push containing the archive-upload step
-and a fully successful rebuild workflow; older evidence-only runs cannot supply
-binaries. No GitHub release or tag is created. See GitHub's
+The first actual delivery passed on September 12 at commit `164b021`, successful
+[run34704460234](https://github.com/KofTwentyTwo/nuncio/actions/runs/34704460234),
+attempt1. All eleven artifacts were retained and digest-checked. The unmodified
+installer downloaded artifact10301603739 and installed its 467-entry package into
+a fresh temporary prefix; normal-environment snapshots stayed unchanged. Separate
+help/version/account-command checks passed27parser cases. Full system/E2E behavior
+is recorded in [VERIFICATION.md](VERIFICATION.md); no daemon or live account was
+started during installer verification. Exact package/ZIP hashes are in the
+[implementation report](IMPLEMENTATION-REPORT.md). Older evidence-only runs cannot
+supply binaries. No GitHub release or tag is created. See GitHub's
 [artifact API](https://docs.github.com/en/rest/actions/artifacts) and
 [workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs) for the
 download provenance fields.

@@ -121,12 +121,11 @@ Without `--wait`, retain the returned `run.id`. Inspect it with `system sync-sta
 ## Verification and current limits
 
 Historical migrations, process-crash cleanup, corrected-passphrase retry, durable
-state retention and restore reconciliation have passed offline system/subprocess
-checks at baseline `6ff9bb9`, including its full release/egress run and hosted CI.
-Current account-management/schema-23 verification and a fresh package remain
-separate work; see [VERIFICATION.md](VERIFICATION.md) for actual counts and failures.
-The baseline local archive under `dist/final-candidate` passed extraction,
-manifest and production-control checks; see [PACKAGING.md](PACKAGING.md).
+state retention and restore reconciliation passed the current schema-23 full
+offline gate, including all 46 migration SIGKILL boundaries. The fresh local
+`164b021` archive passed extraction, manifest and production-control checks.
+Current hosted delivery also passed; see [VERIFICATION.md](VERIFICATION.md)
+and [PACKAGING.md](PACKAGING.md) for exact evidence.
 No normal-environment installation or public release was performed. An older
 schema-22 binary cannot open a profile migrated to schema 23; retain a verified
 backup and use the appropriate binary rather than attempting a database downgrade.
