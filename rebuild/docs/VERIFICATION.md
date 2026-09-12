@@ -1,6 +1,84 @@
 # Verification evidence
 
+## Full Calendar-role regression gate — passed
+
+September12 01:49UTC: `python3 scripts/verify.py --all` completed exit0
+(shell92959). All25 commands passed: both builds, fmt, both Clippy configurations,
+normal workspace304 and feature workspace304 test executions, plus18 named suites.
+Named results: mock26, Google system22/E2E27, operations6; IMAP contract2/system27/
+E2E13; recovery5, repair2/2, migration1, reconciliation3, multi-engine1; security3/2,
+resources4/3 and production isolation2. Zero failed/ignored. These are per-run
+executions; repeated workspace/named runs are not additional unique tests.
+
+All captured source hashes were unchanged during the gate. Logs/results/counts,
+independent provider/resource metrics and fresh binary hashes are preserved in
+`test-results/task14-all/`. Summary script initially failed on duplicate test-target
+names across packages; corrected to report unambiguous per-run totals and then
+passed0. This reporting correction did not change or rerun product tests.
+Production daemon16,402,304bytes SHA256
+`33daba77108e7ccdc875121e63f17c927ed0ded9692265c8deebbb252c062fbd`;
+CLI3,506,544bytes SHA256
+`9715785d0c29467b9e477499308e3b7c35fbea6aeff3099b47aeb076e661808d`.
+Standalone client/egress and new release scripts are separate later work, outside
+this gate. Dependency advisories, final packages/CI and live acceptance remain open.
+
+## Release preparation — independent client and egress foundations
+
+Standalone clients/smoke generates a System client from the v2 source protobuf in
+its own Cargo workspace. Compilation47447/101 found fixture build-argument type
+mismatch, corrected before runtime red49910/101 demonstrated unimplemented client.
+Green7033/0 passed1 actual daemon/mock subprocess test, then external all-target
+Clippy passed0. Independent fmt check0 and cargo tree normal/build scan0 confirm
+no engine/storage/CLI/daemon/mock/Nuncio-client-library dependencies. Credentials
+are bounded stdin input, no argv/output secret. Test verifies status and replayed
+change identities, bad-token rejection and independent zero sends/notifications.
+Evidence: task15-contract/. Main verifier/package integration is still pending.
+
+MacOS process-local sandbox probe passed0 and denies external TEST-NET IPv4/IPv6
+with EPERM, allows loopback, and passes the same assertions in a child. New
+scripts/egress.py preserves underlying command exits0 and17 in real wrapper checks;
+both JSON evidence files retain parent/child observations. No host firewall changed.
+Linux hosted-runner branch is written but unverified; IPv6 route/counter behavior,
+container internal networks, full-suite wrapper and CI integration remain pending.
+Evidence: task15-egress/. This does not prove CI egress or remote CI execution.
+
+Cargo-deny0.19.8 initial review99059/5 reported three unmaintained dependencies and
+three rejected license allowances; exact findings in DEPENDENCIES.md and original
+JSON in task15-dependencies/. Reviewed0BSD/CDLA permissive notices are now allowed;
+licenses/sources check0 with374 license helps, zero errors/warnings. The three
+advisories remain errors and require remediation; no clean dependency claim.
+
+## Calendar limited-writer permission gap — focused verification
+
+Current official [CalendarList](https://developers.google.com/workspace/calendar/api/v3/reference/calendarList)
+and [sharing](https://developers.google.com/workspace/calendar/api/concepts/sharing)
+references document writerWithoutPrivateAccess as an editor of non-private events
+with private details hidden. Existing implementation rejected that role entirely.
+Independent mock contract red25702/101 reproduced unsupportedRole; mock now masks
+private fields in get/list/instances, preserves timing/identity, rejects private
+PATCH/DELETE, permits ordinary create/edit/delete and counts notification effects.
+Full independent contract green69060/0:26passed. Owner/writer full details remain
+verified; reader masking is also checked. Mock and engine use independent code.
+
+Production unit red97361/101 and authenticated API red78114/101 reproduced valid
+edit refusal; actual CLI red16362/101 reproduced create refusal. Minimal change
+in domain/calendar_change.rs accepts the role while denying existing private-event
+update/delete/respond; other scope/ETag/organizer guards remain. Focused75329:
+engine4/system1/build passed; CLI failed at new fixture restart without prior stop.
+No product failure at that point. Corrected fixture force-kills first; focused53623
+passed1/0. Actual CLI independently checks create/edit/respond/delete, exactly3
+notification effects, private data absent after restart, unchanged remote private
+event and no private mutation requests. System test independently verifies one
+visible edit/notification, request replay and no private delete effect. Original
+red/fixture failure and green logs retained under task14-calendar-role/.
+Full workspace/offline gate and production refresh pending.
+
 ## Resource telemetry and shared provider budget — full affected gate passed
+
+Signed checkpoint0805a7dc4b7e544195f3eb14e8c85db54c41a004 pushed to the approved
+feature branch. Staged Gitleaks (45,360bytes) and whitespace checks passed;
+git verify-commit reports a good signature (local ownertrust unknown), HTTPS push
+and ls-remote completed0 (shell13278), exact remote hash matches.
 
 Fifteen-command gate shell57763 completed exit0 atSeptember12 00:57UTC.
 `python3 test-results/task14-resource-status/run-gate.py`: fmt/bothClippy;

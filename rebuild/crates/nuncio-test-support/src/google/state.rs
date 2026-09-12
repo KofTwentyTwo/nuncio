@@ -26,7 +26,10 @@ impl GoogleControl {
         id: &str,
         role: &str,
     ) -> std::result::Result<(), crate::TestError> {
-        if !matches!(role, "owner" | "writer" | "reader") {
+        if !matches!(
+            role,
+            "owner" | "writer" | "writerWithoutPrivateAccess" | "reader"
+        ) {
             return Err(Reply::error(400, "unsupportedRole").into());
         }
         let mut model = self.0.lock().await;

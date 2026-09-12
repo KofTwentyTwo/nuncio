@@ -55,6 +55,181 @@ async fn get(h: &E2eHarness, account: &str, calendar: &str, event: &str) -> Valu
     result.json().unwrap()["result"]["event"].clone()
 }
 #[tokio::test]
+async fn calendar_cli_limited_writer_has_real_effects_without_private_access() {
+    let mut h = E2eHarness::start(Seed::TwoAccounts).await.unwrap();
+    let account = h.connect_google("alpha@example.test").await.unwrap();
+    let provider_calendar = "team-alpha@example.test";
+    h.google
+        .control()
+        .set_calendar_role(
+            "alpha@example.test",
+            provider_calendar,
+            "writerWithoutPrivateAccess",
+        )
+        .await
+        .unwrap();
+    h.google.control().put_event("alpha@example.test", provider_calendar, json!({"id":"private001","visibility":"private","summary":"Private CLI canary","description":"Private body canary","start":{"date":"2026-10-02"},"end":{"date":"2026-10-03"}})).await.unwrap();
+    assert_eq!(
+        h.cli(&[
+            "--json",
+            "calendar",
+            "refresh",
+            "--account",
+            &account,
+            "--from",
+            "2026-10-01",
+            "--to",
+            "2026-10-05",
+            "--wait"
+        ])
+        .await
+        .unwrap()
+        .status,
+        0
+    );
+    let catalog = h
+        .cli(&["--json", "calendar", "list", "--account", &account])
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let calendar = catalog["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["provider_id"] == provider_calendar)
+        .unwrap();
+    assert_eq!(calendar["access_role"], "writerWithoutPrivateAccess");
+    let calendar = calendar["id"].as_str().unwrap();
+    let agenda = h
+        .cli(&[
+            "--json",
+            "calendar",
+            "agenda",
+            "--account",
+            &account,
+            "--from",
+            "2026-10-01",
+            "--to",
+            "2026-10-05",
+        ])
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let private = agenda["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["provider_id"] == "private001")
+        .unwrap();
+    assert!(private["summary"].is_null());
+    assert!(!private.to_string().contains("canary"));
+    let private_id = private["id"].as_str().unwrap();
+    let before = h.google.control().snapshot().await.calendars["alpha@example.test"]
+        [provider_calendar]
+        .clone();
+    let create = json!({"action":"create","scope":"single","notifications":"all","event":{"summary":"Limited writer CLI","start":{"date":"2026-10-03"},"end":{"date":"2026-10-04"},"attendees":[{"email":"alpha@example.test"}]}});
+    let created = change(
+        &h,
+        &account,
+        calendar,
+        "9182ea19-966d-4095-8396-5025868bd014",
+        create,
+    )
+    .await;
+    assert_eq!(created["state"], "applied");
+    let id = created["resource_id"].as_str().unwrap();
+    let local = get(&h, &account, calendar, id).await;
+    let provider_id = local["provider_id"].as_str().unwrap();
+    let edited = change(&h,&account,calendar,"dd06ee37-d5a4-4b6d-9ed1-7ccbc7e0a328",json!({"action":"update","event_id":id,"expected_etag":local["etag"],"scope":"single","notifications":"all","patch":{"summary":"Limited writer edited"}})).await;
+    assert_eq!(edited["state"], "applied");
+    let local = get(&h, &account, calendar, id).await;
+    let responded = change(&h,&account,calendar,"8e4384f5-8bb7-4784-bf22-49c3efb2db9b",json!({"action":"respond","event_id":id,"expected_etag":local["etag"],"scope":"single","notifications":"none","response":"accepted"})).await;
+    assert_eq!(responded["state"], "applied");
+    let remote = h.google.control().snapshot().await.calendars["alpha@example.test"]
+        [provider_calendar]
+        .clone();
+    assert_eq!(
+        remote.events[provider_id]["summary"],
+        "Limited writer edited"
+    );
+    assert_eq!(
+        remote.events[provider_id]["attendees"][0]["responseStatus"],
+        "accepted"
+    );
+    let local = get(&h, &account, calendar, id).await;
+    let deleted = change(&h,&account,calendar,"1a13cbb3-389b-448d-b865-c1cf708122b7",json!({"action":"delete","event_id":id,"expected_etag":local["etag"],"scope":"single","notifications":"all"})).await;
+    assert_eq!(deleted["state"], "applied");
+    h.force_kill().await.unwrap();
+    h.restart().await.unwrap();
+    let private = get(&h, &account, calendar, private_id).await;
+    assert!(private["summary"].is_null());
+    assert!(!private.to_string().contains("canary"));
+    let path = h.artifacts.join("private-denied.json");
+    for action in ["update", "delete", "respond"] {
+        let mut payload = json!({"schema_version":1,"action":action,"event_id":private_id,"expected_etag":private["etag"],"scope":"single","notifications":"all"});
+        if action == "update" {
+            payload["patch"] = json!({"summary":"Forbidden"});
+        }
+        if action == "respond" {
+            payload["response"] = json!("accepted");
+        }
+        std::fs::write(&path, payload.to_string()).unwrap();
+        assert_eq!(
+            h.cli(&[
+                "--json",
+                "calendar",
+                "change",
+                "--account",
+                &account,
+                "--calendar",
+                calendar,
+                "--request-id",
+                "d2512fb3-82cd-439b-9909-a04e481267e3",
+                "--file",
+                path.to_str().unwrap(),
+                "--wait"
+            ])
+            .await
+            .unwrap()
+            .status,
+            2
+        );
+    }
+    let remote = h.google.control().snapshot().await;
+    let final_calendar = &remote.calendars["alpha@example.test"][provider_calendar];
+    assert_eq!(
+        final_calendar.events["private001"],
+        before.events["private001"]
+    );
+    assert_eq!(final_calendar.events[provider_id]["status"], "cancelled");
+    assert_eq!(
+        final_calendar.notifications.len(),
+        before.notifications.len() + 3
+    );
+    assert!(final_calendar
+        .notifications
+        .iter()
+        .all(|n| n.event_id == provider_id && n.recipients == vec!["alpha@example.test"]));
+    assert_eq!(
+        remote
+            .requests
+            .iter()
+            .filter(|r| r.path.ends_with("/private001")
+                && ["PATCH", "DELETE"].contains(&r.method.as_str()))
+            .map(|r| r.count)
+            .sum::<u64>(),
+        0
+    );
+    std::fs::write(
+        h.artifacts.join("limited-writer-effects.json"),
+        serde_json::to_vec_pretty(&final_calendar).unwrap(),
+    )
+    .unwrap();
+    h.shutdown().await.unwrap();
+}
+#[tokio::test]
 async fn calendar_cli_writes_create_edit_respond_and_delete_with_independent_effects() {
     let mut h = E2eHarness::start(Seed::TwoAccounts).await.unwrap();
     let account = h.connect_google("alpha@example.test").await.unwrap();

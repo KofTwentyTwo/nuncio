@@ -153,14 +153,15 @@ impl CalendarAction {
         account_email: &str,
         role: &str,
     ) -> Result<Value, ChangeError> {
-        if !matches!(role, "owner" | "writer") {
+        if !matches!(role, "owner" | "writer" | "writerWithoutPrivateAccess") {
             return Err(ChangeError::Permission);
         }
         if let Self::Create { event, .. } = self {
             return Ok(event.clone());
         }
         let base = base.ok_or(ChangeError::Invalid)?;
-        if base["status"] == "cancelled"
+        if role == "writerWithoutPrivateAccess" && base["visibility"] == "private"
+            || base["status"] == "cancelled"
             || base["locked"] == true
             || base.get("eventType").is_some_and(|v| v != "default")
         {

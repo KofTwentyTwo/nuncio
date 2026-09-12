@@ -10,10 +10,22 @@ Read AGENTS→CLAUDE, shared personal rules/style, rebuild/AGENTS, this file, TO
 
 ## Immediate next action
 
+Current handoff (September12 01:49UTC): full gate92959 completed all25 commands0,
+304 normal and304 feature workspace test executions;18 named suites all passed.
+Original gate source hashes verified unchanged; task14-all/summarize.py corrected
+ambiguous package-target attribution then passed0. All logs/counts/metrics/artifact
+hashes retained in task14-all/. Checkpoint the Calendar role fix next, then update
+keyring4.2.0 (explicit v1 native backend, same hex storage, delete_credential) and
+replace rustls-pemfile with existing rustls pki_types parser. No OS keychain access.
+Uncommitted Task15 foundations: independently tested clients/smoke and macOS egress;
+Linux egress branch unverified. scripts/package.py and test_package.py added:
+missing-file red1, two manifest/environment unit regressions green0; no archive yet.
+Contract regression prepared in task15-contract/contract.rs awaiting frozen baseline.
+
 Continue the approved goal inline; finish demonstrated R01–R16 failures and missing
 Task14/15 deliverables. Do not reopen speculative recovery audits or completed work.
 
-Last signed/pushed checkpoint: `a29812fadee371890972506ef2acae41ec9d3f11` (admission/memory/queued-worker fixes); prior resource checkpoint c1180f1.
+Last signed/pushed checkpoint: `0805a7dc4b7e544195f3eb14e8c85db54c41a004` (shared resource budgets/status); prior admission/memory/queued-worker checkpoint a29812f. Staged Gitleaks/whitespace, good signature, HTTPS push and exact remote hash verified (shell13278/0).
 Prior security checkpoint: `8811acdd14f86784993d525de24c582f3f010563`. Both signatures,
 pushes, exact remote hashes, staged Gitleaks and whitespace checks passed. Security
 nine-command plus four-command follow-up gates passed; resource six-command gate
@@ -72,11 +84,56 @@ Summarize.py completed0, recording canonical counts, source/artifact hashes and
 independent resource/security metrics. Fresh production binaries verified below.
 Added docs/API.md from current proto/CLI code; local links verified. Descriptor
 freeze/external client/package evidence remains pending, explicitly documented.
-Next: signed checkpoint/push using
-HTTPS command-only gh helper if SSH agent remains locked. Then finish the explicit
+Resource checkpoint0805a7d is signed/pushed and verified. Now finish the explicit
 writerWithoutPrivateAccess Calendar-role gap (confirmed in current official
 Google CalendarList/sharing docs), Task14 --all and Task15 packaging/contract/
 egress/dependency/CI deliverables. Do not reopen completed recovery audits.
+
+Calendar-role fix now implemented, awaiting full gate. Independent mock red25702/101
+(unsupportedRole), entire mock contract green69060/0,26passed. Engine red97361/101;
+system API red78114/101; actual CLI red16362/101. Minimal provider_patch accepts
+limited writer for ordinary events but rejects modifications of private events.
+Mock independently hides private details in get/list/instances and rejects writes.
+Focused75329: engine4/system1/build passed; E2E failed only because new fixture
+called restart without stopping. Retained e2e-green.log; corrected fixture now
+force-kills then restarts, all assertions unchanged, focused53623/0 passed1.
+Evidence: test-results/task14-calendar-role/. Full `python3 scripts/verify.py --all`
+is running in shell92959; wrapper log/exit/source-hashes under task14-all/, runner
+logs/results under test-results/all/. Both builds, fmt and bothClippy passed;
+workspace tests currently running. Poll before rerunning. No role checkpoint yet.
+
+Task15 independent preparation: stricter process-local macOS sandbox-exec probe
+passed0, preserving loopback and rejecting external TEST-NET IPv4/IPv6 with EPERM;
+child inherits denial. Exact JSON at task15-egress/macos-probe.json. Policy:
+`(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*") (remote unix-socket))`.
+No host firewall changes. Runner integration/Linux/CI/container denial still pending.
+Cargo-deny0.19.8 review99059 exited5:3 unmaintained advisories (derivative/instant via
+keyring2→secret-service3→zbus3; direct rustls-pemfile2), plus3 license-policy failures
+(two0BSD, oneCDLA-Permissive-2.0). No vulnerability finding in that run; do not call
+the audit clean. Full JSON/config/current RustSec checkout under task15-dependencies/.
+After Task14 gate, migrate supported keyring backend/version and PEM parsing, review
+and include appropriate permissive license notices, then repeat dependency checks.
+Do not mutate shared Cargo/source/fixtures during the current full run.
+
+Independent Task15 files prepared without changing the running gate's Cargo sources:
+deny.toml and DEPENDENCIES.md; reviewed licenses/sources pass0 with374 license
+helps and zero errors/warnings. Three unmaintained advisories remain unfixed.
+scripts/egress.py now wraps macOS sandbox-exec; real wrapper tests pass0 and preserve
+injected command exit17, with parent/child IPv4/IPv6 EPERM and loopback success.
+Linux hosted-runner owner-filter branch is written but unverified (including
+IPv6 no-route/counter behavior); no local host firewall changes or CI claim.
+Container internal-network integration and verifier/CI integration remain pending.
+
+clients/smoke is a separate Cargo workspace/lockfile generating System client code
+directly from proto. First compilation47447/101 corrected build argument types;
+runtime red49910/101 demonstrated missing client behavior. Actual daemon/mock
+integration green7033/0 passed1, followed by external all-target Clippy0/fmt0.
+Normal/build cargo tree independently excludes engine, store, CLI, daemon, mock
+and nuncio-proto helper dependencies. Auth comes only through bounded stdin; test
+checks status/change identity, invalid token rejection and no remote sends/notifies.
+Evidence: task15-contract/{external-*,external-boundary.json}. Main verifier and
+package integration plus descriptor freezing remain pending; this new client is
+outside the already-running Task14 --all gate and has its own checks.
 
 Finish current Task14 resource implementation and independent concurrency/byte/
 batch observations.
@@ -89,6 +146,11 @@ Then full offline verifier and Task15 contract/egress/dependency/package/CI work
 ## Hourly status emails
 
 James authorized hourly progress emails to james@kof22.com beginning immediately.
+He additionally requires a chart of all16 major tasks, estimated percent complete
+and remaining active-work hours per task. Baseline definitions/estimates are in
+PROGRESS.md; revise with actual evidence every hour. Renderer/example MIME/PNG are
+under test-results/status-emails/. Embed the chart plus a readable HTML table and
+plain-text fallback; visually inspect before sending.
 First hourly email sent September11 at approximately22:57UTC/17:57Central using
 connected Gmail, subject `Nuncio rebuild — hourly status — September 11, 2026,
 5:57 p.m. CT`; Gmail ID/thread `1a092b0a4e84f109`, SENT confirmed.
@@ -101,6 +163,12 @@ approximately01:03UTC, Gmail ID/thread `1a0932257375285e`, SENT. Exact body and
 attempt history: test-results/status-emails/2026-09-11-1957.md. Recipient delivery
 or reading is not independently confirmed.
 Next due: September12 01:57UTC / September11 20:57Central. Check the clock during active goal execution;
+At James's explicit request, a revised third report was sent at01:08UTC with all16
+task bars/percentages/hours. Gmail ID/thread1a09328893b32fa7, SENT; sent-folder read
+confirms the186505-byte inline PNG and matching content ID. Exact report and chart:
+2026-09-11-1957-revised.{md,html} and -chart.png under status-emails/. This revision
+does not shift the regular01:57UTC schedule. Estimates15–31offline hours plus3–6
+live hours after authorization; live waiting time excluded, no delivery guarantee.
 send one concise update each hour with actual progress, test results, blockers,
 remaining deliverables and next action, then update this timestamp and message ID.
 Do not send catch-up bursts or infer progress while paused. This authorization is

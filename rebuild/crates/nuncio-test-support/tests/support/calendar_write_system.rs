@@ -2,6 +2,162 @@ use super::{begin, finish, Seed, SystemHarness};
 use nuncio_proto::v2::*;
 
 #[tokio::test]
+async fn limited_writer_api_preserves_private_events_and_applies_visible_edits() {
+    let mut h = SystemHarness::start(Seed::TwoAccounts).await.unwrap();
+    let account = finish(&h, &begin(&h, "alpha@example.test", None).await, 200)
+        .await
+        .account_id
+        .unwrap();
+    let provider_calendar = "team-alpha@example.test";
+    h.google
+        .control()
+        .set_calendar_role(
+            "alpha@example.test",
+            provider_calendar,
+            "writerWithoutPrivateAccess",
+        )
+        .await
+        .unwrap();
+    for (id, visibility, title) in [
+        ("private001", "private", "Private API canary"),
+        ("visible001", "default", "Visible"),
+    ] {
+        h.google.control().put_event("alpha@example.test", provider_calendar, serde_json::json!({"id":id,"visibility":visibility,"summary":title,"start":{"date":"2026-10-02"},"end":{"date":"2026-10-03"},"attendees":[{"email":"recipient@example.test"}]})).await.unwrap();
+    }
+    let window = AgendaWindow {
+        from: "2026-10-01".into(),
+        to: "2026-10-05".into(),
+    };
+    let mut run = h
+        .calendar()
+        .refresh_agenda(RefreshAgendaRequest {
+            account_id: account.clone(),
+            window: Some(window.clone()),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while matches!(run.state.as_str(), "queued" | "running") {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        run = h
+            .authenticated()
+            .get_sync_run(SyncRunRequest {
+                account_id: account.clone(),
+                run_id: run.id,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+    }
+    assert_eq!(run.state, "succeeded");
+    let events = h
+        .calendar()
+        .list_agenda(ListAgendaRequest {
+            account_id: account.clone(),
+            window: Some(window),
+            page_size: 100,
+            page_token: None,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .items;
+    let private = events
+        .iter()
+        .find(|e| e.provider_id == "private001")
+        .unwrap();
+    let visible = events
+        .iter()
+        .find(|e| e.provider_id == "visible001")
+        .unwrap();
+    assert!(private.summary.is_none());
+    assert!(!private.provider_json.contains("canary"));
+    let before = h.google.control().snapshot().await.calendars["alpha@example.test"]
+        [provider_calendar]
+        .clone();
+    let request = ChangeEventRequest {
+        account_id: account.clone(),
+        calendar_id: visible.calendar_id.clone(),
+        request_id: "d66afedf-37f4-4b61-901e-462852845f1e".into(),
+        scope: CalendarEditScope::Single as i32,
+        notification_policy: CalendarNotificationPolicy::All as i32,
+        action: Some(change_event_request::Action::Update(CalendarUpdate {
+            event_id: visible.id.clone(),
+            expected_etag: visible.etag.clone().unwrap(),
+            fields: Some(CalendarEventFields {
+                summary: Some("API limited writer edited".into()),
+                ..Default::default()
+            }),
+            clear_fields: vec![],
+        })),
+    };
+    let applied = wait(
+        &h,
+        h.calendar()
+            .change_event(request.clone())
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(applied.state, "applied");
+    assert_eq!(
+        h.calendar()
+            .change_event(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .id,
+        applied.id
+    );
+    let denied = ChangeEventRequest {
+        account_id: account.clone(),
+        calendar_id: private.calendar_id.clone(),
+        request_id: "7c240d62-94bf-48cb-adc9-765b59475850".into(),
+        scope: CalendarEditScope::Single as i32,
+        notification_policy: CalendarNotificationPolicy::All as i32,
+        action: Some(change_event_request::Action::Delete(CalendarDelete {
+            event_id: private.id.clone(),
+            expected_etag: private.etag.clone().unwrap(),
+        })),
+    };
+    assert_eq!(
+        h.calendar().change_event(denied).await.unwrap_err().code(),
+        tonic::Code::InvalidArgument
+    );
+    let local = h
+        .calendar()
+        .get_event(CalendarEventRequest {
+            account_id: account,
+            calendar_id: visible.calendar_id.clone(),
+            event_id: visible.id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .event
+        .unwrap();
+    assert_eq!(local.summary.as_deref(), Some("API limited writer edited"));
+    let after = h.google.control().snapshot().await.calendars["alpha@example.test"]
+        [provider_calendar]
+        .clone();
+    assert_eq!(
+        after.events["visible001"]["summary"],
+        "API limited writer edited"
+    );
+    assert_eq!(after.events["private001"], before.events["private001"]);
+    assert_eq!(after.version, before.version + 1);
+    assert_eq!(after.notifications.len(), before.notifications.len() + 1);
+    assert_eq!(
+        after.notifications.last().unwrap().recipients,
+        vec!["recipient@example.test"]
+    );
+    h.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn calendar_create_is_authenticated_scoped_and_records_one_independent_invitation_effect() {
     let (mut h, account, calendar) = setup().await;
     let request = ChangeEventRequest {

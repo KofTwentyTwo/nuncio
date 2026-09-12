@@ -53,15 +53,39 @@ pub(super) fn route(model: &mut Model, input: &Input, account: &str) -> Result<R
         ("GET", [id, "instances"]) => list(model, input, account, calendar_id, Some(id)),
         ("GET", [id]) => {
             input.query.validate(&[], &[])?;
-            Ok(Reply::json(
-                model.calendar(account, calendar_id)?.event(id)?,
-            ))
+            let calendar = model.calendar(account, calendar_id)?;
+            Ok(Reply::json(visible_event(
+                calendar.event(id)?,
+                &calendar.access_role,
+            )))
         }
         ("POST", []) | ("PATCH", [_]) | ("DELETE", [_]) => {
             write(model, input, account, calendar_id, segments.get(5).copied())
         }
         _ => Err(Reply::error(405, "methodNotAllowed")),
     }
+}
+fn visible_event(mut event: Value, role: &str) -> Value {
+    if matches!(role, "reader" | "writerWithoutPrivateAccess") && event["visibility"] == "private" {
+        if let Some(fields) = event.as_object_mut() {
+            fields.retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    "kind"
+                        | "id"
+                        | "etag"
+                        | "status"
+                        | "start"
+                        | "end"
+                        | "recurrence"
+                        | "recurringEventId"
+                        | "originalStartTime"
+                        | "visibility"
+                )
+            });
+        }
+    }
+    event
 }
 fn bounds(query: &Query) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
     let lower = timestamp(query.get("timeMin").unwrap_or("2025-01-01T00:00:00Z"))?;
@@ -212,6 +236,10 @@ fn list(
             }
         }
     }
+    let items = items
+        .into_iter()
+        .map(|event| visible_event(event, &response_role))
+        .collect();
     let final_fields = if master.is_none() {
         let token = model.next("sync");
         model.calendar_tokens.insert(
@@ -270,7 +298,10 @@ fn write(
     }
     .to_string();
     let calendar = model.calendar_mut(account, calendar_id)?;
-    if !matches!(calendar.access_role.as_str(), "owner" | "writer") {
+    if !matches!(
+        calendar.access_role.as_str(),
+        "owner" | "writer" | "writerWithoutPrivateAccess"
+    ) {
         return Err(Reply::error(403, "forbidden"));
     }
     if creation {
@@ -286,6 +317,11 @@ fn write(
         }
     } else {
         let existing = calendar.event(&id)?;
+        if calendar.access_role == "writerWithoutPrivateAccess"
+            && existing["visibility"] == "private"
+        {
+            return Err(Reply::error(403, "forbidden"));
+        }
         let organizer_copy = existing.get("organizer").is_none_or(|organizer| {
             organizer
                 .get("self")
@@ -338,7 +374,7 @@ fn write(
         body["status"] = json!("confirmed");
     }
     let body = calendar.put(body, policy, if creation { "insert" } else { "patch" })?;
-    Ok(Reply::json(body))
+    Ok(Reply::json(visible_event(body, &calendar.access_role)))
 }
 // Google supports updating just the participant response without replacing the
 // complete attendee array (Events.attendeesOmitted). Model that on server state.
