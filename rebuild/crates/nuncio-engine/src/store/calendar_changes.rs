@@ -66,7 +66,7 @@ impl Store {
                 if op.kind!="calendar_change" || op.fingerprint!=fingerprint {return Err(StoreError::VersionConflict);}
                 return Ok(op);
             }
-            let account=super::accounts::get(&tx,&input.account_id)?.ok_or(StoreError::NotFound)?;
+            let account=super::accounts::writable(&tx,&input.account_id)?;
             if account.account.provider!="google" {return Err(StoreError::InvalidInput);}
             let (provider_calendar_id,zone,role):(String,Option<String>,String)=tx.query_row("SELECT provider_id,time_zone,access_role FROM calendars WHERE account_id=?1 AND id=?2 AND retired=0",params![input.account_id,input.calendar_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(StoreError::NotFound)?;
             let time_zone=zone.ok_or(StoreError::InvalidInput)?;

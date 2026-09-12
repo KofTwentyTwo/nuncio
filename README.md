@@ -1,33 +1,62 @@
 # Nuncio
 
-**A local-first mail, calendar, and contacts engine written in Rust.**
+**A local-first mail and calendar engine written in Rust.**
 
-> **Status: pre-alpha, under active reconstruction (2026-07-26).**
-> Nuncio began as an AI-generated proof of concept. A forensic assessment found
-> that while several library-layer components are genuinely well-built, the
-> end-to-end product did not work and much of the prior documentation was
-> inaccurate. The project is being rebuilt engine-first. **It is not usable yet,
-> and published pre-1.0 releases are non-functional — do not install them.**
-> See the **[live roadmap](https://koftwentytwo.github.io/nuncio/roadmap/)**
-> (source: [`docs/ROADMAP.md`](docs/ROADMAP.md)) for the plan and
-> [`docs/adr/0001-engine-first-grpc-architecture.md`](docs/adr/0001-engine-first-grpc-architecture.md)
-> for the architecture decision.
+> **Status: pre-alpha; active implementation is in [`rebuild/`](rebuild/README.md)
+> (September 12, 2026).** The current engine/API/CLI, account-management additions,
+> and testing installer passed all 34 offline gate commands, with 322 tests in
+> each workspace configuration and no failures or ignored tests. Fresh packaging,
+> current-source hosted CI, and the first eligible testing download remain pending.
+> Earlier schema-22 checkpoints passed Linux/macOS CI. Live Google,
+> Synology MailPlus, and native-keystore acceptance remain unverified.
+> See the [implementation report](rebuild/docs/IMPLEMENTATION-REPORT.md) for the
+> exact evidence and [current work](rebuild/docs/SESSION-STATE.md) for progress.
 
 ## What Nuncio is
 
-A background daemon (`nunciod`) owns all state, credentials, and protocol logic
-(IMAP/SMTP, then JMAP, CalDAV, CardDAV), and **publishes a versioned gRPC API over
-loopback**. User interfaces are separate native client projects that consume that
-API — they hold no business logic and no data of their own. This makes feature
-parity across clients a property of the published contract rather than a matter of
-discipline.
+A daemon (`nunciod`) owns encrypted SQLCipher storage, credentials, synchronization,
+and durable operations. The active rebuild supports Google Gmail/Calendar and
+IMAP/SMTP mail through an authenticated `nuncio.v2` gRPC API on numeric loopback.
+The reference `nuncio-cli` consumes that API independently of engine/storage code.
+Native applications are outside this workspace's implementation scope. Contacts,
+JMAP, and CalDAV/CardDAV remain outside the active rebuild's approved provider set.
 
-The only client in this repository is `nuncio-cli`, which serves as the reference
-API consumer and the driver for end-to-end tests. Native GUIs (macOS/Windows), a
-TUI, and an MCP bridge will live in separate repositories once the engine and its
-API are solid.
+For Apple Silicon laptop testing, the [testing installer](rebuild/docs/TESTING-INSTALL.md)
+downloads an eligible verified CI package without compiling locally. Its first
+download requires a successful testing-branch CI run containing the new artifact
+upload step. It installs into a separate versioned prefix without starting a
+service. No public release or live-provider readiness is implied.
 
-## Workspace layout
+The [proposed post-engine roadmap](rebuild/docs/POST-ENGINE-ROADMAP.md) starts
+after engine/CLI acceptance and sequences a native Mac alpha, daily mail,
+daily calendar, and a dependable personal release. It is future planning;
+native implementation is outside the current goal.
+
+## Active workspace and verification
+
+Use the independent [`rebuild/Cargo.toml`](rebuild/Cargo.toml) workspace. Its
+[README](rebuild/README.md), [running guide](rebuild/docs/RUNNING.md),
+[account-management guide](rebuild/docs/ACCOUNT-MANAGEMENT.md), and
+[API contract](rebuild/docs/API.md) describe the current source.
+
+```sh
+cd rebuild
+cargo build --locked -p nunciod -p nuncio-cli
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+```
+
+These are basic Rust checks. The complete [offline verification](rebuild/docs/TESTING.md)
+also runs test-feature builds, independent provider services, real daemon/CLI
+subprocess tests, security/resource checks, and production-package checks.
+
+## Original workspace
+
+The root Cargo workspace and original roadmap remain preserved separately.
+The July 26 assessment found the original proof of concept did not work end to
+end and older documentation overstated its capabilities. Its library layout below
+describes that original code, not the independent rebuild or a finished product.
 
 Engine libraries composed by the daemon:
 
@@ -46,7 +75,7 @@ The former `nuncio-tui`, `nuncio-gui`, and `nuncio-mcp` shells have been moved t
 `_reference/` (out of the workspace) and will be rebuilt as separate client
 repositories (roadmap Phase 5).
 
-## Build & test
+## Original-workspace build and test
 
 ```bash
 cargo build --workspace          # build everything
@@ -61,10 +90,10 @@ full local gate as three separate commands — `cargo fmt --all -- --check`,
 
 Cargo aliases are defined in [`.cargo/config.toml`](.cargo/config.toml).
 
-## Documentation
+## Original architecture and planning references
 
 - **[Roadmap — live rendered page](https://koftwentytwo.github.io/nuncio/roadmap/)** — the visual plan to a client-ready backend (GitHub Pages)
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — authoritative roadmap and target architecture (source for the page above)
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — original-workspace roadmap (source for the page above); the rebuild follows its [approved specification](docs/superpowers/specs/2026-09-10-google-first-rebuild.md)
 - [`docs/STORY-WORKFLOW.md`](docs/STORY-WORKFLOW.md) — how contributors execute a roadmap story (gates, patterns, review flow)
 - [`docs/HANDOFF.md`](docs/HANDOFF.md) — development handoff: current state, branches, and the M1–M7 story index
 - [`docs/BACKLOG.md`](docs/BACKLOG.md) — engineering-ready Phase 0 / Phase 1 stories

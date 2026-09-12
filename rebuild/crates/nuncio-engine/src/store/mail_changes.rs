@@ -116,7 +116,7 @@ impl Store {
                 if op.kind!="mail_change" || op.fingerprint!=fingerprint {return Err(StoreError::VersionConflict);}
                 return Ok(op);
             }
-            let account=super::accounts::get(&tx,&input.account_id)?.ok_or(StoreError::NotFound)?;
+            let account=super::accounts::writable(&tx,&input.account_id)?;
             if !matches!(account.account.provider.as_str(),"google"|"imap") {return Err(StoreError::InvalidInput);}
             let provider:String=tx.query_row("SELECT provider_id FROM messages WHERE account_id=?1 AND id=?2",params![input.account_id,input.message_id],|r|r.get(0)).optional()?.ok_or(StoreError::NotFound)?;
             if !provider_id(&provider) {return Err(StoreError::InvalidInput);}

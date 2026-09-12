@@ -1,6 +1,14 @@
 # Requirement-to-evidence matrix
 
-Current qualification: signed checkpoint `6ff9bb9` passed all 34 offline commands,
+Current schema-23 account/installer source passed the complete offline gate:
+all 34 commands exited 0, both workspace configurations passed 322 tests with zero
+failed/ignored, all 22 script regressions passed, and 411 captured source hashes
+stayed unchanged. Receipts are in
+`test-results/account-management-final-all/{final-summary.json,exit.json,source-verification.json,current-all/}`.
+Fresh packaging, current-source hosted CI, and the first eligible testing download
+remain pending. The historical results below retain their original source scope.
+
+Baseline qualification: signed checkpoint `6ff9bb9` passed all 34 offline commands,
 308 tests in each workspace configuration, and all ten actual hosted CI jobs.
 The fresh clean local archive `b26d2c93` passed repeatability and 22 extracted-binary
 checks per build. The optional LIST-hint cursor regression failed before the fix
@@ -8,8 +16,40 @@ and passes afterward; full provider state and original assertions are preserved.
 Exact commands, statuses, and artifact paths are in [VERIFICATION.md](VERIFICATION.md)
 and the [implementation report](IMPLEMENTATION-REPORT.md). Live Google/Synology and
 native-keystore acceptance remain deferred, unapproved, and unverified.
+Documentation checkpoint `7390e77` also passed all ten hosted CI jobs. These
+results qualify the schema-22 baseline, not the new schema-23 working tree.
 
-Working matrix for the approved September10specification. The full goal remains
+## Account-management follow-up
+
+Current source adds saved account details/versioned edits, Google add/reauth and
+consent wait/cancel, IMAP configuration/password updates, pause/resume,
+archive-by-default removal, restore, and confirmed local purge. Its seven new
+authenticated methods bring the API to 49 RPCs. The updated full offline gate
+passes, including storage/system/actual CLI checks, all 46 migration SIGKILL
+boundaries, and the 196-case auth matrix. A fresh artifact, checkpoint, and
+current-source hosted verification remain pending. The
+[account guide](ACCOUNT-MANAGEMENT.md), [approved follow-up plan](ACCOUNT-MANAGEMENT-PLAN.md),
+and dated [verification evidence](VERIFICATION.md) track that additional scope.
+The [testing installer](TESTING-INSTALL.md) has offline regression evidence, but
+the first downloadable CI package requires a successful run with its new upload
+step. The [API publication proposal](API-PUBLICATION-PLAN.md) is not a delivered
+public contract archive or documentation site.
+
+| Account requirement | Implementation | Independent or storage evidence | Delivery status |
+|---|---|---|---|
+| AM01 Inspect and versioned edit | [engine management](../crates/nuncio-engine/src/accounts/management.rs), [CLI](../crates/nuncio-cli/src/accounts.rs) | `account_details_edit_pause_archive_restore_and_purge_work_through_cli`; IMAP failed-probe and version-conflict checks | Full current-source offline gate passed |
+| AM02 Add, reauthenticate, wait and cancel | [Google CLI flow](../crates/nuncio-cli/src/accounts/google.rs), [IMAP management](../crates/nuncio-engine/src/accounts/imap.rs) | `google_auth_wait_cancel_and_archive_cannot_revive_saved_accounts`; `imap_account_edit_archive_restore_reauth_and_purge_preserve_remote_mail` | Offline flows passed; real OAuth/native keystore deferred |
+| AM03 Pause and resume | [lifecycle storage](../crates/nuncio-engine/src/store/account_lifecycle.rs), [operation worker](../crates/nuncio-engine/src/operations.rs) | `paused_or_purged_admitted_work_does_not_dispatch_or_stop_other_accounts`; restart and queued-operation checks | Full current-source offline gate passed |
+| AM04 Archive and restore | [lifecycle storage](../crates/nuncio-engine/src/store/account_lifecycle.rs), [engine management](../crates/nuncio-engine/src/accounts/management.rs) | Google/IMAP actual CLI lifecycle tests; preserved drafts and independent remote-state snapshots | Full current-source offline gate passed |
+| AM05 Confirmed local purge | [preview/purge transaction](../crates/nuncio-engine/src/store/account_lifecycle.rs) | `account_purge_preserves_lost_ack_send_evidence_until_explicit_abandonment`; fresh-preview refusal, rollback, other-account isolation and replay tests | Logical local deletion passed; no remote or secure-erasure claim |
+| AM06 Concurrency and recovery | [engine coordination](../crates/nuncio-engine/src/engine.rs), [schema 23](../crates/nuncio-engine/src/store/account_lifecycle_schema.sql) | Four actual archive/purge process-death boundaries; late OAuth/upload rejection; `imap_account_edits_failed_probe_and_purge_cleanup_are_durable`; encrypted backup/restore | Full gate and all 46 migration SIGKILL cases passed |
+| AM07 API and CLI parity | [account contract](../crates/nuncio-proto/proto/nuncio/v2/accounts.proto), [daemon API](../crates/nunciod/src/accounts.rs), [wire compatibility](../crates/nuncio-proto/tests/contract.rs) | Seven additive RPCs; retained old descriptor comparison; all 49 RPCs included in the 196-case auth matrix; actual text/JSON CLI checks | Old-wire compatibility and all 196 auth cases passed |
+| AM08 Verification and alpha delivery | [verification](VERIFICATION.md), [installer](TESTING-INSTALL.md), [packaging](PACKAGING.md) | Full offline gate, clean production package pair, exact hosted CI artifact and temporary-prefix installation receipt | Full offline gate passed; current-source artifact/hosted delivery pending |
+
+## September 10 requirement baseline at 6ff9bb9
+
+The matrix below records the approved September 10 specification at that baseline.
+Its "Passed offline" labels do not qualify current follow-up changes. The full goal remains
 incomplete. Passed offline is not live-provider sign-off; Google/Synology and
 native-keystore acceptance remain deferred/unverified. Task estimates are separate
 in [PROGRESS.md](PROGRESS.md). Historical evidence retains its original snapshots.

@@ -3,6 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);
     config.skip_source_info();
     for name in [
+        "AccountPurgePreview",
         "ResourceStatus",
         "BackupInspection",
         "RepairProjectionResponse",
@@ -64,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ".nuncio.v2.BeginGoogleAuthRequest",
         ".nuncio.v2.ImapCredentials",
         ".nuncio.v2.ConnectImapRequest",
+        ".nuncio.v2.UpdateImapAccountRequest",
     ]);
     config.type_attribute(
         ".nuncio.v2.RecoverySecret",

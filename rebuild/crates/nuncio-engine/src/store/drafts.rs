@@ -83,7 +83,7 @@ impl Store {
             return Err(StoreError::ResultTooLarge);
         }
         self.execute(move|c|{
-            let tx=c.transaction()?; account_exists(&tx,&input.account_id)?;
+            let tx=c.transaction()?; super::accounts::writable(&tx,&input.account_id)?;
             let id=if let Some(id)=input.id {
                 let old=get(&tx,&input.account_id,&id)?;
                 if Some(old.version)!=input.expected_version { return Err(StoreError::VersionConflict); }
@@ -110,6 +110,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.execute(move |c| {
             let tx = c.transaction()?;
+            super::accounts::writable(&tx, &account)?;
             let draft = get(&tx, &account, &id)?;
             if draft.version != expected_version {
                 return Err(StoreError::VersionConflict);

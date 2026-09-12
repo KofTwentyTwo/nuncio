@@ -820,7 +820,7 @@ async fn calendar_write_faults_retry_only_with_rejection_or_positive_identity_ev
         );
         assert_eq!(
             h.accounts()
-                .list_accounts(ListAccountsRequest {})
+                .list_accounts(ListAccountsRequest::default())
                 .await
                 .unwrap()
                 .into_inner()

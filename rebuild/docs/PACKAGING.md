@@ -1,5 +1,12 @@
 # Local packages and operation
 
+For a laptop download without compiling, use [TESTING-INSTALL.md](TESTING-INSTALL.md).
+That installer requires an eligible successful CI archive; its first upload is
+pending. This page describes local packaging and the verified `6ff9bb9` baseline.
+Current schema-23 account changes require a fresh full gate and package; the old
+baseline archive does not contain them. Baseline software and documentation
+checkpoint `7390e77` passed hosted CI, but those runs uploaded evidence only.
+
 Candidates are versioned local archives, not installed or public releases. Use the
 archive's adjacent SHA-256 sidecar to verify it before extraction. The adjacent
 `-build.jsonl` and `-verification.json` files record the build and extracted-binary
@@ -88,13 +95,17 @@ backup, interrupted work and new-profile restore. A transient error after send,
 copy or notification dispatch is not permission to issue a new request UUID.
 Inspect the durable operation and independent provider evidence first.
 
-## Optional later installation and removal
+## Testing installation and removal
 
-Installation is not currently authorized or performed. When requested, use a
-version-specific directory such as `~/.local/opt/nuncio-rebuild/VERSION`, preserving
-older candidates for rollback. Point the terminal at that candidate's two binaries;
-do not overwrite the original application's executables or add automatic login
-services as a side effect. Native application packaging is outside this goal.
+The repository [testing installer](TESTING-INSTALL.md) uses a version/source/run
+directory beneath the explicit `~/.local/opt/nuncio-testing` prefix and refuses
+existing destinations. It verifies CI provenance, digests, package contents and
+architecture without compiling or executing the downloaded binaries. Use the
+printed binary paths; it does not modify PATH, profiles, production executables
+or login services. Its first usable CI archive is still pending. For a manually
+extracted local candidate, likewise choose a new version-specific directory and
+preserve older candidates. No normal-environment installation has been performed
+here. Native application packaging is outside this goal.
 
 For rollback, stop the daemon and choose a binary compatible with the profile's
 schema, or restore a verified backup into a new directory. An older binary must

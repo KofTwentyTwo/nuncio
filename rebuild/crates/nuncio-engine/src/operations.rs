@@ -153,7 +153,8 @@ async fn process(
             .store
             .account(work.account_id.clone())
             .await?
-            .ok_or(StoreError::NotFound)?
+            .filter(|row| row.state == "connected")
+            .ok_or(StoreError::AccountLifecycle)?
             .account
             .provider
             == "imap";
@@ -172,6 +173,14 @@ async fn process(
                 },
             )
             .await?;
+        if service
+            .store
+            .account(work.account_id.clone())
+            .await?
+            .is_none_or(|row| row.state != "connected")
+        {
+            return Err(StoreError::AccountLifecycle);
+        }
         let prepared = if work.kind == "calendar_change" {
             PreparedWrite::Calendar(
                 service
@@ -245,7 +254,8 @@ async fn process(
         result=preparation=>match result {
             Ok(prepared)=>prepared,
             // No attempt has started; leave durable intent ready for the next tick.
-            Err(StoreError::Busy)=>return Ok(()),
+            Err(StoreError::Busy | StoreError::AccountLifecycle)=>return Ok(()),
+            Err(StoreError::NotFound) if service.store.account(work.account_id.clone()).await?.is_none()=>return Ok(()),
             Err(error)=>return Err(error),
         },
         _=stop.changed()=>return Ok(()),

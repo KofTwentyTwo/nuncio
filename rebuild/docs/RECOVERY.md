@@ -1,6 +1,15 @@
 # Recovery
 
-Encrypted backup/inspection/new-profile restore and projection repair work through the engine, authenticated API and CLI. Schema22 recovery has44 actual migration SIGKILL cases and five restore crash boundaries, with original keys/data and independently observed provider effects preserved. Explicit restored-operation reconciliation is implemented across Google mail/calendar and IMAP/SMTP; pending work stays held unless an explicit safe reconciliation or duplicate-risk decision permits progress. The full integrated offline gate passed, including recoveryE2E5, IMAPE2E13, migrationE2E1 (44 process-death cases), and repair system/E2E2 each. The subsequent affected subprocess gate passed after a test-only resource deadline correction. Hosted CI and live/native-keystore acceptance remain separate pending conditions. See [SESSION-STATE.md](SESSION-STATE.md) and [VERIFICATION.md](VERIFICATION.md) for exact commands and retained failures.
+Encrypted backup/inspection/new-profile restore and projection repair work through
+the engine, authenticated API and CLI. Baseline `6ff9bb9` passed full offline and
+hosted verification with schema 22: 44 migration SIGKILL cases, five restore crash
+boundaries, recovery E2E 5, IMAP E2E 13, and repair system/E2E 2 each. The later
+documentation checkpoint `7390e77` also passed hosted CI. Current source uses
+schema 23 for account management; its focused lifecycle/recovery checks pass,
+while the updated full gate and fresh package remain under verification. These
+new migrations require their own evidence. Live Google/Synology and native-keystore
+acceptance remain unverified. See [SESSION-STATE.md](SESSION-STATE.md) and
+[VERIFICATION.md](VERIFICATION.md) for exact current and historical results.
 
 ## Commands and passphrase input
 
@@ -38,7 +47,7 @@ Temporary artifacts live in a private directory beneath the source profile and a
 
 ## Restore staging
 
-`stage_restore` copies a regular, non-symlink single-file backup into a private stage. Existing WAL/SHM/journal companions are rejected. Inspection and SQLCipher export operate on that owned copy; the caller's source remains untouched. Export uses a new 32-byte database key and explicitly restores schema metadata. The copied database migrates to the current schema, clears provider credential references, the old credential-cleanup queue and source restore-cleanup authority, and disconnects every account. This prevents cleanup in a restored profile from deleting secrets belonging to the original profile.
+`stage_restore` copies a regular, non-symlink single-file backup into a private stage. Existing WAL/SHM/journal companions are rejected. Inspection and SQLCipher export operate on that owned copy; the caller's source remains untouched. Export uses a new 32-byte database key and explicitly restores schema metadata. The copied database migrates to the current schema, clears provider credential references, the old credential-cleanup queue and source restore-cleanup authority, and disconnects every account's credentials. Schema-23 account names and paused/archived lifecycle decisions are preserved. This prevents cleanup in a restored profile from deleting secrets belonging to the original profile.
 
 Every pending operation is held as uncertain with automatic reconciliation disabled, including work that was queued at snapshot time. That old state cannot prove the operation was never sent afterward. Source state/version and backup hash are recorded in `restored_operations`; unfinished attempts retain their identity and become interrupted/uncertain, without invented delivery/copy receipts. Drafts, PDF attachments, frozen MIME, request identity and existing receipts survive. Terminal/resolved operations are preserved. Reconnection and ordinary sync do not release these holds. The existing explicit resend resolution creates a separate operation after duplicate-risk acknowledgement; it does not resume the original operation. Use explicit `operation reconcile` to observe or safely continue the original operation, subject to the provider-specific proof rules below.
 
@@ -50,7 +59,14 @@ The engine's streamed restore records a cleanup job in the encrypted source stor
 
 On source-profile startup, recovery checks recorded device/inode identities. A matching activated target with the expected profile manifest retains both new keys. An abandoned stage and upload are validated before any key deletion; cleanup uses retained directory handles, an exact bounded file allowlist, and no recursive traversal. Changed paths, unexpected contents or ambiguous activation retain the cleanup record for inspection. Key-store deletion failures retain the record for retry. Successfully removed directories are synced before retiring the record. Normal successful restore also requires explicit upload cleanup; a cleanup or fsync error after activation reports activation uncertainty and keeps the target and new keys for inspection/retry. Cleanup records are excluded from backup exports and cleared again during restore so another profile cannot inherit deletion authority.
 
-The verified schema22 gate includes five subprocess crash boundaries: owned stage before export, completed stage, first key, second key and activated target. All12 local gate commands pass, including44 migration SIGKILL cases and independent Google/IMAP regressions. Directory creation before its identity can be recorded, earlier upload/export artifact lifetimes, and the low-level caller-owned `Engine::restore_profile` helper are separate remaining checks; this is not a claim that every maintenance crash window is covered. Unrecognized directories are retained, never removed merely because their names start with `.restore-` or `.maintenance-`.
+The historical schema-22 gate verified five subprocess crash boundaries: owned
+stage before export, completed stage, first key, second key and activated target.
+Its 12 local commands passed, including 44 migration SIGKILL cases and independent
+Google/IMAP regressions; later admission, cleanup-retry and path-identity checks
+are recorded in [VERIFICATION.md](VERIFICATION.md). These named checks do not
+claim coverage of every possible filesystem or keystore failure. Unrecognized
+directories are retained, never removed merely because their names start with
+`.restore-` or `.maintenance-`. The current schema-23 gate is separate evidence.
 
 Failed restores do not require restarting the source daemon before correcting the
 passphrase. The next valid restore request first retires prior owned cleanup jobs
@@ -60,6 +76,13 @@ closed; it does not permit deletion of unrelated paths or original keys.
 ## Operating a restored profile
 
 Keep the original daemon stopped before starting the restored profile. Its original queued work and credentials remain intact; running both copies could dispatch original work independently of the restored holds. Start the new daemon using the returned directory, then point the CLI at that directory and the new daemon's endpoint. The old bearer token cannot authenticate the new profile. Reconnect each account to its saved stable identity through the ordinary credential flow; the backup contains no provider tokens.
+
+Account restore and backup restore are different operations. `account restore`
+unarchives one retained local account; it does not load a backup or restore its
+credentials. A backup-restored profile retains paused and archived lifecycle
+choices. Unarchive and reauthenticate an archived account, or explicitly resume
+a paused account, before requesting provider work. Local purge cannot erase old
+backups or exported files. See [account management](ACCOUNT-MANAGEMENT.md).
 
 Inspect drafts and operation history before authorizing any new outbound work. Never treat absence in a provider search as proof of no earlier delivery. `operation resolve` supports the existing explicit confirmation, abandonment and duplicate-risk resend decisions; consult [RUNNING.md](RUNNING.md) for their provider-specific evidence requirements. Resend preserves the original uncertain operation and records a separate replacement operation with a new Message-ID. For the original operation, use `operation reconcile` as described below; ambiguous delivery or copying stays held.
 
@@ -99,10 +122,14 @@ Without `--wait`, retain the returned `run.id`. Inspect it with `system sync-sta
 
 Historical migrations, process-crash cleanup, corrected-passphrase retry, durable
 state retention and restore reconciliation have passed offline system/subprocess
-checks. The full integrated release/egress run passed; hosted CI and live acceptance remain pending;
-see [VERIFICATION.md](VERIFICATION.md) for actual counts, hashes and failures.
-The repeatable local archive under dist/final-candidate has passed extraction,
-manifest and production-control checks; see [PACKAGING.md](PACKAGING.md). No package has been installed or publicly released.
+checks at baseline `6ff9bb9`, including its full release/egress run and hosted CI.
+Current account-management/schema-23 verification and a fresh package remain
+separate work; see [VERIFICATION.md](VERIFICATION.md) for actual counts and failures.
+The baseline local archive under `dist/final-candidate` passed extraction,
+manifest and production-control checks; see [PACKAGING.md](PACKAGING.md).
+No normal-environment installation or public release was performed. An older
+schema-22 binary cannot open a profile migrated to schema 23; retain a verified
+backup and use the appropriate binary rather than attempting a database downgrade.
 
 A restored profile requires provider reconnection and explicit reconciliation of
 outbound work. Neither a successful local restore nor an empty provider search

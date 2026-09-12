@@ -103,7 +103,7 @@ async fn credential_write_failures_compensate_and_disconnect_cleanup_survives_re
     assert_eq!(failed.error_code.as_deref(), Some("credential_storage"));
     assert!(h
         .accounts()
-        .list_accounts(ListAccountsRequest {})
+        .list_accounts(ListAccountsRequest::default())
         .await
         .unwrap()
         .into_inner()
@@ -155,7 +155,7 @@ async fn credential_write_failures_compensate_and_disconnect_cleanup_survives_re
     );
     let paused = h
         .accounts()
-        .list_accounts(ListAccountsRequest {})
+        .list_accounts(ListAccountsRequest::default())
         .await
         .unwrap()
         .into_inner()
@@ -175,7 +175,7 @@ async fn credential_write_failures_compensate_and_disconnect_cleanup_survives_re
     );
     let saved = h
         .accounts()
-        .list_accounts(ListAccountsRequest {})
+        .list_accounts(ListAccountsRequest::default())
         .await
         .unwrap()
         .into_inner()
@@ -849,7 +849,7 @@ async fn lost_rotated_refresh_ack_requires_reauthorization_without_affecting_oth
     );
     let accounts = h
         .accounts()
-        .list_accounts(ListAccountsRequest {})
+        .list_accounts(ListAccountsRequest::default())
         .await
         .unwrap()
         .into_inner()
@@ -915,7 +915,7 @@ async fn oauth_accounts_are_authenticated_isolated_and_refreshes_are_serialized(
     let mut anonymous = h.anonymous_accounts();
     assert_eq!(
         anonymous
-            .list_accounts(ListAccountsRequest {})
+            .list_accounts(ListAccountsRequest::default())
             .await
             .unwrap_err()
             .code(),
@@ -1055,7 +1055,7 @@ async fn oauth_accounts_are_authenticated_isolated_and_refreshes_are_serialized(
     assert_eq!(reconnected.account_id.as_deref(), Some(alpha.as_str()));
     assert_eq!(
         h.accounts()
-            .list_accounts(ListAccountsRequest {})
+            .list_accounts(ListAccountsRequest::default())
             .await
             .unwrap()
             .into_inner()
@@ -1166,7 +1166,7 @@ async fn oauth_rejects_state_host_pkce_denial_expired_code_and_missing_scopes() 
     );
     assert!(h
         .accounts()
-        .list_accounts(ListAccountsRequest {})
+        .list_accounts(ListAccountsRequest::default())
         .await
         .unwrap()
         .into_inner()
@@ -1203,7 +1203,7 @@ async fn system_harness_uses_real_engine_store_and_authenticated_rpc() {
         .unwrap()
         .into_inner();
     assert_eq!(status.api_version, "nuncio.v2");
-    assert_eq!(status.storage.unwrap().schema_version, 22);
+    assert_eq!(status.storage.unwrap().schema_version, 23);
     let other = second
         .authenticated()
         .get_status(GetStatusRequest {})

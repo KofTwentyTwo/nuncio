@@ -1,3 +1,4 @@
+mod google;
 mod imap;
 use crate::{args::AccountCommand, output::AppError, rpc_error};
 use nuncio_proto::{
@@ -9,6 +10,8 @@ use serde_json::{json, Value};
 use std::{io::Read, path::Path};
 use tonic::transport::Channel;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+type AccountClient =
+    AccountsClient<tonic::service::interceptor::InterceptedService<Channel, TokenInjector>>;
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
 struct Registration {
@@ -61,6 +64,176 @@ pub async fn run(
 ) -> Result<Value, AppError> {
     let mut client = AccountsClient::with_interceptor(channel, injector);
     match command {
+        AccountCommand::EditImap {
+            account: id,
+            version,
+            config,
+            credentials_stdin,
+        } => {
+            let config = imap::configuration(&config)?;
+            let credentials = if credentials_stdin {
+                Some(
+                    tokio::task::spawn_blocking(imap::credentials)
+                        .await
+                        .map_err(|_| AppError::invalid())??,
+                )
+            } else {
+                None
+            };
+            let result = client
+                .update_imap_account(v2::UpdateImapAccountRequest {
+                    account_id: id,
+                    version,
+                    config: Some(config),
+                    credentials,
+                })
+                .await
+                .map_err(rpc_error)?
+                .into_inner();
+            Ok(
+                json!({"account":account(result.account.ok_or_else(AppError::invalid)?),"capabilities":result.capabilities,"credential_cleanup_pending":result.credential_cleanup_pending}),
+            )
+        }
+        AccountCommand::AddGoogle {
+            client_config,
+            login_hint,
+            no_browser,
+            no_wait,
+        } => {
+            google::connect(
+                &mut client,
+                client_config,
+                login_hint,
+                None,
+                no_browser,
+                !no_wait,
+            )
+            .await
+        }
+        AccountCommand::ReauthGoogle {
+            account,
+            client_config,
+            no_browser,
+            no_wait,
+        } => {
+            google::connect(
+                &mut client,
+                client_config,
+                None,
+                Some(account),
+                no_browser,
+                !no_wait,
+            )
+            .await
+        }
+        AccountCommand::AuthWait {
+            session,
+            timeout_seconds,
+        } => google::wait(&mut client, session, timeout_seconds).await,
+        AccountCommand::ReauthImap {
+            account: id,
+            credentials_stdin: _,
+        } => {
+            let config = client
+                .get_imap_config(v2::AccountRequest {
+                    account_id: id.clone(),
+                })
+                .await
+                .map_err(rpc_error)?
+                .into_inner()
+                .config
+                .ok_or_else(AppError::invalid)?;
+            let credentials = tokio::task::spawn_blocking(imap::credentials)
+                .await
+                .map_err(|_| AppError::invalid())??;
+            let result = client
+                .connect_imap(v2::ConnectImapRequest {
+                    config: Some(config),
+                    credentials: Some(credentials),
+                    account_id: Some(id),
+                })
+                .await
+                .map_err(rpc_error)?
+                .into_inner();
+            Ok(
+                json!({"account":account(result.account.ok_or_else(AppError::invalid)?),"capabilities":result.capabilities,"credential_cleanup_pending":result.credential_cleanup_pending}),
+            )
+        }
+        AccountCommand::Show { account: id } => {
+            let value = client
+                .get_account(v2::AccountRequest { account_id: id })
+                .await
+                .map_err(rpc_error)?
+                .into_inner();
+            Ok(json!({"account": account(value)}))
+        }
+        AccountCommand::Edit {
+            account: id,
+            name,
+            version,
+        } => {
+            let value = client
+                .update_account(v2::UpdateAccountRequest {
+                    account_id: id,
+                    version,
+                    display_name: name,
+                })
+                .await
+                .map_err(rpc_error)?
+                .into_inner();
+            Ok(account(value))
+        }
+        AccountCommand::Pause { account: id } => {
+            lifecycle(&mut client, id, v2::AccountLifecycleAction::Pause).await
+        }
+        AccountCommand::Resume { account: id } => {
+            lifecycle(&mut client, id, v2::AccountLifecycleAction::Resume).await
+        }
+        AccountCommand::Remove { account: id } => {
+            lifecycle(&mut client, id, v2::AccountLifecycleAction::Archive).await
+        }
+        AccountCommand::Restore { account: id } => {
+            lifecycle(&mut client, id, v2::AccountLifecycleAction::Restore).await
+        }
+        AccountCommand::AuthCancel { session: id } => Ok(session(
+            client
+                .cancel_google_auth(v2::GetAuthStatusRequest { session_id: id })
+                .await
+                .map_err(rpc_error)?
+                .into_inner(),
+        )),
+        AccountCommand::Purge {
+            account: id,
+            dry_run,
+            confirm,
+        } => {
+            if !dry_run && confirm.as_deref() != Some(&id) {
+                return Err(AppError::invalid());
+            }
+            let preview = client
+                .preview_account_purge(v2::AccountRequest {
+                    account_id: id.clone(),
+                })
+                .await
+                .map_err(rpc_error)?
+                .into_inner();
+            if dry_run {
+                return Ok(json!(preview));
+            }
+            let result = client
+                .purge_account(v2::PurgeAccountRequest {
+                    account_id: id.clone(),
+                    version: preview.version,
+                    revision: preview.revision,
+                    confirm_account_id: confirm.ok_or_else(AppError::invalid)?,
+                })
+                .await
+                .map_err(rpc_error)?
+                .into_inner();
+            Ok(
+                json!({"account_id":id,"state":"purged","deleted":result.deleted,"credential_cleanup_pending":result.credential_cleanup_pending}),
+            )
+        }
         AccountCommand::ConnectImap {
             config,
             credentials_stdin: _,
@@ -100,26 +273,17 @@ pub async fn run(
             login_hint,
             account,
             no_browser,
+            wait,
         } => {
-            let mut registration = registration(&client_config)?;
-            let result = client
-                .begin_google_auth(v2::BeginGoogleAuthRequest {
-                    client_id: std::mem::take(&mut registration.client_id),
-                    client_secret: registration.client_secret.take(),
-                    login_hint,
-                    account_id: account,
-                })
-                .await
-                .map_err(rpc_error)?
-                .into_inner();
-            let opened = if no_browser {
-                false
-            } else {
-                open_browser(&result.browser_url).await
-            };
-            let mut value = session(result);
-            value["browser_opened"] = json!(opened);
-            Ok(value)
+            google::connect(
+                &mut client,
+                client_config,
+                login_hint,
+                account,
+                no_browser,
+                wait,
+            )
+            .await
         }
         AccountCommand::AuthStatus { session: id } => Ok(session(
             client
@@ -128,9 +292,9 @@ pub async fn run(
                 .map_err(rpc_error)?
                 .into_inner(),
         )),
-        AccountCommand::List => {
+        AccountCommand::List { include_archived } => {
             let result = client
-                .list_accounts(v2::ListAccountsRequest {})
+                .list_accounts(v2::ListAccountsRequest { include_archived })
                 .await
                 .map_err(rpc_error)?
                 .into_inner();
@@ -159,7 +323,26 @@ fn session(value: v2::AuthSession) -> Value {
         "state":value.state,"account_id":value.account_id,"error_code":value.error_code,"warning_code":value.warning_code})
 }
 fn account(value: v2::Account) -> Value {
-    json!({"id":value.id,"provider":value.provider,"address":value.address,"state":value.state})
+    json!({"id":value.id,"provider":value.provider,"address":value.address,"state":value.state,"display_name":value.display_name,"version":value.version,"auth_state":value.auth_state,"identity":value.identity})
+}
+async fn lifecycle(
+    client: &mut AccountsClient<
+        tonic::service::interceptor::InterceptedService<Channel, TokenInjector>,
+    >,
+    id: String,
+    action: v2::AccountLifecycleAction,
+) -> Result<Value, AppError> {
+    let result = client
+        .set_account_lifecycle(v2::SetAccountLifecycleRequest {
+            account_id: id,
+            action: action.into(),
+        })
+        .await
+        .map_err(rpc_error)?
+        .into_inner();
+    let mut value = account(result.account.ok_or_else(AppError::invalid)?);
+    value["credential_cleanup_pending"] = json!(result.credential_cleanup_pending);
+    Ok(value)
 }
 async fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]

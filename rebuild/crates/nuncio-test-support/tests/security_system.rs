@@ -55,7 +55,7 @@ async fn every_descriptor_rpc_rejects_missing_wrong_and_retired_profile_authoriz
     }
     assert_eq!(services.len(), 6);
     assert!(
-        methods.len() >= 40,
+        methods.len() >= 49,
         "descriptor must cover the complete public API"
     );
     let mut evidence = Vec::new();

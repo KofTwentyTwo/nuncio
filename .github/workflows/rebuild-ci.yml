@@ -237,6 +237,17 @@ jobs:
         run: python3 scripts/egress.py --evidence test-results/rebuild-release-check-egress.json -- python3 scripts/verify.py --job rebuild-release-check
       - name: Verify local production archive
         run: python3 scripts/egress.py --evidence test-results/package-egress.json -- python3 scripts/package.py --output dist
+      - name: Retain verified Apple Silicon testing archive
+        if: runner.os == 'macOS' && github.event_name == 'push' && github.ref == 'refs/heads/feature/nuncio-google-first-rebuild'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nuncio-testing-aarch64-apple-darwin-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: |
+            rebuild/dist/*-aarch64-apple-darwin-*.tar.gz
+            rebuild/dist/*-aarch64-apple-darwin-*.tar.gz.sha256
+            rebuild/dist/*-aarch64-apple-darwin-*-verification.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain command logs and numeric evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

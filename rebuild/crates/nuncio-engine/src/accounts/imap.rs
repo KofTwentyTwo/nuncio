@@ -131,7 +131,43 @@ impl Accounts {
         credentials: ImapCredentials,
         requested: Option<String>,
     ) -> Result<ImapConnection, AccountError> {
+        self.connect_imap_inner(config, credentials, requested, None)
+            .await
+    }
+    pub async fn update_imap(
+        &self,
+        id: String,
+        version: u64,
+        config: ImapAccountConfig,
+        credentials: Option<ImapCredentials>,
+    ) -> Result<ImapConnection, AccountError> {
+        let row = self.row(&id).await?;
+        if row.version != version {
+            return Err(AccountError::VersionConflict);
+        }
+        let credentials = match credentials {
+            Some(credentials) => credentials,
+            None => {
+                let reference = row.credential_ref.ok_or(AccountError::Authorization)?;
+                let secret = self
+                    .secret_get(&reference)
+                    .await?
+                    .ok_or(AccountError::Authorization)?;
+                serde_json::from_slice(&secret).map_err(|_| AccountError::Secret)?
+            }
+        };
+        self.connect_imap_inner(config, credentials, Some(id), Some(version))
+            .await
+    }
+    async fn connect_imap_inner(
+        &self,
+        config: ImapAccountConfig,
+        credentials: ImapCredentials,
+        requested: Option<String>,
+        expected_version: Option<u64>,
+    ) -> Result<ImapConnection, AccountError> {
         credentials.validate().map_err(|_| AccountError::Invalid)?;
+        let reconnect = requested.is_some();
         let identity = config.identity().map_err(|_| AccountError::Invalid)?;
         let id = if let Some(id) = requested {
             let row = self.row(&id).await?;
@@ -154,9 +190,17 @@ impl Accounts {
         let _credentials = gate.lock().await;
         let _mutation = self.mutations.lock().await;
         if let Some(row) = self.store.account(id.clone()).await? {
+            if expected_version.is_some_and(|version| row.version != version) {
+                return Err(AccountError::VersionConflict);
+            }
+            if row.archived {
+                return Err(AccountError::Lifecycle);
+            }
             if row.account.provider != "imap" || row.subject.as_deref() != Some(&identity) {
                 return Err(AccountError::IdentityMismatch);
             }
+        } else if reconnect {
+            return Err(AccountError::NotFound);
         } else if self.store.status().await?.account_count >= 100 {
             return Err(AccountError::Limit);
         }
@@ -186,7 +230,7 @@ impl Accounts {
         }
         if let Err(error) = self
             .store
-            .connect_imap(
+            .connect_imap_versioned(
                 ConnectedAccount {
                     id: id.clone(),
                     subject: identity,
@@ -195,6 +239,7 @@ impl Accounts {
                 },
                 config,
                 capabilities.clone(),
+                expected_version,
             )
             .await
         {

@@ -6,11 +6,16 @@ of generated protobuf types; other clients should use the same contract and keep
 engine/storage dependencies out of their applications.
 
 The source of truth is [`crates/nuncio-proto/proto/nuncio/v2`](../crates/nuncio-proto/proto/nuncio/v2).
-`nuncio-proto::DESCRIPTOR` embeds the generated file descriptor set. The six-file
-descriptor is frozen and a clean local package has been verified. A standalone generated-client
-status/watch smoke now exists in [clients/smoke](../clients/smoke/README.md), with
-its own workspace/lockfile and no engine or Nuncio client-library dependency.
-The integrated runner is being verified; see [VERIFICATION.md](VERIFICATION.md).
+`nuncio-proto::DESCRIPTOR` embeds the generated six-file descriptor set. The
+current source has 49 RPCs, including seven additive account-management methods;
+the previous verified `6ff9bb9` package has 42. The account extension has focused
+compatibility tests; its full updated gate and fresh package are still under
+verification. The independent [generated-client smoke](../clients/smoke/README.md)
+has its own workspace/lockfile and no engine or Nuncio client-library dependency.
+Its baseline local and hosted checks passed; see [VERIFICATION.md](VERIFICATION.md).
+The [API publication/SemVer plan](API-PUBLICATION-PLAN.md) is a proposal: no
+standalone API release, generated reference site, registry, or new public endpoint
+has been published.
 
 ## Connection and identity
 
@@ -34,11 +39,22 @@ provider state. A changed query snapshot requires restarting pagination.
 | Service | Responsibility | Contract |
 |---|---|---|
 | System | Health/status, shutdown, mail sync runs, cancellation and committed-change stream | [system.proto](../crates/nuncio-proto/proto/nuncio/v2/system.proto) |
-| Accounts | Google OAuth sessions, IMAP/SMTP connection, local account/configuration queries, explicit checks and disconnect | [accounts.proto](../crates/nuncio-proto/proto/nuncio/v2/accounts.proto) |
+| Accounts | Google OAuth begin/status/cancel, IMAP/SMTP connection and updates, local details/name/version, credential checks/disconnect, pause/resume/archive/restore, and previewed local purge | [accounts.proto](../crates/nuncio-proto/proto/nuncio/v2/accounts.proto) |
 | Mail | Cached mail/search, original byte streams, drafts/attachments and queued mail changes/send | [mail.proto](../crates/nuncio-proto/proto/nuncio/v2/mail.proto) |
 | Calendar | Calendar catalog, agenda/events, refresh, free/busy and queued event changes | [calendar.proto](../crates/nuncio-proto/proto/nuncio/v2/calendar.proto) |
 | Operations | Durable operation state, attempts/receipts, cancellation, explicit resolution and reconciliation | [operations.proto](../crates/nuncio-proto/proto/nuncio/v2/operations.proto) |
 | Maintenance | Streamed encrypted backups, inspection, new-profile restore and projection repair | [maintenance.proto](../crates/nuncio-proto/proto/nuncio/v2/maintenance.proto) |
+
+Account records distinguish lifecycle (`state`) from credential status
+(`auth_state`). `ListAccounts` omits archived accounts unless `include_archived`
+is true; `GetAccount` can still inspect a retained archived ID. Name/configuration
+edits require the saved account version. Archive retains downloaded data and
+durable records while removing credentials; restore requires separate
+reauthentication. `PreviewAccountPurge` supplies the version and profile revision
+required by `PurgeAccount`, along with an exact account-ID confirmation. Purge
+requires an archived account and no unresolved remote outcome; it deletes that
+account's local data only. See [account management](ACCOUNT-MANAGEMENT.md) for
+CLI examples, interrupted cleanup, and lifecycle limits.
 
 ## Durable work and observations
 
@@ -77,9 +93,9 @@ Secrets use private files or standard input as documented. Automated examples an
 acceptance tests use the independent local providers; live acceptance remains a
 separate, explicitly authorized procedure in [MANUAL-ACCEPTANCE.md](MANUAL-ACCEPTANCE.md).
 
-## Reviewed v2 release freeze
+## Reviewed v2 contract baseline
 
-`crates/nuncio-proto/proto/nuncio.v2.bin` freezes the six current descriptors,
+`crates/nuncio-proto/proto/nuncio.v2.bin` is the reviewed local descriptor baseline,
 including field numbers/types, reservations, RPC names and streaming modes.
 `cargo test --locked -p nuncio-proto --test contract` compares the generated
 descriptor with that checked-in baseline. The exact freeze intentionally rejects
@@ -87,6 +103,12 @@ additions too: review any contract change before regenerating it. Never reuse a
 field number, change a field wire type, or silently replace a released RPC; reserve
 removed fields and introduce a new API version for incompatible behavior.
 The local package verifies its freshly built descriptor against the same freeze.
+The retained `nuncio.v2.pre-account-management.bin` separately checks that prior
+fields and RPCs survive the account extension; it is not a second current API.
+The package name `nuncio.v2`, application Cargo version `0.1.0`, database schema
+23, and CLI JSON schema version 1 identify different contracts. An independent
+API artifact SemVer and broader compatibility gate are proposed in the
+[publication plan](API-PUBLICATION-PLAN.md), not implemented by this freeze.
 
 The independent [smoke client](../clients/smoke/README.md) generates its own status/
 watch bindings in a separate Cargo workspace. Its normal/build dependency tree

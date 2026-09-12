@@ -1,12 +1,43 @@
 # Nuncio rebuild implementation report
 
-The engine, authenticated API, and CLI are implemented and offline verified at signed checkpoint `6ff9bb9e7be23249c9f448276e08c3062efc44a7`. The full local gate passed, all ten actual hosted CI jobs passed, and two fresh production builds produced identical verified archives. **The full goal remains incomplete: live Google/Synology and native-keystore acceptance are deferred, unapproved, and unverified.** No native application, merge, release, or normal-environment installation was performed.
+The current engine, authenticated API, CLI, account-management additions, and testing installer passed the complete offline gate on September 12: all 34 commands exited 0, both workspace configurations passed 322 tests with zero failed or ignored, and all 411 captured source hashes stayed unchanged. **Fresh packaging, current-source hosted CI, and the first eligible testing download remain pending. The full goal also requires deferred, unverified live Google/Synology and native-keystore acceptance.** No native application, merge, release, or normal-environment installation was performed.
+
+## Current offline verification
+
+The working tree now implements [account management](ACCOUNT-MANAGEMENT.md):
+saved details and versioned edits, Google add/reauthentication and consent
+wait/cancel, IMAP settings/password updates, pause/resume, default archive removal,
+restore, and separate confirmed local purge. Storage is schema 23 and the API has
+49 RPCs, seven more than the baseline. Full-gate receipts are retained under
+`test-results/account-management-final-all/{final-summary.json,exit.json,source-verification.json,current-all/}`;
+dated evidence, including earlier failures, is in [VERIFICATION.md](VERIFICATION.md).
+Separate Google suites passed 26 mock, 22 system, 30 actual CLI E2E, and 8 operation
+tests; IMAP/SMTP passed 2 contract, 28 system, and 14 actual CLI E2E tests. Recovery,
+repair, reconciliation, multi-engine, security, resource, production-isolation,
+and independent-client suites also passed, including all 46 migration SIGKILL
+boundaries and 196 invalid-auth cases. Six Python mail-service scripts and all
+22 script regressions passed. Repeated workspace/named runs are not additional
+unique tests. A fresh package, checkpoint, and current-source hosted CI remain
+separate work. The old package below does not contain these additions.
+The [testing installer](TESTING-INSTALL.md) is implemented and passes offline
+archive/install regressions; its first eligible testing CI archive is pending.
+The [API publication plan](API-PUBLICATION-PLAN.md) is a proposal only.
+
+## Verified baseline at 6ff9bb9
+
+Signed checkpoint `6ff9bb9e7be23249c9f448276e08c3062efc44a7` passed its full local
+gate and all ten hosted jobs, and two fresh production builds produced identical
+verified archives. Later checkpoints `7390e77` ([run 34685516476](https://github.com/KofTwentyTwo/nuncio/actions/runs/34685516476))
+and `549a598` ([run 34702939717](https://github.com/KofTwentyTwo/nuncio/actions/runs/34702939717))
+also passed all ten rebuild CI jobs. Those runs used the earlier schema-22 rebuild
+source; they do not qualify the current account-management implementation or
+establish success of separate security workflows.
 
 The Rust daemon owns SQLCipher storage, credentials, account isolation, synchronization, and durable operations. The versioned, authenticated `nuncio.v2` loopback gRPC API exposes that engine to an independent CLI. Google support includes OAuth/refresh, Gmail initial/history sync, offline search and MIME/attachment reads, drafts, sending and mail mutations, Calendar discovery/sync, recurring-event occurrences, writes, RSVP, and free/busy. MailPlus support uses IMAP/SMTP for folder/UID/flag synchronization, copy/move/trash/restore, submission, and separate Sent-copy receipts. It was tested against independent local servers; live MailPlus compatibility is not established.
 
 Durable intent, explicit uncertainty, crash reconciliation, raw export, encrypted backup/restore, migrations, and repair work through the engine, API, and CLI. Tests inspect independent provider state, received bytes, and send/copy/notification effects rather than relying only on local success records. The [R01–R16 matrix](REQUIREMENTS.md) links each requirement to implementation, executable evidence, and its remaining acceptance condition.
 
-The following results were observed on the correction checkpoint. Repeated workspace and named executions are not additional unique tests. Exact commands, exit statuses, and logs are retained in [VERIFICATION.md](VERIFICATION.md) and the evidence directories below.
+The following results were observed on the `6ff9bb9` correction checkpoint, with schema 22 and 42 RPCs. Repeated workspace and named executions are not additional unique tests. Exact commands, exit statuses, and logs are retained in [VERIFICATION.md](VERIFICATION.md) and the evidence directories below.
 
 | Check | Actual result | Evidence under `test-results/` |
 |---|---|---|
@@ -25,7 +56,7 @@ The original 10,000-message workload retained all messages and traversed 100 API
 
 The final correction excludes optional IMAP `Marked`/`Unmarked` interest hints from the coverage fingerprint while preserving the full provider state. Its SQLCipher regression failed before the fix and passed afterward; actual mailbox changes still alter coverage. Existing profiles receive a one-time opaque local coverage-token change on their next promotion. There is no schema, public API, or remote-cursor change. Earlier production and CI failures, their diagnoses, and original assertions remain recorded in the verification history.
 
-The verified local artifact is under this isolated worktree's `rebuild/` directory:
+The verified baseline local artifact is under this isolated worktree's `rebuild/` directory:
 
 ```text
 dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-6ff9bb9e7be2.tar.gz
@@ -40,10 +71,10 @@ dist/final-candidate/verified/nuncio-0.1.0-rc-aarch64-apple-darwin-6ff9bb9e7be2.
 
 Metadata records clean checkpoint `6ff9bb9`, macOS ARM64, Rust 1.97.1, Apple clang 21, and source epoch `1789202823`. Adjacent checksum, build, and extracted-check files plus `dist/final-candidate/EVIDENCE.json` retain the receipts. Prior candidates are preserved. Byte repeatability applies to the same recorded source, platform, compiler, SDK, and build paths; no cross-platform byte-equivalence claim is made. Archived reports are build-time snapshots; later documentation does not relabel the archive's source.
 
-Follow [PACKAGING.md](PACKAGING.md) to verify the checksum and extract into a new temporary directory. The guide also describes installation/uninstallation for a later authorized decision. [RUNNING.md](RUNNING.md) gives first-run setup, secure credential entry, mock-only development usage, action-file examples, JSON results, and exit semantics. [API.md](API.md) describes the frozen contract. The profile/data directory and default port are separate from the original application; original source, data, and unrelated work were preserved.
+Follow [PACKAGING.md](PACKAGING.md) to verify the checksum and extract into a new temporary directory. [TESTING-INSTALL.md](TESTING-INSTALL.md) describes the new isolated download/install path and its CI availability condition. [RUNNING.md](RUNNING.md) gives first-run setup, secure credential entry, mock-only development usage, action-file examples, JSON results, and exit semantics. [API.md](API.md) describes the current source contract and its retained baseline. The profile/data directory and default port are separate from the original application; original source, data, and unrelated work were preserved.
 
 For recovery, follow [RECOVERY.md](RECOVERY.md): preserve the original profile and keys, create an encrypted consistent backup, inspect it, and restore into a new profile. Restored pending operations remain held until explicit reconciliation. Retain the original request UUID after an acknowledgement is lost, inspect durable receipts and independent provider evidence, and do not repeat an ambiguous SMTP delivery to repair a missing Sent copy. Explicit duplicate-risk resolution is a separate user decision.
 
-[COMPATIBILITY.md](COMPATIBILITY.md) records protocol and provider limits. Google Calendar supplies calendaring; Synology Calendar/CalDAV, permanent purge, reminder delivery, and native apps are excluded. Independent Dovecot 2.4.5 and Mailpit 1.31.1 results do not establish compatibility with an unknown DSM/MailPlus installation. Actual TLS configuration, negotiated capabilities, mailbox encoding, and server/client Sent policy must be recorded during acceptance. One earlier hosted Linux transfer exceeded a CLI deadline; later runs passed unchanged bounds, but that earlier timeout's cause remains unproven and its diagnostic evidence is retained.
+[COMPATIBILITY.md](COMPATIBILITY.md) records protocol and provider limits. Google Calendar supplies calendaring; Synology Calendar/CalDAV, permanent provider-message purge, reminder delivery, and native apps are excluded. Confirmed local account purge is part of the new account-management work. Independent Dovecot 2.4.5 and Mailpit 1.31.1 results do not establish compatibility with an unknown DSM/MailPlus installation. Actual TLS configuration, negotiated capabilities, mailbox encoding, and server/client Sent policy must be recorded during acceptance. One earlier hosted Linux transfer exceeded a CLI deadline; later runs passed unchanged bounds, but that earlier timeout's cause remains unproven and its diagnostic evidence is retained.
 
 To complete the full goal, the [manual acceptance worksheet](MANUAL-ACCEPTANCE.md) still requires explicit approval for named disposable accounts, recipients, calendars, actions, and cleanup. Rows G01–G10, S01–S05, and X01 are unapproved and unverified. Live OAuth/refresh, native-keystore behavior, remote byte fidelity, actual mail/calendar writes, notifications, and MailPlus Sent behavior must pass before completion can be claimed. James has deferred that work in favor of full mocks for now; no live accounts were accessed for rebuild acceptance. Separately authorized status emails are not provider-acceptance evidence.

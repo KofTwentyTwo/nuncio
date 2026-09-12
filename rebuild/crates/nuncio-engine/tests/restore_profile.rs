@@ -72,7 +72,7 @@ async fn restored_profile_opens_with_new_identity_and_keys_while_original_remain
     .unwrap();
     assert_ne!(report.profile_id, original_id);
     assert_eq!(report.directory, restored);
-    assert_eq!(report.restore.schema_version, 22);
+    assert_eq!(report.restore.schema_version, 23);
     let engine = Engine::open(EngineConfig {
         directory: restored.clone(),
         secrets: secrets.clone(),

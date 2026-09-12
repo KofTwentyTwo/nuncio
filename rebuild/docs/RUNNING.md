@@ -1,6 +1,16 @@
 # Running the rebuild
 
-This workspace provides daemon lifecycle, Google account connection, Gmail/Calendar synchronization, local mail queries/search, original-content downloads, local drafts with attachments/reply/forward, and durable Google send and label mutations with operation history and resolution. Google Calendar writes and free/busy, Synology mail reads/flags, explicit folder transfers, and SMTP with client/server Sent policies are verified against local independent services. Encrypted backup creation/inspection/new-profile restore, schema migrations, projection repair and crash recovery have offline evidence. A clean local archive is verified; full integrated offline verification passed; local package verification passed; hosted CI remains pending. See [PACKAGING.md](PACKAGING.md) for prerequisites, extraction, operation and later installation/removal. These are local development artifacts, not a finished release or a claim of live compatibility. All acceptance so far uses synthetic local providers. Google and Synology live access is deferred by the user's instruction.
+This workspace provides the daemon, authenticated local API, and reference CLI
+for Google Gmail/Calendar and IMAP/SMTP mail. Baseline `6ff9bb9` passed the full
+offline gate, Linux/macOS hosted CI, and repeatable local Apple Silicon packaging;
+the later documentation checkpoint `7390e77` also passed hosted CI. Current
+schema-23 account-management additions have focused offline evidence and await
+full current-source verification and fresh artifacts. Commands added below are
+not present in the old baseline archive. Provider acceptance uses independent
+synthetic services; live Google/Synology and native-keystore acceptance remain
+deferred and unverified. For build-free laptop setup, see the
+[testing installer](TESTING-INSTALL.md), whose first eligible CI archive is still
+pending. [PACKAGING.md](PACKAGING.md) covers local builds and archived evidence.
 
 ## Offline development
 
@@ -30,7 +40,43 @@ mail body --account ID --message MESSAGE_ID --kind html --output NEW_FILE.html
 mail fetch --account ID --message MESSAGE_ID --wait
 ```
 
-Account list is local. Check explicitly contacts the configured provider to validate the credential and saved stable identity. Disconnect durably pauses the account, deletes its credential reference/secret, and retains its cached data and durable records. It does not call Google's grant-revocation endpoint. Reconnect checks Google's stable `sub` identifier; an email address alone is insufficient. Choosing another Google account for an existing ID fails. A normal connect to an already-known subject reuses its local ID.
+Account list is local and omits archived accounts unless `--include-archived` is
+set. Check explicitly contacts the provider to validate credentials and stable
+identity. Disconnect removes credentials while retaining cached data and durable
+records; it is distinct from pause, which retains credentials. Neither revokes
+the Google grant remotely. Reconnect checks Google's stable `sub` identifier;
+choosing another Google identity for a saved ID fails. A known archived identity
+must be restored before reconnecting.
+
+## Account management
+
+The current source adds local account details, versioned name/configuration edits,
+Google add/reauthentication with consent waiting, IMAP password replacement,
+pause/resume, archive/restore, and separately confirmed local purge. Use
+`account show --account ID` to obtain the saved version, lifecycle and credential
+status. The [account-management guide](ACCOUNT-MANAGEMENT.md) gives complete
+commands and cleanup/recovery behavior; its new commands require a fresh build.
+
+```text
+account show --account ID
+account edit --account ID --version VERSION --name "Personal mail"
+account pause --account ID
+account resume --account ID
+account remove --account ID
+account list --include-archived
+account restore --account ID
+account reauth-google --account ID --client-config FILE
+account purge --account ID --dry-run
+```
+
+Removal archives by default and keeps downloaded data. Pause keeps credentials
+but prevents provider work; reauthentication does not silently resume a paused
+account. Restoring an archive requires separate reauthentication. The purge
+preview is local and non-destructive; permanent deletion requires an archived
+account, resolved remote uncertainty, and `--confirm ID` matching its account ID.
+It does not delete provider data or existing backups/exports. A CLI timeout does
+not establish that an account mutation failed: inspect its local state before
+retrying.
 
 ## Production preparation for later authorized acceptance
 
@@ -50,9 +96,9 @@ Mail list/read/search/download commands read the local encrypted projection, inc
 
 Access-token refresh is serialized per account. A returned rotated refresh token is saved before using the new access token. A revoked or unusable credential moves only that account to `needs_auth`; reconnect it with its saved account ID. A lost acknowledgement during refresh-token rotation can require fresh consent because the provider may have invalidated the old refresh token. No successful reconnection is fabricated from a local cache.
 
-Credential replacement uses a durable SQLCipher cleanup intent before the keystore write, then atomically publishes the new reference. Disconnect first persists the paused state and cleanup intent. If secret removal fails, the command reports failure but the account remains paused; retry disconnect or restart after the keystore becomes available. Startup completes pending cleanup without deleting account data. A crash during browser consent loses the in-memory authorization session: inspect account list after restart and start a new consent flow if it did not finish. Sessions admit at most 16 pending flows, retain at most 64 recent statuses, and expire after five minutes.
+Credential replacement uses a durable SQLCipher cleanup intent before the keystore write, then atomically publishes the new reference. Disconnect first persists the disconnected credential state and cleanup intent. If secret removal fails, the command reports failure but provider dispatch stays disabled; retry disconnect or restart after the keystore becomes available. Startup completes pending cleanup without deleting account data. A crash during browser consent loses the in-memory authorization session: inspect account list after restart and start a new consent flow if it did not finish. Sessions admit at most 16 pending flows, retain at most 64 recent statuses, and expire after five minutes. `account auth-wait --session ID` waits for a terminal result; `account auth-cancel --session ID` explicitly cancels pending consent.
 
-Keep original profiles untouched. If the database key is missing, SQLCipher rejects the file, or the schema is newer than the binary, startup fails without replacing the data. For encrypted backup creation, inspection, new-profile restore and `repair --scope mail|calendar` with a local `--dry-run` preview, follow [RECOVERY.md](RECOVERY.md). Integrated offline recovery and local package checks have passed; hosted CI and live acceptance remain pending.
+Keep original profiles untouched. If the database key is missing, SQLCipher rejects the file, or the schema is newer than the binary, startup fails without replacing the data. For encrypted backup creation, inspection, new-profile restore and `repair --scope mail|calendar` with a local `--dry-run` preview, follow [RECOVERY.md](RECOVERY.md). Baseline recovery, packaging and hosted CI passed; schema-23 full verification and fresh artifacts are separate current work. Live acceptance remains pending.
 
 When credential replacement has committed but deletion of the previous secret fails, auth status reports success with `warning_code=credential_cleanup_pending`. The new account is usable; the obsolete secret remains queued for cleanup on restart. This differs from a failed initial credential write, which creates no connected account. Profiles currently admit up to 100 connected or retained accounts.
 
@@ -224,7 +270,7 @@ python3 -c 'import getpass,json; print(json.dumps({"imap_password":getpass.getpa
 
 The verified local archive includes these commands; see PACKAGING.md for its exact hash and operating limits. Current automated tests build separate feature artifacts under `target/test-harness/debug` with synthetic keystore files.
 
-Connection authenticates IMAP SASL PLAIN and SMTP PLAIN or LOGIN after TLS, then saves credentials in the profile's SecretStore. It sends no mail. The response reports advertised capabilities and any obsolete credential cleanup still pending. Configured folder existence and mail operation support are not established by this account probe yet. `account imap-config --account UUID` reads the saved configuration and last authenticated capability snapshot locally; `account check --account UUID` contacts both endpoints. `account list` stays local. `account disconnect --account UUID` removes access credentials while preserving local data. Reconnect with `--account UUID`; changing the canonical IMAP host/port/TLS or exact username fails identity matching. Address and SMTP configuration may be updated for that same principal.
+Connection authenticates IMAP SASL PLAIN and SMTP PLAIN or LOGIN after TLS, then saves credentials in the profile's SecretStore. It sends no mail. The response reports advertised capabilities and any obsolete credential cleanup still pending. Configured folder existence and mail operation support are not established by this account probe yet. `account imap-config --account UUID` reads the saved configuration and last authenticated capability snapshot locally; `account check --account UUID` contacts both endpoints. `account list` stays local. `account disconnect --account UUID` removes access credentials while preserving local data. Reconnect with `--account UUID`; changing the canonical IMAP host/port/TLS or exact username fails identity matching. Address and SMTP configuration may be updated for that same principal. Current source adds `account edit-imap --account UUID --version VERSION --config FILE` (optional `--credentials-stdin`): new settings publish only after a successful TLS/authentication probe. `account reauth-imap --account UUID --credentials-stdin` uses the saved configuration.
 
 A temporary IMAP rejection without explicit authentication-failure evidence, or an SMTP4xx authentication response, is unavailable and preserves credentials. Explicit authentication failure pauses the account as `needs_auth`; reconnect after correcting its credentials. TLS trust failures preserve existing credentials and require correcting configuration or trust. All responses/logs use fixed error categories rather than echoing server text or passwords.
 
@@ -281,7 +327,16 @@ If the daemon cannot prove acceptance after DATA began, `smtp_acceptance_unknown
 
 For `sent_policy: "server"`, the worker never issues client APPEND. It records the current Sent UIDNEXT immediately before transmitting DATA and requires a successful SMTP acknowledgement followed by a unique matching copy in that account/folder/UIDVALIDITY at or above that floor. It compares selected identity headers and exact body bytes, permits added trace headers and omission of the private Bcc header, and rechecks the candidate set. `server_sent_observed` records that positive placement observation before `sent_copy` publishes it locally. A changed body or missing copy remains unconfirmed and receives bounded observation retries; duplicate matching copies or a changed folder epoch remain uncertain. A Sent copy alone never proves delivery when the SMTP acknowledgement was lost.
 
-The current source schema is22. Older server-Sent operations lacking a stored observation floor/content fingerprint cannot gain invented evidence during migration. Provider capability/configuration profiles are verified offline, including server Sent without UIDPLUS and rejection before SMTP DATA for client Sent without UIDPLUS. Queued sends preserve the captured SMTP endpoint; changing it pauses dispatch with identity_mismatch until restored. Recovery/migration and cross-cutting adversarial/resource checks have passed their offline gates. Full integrated offline verification passed; hosted platform verification and live MailPlus acceptance remain pending. Consult SESSION-STATE.md for current verification rather than treating development binaries as a packaged release. All automated SMTP tests use independent local Dovecot/Mailpit services, including actual daemon/CLI crash tests; no live provider compatibility is implied.
+The current source schema is 23; the previously verified package uses schema 22.
+Older server-Sent operations lacking a stored observation floor/content fingerprint
+cannot gain invented evidence during migration. Baseline offline and hosted tests
+cover server Sent without UIDPLUS and rejection before SMTP DATA for client Sent
+without UIDPLUS. Queued sends retain their captured SMTP endpoint; changing it
+pauses dispatch with `identity_mismatch` until restored. Current account lifecycle
+changes require their own full verification and package. All automated SMTP tests
+use independent local Dovecot/Mailpit services, including actual daemon/CLI crash
+tests; live MailPlus compatibility remains unverified. Consult
+[SESSION-STATE.md](SESSION-STATE.md) for the current gate.
 
 For later explicitly authorized live checks, use [MANUAL-ACCEPTANCE.md](MANUAL-ACCEPTANCE.md). It is currently deferred and unapproved.
 

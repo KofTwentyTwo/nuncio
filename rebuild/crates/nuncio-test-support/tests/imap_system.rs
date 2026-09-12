@@ -15,6 +15,116 @@ use nuncio_test_support::{google::Seed, imap::MockMailPlus, TestError};
 use serde_json::json;
 use support::system::SystemHarness;
 
+#[tokio::test]
+async fn imap_account_edits_failed_probe_and_purge_cleanup_are_durable() -> Result<(), TestError> {
+    use std::sync::atomic::Ordering;
+    let mut mock = MockMailPlus::start(&[]).await?;
+    let mut h = SystemHarness::start(Seed::TwoAccounts).await?;
+    let saved = h
+        .accounts()
+        .connect_imap(request(&mock, false, "alpha@example.test").await?)
+        .await?
+        .into_inner()
+        .account
+        .unwrap();
+    let mut config = configuration(&mock, false, "alpha@example.test").await?;
+    config.address = "alias@example.test".into();
+    let failed = h
+        .accounts()
+        .update_imap_account(v2::UpdateImapAccountRequest {
+            account_id: saved.id.clone(),
+            version: saved.version,
+            config: Some(config.clone()),
+            credentials: Some(v2::ImapCredentials {
+                imap_password: "synthetic-invalid-password".into(),
+                smtp_password: "synthetic-invalid-password".into(),
+            }),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(failed.code(), tonic::Code::Unauthenticated);
+    let unchanged = h
+        .accounts()
+        .get_account(v2::AccountRequest {
+            account_id: saved.id.clone(),
+        })
+        .await?
+        .into_inner();
+    assert_eq!(unchanged.version, saved.version);
+    assert_eq!(unchanged.address, saved.address);
+    let before = imap_effects::effects(&mut mock).await?;
+    let edited = h
+        .accounts()
+        .update_imap_account(v2::UpdateImapAccountRequest {
+            account_id: saved.id.clone(),
+            version: saved.version,
+            config: Some(config),
+            credentials: None,
+        })
+        .await?
+        .into_inner()
+        .account
+        .unwrap();
+    assert_eq!(edited.address, "alias@example.test");
+    assert_eq!(edited.identity, saved.identity);
+    h.secrets.fail_delete.store(true, Ordering::SeqCst);
+    let archived = h
+        .accounts()
+        .set_account_lifecycle(v2::SetAccountLifecycleRequest {
+            account_id: saved.id.clone(),
+            action: v2::AccountLifecycleAction::Archive.into(),
+        })
+        .await?
+        .into_inner();
+    assert!(archived.credential_cleanup_pending);
+    let names = |path: &std::path::Path| -> Vec<String> {
+        let bytes = zeroize::Zeroizing::new(std::fs::read(path).unwrap());
+        serde_json::from_slice::<std::collections::BTreeMap<String, serde_json::Value>>(&bytes)
+            .unwrap()
+            .into_keys()
+            .filter(|k| k.contains("/account/"))
+            .collect()
+    };
+    assert_eq!(names(&h.secrets_file).len(), 1);
+    h.secrets.fail_delete.store(true, Ordering::SeqCst);
+    let preview = h
+        .accounts()
+        .preview_account_purge(v2::AccountRequest {
+            account_id: saved.id.clone(),
+        })
+        .await?
+        .into_inner();
+    let purged = h
+        .accounts()
+        .purge_account(v2::PurgeAccountRequest {
+            account_id: saved.id.clone(),
+            confirm_account_id: saved.id.clone(),
+            version: preview.version,
+            revision: preview.revision,
+        })
+        .await?
+        .into_inner();
+    assert!(purged.credential_cleanup_pending);
+    assert_eq!(names(&h.secrets_file).len(), 1);
+    h.shutdown().await?;
+    h.restart().await?;
+    assert!(names(&h.secrets_file).is_empty());
+    assert_eq!(
+        h.accounts()
+            .get_account(v2::AccountRequest {
+                account_id: saved.id
+            })
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::NotFound
+    );
+    assert_eq!(imap_effects::effects(&mut mock).await?, before);
+    h.shutdown().await?;
+    mock.shutdown().await?;
+    Ok(())
+}
+
 async fn configuration(
     mock: &MockMailPlus,
     start_tls: bool,
@@ -324,7 +434,7 @@ async fn imap_account_authenticates_both_tls_servers_and_reopens_without_sending
     assert_eq!(
         harness
             .accounts()
-            .list_accounts(v2::ListAccountsRequest {})
+            .list_accounts(v2::ListAccountsRequest::default())
             .await?
             .into_inner()
             .accounts
@@ -415,7 +525,7 @@ async fn account_setup_rejects_bad_trust_and_credentials_without_persisting_or_s
     }
     assert!(harness
         .accounts()
-        .list_accounts(v2::ListAccountsRequest {})
+        .list_accounts(v2::ListAccountsRequest::default())
         .await?
         .into_inner()
         .accounts
@@ -435,7 +545,7 @@ async fn account_setup_rejects_bad_trust_and_credentials_without_persisting_or_s
     );
     assert!(harness
         .accounts()
-        .list_accounts(v2::ListAccountsRequest {})
+        .list_accounts(v2::ListAccountsRequest::default())
         .await?
         .into_inner()
         .accounts
@@ -464,7 +574,7 @@ async fn account_setup_rejects_bad_trust_and_credentials_without_persisting_or_s
         assert_eq!(
             harness
                 .accounts()
-                .list_accounts(v2::ListAccountsRequest {})
+                .list_accounts(v2::ListAccountsRequest::default())
                 .await?
                 .into_inner()
                 .accounts[0]

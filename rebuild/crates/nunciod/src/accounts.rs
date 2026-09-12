@@ -10,6 +10,29 @@ use tonic::{Request, Response, Status};
 pub(crate) struct AccountsService(pub Arc<Engine>);
 #[tonic::async_trait]
 impl Accounts for AccountsService {
+    async fn update_imap_account(
+        &self,
+        request: Request<v2::UpdateImapAccountRequest>,
+    ) -> Result<Response<v2::ConnectImapResponse>, Status> {
+        let input = request.into_inner();
+        let config = imap::config(input.config.ok_or_else(|| error(AccountError::Invalid))?)?;
+        let credentials = input.credentials.map(|mut value| {
+            nuncio_engine::domain::imap_account::ImapCredentials {
+                imap_password: std::mem::take(&mut value.imap_password),
+                smtp_password: std::mem::take(&mut value.smtp_password),
+            }
+        });
+        let result = self
+            .0
+            .update_imap_account(input.account_id, input.version, config, credentials)
+            .await
+            .map_err(error)?;
+        Ok(Response::new(v2::ConnectImapResponse {
+            account: Some(account(result.account)),
+            capabilities: Some(imap::capabilities(result.capabilities)),
+            credential_cleanup_pending: result.credential_cleanup_pending,
+        }))
+    }
     async fn connect_imap(
         &self,
         request: Request<v2::ConnectImapRequest>,
@@ -84,12 +107,12 @@ impl Accounts for AccountsService {
     }
     async fn list_accounts(
         &self,
-        _: Request<v2::ListAccountsRequest>,
+        request: Request<v2::ListAccountsRequest>,
     ) -> Result<Response<v2::ListAccountsResponse>, Status> {
         Ok(Response::new(v2::ListAccountsResponse {
             accounts: self
                 .0
-                .list_accounts()
+                .list_accounts_including_archived(request.into_inner().include_archived)
                 .await
                 .map_err(error)?
                 .into_iter()
@@ -118,6 +141,109 @@ impl Accounts for AccountsService {
                 .map_err(error)?,
         )))
     }
+    async fn get_account(
+        &self,
+        request: Request<v2::AccountRequest>,
+    ) -> Result<Response<v2::Account>, Status> {
+        Ok(Response::new(account(
+            self.0
+                .show_account(&request.into_inner().account_id)
+                .await
+                .map_err(error)?,
+        )))
+    }
+    async fn update_account(
+        &self,
+        request: Request<v2::UpdateAccountRequest>,
+    ) -> Result<Response<v2::Account>, Status> {
+        let input = request.into_inner();
+        Ok(Response::new(account(
+            self.0
+                .edit_account_name(&input.account_id, input.version, input.display_name)
+                .await
+                .map_err(error)?,
+        )))
+    }
+    async fn set_account_lifecycle(
+        &self,
+        request: Request<v2::SetAccountLifecycleRequest>,
+    ) -> Result<Response<v2::AccountLifecycleResponse>, Status> {
+        use nuncio_engine::store::AccountLifecycle;
+        let input = request.into_inner();
+        let action = match input.action() {
+            v2::AccountLifecycleAction::Pause => AccountLifecycle::Pause,
+            v2::AccountLifecycleAction::Resume => AccountLifecycle::Resume,
+            v2::AccountLifecycleAction::Archive => AccountLifecycle::Archive,
+            v2::AccountLifecycleAction::Restore => AccountLifecycle::Restore,
+            v2::AccountLifecycleAction::Unspecified => return Err(error(AccountError::Invalid)),
+        };
+        let (value, pending) = self
+            .0
+            .change_account_lifecycle(&input.account_id, action)
+            .await
+            .map_err(error)?;
+        Ok(Response::new(v2::AccountLifecycleResponse {
+            account: Some(account(value)),
+            credential_cleanup_pending: pending,
+        }))
+    }
+    async fn preview_account_purge(
+        &self,
+        request: Request<v2::AccountRequest>,
+    ) -> Result<Response<v2::AccountPurgePreview>, Status> {
+        Ok(Response::new(preview(
+            self.0
+                .preview_account_purge(request.into_inner().account_id)
+                .await
+                .map_err(error)?,
+        )))
+    }
+    async fn purge_account(
+        &self,
+        request: Request<v2::PurgeAccountRequest>,
+    ) -> Result<Response<v2::PurgeAccountResponse>, Status> {
+        let input = request.into_inner();
+        if input.confirm_account_id != input.account_id {
+            return Err(error(AccountError::Invalid));
+        }
+        let (deleted, pending) = self
+            .0
+            .purge_account(&input.account_id, input.version, input.revision)
+            .await
+            .map_err(error)?;
+        Ok(Response::new(v2::PurgeAccountResponse {
+            deleted: Some(preview(deleted)),
+            credential_cleanup_pending: pending,
+        }))
+    }
+    async fn cancel_google_auth(
+        &self,
+        request: Request<v2::GetAuthStatusRequest>,
+    ) -> Result<Response<v2::AuthSession>, Status> {
+        Ok(Response::new(session(
+            self.0
+                .cancel_google_auth(&request.into_inner().session_id)
+                .await
+                .map_err(error)?,
+        )))
+    }
+}
+fn preview(value: nuncio_engine::store::AccountPurgePreview) -> v2::AccountPurgePreview {
+    v2::AccountPurgePreview {
+        account_id: value.account_id,
+        version: value.version,
+        revision: value.revision,
+        archived: value.archived,
+        messages: value.messages,
+        calendars: value.calendars,
+        events: value.events,
+        drafts: value.drafts,
+        blobs: value.blobs,
+        blob_bytes: value.blob_bytes,
+        operations: value.operations,
+        queued_operations: value.queued_operations,
+        unresolved_operations: value.unresolved_operations,
+    }
 }
 fn account(value: nuncio_engine::accounts::Account) -> v2::Account {
     v2::Account {
@@ -125,6 +251,10 @@ fn account(value: nuncio_engine::accounts::Account) -> v2::Account {
         provider: value.provider,
         address: value.address,
         state: value.state,
+        display_name: value.display_name,
+        version: value.version,
+        auth_state: value.auth_state,
+        identity: value.identity,
     }
 }
 fn session(value: nuncio_engine::accounts::AuthSession) -> v2::AuthSession {
@@ -141,6 +271,8 @@ fn session(value: nuncio_engine::accounts::AuthSession) -> v2::AuthSession {
 fn error(error: AccountError) -> Status {
     let message = error.to_string();
     match error {
+        AccountError::VersionConflict => Status::aborted(message),
+        AccountError::Lifecycle => Status::failed_precondition(message),
         AccountError::Invalid => Status::invalid_argument(message),
         AccountError::NotFound => Status::not_found(message),
         AccountError::Authorization | AccountError::ScopeDenied => Status::unauthenticated(message),

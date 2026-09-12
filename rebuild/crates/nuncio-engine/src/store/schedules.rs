@@ -135,7 +135,7 @@ impl Store {
     }
 }
 fn list(c: &Connection) -> Result<Vec<SyncSchedule>, StoreError> {
-    let mut stmt=c.prepare("SELECT s.account_id,s.scope,a.state,s.last_run_id,r.state,coalesce(r.processed,0),s.last_success_at_ms,s.next_attempt_at_ms,s.provider_retry_after_ms,s.consecutive_failures,s.error_code FROM sync_schedules s JOIN accounts a ON a.id=s.account_id LEFT JOIN sync_runs r ON r.account_id=s.account_id AND r.id=s.last_run_id ORDER BY s.account_id,s.scope LIMIT 301")?;
+    let mut stmt=c.prepare("SELECT s.account_id,s.scope,CASE WHEN a.archived=1 THEN 'archived' WHEN a.paused=1 THEN 'paused' ELSE a.state END,s.last_run_id,r.state,coalesce(r.processed,0),s.last_success_at_ms,s.next_attempt_at_ms,s.provider_retry_after_ms,s.consecutive_failures,s.error_code FROM sync_schedules s JOIN accounts a ON a.id=s.account_id LEFT JOIN sync_runs r ON r.account_id=s.account_id AND r.id=s.last_run_id ORDER BY s.account_id,s.scope LIMIT 301")?;
     let rows = stmt
         .query_map([], |r| {
             let processed: i64 = r.get(5)?;

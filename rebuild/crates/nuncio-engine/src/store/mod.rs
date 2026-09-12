@@ -11,7 +11,9 @@ mod restore;
 pub use restore::{stage_restore, RestoreReport, StagedRestore};
 mod smtp;
 pub use smtp::{SentCopyResult, ServerSentEvidence, SmtpIntent, SmtpProgress, SmtpStep};
+mod account_lifecycle;
 mod accounts;
+pub use account_lifecycle::{AccountLifecycle, AccountPurgePreview};
 mod calendar_changes;
 mod imap_accounts;
 mod imap_mailboxes;
@@ -84,6 +86,8 @@ use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("Account must be archived and remote-effect uncertainty resolved before deletion")]
+    AccountLifecycle,
     #[error("The local resource changed; read its latest version before editing")]
     VersionConflict,
     #[error("Different work is already active for this account and scope")]
@@ -147,6 +151,11 @@ pub struct StoredAccount {
     pub subject: Option<String>,
     pub state: String,
     pub credential_ref: Option<String>,
+    pub display_name: String,
+    pub version: u64,
+    pub auth_state: String,
+    pub paused: bool,
+    pub archived: bool,
 }
 
 pub struct ConnectedAccount {

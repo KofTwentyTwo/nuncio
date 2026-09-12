@@ -37,6 +37,6 @@ async fn calendar_objects_and_occurrences_cannot_reference_another_accounts_cale
         .windows(26)
         .any(|w| w == b"encrypted-calendar-content"));
     let store = Store::open(temp.path(), key).await.unwrap();
-    assert_eq!(store.status().await.unwrap().schema_version, 22);
+    assert_eq!(store.status().await.unwrap().schema_version, 23);
     store.close().await.unwrap();
 }

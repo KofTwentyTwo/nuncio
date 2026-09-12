@@ -111,7 +111,7 @@ impl Store {
         };
         let id = upload.id.clone();
         self.execute(move|c|{
-            let tx=c.transaction()?;let draft=drafts::get(&tx,&input.account_id,&input.draft_id)?;
+            let tx=c.transaction()?;super::accounts::writable(&tx,&input.account_id)?;let draft=drafts::get(&tx,&input.account_id,&input.draft_id)?;
             if draft.version!=input.expected_version{return Err(StoreError::VersionConflict);}
             limits(&draft,input.byte_length)?;
             let active:u32=tx.query_row("SELECT count(*) FROM draft_uploads",[],|r|r.get(0))?;
@@ -136,6 +136,7 @@ impl Store {
         self.execute(move|c|{
             let tx=c.transaction()?;
             let (length,received):(u32,u32)=tx.query_row("SELECT byte_length,received FROM draft_uploads WHERE account_id=?1 AND id=?2",params![account,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(StoreError::NotFound)?;
+            super::accounts::writable(&tx,&account)?;
             if offset!=u64::from(received) || data.len()!=(length-received).min(BLOB_CHUNK_BYTES as u32)as usize {return Err(StoreError::InvalidInput);}
             tx.execute("INSERT INTO draft_upload_chunks(account_id,upload_id,ordinal,data) VALUES (?1,?2,?3,?4)",params![account,id,received/BLOB_CHUNK_BYTES as u32,data])?;
             tx.execute("UPDATE draft_uploads SET received=received+?3 WHERE account_id=?1 AND id=?2",params![account,id,data.len()as u32])?;
@@ -155,6 +156,7 @@ impl Store {
         let result=self.execute(move|c|{
             let tx=c.transaction()?;
             let (draft_id,version,length,received,hash):(String,i64,u32,u32,String)=tx.query_row("SELECT draft_id,expected_version,byte_length,received,sha256 FROM draft_uploads WHERE account_id=?1 AND id=?2",params![account,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(StoreError::NotFound)?;
+            super::accounts::writable(&tx,&account)?;
             if length!=received{return Err(StoreError::InvalidInput);}
             let draft=drafts::get(&tx,&account,&draft_id)?;
             if i64::try_from(draft.version).map_err(|_|StoreError::KeyOrCorrupt)?!=version{return Err(StoreError::VersionConflict);}

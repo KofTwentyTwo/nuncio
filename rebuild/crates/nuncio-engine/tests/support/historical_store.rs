@@ -27,11 +27,11 @@ pub struct Migration {
 }
 pub fn history() -> History {
     let history: History = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/migrations/schema-history-through-22.json"
+        "../../../../tests/fixtures/migrations/schema-history-through-23.json"
     ))
     .unwrap();
-    assert_eq!(history.last_schema, 22);
-    assert_eq!(history.migrations.len(), 22);
+    assert_eq!(history.last_schema, 23);
+    assert_eq!(history.migrations.len(), 23);
     for (ordinal, m) in history.migrations.iter().enumerate() {
         assert_eq!(m.version as usize, ordinal + 1);
         assert_eq!(hex::encode(Sha256::digest(m.sql.as_bytes())), m.sha256);

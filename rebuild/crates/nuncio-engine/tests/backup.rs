@@ -182,7 +182,7 @@ async fn encrypted_snapshot_preserves_committed_wal_tables_and_frozen_operations
     let backup = store.create_backup(key(), 2000).await.unwrap();
     let info = backup.inspection();
     assert_eq!(info.format_version, 1);
-    assert_eq!(info.schema_version, 22);
+    assert_eq!(info.schema_version, 23);
     assert_eq!(info.created_at_ms, 2000);
     assert_eq!(info.revision, before_status.revision);
     assert_eq!(info.accounts, 1);
@@ -312,6 +312,6 @@ async fn backup_inspection_rejects_wrong_format_corruption_truncation_and_future
         assert_eq!(std::fs::read(&file).unwrap(), before);
         assert_eq!(std::fs::read(backup.path()).unwrap(), original);
     }
-    assert_eq!(store.status().await.unwrap().schema_version, 22);
+    assert_eq!(store.status().await.unwrap().schema_version, 23);
     store.close().await.unwrap();
 }

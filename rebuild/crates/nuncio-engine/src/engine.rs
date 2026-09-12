@@ -624,6 +624,21 @@ impl Engine {
     > {
         self.accounts.imap_config(id).await
     }
+    pub async fn update_imap_account(
+        &self,
+        id: String,
+        version: u64,
+        config: crate::domain::imap_account::ImapAccountConfig,
+        credentials: Option<crate::domain::imap_account::ImapCredentials>,
+    ) -> Result<crate::accounts::ImapConnection, crate::accounts::AccountError> {
+        let config = config
+            .canonicalized()
+            .map_err(|_| crate::accounts::AccountError::Invalid)?;
+        let _permit = self.mail.coordinator.acquire(&id).await?;
+        self.accounts
+            .update_imap(id, version, config, credentials)
+            .await
+    }
     pub async fn begin_google_auth(
         &self,
         request: crate::accounts::GoogleAuthRequest,
@@ -642,7 +657,60 @@ impl Engine {
         self.accounts.list().await
     }
     pub async fn disconnect_account(&self, id: &str) -> Result<(), crate::accounts::AccountError> {
+        let _permit = self.mail.coordinator.acquire(id).await?;
         self.accounts.disconnect(id).await
+    }
+    pub async fn show_account(
+        &self,
+        id: &str,
+    ) -> Result<crate::accounts::Account, crate::accounts::AccountError> {
+        self.accounts.show(id).await
+    }
+    pub async fn list_accounts_including_archived(
+        &self,
+        include_archived: bool,
+    ) -> Result<Vec<crate::accounts::Account>, crate::accounts::AccountError> {
+        self.accounts
+            .list_including_archived(include_archived)
+            .await
+    }
+    pub async fn edit_account_name(
+        &self,
+        id: &str,
+        version: u64,
+        name: String,
+    ) -> Result<crate::accounts::Account, crate::accounts::AccountError> {
+        let _permit = self.mail.coordinator.acquire(id).await?;
+        self.accounts.edit_name(id, version, name).await
+    }
+    pub async fn change_account_lifecycle(
+        &self,
+        id: &str,
+        action: crate::store::AccountLifecycle,
+    ) -> Result<(crate::accounts::Account, bool), crate::accounts::AccountError> {
+        let _permit = self.mail.coordinator.acquire(id).await?;
+        self.accounts.lifecycle(id, action).await
+    }
+    pub async fn preview_account_purge(
+        &self,
+        id: String,
+    ) -> Result<crate::store::AccountPurgePreview, crate::accounts::AccountError> {
+        Ok(self.store.preview_account_purge(id).await?)
+    }
+    pub async fn purge_account(
+        &self,
+        id: &str,
+        version: u64,
+        revision: u64,
+    ) -> Result<(crate::store::AccountPurgePreview, bool), crate::accounts::AccountError> {
+        let _permit = self.mail.coordinator.acquire(id).await?;
+        self.accounts.purge(id, version, revision).await
+    }
+    pub async fn cancel_google_auth(
+        &self,
+        id: &str,
+    ) -> Result<crate::accounts::AuthSession, crate::accounts::AccountError> {
+        self.accounts.cancel_auth(id).await
     }
     pub async fn check_account(
         &self,

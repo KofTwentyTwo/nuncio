@@ -153,6 +153,7 @@ impl Store {
                     ("confirm_applied","applied","manual_confirmed",None)
                 },
                 ResolutionDecision::Resend{ref request_id,..} => {
+                    super::accounts::writable(&tx,account)?;
                     if op.kind!="send" || request_id==&op.request_id { return Err(StoreError::InvalidInput); }
                     let frozen=replacement.ok_or(StoreError::InvalidInput)?;
                     let replacement=insert_resend(&tx,&op,request_id,&canonical,frozen,now)?;

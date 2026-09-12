@@ -1,5 +1,24 @@
 # Current delivery and acceptance state
 
+## Active account-management follow-up
+
+- [x] Post-engine PO/PM roadmap delivered in POST-ENGINE-ROADMAP.md; future scope only.
+
+- [x] AM01–AM02 account details/editing and usable Google/IMAP add/reauth flows.
+- [x] AM03–AM05 pause/resume, archive/restore and separately confirmed permanent deletion.
+- [x] AM06–AM07 concurrency, recovery, migration and engine/API/CLI parity.
+- [ ] AM08 independent system/subprocess checks, full gate, fresh artifacts and alpha handoff.
+- [x] API publication and semantic-version research/plan delivered; proposed tooling and publication are separate future work.
+- [x] All 11 open PRs reviewed; relevant fixes tested and explicit later merge/closure dispositions recorded in OPEN-PR-REPORT.md. Follow-up lock/label checkpoint and hosted rerun remain pending.
+- [ ] Dependency remediation implemented and checked (790 tests and fresh-index audit); checkpoint the final yanked-lock fix and verify corrected hosted scan. Default branch/PR closure requires authorized integration.
+- [ ] Development security CI: Rust/Python/Actions/JS CodeQL and development/PR triggers, advisory coverage, actual hosted verification; remote protections unchanged.
+- [ ] Current README and operating/API/implementation docs: delegated maintenance, with root providing final gate/artifact facts.
+- [ ] Repo-run prebuilt testing installer: delegated by James to `testing_installer`; root must integrate its tested script/workflow with fresh verified artifacts and authorized checkpoint push.
+
+All account commands are now implemented through engine/API/CLI. Focused Google/IMAP system and actual subprocess checks, account crash boundaries, encrypted storage and recovery checks pass. The full updated 34-command gate also passed, including schema23 migration, 196 authorization cases and old-wire compatibility. AM08 remains open for fresh artifacts, hosted verification, installer download and final handoff. Exact commands and failures are in VERIFICATION and test-results/account-management.
+
+The earlier completed implementation below predates this newly authorized scope. Follow ACCOUNT-MANAGEMENT-PLAN.md; do not use the old package as evidence for new account-management changes.
+
 - [x] Tasks 01–14 software implementation and independent mock/system/actual daemon-CLI coverage, including mail/calendar writes, recovery, security, and resource bounds.
 - [x] Full 34-command offline gate passed on 6ff9bb9: 308 tests per workspace configuration, all separate/Python/dependency/client checks passed, zero failed/ignored, 399 source hashes unchanged.
 - [x] Signed software checkpoint 6ff9bb9 pushed; signature and exact remote head verified.

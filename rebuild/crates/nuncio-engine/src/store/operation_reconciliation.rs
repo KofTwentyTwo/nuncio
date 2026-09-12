@@ -187,6 +187,7 @@ impl Store {
                 if id!=input.operation_id || version!=input.expected_version as i64 || mode!=input.mode.value(){return Err(StoreError::VersionConflict)}
                 return operations::get(&tx,&input.account_id,&input.operation_id);
             }
+            super::accounts::writable(&tx,&input.account_id)?;
             let op=operations::get(&tx,&input.account_id,&input.operation_id)?;
             if op.version!=input.expected_version || !matches!(op.state.as_str(),"uncertain"|"conflict") || op.disposition.is_some() || op.needs_reconciliation {return Err(StoreError::VersionConflict)}
             if !matches!(op.kind.as_str(),"send"|"mail_change"|"calendar_change"){return Err(StoreError::InvalidInput)}

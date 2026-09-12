@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "support/account_management_system.rs"]
+mod account_management_system;
 #[path = "support/mail_change_system.rs"]
 mod mail_change_system;
 pub mod support;

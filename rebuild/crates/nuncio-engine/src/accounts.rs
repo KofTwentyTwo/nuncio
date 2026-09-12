@@ -1,4 +1,5 @@
 mod imap;
+mod management;
 use crate::{
     providers::google::{
         http::{GoogleApi, GoogleHttp, GoogleRead, TokenResponse, UserInfo},
@@ -28,6 +29,10 @@ enum GoogleWrite<'a> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AccountError {
+    #[error("Account configuration changed; read the latest version")]
+    VersionConflict,
+    #[error("Account lifecycle does not permit this action; restore archived accounts and resolve remote-effect uncertainty before deletion")]
+    Lifecycle,
     #[error("Mail server TLS verification failed")]
     Tls,
     #[error("Mail server does not support a required protocol capability")]
@@ -58,6 +63,8 @@ pub enum AccountError {
 impl AccountError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::VersionConflict => "version_conflict",
+            Self::Lifecycle => "account_lifecycle",
             Self::Tls => "tls_verification",
             Self::Unsupported => "unsupported",
             Self::Invalid => "invalid_input",
@@ -74,8 +81,17 @@ impl AccountError {
     }
 }
 impl From<crate::store::StoreError> for AccountError {
-    fn from(_: crate::store::StoreError) -> Self {
-        Self::Storage
+    fn from(error: crate::store::StoreError) -> Self {
+        match error {
+            crate::store::StoreError::NotFound => Self::NotFound,
+            crate::store::StoreError::VersionConflict => Self::VersionConflict,
+            crate::store::StoreError::AccountLifecycle => Self::Lifecycle,
+            crate::store::StoreError::InvalidInput | crate::store::StoreError::InvalidAccount => {
+                Self::Invalid
+            }
+            crate::store::StoreError::Busy => Self::Unavailable,
+            _ => Self::Storage,
+        }
     }
 }
 
@@ -132,6 +148,10 @@ pub struct Account {
     pub provider: String,
     pub address: String,
     pub state: String,
+    pub display_name: String,
+    pub version: u64,
+    pub auth_state: String,
+    pub identity: Option<String>,
 }
 impl From<StoredAccount> for Account {
     fn from(row: StoredAccount) -> Self {
@@ -140,6 +160,10 @@ impl From<StoredAccount> for Account {
             provider: row.account.provider,
             address: row.account.address,
             state: row.state,
+            display_name: row.display_name,
+            version: row.version,
+            auth_state: row.auth_state,
+            identity: row.subject,
         }
     }
 }
@@ -194,6 +218,7 @@ impl Accounts {
         self: &Arc<Self>,
         request: GoogleAuthRequest,
     ) -> Result<AuthSession, AccountError> {
+        let _mutation = self.mutations.lock().await;
         request.registration.validate(self.http.synthetic)?;
         if request
             .login_hint
@@ -204,6 +229,9 @@ impl Accounts {
         }
         if let Some(id) = &request.account {
             let row = self.row(id).await?;
+            if row.archived {
+                return Err(AccountError::Lifecycle);
+            }
             if row.account.provider != "google" || row.subject.is_none() {
                 return Err(AccountError::Invalid);
             }
@@ -220,9 +248,19 @@ impl Accounts {
             .ok_or(AccountError::NotFound)
     }
     pub async fn list(&self) -> Result<Vec<Account>, AccountError> {
+        self.list_including_archived(false).await
+    }
+    pub async fn list_including_archived(
+        &self,
+        include_archived: bool,
+    ) -> Result<Vec<Account>, AccountError> {
+        let _mutation = self.mutations.lock().await;
         let mut result = Vec::new();
         for row in self.store.accounts().await? {
-            result.push(self.row(&row.id).await?.into());
+            let row = self.row(&row.id).await?;
+            if include_archived || !row.archived {
+                result.push(row.into());
+            }
         }
         Ok(result)
     }
@@ -619,9 +657,14 @@ impl Accounts {
             return Err(AccountError::Authorization);
         }
         if let Some(row) = self.store.account(id.clone()).await? {
+            if row.archived {
+                return Err(AccountError::Lifecycle);
+            }
             if row.account.provider != "google" || row.subject.as_deref() != Some(&info.sub) {
                 return Err(AccountError::IdentityMismatch);
             }
+        } else if request.account.is_some() {
+            return Err(AccountError::NotFound);
         } else if self.store.status().await?.account_count >= 100 {
             return Err(AccountError::Limit);
         }
@@ -667,6 +710,11 @@ impl Accounts {
         // The new account reference is already committed. A failed deletion of an
         // obsolete secret remains durably queued; report that independently.
         let cleanup_pending = self.cleanup().await.is_err();
+        if let Some(slot) = self.sessions.lock().await.get_mut(session) {
+            slot.status.state = "succeeded".into();
+            slot.status.account_id = Some(id.clone());
+            slot.status.warning_code = cleanup_pending.then(|| "credential_cleanup_pending".into());
+        }
         Ok((id, cleanup_pending))
     }
     async fn row(&self, id: &str) -> Result<StoredAccount, AccountError> {

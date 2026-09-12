@@ -177,7 +177,104 @@ pub enum CalendarCommand {
 
 #[derive(Subcommand)]
 pub enum AccountCommand {
+    /// Probe and save public IMAP/SMTP settings for the same IMAP principal.
+    EditImap {
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        config: PathBuf,
+        /// Optionally replace passwords using protected stdin input.
+        #[arg(long)]
+        credentials_stdin: bool,
+    },
+    /// Add a Google account and wait for browser consent by default.
+    AddGoogle {
+        #[arg(long)]
+        client_config: PathBuf,
+        #[arg(long)]
+        login_hint: Option<String>,
+        #[arg(long)]
+        no_browser: bool,
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Reauthenticate exactly this saved Google identity.
+    ReauthGoogle {
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        client_config: PathBuf,
+        #[arg(long)]
+        no_browser: bool,
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Replace passwords for the saved IMAP/SMTP configuration.
+    ReauthImap {
+        #[arg(long)]
+        account: String,
+        #[arg(long, required = true)]
+        credentials_stdin: bool,
+    },
+    /// Wait for terminal browser-consent status; pending consent returns a timeout error.
+    AuthWait {
+        #[arg(long)]
+        session: String,
+        #[arg(long, default_value_t = 300, value_parser=clap::value_parser!(u64).range(1..=300))]
+        timeout_seconds: u64,
+    },
+    /// Read saved identity, display name, lifecycle and configuration version.
+    Show {
+        #[arg(long)]
+        account: String,
+    },
+    /// Change the local display name using the version from account show.
+    Edit {
+        #[arg(long)]
+        account: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        version: u64,
+    },
+    /// Stop provider work while retaining credentials and downloaded data.
+    Pause {
+        #[arg(long)]
+        account: String,
+    },
+    Resume {
+        #[arg(long)]
+        account: String,
+    },
+    /// Archive locally and disconnect credentials; downloaded data is retained.
+    #[command(visible_alias = "archive")]
+    Remove {
+        #[arg(long)]
+        account: String,
+    },
+    /// Unarchive a saved account. Reauthenticate separately to reconnect.
+    Restore {
+        #[arg(long)]
+        account: String,
+    },
+    /// Permanently delete an archived account from this profile; remote data and backups remain.
+    Purge {
+        #[arg(long)]
+        account: String,
+        #[arg(long, conflicts_with = "confirm")]
+        dry_run: bool,
+        /// Exact account ID. Required unless --dry-run is supplied.
+        #[arg(long, required_unless_present = "dry_run")]
+        confirm: Option<String>,
+    },
+    AuthCancel {
+        #[arg(long)]
+        session: String,
+    },
     /// Authenticate IMAP and SMTP with required TLS; passwords arrive only on stdin.
+    #[command(visible_alias = "add-imap")]
     ConnectImap {
         /// Version1 public configuration JSON; no passwords.
         #[arg(long)]
@@ -206,12 +303,18 @@ pub enum AccountCommand {
         /// Return the browser URL without opening it automatically.
         #[arg(long)]
         no_browser: bool,
+        /// Wait up to five minutes for consent; add-google waits by default.
+        #[arg(long)]
+        wait: bool,
     },
     AuthStatus {
         #[arg(long)]
         session: String,
     },
-    List,
+    List {
+        #[arg(long)]
+        include_archived: bool,
+    },
     Disconnect {
         #[arg(long)]
         account: String,

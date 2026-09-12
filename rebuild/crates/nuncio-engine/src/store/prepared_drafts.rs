@@ -93,7 +93,7 @@ impl Store {
             let id=uuid::Uuid::new_v4().to_string();
             let content=serde_json::to_string(&prepared.content).map_err(|_|StoreError::InvalidInput)?;
             let context=serde_json::to_string(&prepared.context).map_err(|_|StoreError::InvalidInput)?;
-            if !tx.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?1)",[&account],|r|r.get::<_,bool>(0))? {return Err(StoreError::NotFound);}
+            super::accounts::writable(&tx,&account)?;
             tx.execute("INSERT INTO drafts(account_id,id,version,subject,content_json,created_at_ms,updated_at_ms,context_json) VALUES (?1,?2,1,?3,?4,?5,?5,?6)",params![account,id,prepared.content.subject,content,now,context])?;
             for (position,a) in prepared.attachments.into_iter().enumerate() {
                 let blob=super::blobs::insert(&tx,&account,&a.bytes)?;

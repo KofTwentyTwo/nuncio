@@ -373,6 +373,7 @@ pub(crate) fn storage_error(e: store::StoreError) -> Status {
         store::StoreError::ResultTooLarge => Status::resource_exhausted(message),
         store::StoreError::NotFound => Status::not_found(message),
         store::StoreError::InvalidInput => Status::invalid_argument(message),
+        store::StoreError::AccountLifecycle => Status::failed_precondition(message),
         store::StoreError::RefreshRequired => Status::failed_precondition(message),
         store::StoreError::Unavailable => Status::unavailable(message),
         _ => Status::internal(message),

@@ -203,7 +203,7 @@ async fn restore_rekeys_preserves_durable_payloads_and_holds_all_pending_work_af
     let target = temp.path().join("restored");
     let report = staged.activate(&target).unwrap();
     assert_eq!(report.backup, *backup.inspection());
-    assert_eq!(report.schema_version, 22);
+    assert_eq!(report.schema_version, 23);
     assert_eq!(report.held_operations, 3);
     assert!(report.revision > report.backup.revision);
     assert!(!stage_path.exists());
@@ -450,6 +450,7 @@ async fn restore_rejects_bad_inputs_and_failed_migration_without_altering_origin
                 .unwrap();
                 if version == 18 {
                     c.execute_batch("DROP TABLE staged_calendar_repair_events; DROP TABLE staged_calendar_repair_ids; DROP TABLE operation_reconciliation_requests; DROP TABLE restore_cleanup_jobs;").unwrap();
+                    c.execute_batch("ALTER TABLE accounts DROP COLUMN display_name; ALTER TABLE accounts DROP COLUMN version; ALTER TABLE accounts DROP COLUMN paused; ALTER TABLE accounts DROP COLUMN archived;").unwrap();
                     c.execute("DELETE FROM schema_migrations WHERE version>18", [])
                         .unwrap();
                     if case == "schema18" {
@@ -476,7 +477,7 @@ async fn restore_rejects_bad_inputs_and_failed_migration_without_altering_origin
             let staged = result.unwrap();
             let report = staged.activate(&temp.path().join("upgraded")).unwrap();
             assert_eq!(report.backup.schema_version, 18);
-            assert_eq!(report.schema_version, 22);
+            assert_eq!(report.schema_version, 23);
             let c = opened(
                 &temp.path().join("upgraded/store.db"),
                 &format!("x'{}'", hex::encode([0x32; 32])),

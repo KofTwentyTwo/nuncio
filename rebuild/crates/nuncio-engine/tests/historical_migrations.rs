@@ -71,7 +71,7 @@ async fn failure_at_each_migration_ledger_write_rolls_back_schema_and_data_and_a
         let store = Store::open(temp.path(), Zeroizing::new(KEY.to_vec()))
             .await
             .unwrap();
-        assert_eq!(store.status().await.unwrap().schema_version, 22);
+        assert_eq!(store.status().await.unwrap().schema_version, 23);
         if version >= 7 {
             assert_eq!(
                 store
@@ -117,7 +117,7 @@ async fn every_historical_backup_restores_into_a_new_encrypted_store_with_pendin
         .unwrap();
         let target = temp.path().join("restored");
         let report = staged.activate(&target).unwrap();
-        assert_eq!(report.schema_version, 22);
+        assert_eq!(report.schema_version, 23);
         assert_eq!(report.backup.schema_version, version);
         assert_eq!(report.held_operations, if version >= 10 { 2 } else { 0 });
         assert!(
@@ -293,7 +293,7 @@ async fn every_frozen_schema_migrates_without_losing_existing_columns_or_durable
         let store = Store::open(temp.path(), Zeroizing::new(KEY.to_vec()))
             .await
             .unwrap();
-        assert_eq!(store.status().await.unwrap().schema_version, 22);
+        assert_eq!(store.status().await.unwrap().schema_version, 23);
         assert_eq!(store.accounts().await.unwrap().len(), 2);
         for account in [ACCOUNT, IMAP] {
             assert_eq!(
@@ -382,7 +382,7 @@ async fn every_frozen_schema_migrates_without_losing_existing_columns_or_durable
             c.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            22
+            23
         );
         assert_eq!(
             c.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))

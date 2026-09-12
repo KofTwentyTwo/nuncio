@@ -11,6 +11,13 @@ service Accounts {
   rpc DisconnectAccount(AccountRequest) returns (DisconnectAccountResponse);
   // Explicit online credential/identity check; list remains a local query.
   rpc CheckAccount(AccountRequest) returns (Account);
+  rpc GetAccount(AccountRequest) returns (Account);
+  rpc UpdateAccount(UpdateAccountRequest) returns (Account);
+  rpc UpdateImapAccount(UpdateImapAccountRequest) returns (ConnectImapResponse);
+  rpc SetAccountLifecycle(SetAccountLifecycleRequest) returns (AccountLifecycleResponse);
+  rpc PreviewAccountPurge(AccountRequest) returns (AccountPurgePreview);
+  rpc PurgeAccount(PurgeAccountRequest) returns (PurgeAccountResponse);
+  rpc CancelGoogleAuth(GetAuthStatusRequest) returns (AuthSession);
 }
 message BeginGoogleAuthRequest {
   string client_id = 1;
@@ -33,11 +40,49 @@ message Account {
   string provider = 2;
   string address = 3;
   string state = 4;
+  string display_name = 5;
+  uint64 version = 6;
+  string auth_state = 7;
+  optional string identity = 8;
 }
-message ListAccountsRequest {}
+message ListAccountsRequest { bool include_archived = 1; }
 message ListAccountsResponse { repeated Account accounts = 1; }
 message AccountRequest { string account_id = 1; }
 message DisconnectAccountResponse {}
+
+message UpdateAccountRequest { string account_id = 1; uint64 version = 2; string display_name = 3; }
+enum AccountLifecycleAction {
+  ACCOUNT_LIFECYCLE_ACTION_UNSPECIFIED = 0;
+  ACCOUNT_LIFECYCLE_ACTION_PAUSE = 1;
+  ACCOUNT_LIFECYCLE_ACTION_RESUME = 2;
+  ACCOUNT_LIFECYCLE_ACTION_ARCHIVE = 3;
+  ACCOUNT_LIFECYCLE_ACTION_RESTORE = 4;
+}
+message SetAccountLifecycleRequest { string account_id = 1; AccountLifecycleAction action = 2; }
+message AccountLifecycleResponse { Account account = 1; bool credential_cleanup_pending = 2; }
+message AccountPurgePreview {
+  string account_id = 1;
+  uint64 version = 2;
+  uint64 revision = 3;
+  bool archived = 4;
+  uint64 messages = 5;
+  uint64 calendars = 6;
+  uint64 events = 7;
+  uint64 drafts = 8;
+  uint64 blobs = 9;
+  uint64 blob_bytes = 10;
+  uint64 operations = 11;
+  uint64 queued_operations = 12;
+  uint64 unresolved_operations = 13;
+}
+message PurgeAccountRequest {
+  string account_id = 1;
+  uint64 version = 2;
+  uint64 revision = 3;
+  // Must exactly equal account_id. Deletes local data only; backups/exports remain.
+  string confirm_account_id = 4;
+}
+message PurgeAccountResponse { AccountPurgePreview deleted = 1; bool credential_cleanup_pending = 2; }
 
 enum MailTls { MAIL_TLS_UNSPECIFIED = 0; MAIL_TLS_IMPLICIT = 1; MAIL_TLS_START_TLS = 2; }
 enum SentPolicy { SENT_POLICY_UNSPECIFIED = 0; SENT_POLICY_SERVER = 1; SENT_POLICY_CLIENT_APPEND = 2; }
@@ -58,6 +103,13 @@ message ConnectImapRequest {
   ImapAccountConfig config = 1;
   ImapCredentials credentials = 2;
   optional string account_id = 3;
+}
+message UpdateImapAccountRequest {
+  string account_id = 1;
+  uint64 version = 2;
+  ImapAccountConfig config = 3;
+  // Omit to reuse securely stored credentials. Publication follows a successful TLS/auth probe.
+  ImapCredentials credentials = 4;
 }
 message ImapCapabilities {
   bool move_messages = 1;

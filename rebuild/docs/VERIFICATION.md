@@ -1,5 +1,69 @@
 # Verification evidence
 
+## September 12 — current account/installer full offline gate passed
+
+`python3 test-results/account-management-final-all/run.py`, shell 4169, exited 0. Its egress-denied `scripts/verify.py --all` passed all 34 commands. Both workspace configurations passed 322 tests, zero failed/ignored; all 411 captured source hashes stayed unchanged. Separate Google suites: mock 26, system 22, actual CLI 30, operations 8. IMAP/SMTP: contract 2, system 28, actual CLI 14. Recovery 5; repair 2/2; migration 1; reconciliation 3; multi-engine 1; security 3/2; resources 4/3; release isolation 2; independent generated client 1. Six local-service scripts, 22 script regressions, formatting, both Clippy modes, dependency and client-boundary gates passed. Repeated suites are not additional unique tests.
+
+The 196 recorded authorization cases cover all 49 RPCs. All 46 distinct before/after migration-commit SIGKILL receipts cover schemas 1–23, two verified restarts each, retained catalog/rows/CLI payloads, profile keys and independent provider state. Parent/child external egress was denied and loopback allowed. Exact commands, logs, records and source proof: `test-results/account-management-final-all/{final-summary,exit,source-verification,egress}.json` and `current-all/`. The previous fixture failure at shell31288 is retained separately; no assertions were weakened.
+
+This qualifies the current account implementation and installer source offline. Fresh clean production packages, current-source hosted CI and actual testing-artifact installation remain pending. Prior archive/CI results cannot qualify those delivery steps. Named Google/Synology/native-keystore acceptance remains deferred.
+
+The tested dependency/action-pin follow-up is signed locally as `1f47fe4e64cc7bbf4c10e2cb002d44aa1ed03167`, not yet pushed. Nine-file scope and signature/secret/whitespace/source receipts are in `test-results/checkpoint-security-followup/`; original workspace still matches its 790-test/fresh-index audit evidence. Older-source rebuild run34702939717 at549a598 passed all ten jobs; artifact download44847 exited0 and all ten result sets were inspected. The sibling security failure and all53classified alerts remain recorded in SECURITY-CI.md.
+
+
+## September12 — dependency/security checkpoints pushed; normal workspace passes
+
+Final original dependency gate:790passed/0failed/0ignored,123captured source hashes unchanged; fmt/Clippy/cargo-deny and all3complete-lock cargo-audit0.22.2 checks pass with zero vulnerabilities/warnings. Signed81a1bc6ce6ea84d82d38f88e21679d51c42cf85b includes13scoped files; signed549a5983db507670274422d6f702122b56210702 includes5security workflow/doc changes. Root rechecked source/input hashes, exact staged sets, whitespace and scopedGitleaks0; signatures verified (16433/65105 exit0). Push82025 exited0; exact remote549a598verified. Receipts checkpoint-dependencies/ and checkpoint-security/. Installer upload block remains unstaged; only rebuild workflow development triggers entered security checkpoint. Actual security34702939715 and rebuild34702939717 running at549a598; their rebuildsource remains previousbaseline.
+
+Current uncommitted account source fullgate4169 has passed normalworkspace322tests, zero failures/ignored across93resultgroups, plus builds/formatting/bothClippy/22scriptregressions. Feature workspace and separate suites remain running. Failed initialgate and fixture correction retained; no fullnewgate or freshaccountartifact claim.
+
+10:40Central email1a096482a4909b90 independentlyread asSENT to james@kof22.com with208413-byte19taskPNG; exactsentpayload/body/chart/receipt retained understatus-emails/2026-09-12-1040*. Nextdue16:40UTC. New all-open-PR request arrived afterward and is delegated for inventory/disposition and bounded fixes.
+
+
+## September 12 — user-requested delegated delivery and security changes
+
+Installer worker delivered scripts/install-testing.py, test_install_testing.py, TESTING-INSTALL.md and the macOS testing CI artifact upload.14focused tests and all22script regressions passed, plus Ruff/check-format and whitespace. Existing6ff9bb9package verified through installer extraction with458manifest entries/22receipt checks in temporary storage; actual GitHub evidence ZIP download/digest matched. No normal installation or binary execution. Root reviewed downloader/provenance/unsafe-path/manifest/native-header checks; fresh hosted archive and temporary-prefix acceptance remain pending. Worker results originally existed only in tool outputs; raw logs and temporary downloads/extractions were not retained. Its explicitly retrospective test/download/package observation receipt is test-results/testing-installer/evidence.json. The full gate independently captures fresh22script regression output.
+
+API-PUBLICATION-PLAN.md is a researched proposal only: separateAPI2.0.0-alpha.1, currentnuncio.v2 preserved, protobuf reference docs/grpcui/Buf compatibility. No runtime version discovery, API packager, registry/tag/publication was implemented or claimed.
+
+Documentation worker updated two READMEs and nine operating/evidence guides (11files) to distinguish historical6ff9bb9/7390e77 results from current schema23/49RPC pending full gate/package.152local links, balanced fences, whitespace and source command/RPC checks passed; no source changes during gate. Root added ACCOUNT-MANAGEMENT.md and current PROGRESS.md.
+
+Security worker delivered SECURITY-CI.md and existing-workflow changes for Rust/Python/JS/Actions CodeQL, development and all-PR triggers,3Cargo advisory jobs and Dependabot directories; installer upload preserved. Local YAML/structural assertions and explicit-path client advisory scan exited0. Whole-current-source Gitleaks exited1 on one archived Tauri updater minisign PUBLIC key; classification and redacted evidence retained, no suppression or credential output. Actual new hosted CodeQL extraction/findings are still unverified. Actualdev branch exists, develop does not; branch-protection configuration has no required checks, rulesets not inspected, remote settings unchanged. Original dependency remediation is separate and active.
+
+
+## September 12 — restore fixture correction and full gate retry
+
+The first full current-source gate shell31288 exited1 at the normal workspace command (cargo exit101): restore_rejects_bad_inputs_and_failed_migration_without_altering_original_files failed while constructing/restoring its synthetic schema18 fixture. It removed newer tables but retained schema23 account columns, so migration23 encountered duplicate columns. The fixture now removes all four added account columns when downgrading its synthetic schema. Every original failure, preservation and recovery assertion is retained. Focused shell7104 exited0: all4historical migration/backup tests and all3restore tests pass. No production source changed for this correction. The failed gate retains all commands/logs/exit/source proof under test-results/account-management-all/; all411captured source hashes were unchanged during that run.
+
+Fresh full-gate evidence is now test-results/account-management-final-all/ (separate wrapper/output; initial failure preserved). Poll its recorded shell in SESSION-STATE; no full-gate success claim until the terminal result.
+
+
+## September 12 — final archived-work admission and broad gate start
+
+Normal workspace Clippy shell3324 and feature Clippy shell77366 exited0. The expanded independent lost-ack send regression demonstrated that archived accounts still accepted new resend intent (shell19279 exit101, archived-intent-red.log); after guarding resend, it separately demonstrated new reconciliation admission (shell23627 exit101, archived-reconcile-red.log). Store-level lifecycle guards now reject both in the publication transaction while allowing existing read/replay and explicit non-sending resolution. Shell82295 exited0: one focused system test passed, 7filtered, independently accepted mail remained exactly one. Commands/status receipts and egress enforcement are under test-results/account-management/archived-*. No assertions weakened.
+
+Full current-source offline gate wrapper is test-results/account-management-all/run.py. It captures source SHA-256s, preserves previous integrated logs, runs scripts/egress.py -- python3 scripts/verify.py --all, and retains every command/status plus source verification. Results are pending; historical checks do not qualify these additions. Dependency agent independently confirmed no rebuild/client dependency changes are needed, allowing this source freeze; other agents own only current documentation and original-workspace/security-workflow changes during the gate.
+
+
+## September 12 — account lifecycle implementation and focused verification
+
+Evidence root: `test-results/account-management/`. These results precede the full new-source gate; previous package/CI results do not qualify this source.
+
+- Missing auth CLI RED: shell58095 exit101, actual `reauth-google` exit2. Google auth wait/cancel/restore/reauth actual E2E then passed shell42411 exit0, 1 test (auth-e2e.log/json, auth-green-egress.json). The initial log was overwritten by its green runner; its missing-command assertion and retained red subprocess directory `auth-e2e-artifacts/google-e2e-6mZE2o` identify that RED.
+- Basic lifecycle actual CLI: fresh feature build50203 exit0; runner40287 exit0, 1 passed/27 filtered/zero failed or ignored (lifecycle-e2e.log/json/egress). Independent request counts stayed unchanged across local lifecycle; beta retained its mail. Prior missing-command RED remains recorded below.
+- Storage: initial compilation found unsigned rusqlite conversions (36494 exit101); corrected explicit checked conversions. Shell18807 exit0 passed 2 lifecycle + 1 original credential test; shell90660 exit0 passed explicit account-table purge coverage. Archive-upload regression84149 exit101 reproduced a previously admitted upload publishing after archive; guarded publication/writes passed94570 exit0: lifecycle3, draft prepare3/storage1/upload1. Later72107 exit0 passed all five lifecycle tests, including encrypted backup/restore metadata and failed-purge transaction rollback (storage-recovery.log).
+- IMAP actual CLI: fixture shutdown compile error91327 exit101 retained in imap-compile-red.log; actual missing `edit-imap` RED16069 exit101 (CLI2), retained imap-account-red.log. Fresh versioned edit implementation build73089 exit0; independent local Dovecot/Mailpit account E2E75245 exit0, 1 passed/13 filtered. Public address edit, stable principal enforcement, pause/restart, archive/read/restore/reauth/purge and unchanged remote mailbox/copy/flag/SMTP effects verified.
+- Separate account/operation system tests: fixture UUID dependency compilation87953 exit101 retained. Runner99209 exit101: lost-ack evidence guard passed, paused admitted work unexpectedly became retry_wait rather than queued. After post-lock state recheck,92665 exit0: both tests pass, including purged queued work leaving beta's worker functional, zero unexpected alpha send, and retained remote delivery/evidence until explicit abandonment. Exact logs: account-system-{compile-red,red}.log and account-system.log/json/green-egress.
+- Separate IMAP account system59267 exit0, 1 passed/27 filtered: failed probe does not alter saved configuration/version, valid retained-credential edit works, archive and purge separately report failed secure cleanup, startup retries cleanup after the account row is gone, and independent remote effects stay unchanged.
+- Actual archive/purge crash test1114 exit101 before crash hooks existed. Fresh build78172 exit0;92155 exit0, 1 test covering all four before/after archive/purge commit boundaries. Real daemon SIGKILL, failing in-flight CLI, successful restart, retained other account and identical independent provider snapshots verified. Per-case account-crash-evidence.json files and original red log remain.
+- API compatibility9377 exit0: every previous field and RPC preserved. Frozen v2 descriptor deliberately refreshed after this comparison (descriptor-refresh.json); old descriptor retained separately. New descriptor has49RPCs; invalid-auth matrix must now exercise196cases. New schema-history-through-23 fixture retains prior22migrations unchanged; updated historical/current assertions and46migration SIGKILL boundaries still need the broad gate.
+
+Normal Clippy3324 was started after these results. Poll it and resolve findings; do not claim a full gate, production artifact, new commit or hosted CI yet. The 09:40 Central chart email was independently read as SENT (1a0960e4e115b94e,187462-byte PNG); next15:40UTC.
+
+## September 12 — account-management actual CLI regression
+
+`python3 scripts/egress.py --evidence test-results/account-management/red-egress.json -- python3 test-results/account-management/red.py` exited 101 (shell 47356): 0 passed, 1 failed, 27 filtered, zero ignored. The actual CLI returns 2 for the missing `account show`, where the lifecycle regression requires 0. Independent two-account Google fixtures and the real daemon ran before this assertion. This is the expected missing-feature RED, not a passing lifecycle claim. The earlier compile failure (RequestCount comparison traits) is separately preserved as `compile-red*`; the test now compares serialized independent request counters. Command, log and egress proof: `test-results/account-management/red.{json,log}`, `red-egress.json`; subprocess artifacts: `red-artifacts/google-e2e-gd7vx2`. No production implementation existed at this RED.
+
 ## September 12, 2026 — all actual hosted checks passed on 6ff9bb9
 
 Run34684158773 completed success; watcher3872 exited0. All ten jobs passed and

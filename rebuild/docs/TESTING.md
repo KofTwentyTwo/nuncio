@@ -1,5 +1,15 @@
 # Offline verification
 
+The current schema-23 account-management source and testing installer passed the
+complete offline gate on September 12: all 34 commands exited 0, normal and
+test-harness workspace configurations passed 322 tests each with zero failed or
+ignored, and all 411 captured source hashes stayed unchanged. All named suites,
+six Python mail-service scripts, and 22 script regressions passed. Receipts are
+under `test-results/account-management-final-all/{final-summary.json,exit.json,source-verification.json,current-all/}`.
+Fresh packaging, current-source hosted CI, and the first eligible testing download
+remain pending. Earlier schema-22 CI and archive evidence retain their historical
+scope; [SESSION-STATE.md](SESSION-STATE.md) records subsequent delivery progress.
+
 Run from the isolated worktree root:
 
 ```sh
@@ -18,7 +28,19 @@ python3 rebuild/scripts/verify.py --suite release_isolation
 python3 rebuild/scripts/verify.py --all
 ```
 
-The runner builds actual daemon/CLI test binaries under `rebuild/target/test-harness`; release checks build selected production packages without test features under `rebuild/target/production`. Every subprocess result, command, and exit status is recorded in `rebuild/test-results/<suite>/`. Required missing suites fail with exit 2. Named suites cover independent Google and IMAP/SMTP contracts, authenticated system tests, actual CLI reads/writes/crash recovery, migration/backup/repair, three-engine convergence, security and resource workloads. Resource instrumentation and the prior full Task14 gate have passed; full34-command Task15 integration gate58495 passed; local repeatable packaging has passed and hosted CI remains pending; consult SESSION-STATE and VERIFICATION for exact evidence. Never skip required suites to claim full verification.
+The runner builds actual daemon/CLI test binaries under `rebuild/target/test-harness`; release checks build selected production packages without test features under `rebuild/target/production`. Every subprocess result, command, and exit status is recorded in `rebuild/test-results/<suite>/`. Required missing suites fail with exit 2. Named suites cover independent Google and IMAP/SMTP contracts, authenticated system tests, actual CLI reads/writes/crash recovery, migration/backup/repair, three-engine convergence, security and resource workloads. Consult [VERIFICATION.md](VERIFICATION.md) for exact baseline and current-source evidence. Never skip required suites to claim full verification.
+
+Account-management coverage lives in the real-store lifecycle tests and the
+independent Google/IMAP system and CLI suites, including archive/purge crashes,
+credential cleanup, and admitted work crossing lifecycle changes. The retained
+pre-account descriptor checks compatibility independently of the current freeze.
+Installer regressions use synthetic ZIP/TAR archives, stub only GitHub processes,
+and install into temporary prefixes; they exercise integrity, provenance, unsafe
+paths, architecture refusal, and preservation/cleanup. Run them without compilation:
+
+```sh
+python3 -m unittest discover -s rebuild/scripts -p test_install_testing.py
+```
 
 The independent mock's normal dependencies exclude engine/proto. Its HTTP conformance tests establish provider behavior separately. System tests compose the real engine, SQLCipher, provider HTTP, authenticated RPC, and mock. E2E tests execute the real daemon and CLI; they wait for a private readiness file and authenticated health, use ephemeral ports, and force-kill/restart while preserving profile and remote state. Remote send/copy/notification assertions must use independent provider controls, not the local database or CLI alone.
 
@@ -61,7 +83,7 @@ any failed attempts remain in VERIFICATION; this description is not a full-gate 
 ## Egress enforcement and CI groups
 
 Fetch locked Rust dependencies (both workspaces), pinned server images and the
-RustSec advisory database before running offline checks. Six CI jobs call the same
+RustSec advisory database before running offline checks. Six rebuild test groups call the same
 runner with `--job`: rebuild-lint, rebuild-mock-contract, rebuild-system, rebuild-e2e,
 rebuild-imap, rebuild-release-check. `--all` retains both workspace test configurations
 and all18 named suites, and includes the independent Python mail-service suite,
@@ -106,9 +128,12 @@ checks those properties. Only fixture-local connections reach the providers.
 
 Python fixture style uses Ruff0.16.7 (tests/imap/ruff.toml); install tooling only
 into an isolated test environment or ephemeral CI runner. Never upload retained
-synthetic secret stores/profiles to CI artifacts: workflow retention includes
-command logs/results and numeric egress evidence only. Passing local checks does
-not establish live-provider compatibility or remote CI success.
+synthetic secret stores/profiles to CI artifacts. Evidence uploads contain command
+logs/results and numeric egress evidence. The separate Apple Silicon testing upload
+contains only the production archive, checksum sidecar and extracted-check receipt;
+the [installer](TESTING-INSTALL.md) accepts it only after the entire matching push
+run succeeds. Passing local checks does not establish live-provider compatibility
+or current-source remote CI success.
 
 For an isolated local Ruff installation, pass its absolute executable path in
 `REBUILD_RUFF`; no normal-environment installation is necessary. Set

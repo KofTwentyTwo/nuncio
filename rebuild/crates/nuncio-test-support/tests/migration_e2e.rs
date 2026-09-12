@@ -82,7 +82,7 @@ async fn cli(h: &E2eHarness, args: &[&str]) -> Value {
 
 async fn check_cli(h: &E2eHarness, old: u32, restart: u32) -> Result<(), TestError> {
     let status = cli(h, &["--json", "system", "status"]).await;
-    assert_eq!(status["storage"]["schema_version"], 22);
+    assert_eq!(status["storage"]["schema_version"], 23);
     let accounts = cli(h, &["--json", "account", "list"]).await;
     assert_eq!(
         accounts["accounts"].as_array().unwrap().len(),
@@ -278,7 +278,7 @@ async fn sigkill_before_and_after_every_migration_commit_preserves_whole_generat
                 let case = h.artifacts.file_name().unwrap().to_str().unwrap();
                 let evidence = serde_json::json!({
                     "case": name, "from_schema": old, "schema_after_kill": expected_version,
-                    "final_schema": 22, "verified_restarts": 2, "signal": 9,
+                    "final_schema": 23, "verified_restarts": 2, "signal": 9,
                     "frozen_migration_sha256": history().migrations[old as usize].sha256,
                     "original_ciphertext_sha256": hex::encode(Sha256::digest(&baseline)),
                     "post_crash_ciphertext_sha256": crash_hash,

@@ -124,7 +124,7 @@ impl Store {
         self.execute(move|c|{
             let _permit=permit;
             let tx=c.transaction()?;
-            let account=super::accounts::get(&tx,&input.account_id)?.ok_or(StoreError::NotFound)?;
+            let account=super::accounts::writable(&tx,&input.account_id)?;
             let id=uuid::Uuid::new_v4().to_string();
             let desired=json!({"draft_id":input.draft_id,"draft_version":input.snapshot_version,"submission":"send","sender":input.sender,"recipients":input.frozen.recipients,"message_id":input.frozen.message_id,"thread_id":input.frozen.thread_id});
             let inserted=tx.execute("INSERT INTO operations(account_id,id,request_id,kind,resource_id,fingerprint,request_json,desired_json,state,created_at_ms,updated_at_ms) VALUES (?1,?2,?3,'send',?4,?5,?6,?7,'queued',?8,?8) ON CONFLICT(account_id,request_id) DO NOTHING",params![input.account_id,id,request_id,input.draft_id,fingerprint,canonical,desired.to_string(),now])?;

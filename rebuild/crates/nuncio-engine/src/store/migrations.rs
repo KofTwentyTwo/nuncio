@@ -1,7 +1,7 @@
 use super::{StoreError, StoreOpenOptions};
 use rusqlite::{Connection, Transaction};
 
-pub(super) const VERSION: u32 = 22;
+pub(super) const VERSION: u32 = 23;
 
 pub(super) fn check_version(connection: &Connection) -> Result<u32, StoreError> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -155,6 +155,11 @@ pub(super) fn migrate(
         let transaction = connection.transaction()?;
         transaction.execute_batch(include_str!("restore_jobs_schema.sql"))?;
         commit(transaction, 22, options)?;
+    }
+    if version < 23 {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(include_str!("account_lifecycle_schema.sql"))?;
+        commit(transaction, 23, options)?;
     }
     Ok(())
 }

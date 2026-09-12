@@ -8,6 +8,16 @@ impl Store {
         config: ImapAccountConfig,
         capabilities: ImapCapabilities,
     ) -> Result<(), StoreError> {
+        self.connect_imap_versioned(account, config, capabilities, None)
+            .await
+    }
+    pub(crate) async fn connect_imap_versioned(
+        &self,
+        account: ConnectedAccount,
+        config: ImapAccountConfig,
+        capabilities: ImapCapabilities,
+        expected_version: Option<u64>,
+    ) -> Result<(), StoreError> {
         let config = config
             .canonicalized()
             .map_err(|_| StoreError::InvalidAccount)?;
@@ -17,6 +27,12 @@ impl Store {
             return Err(StoreError::InvalidAccount);
         }
         self.execute(move |c| {
+            if let Some(version) = expected_version {
+                let old = super::accounts::get(c, &account.id)?.ok_or(StoreError::NotFound)?;
+                if old.version != version {
+                    return Err(StoreError::VersionConflict);
+                }
+            }
             super::accounts::connect_provider(c, account, Some((config, capabilities)))
         })
         .await

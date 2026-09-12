@@ -1,40 +1,30 @@
 # Delivery progress estimates
 
-Software checkpoint 6ff9bb9 is implemented, offline verified, packaged, and passed
-all ten actual hosted CI jobs. Estimates are not measured percentages or delivery
-promises. 100% means implementation and applicable offline checks passed; live
-acceptance remains separate. Active hours exclude external waiting and unknown
-new defects. Shared work is counted once; native apps are excluded.
+September 12, 2026 — expanded account-management delivery and newly requested security work. Historical 6ff9bb9 software and 7390e77 documentation each passed all 10 hosted rebuild jobs; current account/installer source passed its full offline gate; fresh packages, hosted checks and testing-artifact delivery remain. Percentages are engineering estimates, not measured completion or delivery promises. 100% means the stated task/deliverable and its applicable offline checks passed, with actual hosted and live acceptance tracked separately. Shared verification is counted once under Task 14; active hours exclude external waiting and unforeseen defects. Native apps remain excluded.
 
 | Task | Estimated complete | Remaining hours | Remaining work / evidence |
 |---|---:|---:|---|
-| 01 Workspace, encrypted lifecycle and status | 100% | 0 | Implemented; relevant offline checks passed. |
-| 02 Independent stateful Google mock | 100% | 0 | Independent contract coverage includes limited writers and private-event masking. |
-| 03 System and subprocess E2E harnesses | 100% | 0 | Independent system and real subprocess harnesses implemented; hosted controller isolation checks passed. |
-| 04 Google OAuth and account lifecycle | 100% | 0 | Implemented and offline verified; live OAuth remains Task 16. |
-| 05 Gmail initial sync, MIME and attachments | 100% | 0 | Implemented; pagination and byte-fidelity checks passed. |
-| 06 Gmail incremental sync and reconciliation | 100% | 0 | Implemented; restart/cursor/reconciliation checks passed. |
-| 07 Calendar sync and agenda | 100% | 0 | Implemented; canonical/occurrence sync checked offline. |
-| 08 Background sync and change streaming | 100% | 0 | Implemented; scheduling, backoff and cancellation checked. |
-| 09 Durable drafts and operation journal | 100% | 0 | Implemented; durable intent and operation history checked. |
-| 10 Gmail send and mail mutations | 100% | 0 | Implemented; independent send/label effects checked. |
-| 11 Calendar writes, RSVP and free/busy | 100% | 0 | Limited-writer writes and private-event denial passed mock, API and actual CLI checks. |
-| 12 Synology IMAP/SMTP mail support | 100% | 0 | Optional mailbox-hint cursor correction passed full regression; live MailPlus remains Task16. |
-| 13 Export, backup, restore and repair | 100% | 0 | Implemented; migration and subprocess crash recovery checked. |
-| 14 Adversarial checks and resource bounds | 100% | 0 | All34offline commands and both308-test workspace configurations passed with original bounds and assertions. |
-| 15 Local packages, API contract and CI | 100% | 0 | Clean artifact pair and all ten actual hosted jobs passed on 6ff9bb9. |
-| 16 Provider acceptance and final report | 50% | 3–7* | 0–1 h delivery closeout; 3–6 h live acceptance remain deferred/unapproved. |
+| 01 Workspace, encrypted lifecycle and status | 100% | 0 | Schema23 lifecycle/storage and full offline gate passed. |
+| 02 Independent stateful Google mock | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
+| 03 System and subprocess E2E harnesses | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
+| 04 Google OAuth and account lifecycle | 100% | 0 | Google/IMAP add, versioned edit, reauth/wait/cancel and lifecycle passed through engine/API/CLI offline; live acceptance counted under16. |
+| 05 Gmail initial sync, MIME and attachments | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
+| 06 Gmail incremental sync and reconciliation | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
+| 07 Calendar sync and agenda | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
+| 08 Background sync and change streaming | 100% | 0 | Pause/archive admission, scheduling and streaming passed the full gate. |
+| 09 Durable drafts and operation journal | 100% | 0 | Archived upload/new-intent rejection and retained lost-ack evidence passed. |
+| 10 Gmail send and mail mutations | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
+| 11 Calendar writes, RSVP and free/busy | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
+| 12 Synology IMAP/SMTP mail support | 100% | 0 | Full independent IMAP/SMTP gate passed:2contract/28system/14actualCLI. |
+| 13 Export, backup, restore and repair | 100% | 0 | Schema23 backup/restore/repair passed, including46migration SIGKILL boundaries. |
+| 14 Adversarial checks and resource bounds | 100% | 0 | All34commands passed,322tests per workspace,196auth cases,46migration cases and411source hashes unchanged. |
+| 15 Local packages, API contract and CI | 85% | 2–5 | Installer22script regressions/full gate passed; clean account checkpoint, fresh package pair, hosted testing artifact and temp-prefix install remain. |
+| 16 Provider acceptance and final report | 50% | 4–7* | 1hour offline documentation/handoff;3–6hours deferred named live/native acceptance. |
+| 17 Original-workspace dependency remediation | 100% | 0 | All11PRs reviewed/incorporated or superseded; original790tests and fresh-index audit pass. Final yank/label correction signed1f47fe4, push/rerun pending under18. |
+| 18 Development security scanning | 95% | 0.5–1 | Four hostedCodeQL analyses inspected;53alerts classified,9actionpins corrected, prior yanked-lock failure preserved. Corrected current-source rerun remains. |
+| 19 API publication design | 100% | 0 | SemVer/gRPC docs/client/compatibility proposal delivered. Publication pipeline implementation and remote publication are future scope, not claimed complete. |
+| 20 Post-engine product roadmap | 100% | 0 | Senior PO/PM milestone plan delivered; its future implementation is outside this goal. |
 
-Remaining offline delivery: 0–1 active hour for the documentation checkpoint,
-its resulting verification record, and handoff. Live acceptance: 3–6 active hours
-after separate named-resource approval, currently deferred. Total: 3–7 active
-hours. This is lower than the last email's 2–5 offline hours because all actual
-hosted jobs and artifact verification now passed. Completion still requires live
-acceptance; no setup or account access is being requested again now.
+Estimated remaining active offline work:3.5–7 hours:2–5hours for current-source package/installer delivery,0.5–1hour for corrected hosted security verification, and1hour for final documentation/handoff. Live/native acceptance adds3–6hours after named-resource authorization and remains deferred. The estimate fell because the full updated offline gate now passes. API publication design and post-engine milestone planning are delivered; their proposed implementations are not silently added to the current goal.
 
-Every hourly email must include all 16 tasks as an inline PNG, matching HTML table,
-and plain-text fallback. Refresh and inspect the chart before sending. Latest
-verified email: 1a094d6890dada3b at 03:57 Central; artifacts and renderer are in
-`test-results/status-emails/2026-09-12-0357*` and `render-progress-0357.py`.
-Next due: 04:57 Central / 09:57 UTC while execution remains active. This reporting
-aid is outside the production application.
+Every hourly email includes all 16 original major tasks and these material follow-ups as a PNG chart, matching HTML table and plain-text fallback. Latest independently verified email: 1a096482a4909b90 at 10:40 Central; next due 11:40 Central / 16:40 UTC during active execution. Reports use actual evidence and refresh estimates before sending. No unattended inactive-session scheduler has been established.

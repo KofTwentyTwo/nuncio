@@ -126,7 +126,7 @@ async fn authenticated_maintenance_streams_verified_ciphertext_and_restores_a_ne
     else {
         unreachable!()
     };
-    assert_eq!(info.schema_version, 22);
+    assert_eq!(info.schema_version, 23);
     assert_eq!(info.accounts, 0);
     let mut bytes = Vec::new();
     let mut complete = false;

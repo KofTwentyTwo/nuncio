@@ -1,10 +1,18 @@
 use super::{AccountRecord, ConnectedAccount, StoreError, StoredAccount};
 use rusqlite::{params, Connection, OptionalExtension};
 
+pub(super) fn writable(connection: &Connection, id: &str) -> Result<StoredAccount, StoreError> {
+    let row = get(connection, id)?.ok_or(StoreError::NotFound)?;
+    if row.archived {
+        return Err(StoreError::AccountLifecycle);
+    }
+    Ok(row)
+}
+
 pub(super) fn get(connection: &Connection, id: &str) -> Result<Option<StoredAccount>, StoreError> {
     connection
         .query_row(
-            "SELECT id,provider,address,subject,state,credential_ref FROM accounts WHERE id=?1",
+            "SELECT id,provider,address,subject,CASE WHEN archived=1 THEN 'archived' WHEN paused=1 THEN 'paused' ELSE state END,credential_ref,display_name,version,state,paused,archived FROM accounts WHERE id=?1",
             [id],
             |row| {
                 Ok(StoredAccount {
@@ -16,6 +24,11 @@ pub(super) fn get(connection: &Connection, id: &str) -> Result<Option<StoredAcco
                     subject: row.get(3)?,
                     state: row.get(4)?,
                     credential_ref: row.get(5)?,
+                    display_name: row.get(6)?,
+                    version: u64::try_from(row.get::<_, i64>(7)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    auth_state: row.get(8)?,
+                    paused: row.get(9)?,
+                    archived: row.get(10)?,
                 })
             },
         )
@@ -85,6 +98,9 @@ pub(super) fn connect_provider(
     }
     let old = get(&transaction, &account.id)?;
     if let Some(old) = &old {
+        if old.archived {
+            return Err(StoreError::AccountLifecycle);
+        }
         if old.account.provider != provider || old.subject.as_deref() != Some(&account.subject) {
             return Err(StoreError::InvalidAccount);
         }
@@ -96,7 +112,7 @@ pub(super) fn connect_provider(
         }
     }
     transaction.execute("INSERT INTO accounts(id,provider,address,subject,state,credential_ref) VALUES (?1,?5,?2,?3,'connected',?4)
-        ON CONFLICT(id) DO UPDATE SET address=excluded.address,state='connected',credential_ref=excluded.credential_ref",
+        ON CONFLICT(id) DO UPDATE SET address=excluded.address,state='connected',credential_ref=excluded.credential_ref,version=accounts.version+1",
         params![account.id,account.address,account.subject,account.credential_ref,provider])?;
     if let Some((config, capabilities)) = imap {
         transaction.execute("INSERT INTO imap_accounts(account_id,config,capabilities) VALUES(?1,?2,?3) ON CONFLICT(account_id) DO UPDATE SET config=excluded.config,capabilities=excluded.capabilities",params![account.id,serde_json::to_string(&config).map_err(|_|StoreError::InvalidAccount)?,serde_json::to_string(&capabilities).map_err(|_|StoreError::InvalidAccount)?])?;
@@ -121,7 +137,7 @@ pub(super) fn set_state(
     }
     let transaction = connection.transaction()?;
     let old = get(&transaction, id)?.ok_or(StoreError::InvalidAccount)?;
-    if old.state == state && old.credential_ref.is_none() {
+    if old.auth_state == state && old.credential_ref.is_none() {
         return Ok(());
     }
     if let Some(reference) = old.credential_ref {
@@ -131,7 +147,7 @@ pub(super) fn set_state(
         )?;
     }
     transaction.execute(
-        "UPDATE accounts SET state=?1,credential_ref=NULL WHERE id=?2",
+        "UPDATE accounts SET state=?1,credential_ref=NULL,version=version+1 WHERE id=?2",
         params![state, id],
     )?;
     change(&transaction, id, "account_paused")?;
