@@ -32,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Cache Cargo Dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Run Clippy Linter (all targets, matches local `cargo check-all`)
         run: cargo check-all
 
@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Cache Cargo Dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Run Workspace Tests
         run: cargo test-all
 
@@ -55,9 +55,9 @@ jobs:
       - name: Install llvm-tools component
         run: rustup component add llvm-tools-preview
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@212e92b595ceefa6daaad2cda95b921ed5da4cd4 # cargo-llvm-cov
       - name: Cache Cargo Dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # Coverage is informational only (matches the local `cargo cov` alias):
       # no --fail-under-lines threshold, and the job is continue-on-error so a
       # coverage regression or tooling hiccup never reds the pipeline. A
@@ -76,6 +76,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Cache Cargo Dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Build All Workspace Crates
         run: cargo build --workspace --all-targets

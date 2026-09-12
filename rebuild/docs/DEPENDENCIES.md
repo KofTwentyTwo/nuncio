@@ -8,9 +8,12 @@ the original workspace, rebuild, and independent client. GitHub reported zero
 open Dependabot security alerts, but the original workspace still required h2,
 keyring, age, event-listener, and optional SQLx/RSA remediation. These original
 workspace changes do not alter the rebuild/client lockfiles. Their fresh
-advisory checks remain clean. All three complete lockfiles also pass cargo-audit
-0.22.2 with zero vulnerabilities/warnings, and the final original workspace passes
-790 tests plus formatting/Clippy. Receipts and GitHub closure conditions are
+advisory checks remain clean. Hosted CI subsequently found yanked optional
+`chacha20 0.10.1` in the original lockfile, missed by the initial cached-index
+local audit. A minimal update to 0.10.2 now passes cargo-audit 0.22.2 with an
+explicit online index refresh and zero vulnerabilities/warnings; the original
+workspace again passes 790 tests plus formatting/Clippy. The original hosted
+failure remains recorded and its corrected hosted rerun is pending. Receipts and GitHub closure conditions are
 tracked in that report. Existing package notices below describe the earlier
 rebuild artifact, not a rebuilt original-workspace distribution.
 

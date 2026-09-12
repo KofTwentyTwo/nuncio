@@ -29,6 +29,6 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
-      - "actions"
+      - "github_actions"
     commit-message:
       prefix: "deps(actions)"

@@ -14,11 +14,41 @@ from RustSec and checked at commit
 `b50980aad8b8f14f77e25a97b32dd94bf008b0af` using cargo-deny 0.19.8.
 No advisory exceptions or GitHub alert dismissals were added.
 
-The final original workspace passes **790 tests, zero failed/ignored**, formatting,
-Clippy, and cargo-deny. All three complete lockfiles pass cargo-audit 0.22.2
-with **zero vulnerabilities and zero warnings**. The initial original lockfile,
+The original workspace passes **790 tests, zero failed/ignored**, formatting,
+Clippy, and cargo-deny after the hosted-index follow-up below. All three complete
+lockfiles initially passed local cargo-audit 0.22.2; that cached-index result did
+not detect a yanked optional package subsequently identified by hosted CI. The
+corrected original lockfile now passes with an explicit online index refresh,
+**zero vulnerabilities and zero warnings**. The initial original lockfile,
 rescanned with that same tool/database, fails with two vulnerability advisories,
 one unsoundness advisory, and three maintenance advisories.
+
+## Hosted index follow-up
+
+Hosted [original advisory job 103577787655](https://github.com/KofTwentyTwo/nuncio/actions/runs/34702939715/job/103577787655)
+at `549a5983db507670274422d6f702122b56210702` failed on yanked `chacha20 0.10.1`,
+despite the preceding selected-graph cargo-deny check passing. The optional
+lockfile chain is `reqwest` → `quinn` → `quinn-proto` → `rand 0.10.2` →
+`chacha20 0.10.1`; it is absent from the selected graph even with `--target all`.
+The fresh [crates.io index](https://index.crates.io/ch/ac/chacha20) marks 0.10.0
+and 0.10.1 yanked and 0.10.2 unyanked. This is a yank finding, with no CVE/GHSA
+assigned in the scan; no reason for the yank is inferred.
+
+`cargo update --package chacha20@0.10.1 --precise 0.10.2` changes only that
+version/checksum and the referring `rand` lock entry. Rebuild/client locks remain
+unchanged. Formatting, strict Clippy, all **790 tests**, and cargo-deny pass again.
+Cargo-audit without `--no-fetch` explicitly refreshes both RustSec and crates.io,
+then passes with zero vulnerabilities/warnings. Its human-readable output confirms
+the index update without cache/access warnings. Current original lock SHA-256:
+`e93af28bd2ef6610cfb420e7fc0c3a1c48443f207dc80bc8d92996affffa019b`.
+
+Receipts are under `rebuild/test-results/dependency-security/yank-followup/`:
+`summary.json`, all four gate logs/receipts, verified `tests-egress.json`,
+`audit-online.json`, and `audit-online-human.log`. The original successful local
+receipts remain unchanged: `--no-fetch` also disables registry-index refresh in
+cargo-audit 0.22.2, so those receipts establish only the cached index's state.
+The hosted failure is preserved, and a fresh hosted result on the corrected
+commit is still required. No yank suppression or advisory ignore was introduced.
 
 ## Advisories and affected paths
 
@@ -71,7 +101,7 @@ alongside existing tamper, wrong-key, and incorrect-passphrase assertions. These
 fixtures contain only synthetic data; their provenance is in
 [`crates/nuncio-store/tests/fixtures/README.md`](../../crates/nuncio-store/tests/fixtures/README.md).
 
-| Final check | Result | Local receipt under `rebuild/test-results/dependency-security/` |
+| Check at the initial dependency checkpoint | Result | Local receipt under `rebuild/test-results/dependency-security/` |
 |---|---|---|
 | `cargo fmt --all -- --check` | Exit 0 | `original-fmt-final.receipt.json` |
 | `cargo clippy --locked --offline --workspace --all-targets -- -D warnings` | Exit 0 | `original-clippy-final.receipt.json` |
@@ -82,7 +112,7 @@ fixtures contain only synthetic data; their provenance is in
 | Complete original, rebuild, and client lockfiles, cargo-audit 0.22.2 with `--deny warnings` | Three exits 0; each zero vulnerabilities/warnings, empty ignore list, no target filtering | `{original,rebuild,client}-lock.audit.{json,receipt.json}` |
 
 All 123 original source/fixture/manifest files captured before the final suite
-retained identical hashes afterward. The final original lock SHA-256 is
+retained identical hashes afterward. The original lock SHA-256 at that initial checkpoint was
 `af1495a132b34c44a3a811c289e81ec6d6c9152e703bd076cca17cac9498527c`.
 The earlier 790-test run preceded the SQLx/event-listener cleanup; the final run
 independently verifies the final graph. Initial compiler diagnostics and the
