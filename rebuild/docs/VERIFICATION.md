@@ -1,5 +1,32 @@
 # Verification evidence
 
+## September 13 — full guided setup gate and hosted scheduler diagnostic
+
+`account-setup-ux/full-second-egress.json` and `all/results.json`: shell61754 exited0,
+all35commands passed. Both complete workspace configurations:328passed/0failed/
+0ignored. Separate Google mock26/system22/CLI35 and independent IMAP contract2/
+system28/CLI15 passed; all other recovery/security/resource/migration checks passed.
+All34current script tests and trusted CI registration guards passed separately.
+Signed/pushed78d4d9e and exact remote head/signature are verified in
+`account-setup-ux/checkpoint-receipt.json`.
+
+Hosted `34769543129` passed7/7security jobs; `34769543130` passed9/10rebuild jobs.
+Linux job103756496164 failed the final scheduler recovery wait after cancellation
+inside persisted provider backoff (21/22Google system cases passed). Logs and actual
+terminal job/head observations are retained; this failed run is not qualified.
+Unchanged focused macOS test passed5/5; unchanged offline Linux suite passed22/22.
+A controlled Linux RED experiment with seven valid800ms independent Google GET
+responses failed101 at the original8sec final wait, while remote counts showed
+continuing retrieval. A GREEN experiment separated bounded eligibility from the
+unchanged8sec recovery budget and passed1/1 in11.92sec. Both preserve no-send/
+no-notification assertions. The tracked regression also checks no Gmail reads
+before the persisted retry deadline and success at/after it. No production change.
+Evidence: `account-setup-ux/linux/{run,latency-red,latency-green}.{json,log}`.
+Full relevant regression passed: Linux22/22 (20835/0), macOS22/22 and
+fmt/bothClippy (67502/0, all4commands0). Do not infer hosted success from the
+local reproduction. Initial macOS wrapper exit71 was the
+outer sandbox refusing nested sandbox-exec, then rerun with narrow escalation.
+
 ## September 13 — guided account setup in progress
 
 Checkpoint qualification: both `workspace` and `workspace-test-harness`

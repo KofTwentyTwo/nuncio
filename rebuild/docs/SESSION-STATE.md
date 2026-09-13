@@ -1,40 +1,43 @@
 # Rebuild session state
 
-## September 13 — guided account setup requested
+## September 13 — guided setup delivery and CI correction
 
-Both full workspace configurations passed all 328 tests, including the six
-new guided setup cases. Both Clippy configurations, formatting, all 34 current
-script regressions and the optional CI registration guard checks passed.
-The authorized implementation checkpoint is proceeding on that evidence while
-the separate full-gate commands continue in shell 61754. This is a checkpoint,
-not final artifact qualification: remaining standalone checks, fresh packaging,
-actual hosted CI and latest-build installation must still finish.
+Signed/pushed software `78d4d9e2cf76c78fb6c02832589b63439fd7dae9` implements
+`account add`, hidden terminal password entry, advanced verified-TLS MailPlus
+settings, bundled Google registration support and safe browser cancellation.
+The full 35-command offline gate passed: both workspace configurations 328/0/0,
+all standalone suites and quality checks exit 0. The later CI wrapper also passed
+all 34 current script regressions and trusted event/ref checks. No Google app
+registration exists; no real account/remote settings changes have been made.
 
-Guided CLI implementation is now present, including hidden `/dev/tty` entry,
-optional advanced verified-TLS settings, build-supplied Google registration, and
-simple terminal results. Four initial focused PTY cases passed (three Google
-and one independent MailPlus case, including bad credentials and restart).
-A fifth test exposed a Google Ctrl-C registration race; the signal listener now
-registers before consent is displayed. Full verification is active in shell61754,
-`test-results/all/results.json`; latest exact state remains in current-execution.json.
-No new checkpoint/artifact has been declared qualified yet.
+Actual security run34769543129 passed all seven jobs. Rebuild34769543130 passed
+nine jobs but Linux system tests failed at scheduler recovery after cancelled
+provider backoff. Do not qualify that run's artifact. Original macOS focused
+checks passed five times and the unchanged Linux suite passed22/22. A deterministic
+Linux experiment reproduced the timeout with seven valid800ms Google responses:
+the original8sec recovery budget included the remaining6sec Retry-After wait.
+The corrected experiment passed by separately bounding deadline eligibility and
+subsequent recovery, retaining8sec convergence and all original assertions.
+Tracked regression adds the valid latency, continuous pre-deadline request checks,
+and success-after-deadline assertion; engine/adapter behavior is unchanged.
 
-James reports the laptop quick start passed and requests substantially easier
-account setup. Root is implementing `account add` with guided prompts and hidden
-passwords over the existing authenticated account API. Follow
-[ACCOUNT-SETUP-UX-PLAN.md](ACCOUNT-SETUP-UX-PLAN.md). No Google Desktop OAuth client
-exists yet; prepare application-level registration support and an honest missing
-registration state. Work is inline; commits/pushes remain authorized, and real
-account access/remote registration changes still require their named scope.
-Initial worktree was clean at c953ae8. Prior artifacts qualify prior source only.
+Relevant regression passed: macOS scheduler22/22, fmt and bothClippy
+(shell67502/0); independent Linux22/22 (shell20835/0). Evidence: `test-results/account-setup-ux/`, especially
+`linux/{latency-red,latency-green,regression}.{log,json}` and
+`scheduler-regression.json`. Next sign/push the correction, verify
+actual hosted CI, build/check two clean production packages, then exercise the
+public installer into a fresh temporary prefix. No normal installation or native
+credential access. Exact handles: `test-results/checkpoint-final/current-execution.json`.
 
-Latest status email: September 13, 11:13:42 Central, message/thread
-`1a09b8bbf47dac5f`, independently verified SENT to james@kof22.com with exact
-plain/HTML body and a 233140-byte inline 23-task chart. Guided setup is estimated
-75% complete (0.5–1.5 active hours); one-time Google registration is separately
-pending (0.5–1 hour plus external delays). Receipt/body/chart:
-`test-results/status-emails/2026-09-13-1115*`. Next due 12:13:42 Central /17:13:42 UTC
-during active execution. Historical status emails remain retained.
+The existing guide is [ACCOUNT-SETUP.md](ACCOUNT-SETUP.md); original scope and
+remaining external acceptance are preserved. James reports the prior laptop quick
+start worked; named live/native checks remain deferred, and the full goal remains
+incomplete. App registration is a one-time maintainer task, not per-account setup.
+
+Latest hourly email: September13 at11:13:42Central, verified SENT message
+`1a09b8bbf47dac5f`, exact plain/HTML and233140-byte23-task chart.
+Next due12:13:42Central/17:13:42UTC during active execution. Receipt:
+`test-results/status-emails/2026-09-13-1115*`.
 
 ## Curl-to-Bash testing installation delivered
 

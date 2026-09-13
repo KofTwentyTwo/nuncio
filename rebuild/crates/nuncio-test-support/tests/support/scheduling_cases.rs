@@ -20,6 +20,12 @@ async fn wait_status(
         if predicate(&s) {
             return s;
         }
+        if tokio::time::Instant::now() >= deadline {
+            eprintln!(
+                "Remote method counts at deadline: {}",
+                serde_json::to_string(&h.google.control().snapshot().await.requests).unwrap()
+            );
+        }
         assert!(
             tokio::time::Instant::now() < deadline,
             "scheduler state did not converge: {s:?}"
@@ -392,10 +398,59 @@ async fn polling_honors_remote_retry_deadlines_across_restart_and_keeps_other_sc
         .unwrap()
         .into_inner();
     assert_eq!(cancelled.state, "cancelled");
-    wait_status(&h, |s| {
-        s.sync
+    // Each response remains below the one-second request timeout. Together
+    // they require a real recovery window after Retry-After expires.
+    for suffix in [
+        "profile",
+        "labels",
+        "messages",
+        "messages/m-001",
+        "messages/m-002",
+        "messages/m-003",
+        "history",
+    ] {
+        h.google
+            .control()
+            .inject(Fault {
+                method: "GET".into(),
+                path: format!("/gmail/v1/users/me/{suffix}"),
+                account: Some("alpha@example.test".into()),
+                call: None,
+                phase: Phase::Before,
+                action: FaultAction::Delay { millis: 800 },
+            })
+            .await;
+    }
+    // Provider backoff and sync convergence are separate bounded phases. A
+    // valid slow response must not spend the recovery budget waiting to retry.
+    let eligibility_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let remote_calls = calls(&h, "alpha@example.test", "/gmail/").await;
+        let current = status(&h).await;
+        // Status computes success age from the same engine clock as retry_at.
+        let now = current
+            .sync
             .iter()
-            .any(|s| s.account_id == alpha && s.scope == "gmail" && s.last_success_at_ms.is_some())
+            .find_map(|scope| {
+                Some(scope.last_success_at_ms? + i64::try_from(scope.age_ms?).unwrap())
+            })
+            .unwrap();
+        if now >= retry_at {
+            break;
+        }
+        assert_eq!(remote_calls, 1, "cancelled sync bypassed provider guidance");
+        assert!(
+            tokio::time::Instant::now() < eligibility_deadline,
+            "provider retry deadline did not become eligible: {current:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    wait_status(&h, |s| {
+        s.sync.iter().any(|s| {
+            s.account_id == alpha
+                && s.scope == "gmail"
+                && s.last_success_at_ms.is_some_and(|at| at >= retry_at)
+        })
     })
     .await;
     let remote = h.google.control().snapshot().await;

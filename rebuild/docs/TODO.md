@@ -5,7 +5,10 @@
 - [x] Implement direct guided CLI account setup and hidden secret input.
 - [x] Prepare bundled Nuncio Google registration and optional trusted-push CI input; app registration and repository secret are not created yet.
 - [x] All six real PTY/daemon setup cases passed in the first complete workspace run, including bundled registration and rejected late callbacks.
-- [ ] Run relevant gates, refresh artifacts/docs, and commit/push the checked update.
+- [x] Full35-command gate passed (328 tests per workspace); signed/pushed78d4d9e.
+- [ ] Finish evidence-backed scheduler test correction and relevant Linux/macOS checks; sign/push.
+- [ ] Verify all hosted jobs, clean reproducible packages and actual latest-build temporary installation.
+- [ ] Finalize guides/evidence and send concise updated setup instructions.
 
 ## Curl bootstrap follow-up
 
