@@ -55,8 +55,14 @@ Use the same `--profile laptop-qa` on subsequent commands:
 
 ```sh
 ./bin/nuncio-cli --profile laptop-qa account list
-./bin/nuncio-cli --profile laptop-qa account check --account ACCOUNT_ID
+./bin/nuncio-cli --profile laptop-qa account show --account ACCOUNT_ID
 ```
+
+Find your email address in the list and replace `ACCOUNT_ID` with that entry's
+`id`, not its email address or display name. `account show` reads local details;
+`account check --account ACCOUNT_ID` explicitly contacts the provider to check
+credentials. Use `account --help` for examples and `account ACTION --help` for
+an action's options.
 
 Existing account editing, pause/resume, recoverable removal, and explicit permanent
 deletion are documented in [ACCOUNT-MANAGEMENT.md](ACCOUNT-MANAGEMENT.md). The guided

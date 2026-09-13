@@ -10,6 +10,7 @@ pub struct Args {
     pub endpoint: String,
     #[arg(long, global = true)]
     pub data_dir: Option<PathBuf>,
+    /// Local data profile used by the daemon; one profile can contain multiple accounts.
     #[arg(long, global = true, default_value = "default")]
     pub profile: String,
     #[cfg(feature = "test-harness")]
@@ -48,6 +49,11 @@ pub enum Command {
         #[command(subcommand)]
         command: MailCommand,
     },
+    /// Add accounts or manage one saved account by its ID.
+    #[command(
+        arg_required_else_help = true,
+        after_help = "Work on one account:\n  1. Run 'nuncio-cli account list' and find the matching address or display_name.\n  2. Copy that entry's id and pass it as --account ACCOUNT_ID after the action.\n     Use the local ID, not the email address or display name.\n  3. Use the same --profile as your daemon (for example --profile laptop-qa).\n     A profile can hold multiple accounts; each command selects its account.\n\nExamples (replace ACCOUNT_ID and VERSION with values from list/show):\n  nuncio-cli account list\n  nuncio-cli account show --account ACCOUNT_ID\n  nuncio-cli account edit --account ACCOUNT_ID --name 'Personal' --version VERSION\n  nuncio-cli account pause --account ACCOUNT_ID\n  nuncio-cli account resume --account ACCOUNT_ID\n  nuncio-cli account remove --account ACCOUNT_ID\n  nuncio-cli mail list --account ACCOUNT_ID\n\nRemoval archives local data by default. Use restore to recover an archived account.\nRun 'nuncio-cli account ACTION --help' for the options for any action."
+    )]
     Account {
         #[command(subcommand)]
         command: AccountCommand,
@@ -188,10 +194,13 @@ pub enum AccountCommand {
     },
     /// Probe and save public IMAP/SMTP settings for the same IMAP principal.
     EditImap {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
+        /// Current configuration version from account show.
         #[arg(long)]
         version: u64,
+        /// Public IMAP/SMTP settings JSON; passwords are supplied separately.
         #[arg(long)]
         config: PathBuf,
         /// Optionally replace passwords using protected stdin input.
@@ -211,7 +220,8 @@ pub enum AccountCommand {
     },
     /// Reauthenticate exactly this saved Google identity.
     ReauthGoogle {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
         #[arg(long)]
         client_config: Option<PathBuf>,
@@ -222,7 +232,8 @@ pub enum AccountCommand {
     },
     /// Replace passwords for the saved IMAP/SMTP configuration.
     ReauthImap {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
         #[arg(long, required = true)]
         credentials_stdin: bool,
@@ -236,41 +247,51 @@ pub enum AccountCommand {
     },
     /// Read saved identity, display name, lifecycle and configuration version.
     Show {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
     },
     /// Change the local display name using the version from account show.
     Edit {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
+        /// New local display name; the provider login stays the same.
         #[arg(long)]
         name: String,
+        /// Current version from account show; protects against overwriting a newer edit.
         #[arg(long)]
         version: u64,
     },
     /// Stop provider work while retaining credentials and downloaded data.
     Pause {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
     },
+    /// Resume background synchronization for a paused account.
     Resume {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
     },
     /// Archive locally and disconnect credentials; downloaded data is retained.
     #[command(visible_alias = "archive")]
     Remove {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
     },
     /// Unarchive a saved account. Reauthenticate separately to reconnect.
     Restore {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
     },
     /// Permanently delete an archived account from this profile; remote data and backups remain.
     Purge {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
         #[arg(long, conflicts_with = "confirm")]
         dry_run: bool,
@@ -278,6 +299,7 @@ pub enum AccountCommand {
         #[arg(long, required_unless_present = "dry_run")]
         confirm: Option<String>,
     },
+    /// Cancel a pending Google browser sign-in session.
     AuthCancel {
         #[arg(long)]
         session: String,
@@ -292,14 +314,17 @@ pub enum AccountCommand {
         #[arg(long, required = true)]
         credentials_stdin: bool,
         /// Reconnect this exact saved IMAP endpoint and username.
-        #[arg(long)]
+        /// Use the local ID from account list, not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: Option<String>,
     },
     /// Read saved public configuration and the last authenticated capability snapshot.
     ImapConfig {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
     },
+    /// Start Google sign-in using a Desktop registration file; add-google waits by default.
     ConnectGoogle {
         /// Downloaded Desktop OAuth registration JSON, readable only by its owner.
         #[arg(long)]
@@ -307,7 +332,8 @@ pub enum AccountCommand {
         #[arg(long)]
         login_hint: Option<String>,
         /// Reconnect this saved identity; choosing a different Google user fails.
-        #[arg(long)]
+        /// Use the local ID from account list, not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: Option<String>,
         /// Return the browser URL without opening it automatically.
         #[arg(long)]
@@ -316,21 +342,28 @@ pub enum AccountCommand {
         #[arg(long)]
         wait: bool,
     },
+    /// Inspect a Google browser sign-in session by its session ID.
     AuthStatus {
         #[arg(long)]
         session: String,
     },
+    /// List saved accounts and their IDs, addresses, names and states (local read).
+    #[command(display_order = 0)]
     List {
+        /// Also show archived accounts so they can be restored or permanently deleted.
         #[arg(long)]
         include_archived: bool,
     },
+    /// Remove saved credentials and stop provider work; keep the local account and data.
     Disconnect {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
     },
     /// Explicit online credential/identity check. Account list reads local state.
     Check {
-        #[arg(long)]
+        /// Local account ID from account list; not an email address or display name.
+        #[arg(long, value_name = "ACCOUNT_ID")]
         account: String,
     },
 }

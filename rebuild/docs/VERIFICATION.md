@@ -1,5 +1,26 @@
 # Verification evidence
 
+## Individual-account CLI help — local checks passed
+
+The user reported unclear account targeting. The account help now explains
+`account list` → copy the entry's `id` → `ACTION --account ACCOUNT_ID`, distinguishes
+the local profile from its accounts, gives examples, and describes every action.
+`--account`, display-name edits and configuration versions have explicit help.
+Bare `account` displays the guide and exits 2; explicit `--help` exits 0.
+Scripted `--json` missing-action errors keep their structured contract.
+The subprocess regression reproduced the missing-help failure (101) before the
+fix; all four output tests then passed. Twenty-one action help pages and seven
+examples were checked locally without provider access. All five relevant gates
+passed: CLI tests14/0/0, test-harness CLI tests15/0/0 (including actual daemon
+restart/authentication), formatting and Clippy in both configurations. The first
+harness run failed because the sandbox refused loopback binding (EPERM); the
+unchanged test passed with authorized local binding. Both results are retained.
+Remaining: signed checkpoint/push, then inspect the actual hosted build.
+Exact commands, logs and continuation: `test-results/account-help/` and
+`test-results/checkpoint-final/current-execution.json`. Google registration approval
+and named live/native acceptance remain pending. Prior82a92a0 artifacts are still
+the qualified download until a new build is independently verified.
+
 ## Google registration owner supplied — September 13
 
 The user supplied the owner account. The concrete proposed Cloud/consent/Desktop

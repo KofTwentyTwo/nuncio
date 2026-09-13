@@ -36,6 +36,16 @@ async fn main() -> std::process::ExitCode {
                 std::process::ExitCode::from(1)
             };
         }
+        Err(error)
+            if error.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                && !std::env::args_os().any(|value| value == "--json") =>
+        {
+            return if error.print().is_ok() {
+                std::process::ExitCode::from(2)
+            } else {
+                std::process::ExitCode::from(1)
+            };
+        }
         Err(_) => {
             return output::emit(
                 Err(AppError::invalid()),

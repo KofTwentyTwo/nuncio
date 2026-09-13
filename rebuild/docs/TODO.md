@@ -1,5 +1,12 @@
 # Current delivery and acceptance state
 
+## Individual-account help follow-up
+
+- [x] Clarify account IDs, profiles, individual actions, and command examples.
+- [x] Reproduce/fix bare-account help with subprocess checks; preserve JSON errors.
+- [x] Relevant CLI gates:14 normal/15 harness tests, formatting, both Clippy configurations; all pass.
+- [ ] Signed checkpoint/push and hosted download verification.
+
 ## Guided account setup
 
 - [x] Implement direct guided CLI account setup and hidden secret input.

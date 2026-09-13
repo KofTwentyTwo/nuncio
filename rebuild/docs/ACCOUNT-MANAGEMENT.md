@@ -17,6 +17,28 @@ omit those global options. Provider setup remains subject to the separately
 authorized [manual acceptance worksheet](MANUAL-ACCEPTANCE.md); automated tests
 use synthetic local providers only.
 
+## Work on one account
+
+Run `nuncio-cli --profile laptop-qa account list`, find the entry with the right
+`address` or `display_name`, and copy its `id`. Pass that ID after the action:
+
+```sh
+nuncio-cli --profile laptop-qa account show --account ACCOUNT_ID
+nuncio-cli --profile laptop-qa account pause --account ACCOUNT_ID
+nuncio-cli --profile laptop-qa account resume --account ACCOUNT_ID
+nuncio-cli --profile laptop-qa mail list --account ACCOUNT_ID
+```
+
+Replace `ACCOUNT_ID` with the full local ID. Email addresses and display names
+are not account selectors. Every command selects an account explicitly; there is
+no persistent selected account. `--profile` chooses the daemon's local data
+profile, which may contain several accounts; use the same profile as your daemon.
+
+`nuncio-cli account` and `nuncio-cli account --help` show the account guide.
+Use `nuncio-cli account show --help` (or another action) for its options.
+A bare `account` command exits 2 because an action is required; `--help` exits 0.
+With `--json`, missing actions retain the structured `invalid_input` error.
+
 ## Inspect and name accounts
 
 ```sh
