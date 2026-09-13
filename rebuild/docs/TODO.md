@@ -5,7 +5,8 @@
 - [x] Clarify account IDs, profiles, individual actions, and command examples.
 - [x] Reproduce/fix bare-account help with subprocess checks; preserve JSON errors.
 - [x] Relevant CLI gates:14 normal/15 harness tests, formatting, both Clippy configurations; all pass.
-- [ ] Signed checkpoint/push and hosted download verification.
+- [x] Signed/pushed7508e25; all17hosted jobs pass. Actual public installer verified the new470-file Apple Silicon package and eight packaged CLI cases.
+- [x] Guides and resumable evidence updated; the bounded help fix is delivered.
 
 ## Guided account setup
 

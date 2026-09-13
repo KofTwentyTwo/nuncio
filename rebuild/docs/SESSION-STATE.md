@@ -1,6 +1,6 @@
 # Rebuild session state
 
-## Individual-account CLI help — local checks passed
+## Individual-account CLI help — delivered at7508e25
 
 The user reported unclear account targeting. The account help now explains
 `account list` → copy the entry's `id` → `ACTION --account ACCOUNT_ID`, distinguishes
@@ -15,11 +15,25 @@ passed: CLI tests14/0/0, test-harness CLI tests15/0/0 (including actual daemon
 restart/authentication), formatting and Clippy in both configurations. The first
 harness run failed because the sandbox refused loopback binding (EPERM); the
 unchanged test passed with authorized local binding. Both results are retained.
-Remaining: signed checkpoint/push, then inspect the actual hosted build.
+Signed/pushed7508e25194843e069bcabcdbd1e632d181ef4ac2; signature and exact
+remote head verified. Actual rebuild34776720576 passed all ten jobs; security
+34776720552 passed all seven. Watcher93518 exited0; exact terminal/API results
+are in `account-help/hosted-delivery-final.json`. Public installer15198 exited0,
+selected that source/run/attempt1 and artifact10323998130. The hosted archive
+SHA-256 is `7df994d6abd1af0031c032d57a02b4fcbcaf61b6df34596b70a5209548024caf`.
+All470manifest files, both ARM64 binaries/versions and eight packaged CLI cases
+were checked; no profile was created and normal-environment snapshots stayed
+unchanged. Retained installation and exact receipts are recorded in
+`test-results/account-help/installer/public-verification.json`. No daemon or live
+provider action ran during installation verification.
 Exact commands, logs and continuation: `test-results/account-help/` and
 `test-results/checkpoint-final/current-execution.json`. Google registration approval
-and named live/native acceptance remain pending. Prior82a92a0 artifacts are still
-the qualified download until a new build is independently verified.
+and named live/native acceptance remain pending. The latest testing download is7508e25; prior82a92a0 local reproducible pairs
+and manual-candidate evidence remain preserved as historical qualification.
+This final report-only checkpoint uses `[skip ci]`; it does not claim its own
+hosted run or a new local reproducible pair. No active test/CI process remains.
+Next action: laptop feedback or explicit approval of the previously prepared
+Google registration worksheet; live/native acceptance remains deferred.
 
 ## Google registration owner supplied — September 13
 
