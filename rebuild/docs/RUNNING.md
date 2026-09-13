@@ -1,5 +1,8 @@
 # Running the rebuild
 
+For laptop setup, start with [the guided account command](ACCOUNT-SETUP.md).
+The lower-level commands below remain available for scripts and diagnostics.
+
 This workspace provides the daemon, authenticated local API, and reference CLI
 for Google Gmail/Calendar and IMAP/SMTP mail. Current schema-23 account management
 passed the full offline gate and fresh repeatable local Apple Silicon packaging
@@ -79,7 +82,7 @@ retrying.
 
 The normal daemon uses a separate profile under `~/.nuncio-rebuild/<profile>`, SQLCipher, and the OS keychain service `mx.nuncio.rebuild`. It binds `127.0.0.1:9421` by default. Google endpoints are fixed HTTPS endpoints; redirects and ambient proxy configuration are disabled for provider HTTP. The only plaintext HTTP paths are authenticated local RPC and the short-lived loopback OAuth callback. Do not point normal tests at live accounts.
 
-When live acceptance is separately authorized, prepare a Google Cloud project with Gmail and Calendar APIs enabled, a consent configuration, and an OAuth client of type **Desktop app**. Save the downloaded `installed` client registration JSON outside the repository, mode 0600, and supply its path with `--client-config`. The client ID and optional client secret travel in the authenticated RPC body, never shell arguments or log output. Refresh credentials are stored only in the OS keystore under profile/account-scoped references. OAuth uses the system browser, random state, and PKCE S256 with a numeric loopback redirect; `--no-browser` returns the URL for manual opening. [Google installed-app OAuth](https://developers.google.com/identity/protocols/oauth2/native-app).
+For the one-time maintainer registration, when separately authorized, prepare a Google Cloud project with Gmail and Calendar APIs enabled, a consent configuration, and an OAuth client of type **Desktop app**. Save the downloaded `installed` client registration JSON outside the repository, mode 0600, and pass it to the packager with `--google-client-config`. This bundles the Desktop registration for all accounts; ordinary users need only `account add`. An explicit developer `--client-config` override remains available. The client ID and optional client secret travel in the authenticated RPC body, never shell arguments or log output. Refresh credentials are stored only in the OS keystore under profile/account-scoped references. OAuth uses the system browser, random state, and PKCE S256 with a numeric loopback redirect; `--no-browser` returns the URL for manual opening. [Google installed-app OAuth](https://developers.google.com/identity/protocols/oauth2/native-app).
 
 The requested scopes are `openid email`, `gmail.modify`, and `calendar` (the latter two use their full Google scope URLs). Required permissions must all be granted; partial consent returns an inspectable scope-denied status and does not create a partially usable account. Google's canonical `userinfo.email` scope spelling is accepted as equivalent to `email`. Stable identity comes from the HTTPS userinfo endpoint, not an unverified ID-token payload or the selected login hint. [Google OpenID Connect](https://developers.google.com/identity/openid-connect/openid-connect).
 

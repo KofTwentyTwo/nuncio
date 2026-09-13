@@ -79,6 +79,32 @@ pub fn emit(result: Result<serde_json::Value, AppError>, json: bool) -> std::pro
         _ => std::process::ExitCode::from(1),
     }
 }
+pub fn emit_setup(result: Result<serde_json::Value, AppError>) -> std::process::ExitCode {
+    match result {
+        Ok(value) => {
+            let address = render(&value["account"]["address"], true);
+            let Ok(address) = address else {
+                return std::process::ExitCode::from(1);
+            };
+            let text = format!("Account connected: {address}\nBackground sync is enabled. Use account list to view your accounts.");
+            if writeln!(std::io::stdout().lock(), "{text}").is_err() {
+                return std::process::ExitCode::from(1);
+            }
+            if value["credential_cleanup_pending"] == true {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "An older credential still needs cleanup. Run account check for details."
+                );
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            let _ = writeln!(std::io::stderr().lock(), "{}", error.message);
+            std::process::ExitCode::from(error.exit)
+        }
+    }
+}
+
 pub(crate) fn render(value: &serde_json::Value, json: bool) -> Result<String, serde_json::Error> {
     let rendered = if json {
         serde_json::to_string(&value)

@@ -1,5 +1,22 @@
 # Requirement-to-evidence matrix
 
+## Guided setup follow-up (September 13)
+
+The CLI now guides input over the existing 49-RPC account API; schema 23 and the
+engine's credential/account authority are unchanged. The first complete workspace
+run passed 328 tests, including all 6 new controlling-terminal cases. The remainder
+of the full gate and new delivery qualification are tracked in
+[VERIFICATION.md](VERIFICATION.md); prior artifacts below retain their own source.
+
+| Setup requirement | Implementation | Executable evidence | External condition |
+|---|---|---|---|
+| One guided command | [wizard](../crates/nuncio-cli/src/accounts/wizard.rs), [guide](ACCOUNT-SETUP.md) | `guided_google_setup_uses_browser_consent_and_survives_restart`; `guided_mailplus_setup_checks_password_and_preserves_remote_state` | Named live accounts remain unverified |
+| No per-user Google JSON | [registration selection](../crates/nuncio-cli/src/accounts.rs), [packager](../scripts/package.py), [CI wrapper](../scripts/package-testing.py) | `guided_google_setup_uses_bundled_registration_without_a_json_file`; package/CI registration regressions | One-time Google app registration and repository secret are not created |
+| Hidden passwords and safe cancellation | [terminal](../crates/nuncio-cli/src/accounts/wizard/terminal.rs), [OAuth wait](../crates/nuncio-cli/src/accounts/google.rs) | `guided_setup_requires_terminal_and_cancel_does_not_add_account`; `guided_google_cancel_rejects_a_late_browser_callback` | Native terminal/keychain manual observations pending |
+| Honest failures and independent effects | [terminal tests](../crates/nuncio-test-support/tests/support/account_setup_e2e.rs), [MailPlus test](../crates/nuncio-test-support/tests/support/imap_setup_e2e.rs) | Missing-registration/declined-consent case; bad-password refusal; full independent mail/calendar snapshots; Dovecot/Mailpit effects | Passing mocks does not prove Google/Synology compatibility |
+
+## Earlier delivered baseline
+
 Current schema-23 account/installer source passed the complete offline gate:
 all 34 commands exited 0, both workspace configurations passed 322 tests with zero
 failed/ignored, all 22 script regressions passed, and 411 captured source hashes

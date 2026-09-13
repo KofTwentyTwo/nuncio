@@ -1,5 +1,15 @@
 # Delivery progress estimates
 
+September 13 follow-up: guided account setup is implemented and undergoing its
+full verification/delivery gate. Latest chart email 1a09b8bbf47dac5f (11:13:42 Central)
+includes 23 tasks: the original 20 below, the completed curl bootstrap, guided setup
+estimated 75% (0.5–1.5 active hours), and one-time Google app registration 0%
+(0.5–1 hour plus external approval delays). The first workspace run passed 328 tests
+including 6 new terminal cases. Estimates below describe the previous delivered
+baseline; they do not qualify the new testing artifact. Named live/native
+acceptance remains separate at 3–6 hours. Next hourly report is due 17:13:42 UTC
+during active execution. No inactive-session scheduler is established.
+
 September 12, 2026 — expanded account-management delivery and newly requested security work. Historical 6ff9bb9 software and 7390e77 documentation each passed all 10 hosted rebuild jobs; current account/installer source passed its full offline gate; fresh repeatable local packages also passed; all10hosted rebuild jobs,7securityjobs and actualtesting-artifact installation also passed. Percentages are engineering estimates, not measured completion or delivery promises. 100% means the stated task/deliverable and its applicable offline checks passed, with actual hosted and live acceptance tracked separately. Shared verification is counted once under Task 14; active hours exclude external waiting and unforeseen defects. Native apps remain excluded.
 
 | Task | Estimated complete | Remaining hours | Remaining work / evidence |
@@ -25,6 +35,6 @@ September 12, 2026 — expanded account-management delivery and newly requested 
 | 19 API publication design | 100% | 0 | SemVer/gRPC docs/client/compatibility proposal delivered. Publication pipeline implementation and remote publication are future scope, not claimed complete. |
 | 20 Post-engine product roadmap | 100% | 0 | Senior PO/PM milestone plan delivered; its future implementation is outside this goal. |
 
-Estimated remaining active offline work:0.5–1hour for the final report checkpoint and handoff; all implementation, local artifacts, actualsoftwareCI/security and installer checks passed. Live/native acceptance adds3–6hours after named-resource authorization and remains deferred. The estimate fell because the full updated offline gate now passes. API publication design and post-engine milestone planning are delivered; their proposed implementations are not silently added to the current goal.
+Estimated remaining active offline work:0.5–1 hour for the final report checkpoint and handoff; all implementation, local artifacts, actualsoftwareCI/security and installer checks passed. Live/native acceptance adds3–6hours after named-resource authorization and remains deferred. The estimate fell because the full updated offline gate now passes. API publication design and post-engine milestone planning are delivered; their proposed implementations are not silently added to the current goal.
 
 Every hourly email includes all 16 original major tasks and these material follow-ups as a PNG chart, matching HTML table and plain-text fallback. Latest independently verified email: 1a0967dcff0032a4 at 11:40 Central with the20-task chart; next due 12:40 Central / 17:40 UTC during active execution. Reports use actual evidence and refresh estimates before sending. No unattended inactive-session scheduler has been established.

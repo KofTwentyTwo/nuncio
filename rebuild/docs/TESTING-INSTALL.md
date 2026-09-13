@@ -6,6 +6,11 @@ Run this from any directory; no repository checkout or local build is needed:
 curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-google-first-rebuild/install-testing.sh | bash
 ```
 
+After starting `./bin/nunciod --profile laptop-qa`, use a second terminal in the
+installation directory to run `./bin/nuncio-cli --profile laptop-qa account add`.
+See the [guided account setup](ACCOUNT-SETUP.md). This command is part of the
+September 13 update; wait for its successful build before downloading it.
+
 Use macOS 15 or newer, native ARM64 Python 3.11+ available as `python3`, and
 GitHub CLI (`gh`) 2.100+. Authenticate once with
 `gh auth login --hostname github.com`; artifact downloads need Actions read

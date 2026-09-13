@@ -5,6 +5,8 @@ mod imap_accounts_e2e;
 mod imap_effects;
 #[path = "support/imap_reconciliation_e2e.rs"]
 mod imap_reconciliation_e2e;
+#[path = "support/imap_setup_e2e.rs"]
+mod imap_setup_e2e;
 use nuncio_test_support::{google::Seed, imap::MockMailPlus, process::E2eHarness, TestError};
 use serde_json::json;
 #[path = "support/imap_flags_e2e.rs"]

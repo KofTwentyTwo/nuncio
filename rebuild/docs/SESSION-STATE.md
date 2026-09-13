@@ -1,11 +1,40 @@
 # Rebuild session state
 
-Latest status email: September 12, 13:04 Central, message/thread
-`1a096ca869a72de3`, independently verified SENT to james@kof22.com with a
-220474-byte inline 21-task chart. The report acknowledges the missed 12:40
-update and tracks the new bootstrap at 75%, 0.5–1 remaining active hour.
-Receipt/body/chart: `test-results/status-emails/2026-09-12-1303*`.
-Next due 14:04 Central / 19:04 UTC during active execution.
+## September 13 — guided account setup requested
+
+Both full workspace configurations passed all 328 tests, including the six
+new guided setup cases. Both Clippy configurations, formatting, all 34 current
+script regressions and the optional CI registration guard checks passed.
+The authorized implementation checkpoint is proceeding on that evidence while
+the separate full-gate commands continue in shell 61754. This is a checkpoint,
+not final artifact qualification: remaining standalone checks, fresh packaging,
+actual hosted CI and latest-build installation must still finish.
+
+Guided CLI implementation is now present, including hidden `/dev/tty` entry,
+optional advanced verified-TLS settings, build-supplied Google registration, and
+simple terminal results. Four initial focused PTY cases passed (three Google
+and one independent MailPlus case, including bad credentials and restart).
+A fifth test exposed a Google Ctrl-C registration race; the signal listener now
+registers before consent is displayed. Full verification is active in shell61754,
+`test-results/all/results.json`; latest exact state remains in current-execution.json.
+No new checkpoint/artifact has been declared qualified yet.
+
+James reports the laptop quick start passed and requests substantially easier
+account setup. Root is implementing `account add` with guided prompts and hidden
+passwords over the existing authenticated account API. Follow
+[ACCOUNT-SETUP-UX-PLAN.md](ACCOUNT-SETUP-UX-PLAN.md). No Google Desktop OAuth client
+exists yet; prepare application-level registration support and an honest missing
+registration state. Work is inline; commits/pushes remain authorized, and real
+account access/remote registration changes still require their named scope.
+Initial worktree was clean at c953ae8. Prior artifacts qualify prior source only.
+
+Latest status email: September 13, 11:13:42 Central, message/thread
+`1a09b8bbf47dac5f`, independently verified SENT to james@kof22.com with exact
+plain/HTML body and a 233140-byte inline 23-task chart. Guided setup is estimated
+75% complete (0.5–1.5 active hours); one-time Google registration is separately
+pending (0.5–1 hour plus external delays). Receipt/body/chart:
+`test-results/status-emails/2026-09-13-1115*`. Next due 12:13:42 Central /17:13:42 UTC
+during active execution. Historical status emails remain retained.
 
 ## Curl-to-Bash testing installation delivered
 

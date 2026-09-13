@@ -1,5 +1,50 @@
 # Verification evidence
 
+## September 13 — guided account setup in progress
+
+Checkpoint qualification: both `workspace` and `workspace-test-harness`
+commands exited 0 with 328 passed, zero failed and zero ignored each. All six new
+PTY cases passed in each configuration. Both Clippy configurations and formatting
+passed; all 34 current script tests and CI-wrapper checks passed separately.
+`account-setup-ux/checkpoint-test-counts.json` records the counts. The signed/pushed
+checkpoint may proceed while unchanged standalone/full-gate commands continue;
+full delivery is not claimed until those checks and fresh artifacts/CI finish.
+
+The first complete workspace configuration passed 328 tests with zero failures or
+ignored tests, including 5 Google setup PTY cases and 1 independent MailPlus setup
+case. The delayed callback regression now passes. Both Clippy configurations,
+format checks and the initial 32 script regressions passed. The optional CI wrapper
+was then added with RED/GREEN tests: all 34 current script regressions, Ruff checks,
+and YAML/event/ref-guard checks passed independently in
+`account-setup-ux/post-ci-checks.json` (shell 61943 / exit 0). No real registration or
+repository secret was used. The second workspace configuration and standalone
+suites remain active in shell 61754. All 366 previously captured source hashes stayed
+unchanged; the two new CI-wrapper files have their separate checks above.
+
+Focused RED: `focused.py red-fixed` exited101 because guided add did not exist
+(two expected failures). Initial fixture compilation errors are retained as red.
+`green-1` exited0: three actual Google/terminal tests passed. `imap-green-1`
+exited101 for a test cleanup API typo; `imap-green-2` exited0 with the independent
+Dovecot/Mailpit bad-password/success/restart/no-remote-effects test. Package tests
+exited1 before registration handling, then0 after implementation. All logs are
+under `test-results/account-setup-ux/`.
+
+`google-green-2` exited101: three passed, delayed-callback cancellation timed out.
+The new regression exposed late signal registration in OAuth waiting. Registering
+SIGINT/SIGTERM before starting/displaying consent is now under full verification.
+Normal Clippy first exited101 for a platform flag type mismatch, corrected using
+rustix owned file descriptors. First lint wrapper exited1 because Ruff was absent
+from PATH; its logs are preserved in `account-setup-ux/lint-first`. The full rerun
+uses the repository-local pinned Ruff explicitly; no dependency was installed.
+
+James reports all steps in the simplified laptop quick start worked. This is
+user-reported installation/startup/status/list/shutdown/restart evidence; it does
+not establish real account refresh or credential deletion. The requested Google
+and MailPlus setup email and attachment were independently verified at message
+1a09b6a3f78220b3. He then requested a much simpler product flow. New wizard
+verification belongs under `test-results/account-setup-ux/`; prior package and
+gate evidence below does not qualify these new changes.
+
 ## Actual public curl-to-Bash installation verified
 
 The requested installation/testing email was sent September 12 at 13:23 Central,

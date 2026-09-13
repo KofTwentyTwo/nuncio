@@ -1,6 +1,7 @@
 """Release archive integrity and build-isolation regressions."""
 
 import importlib.util
+import json
 import os
 import tempfile
 import unittest
@@ -15,6 +16,44 @@ spec.loader.exec_module(package)
 
 
 class PackageTests(unittest.TestCase):
+    def test_google_registration_is_explicit_validated_and_not_in_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "desktop.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "installed": {
+                            "client_id": "synthetic.apps.googleusercontent.com",
+                            "client_secret": "synthetic-public-client-secret",
+                        }
+                    }
+                )
+            )
+            path.chmod(0o600)
+            env, metadata = package.google_registration(path)
+            self.assertEqual(env["NUNCIO_GOOGLE_CLIENT_ID"], "synthetic.apps.googleusercontent.com")
+            self.assertEqual(env["NUNCIO_GOOGLE_CLIENT_SECRET"], "synthetic-public-client-secret")
+            self.assertTrue(metadata["configured"])
+            self.assertNotIn("synthetic", json.dumps(metadata))
+            self.assertEqual(package.google_registration(None), ({}, {"configured": False}))
+            path.chmod(0o644)
+            with self.assertRaises(ValueError):
+                package.google_registration(path)
+            path.chmod(0o600)
+            link = path.with_name("link.json")
+            link.symlink_to(path)
+            with self.assertRaises((OSError, ValueError)):
+                package.google_registration(link)
+            for invalid in [
+                {"web": {"client_id": "wrong-kind"}},
+                {"installed": {"client_id": ""}},
+                {"installed": {"client_id": "bad\nvalue"}},
+                {"installed": {"client_id": "ok", "client_secret": 4}},
+            ]:
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(ValueError):
+                    package.google_registration(path)
+
     def test_archive_ignores_output_filename_and_filesystem_timestamps(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -65,7 +104,14 @@ class PackageTests(unittest.TestCase):
                 package.verify_manifest(root)
 
     def test_release_rejects_test_and_compiler_override_environment(self):
-        for name in ["NUNCIO_TEST_CONFIG", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER"]:
+        for name in [
+            "NUNCIO_GOOGLE_CLIENT_ID",
+            "NUNCIO_GOOGLE_CLIENT_SECRET",
+            "NUNCIO_TEST_CONFIG",
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "RUSTC_WRAPPER",
+        ]:
             with self.subTest(name=name), patch.dict(os.environ, {name: "override"}, clear=True):
                 with self.assertRaises(ValueError):
                     package.release_environment()

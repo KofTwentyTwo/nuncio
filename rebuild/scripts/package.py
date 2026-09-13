@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -88,6 +89,8 @@ def release_environment() -> dict:
         "RUSTC_WORKSPACE_WRAPPER",
         "RUSTC_BOOTSTRAP",
         "CARGO_BUILD_RUSTFLAGS",
+        "NUNCIO_GOOGLE_CLIENT_ID",
+        "NUNCIO_GOOGLE_CLIENT_SECRET",
     }
     if any(
         name in forbidden or name.startswith(("NUNCIO_TEST_", "CARGO_FEATURE_"))
@@ -95,6 +98,40 @@ def release_environment() -> dict:
     ):
         raise ValueError("Remove test controls and compiler overrides before packaging")
     return dict(os.environ, CARGO_NET_OFFLINE="true")
+
+
+def google_registration(path: Path | None) -> tuple[dict, dict]:
+    if path is None:
+        return {}, {"configured": False}
+    # Never follow a symlink or block on a special file supplied as a credential.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as source:
+        mode = os.fstat(source.fileno()).st_mode
+        if not stat.S_ISREG(mode) or mode & 0o077:
+            raise ValueError("Google registration must be a private regular file (chmod 600)")
+        content = source.read(65537)
+    if len(content) > 65536:
+        raise ValueError("Google registration exceeds 64 KiB")
+    try:
+        registration = json.loads(content)["installed"]
+        client_id = registration["client_id"]
+        client_secret = registration.get("client_secret")
+        values = [client_id] + ([client_secret] if client_secret is not None else [])
+        if any(
+            not isinstance(value, str)
+            or not value
+            or not value.isascii()
+            or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)
+            for value in values
+        ):
+            raise ValueError("invalid registration value")
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        raise ValueError("Use the downloaded Google Desktop OAuth client JSON") from error
+    env = {"NUNCIO_GOOGLE_CLIENT_ID": client_id}
+    if client_secret is not None:
+        env["NUNCIO_GOOGLE_CLIENT_SECRET"] = client_secret
+    fingerprint = hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()
+    return env, {"configured": True, "registration_sha256": fingerprint}
 
 
 def run(argv: list[str], env: dict) -> str:
@@ -218,8 +255,14 @@ def notices(root: Path, metadata: dict, used: set[str]) -> list[dict]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--google-client-config",
+        type=Path,
+        help="Maintainer-only private Desktop OAuth JSON to embed in the CLI",
+    )
     args = parser.parse_args()
     env = release_environment()
+    registration_env, registration_metadata = google_registration(args.google_client_config)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     rustc = run(["rustc", "-vV"], env)
@@ -260,7 +303,7 @@ def main() -> int:
             str(target),
             "--message-format=json",
         ]
-        messages = run(build, env)
+        messages = run(build, dict(env, **registration_env))
         (output / (label + "-build.jsonl")).write_text(messages)
         used = set()
         for line in messages.splitlines():
@@ -318,6 +361,7 @@ def main() -> int:
             "build_directory": str(target),
             "c_compiler": run(["cc", "--version"], env),
             "features": [],
+            "google_oauth": registration_metadata,
             "lock_sha256": digest(REBUILD / "Cargo.lock"),
             "third_party_packages": len(inventory),
             "live_acceptance": "unverified",

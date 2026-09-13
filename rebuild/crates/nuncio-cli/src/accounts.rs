@@ -1,5 +1,6 @@
 mod google;
 mod imap;
+pub(crate) mod wizard;
 use crate::{args::AccountCommand, output::AppError, rpc_error};
 use nuncio_proto::{
     client::TokenInjector,
@@ -57,6 +58,20 @@ fn registration(path: &Path) -> Result<Registration, AppError> {
     Ok(config.installed)
 }
 
+fn selected_registration(path: Option<std::path::PathBuf>) -> Result<Registration, AppError> {
+    if let Some(path) = path {
+        return registration(&path);
+    }
+    let client_id = option_env!("NUNCIO_GOOGLE_CLIENT_ID").filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| wizard::error("google_setup_required", "Google sign-in is not enabled in this build. Ask the Nuncio maintainer for a Google-enabled testing build.", 2))?;
+    Ok(Registration {
+        client_id: client_id.to_owned(),
+        client_secret: option_env!("NUNCIO_GOOGLE_CLIENT_SECRET")
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned),
+    })
+}
+
 pub async fn run(
     command: AccountCommand,
     channel: Channel,
@@ -64,6 +79,10 @@ pub async fn run(
 ) -> Result<Value, AppError> {
     let mut client = AccountsClient::with_interceptor(channel, injector);
     match command {
+        AccountCommand::Add {
+            client_config,
+            no_browser,
+        } => wizard::run(&mut client, client_config, no_browser).await,
         AccountCommand::EditImap {
             account: id,
             version,
@@ -277,7 +296,7 @@ pub async fn run(
         } => {
             google::connect(
                 &mut client,
-                client_config,
+                Some(client_config),
                 login_hint,
                 account,
                 no_browser,

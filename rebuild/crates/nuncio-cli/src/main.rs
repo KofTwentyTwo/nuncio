@@ -55,6 +55,18 @@ async fn main() -> std::process::ExitCode {
             Err(e) => output::emit(Err(e), true),
         };
     }
+    let guided = matches!(
+        &args.command,
+        Command::Account {
+            command: args::AccountCommand::Add { .. }
+        }
+    );
+    if guided {
+        if let Err(error) = accounts::wizard::preflight(json) {
+            return output::emit(Err(error), json);
+        }
+        return output::emit_setup(run(args).await);
+    }
     output::emit(run(args).await, json)
 }
 

@@ -109,6 +109,7 @@ def main() -> int:
             "RUST_TEST_THREADS": "2",
             "NUNCIO_E2E_DAEMON": str(HARNESS / "debug/nunciod"),
             "NUNCIO_E2E_CLI": str(HARNESS / "debug/nuncio-cli"),
+            "NUNCIO_E2E_MANAGED_CLI": str(HARNESS / "debug/nuncio-cli-managed"),
             "NUNCIO_RELEASE_DAEMON": str(PRODUCTION / "release/nunciod"),
             "NUNCIO_RELEASE_CLI": str(PRODUCTION / "release/nuncio-cli"),
             "NUNCIO_TEST_ARTIFACTS": str(logs / "runs"),
@@ -116,7 +117,9 @@ def main() -> int:
         }
     )
     env.setdefault("NUNCIO_ADVISORY_DB", str(REBUILD / "test-results/advisory-db"))
-    checks = []
+    checks = [
+        ("build-managed-test-cli", [sys.executable, "rebuild/scripts/build-managed-test-cli.py"])
+    ]
     build = [
         "cargo",
         "build",
@@ -135,7 +138,12 @@ def main() -> int:
         checks.append(("build-production", build + ["--release", "--target-dir", str(PRODUCTION)]))
     if args.all or args.job == "rebuild-lint":
         ruff = os.environ.get("REBUILD_RUFF", "ruff")
-        python_paths = ["rebuild/scripts", "rebuild/tests/imap", "rebuild/tests/egress"]
+        python_paths = [
+            "rebuild/scripts",
+            "rebuild/tests/imap",
+            "rebuild/tests/egress",
+            "rebuild/tests/terminal",
+        ]
         checks += [
             (
                 "python-lint",

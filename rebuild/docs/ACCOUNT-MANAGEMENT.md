@@ -1,5 +1,8 @@
 # Account management
 
+For adding an account interactively, use [the guided setup](ACCOUNT-SETUP.md).
+The commands below expose the full scriptable account lifecycle.
+
 The engine, authenticated API and CLI support account inspection, local naming,
 Google consent, IMAP/SMTP configuration and credentials, pause/resume,
 archive/restore and confirmed permanent local deletion. This guide describes the

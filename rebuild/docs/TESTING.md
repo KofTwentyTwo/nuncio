@@ -1,5 +1,14 @@
 # Offline verification
 
+Guided setup adds actual controlling-terminal tests to the existing Google and
+IMAP subprocess suites. A separately compiled test CLI embeds only the synthetic
+Google registration; its no-JSON browser flow is tested alongside the default
+unregistered binary and explicit developer override. Password echo, Ctrl-C,
+late callbacks, bad login, restart and independently unchanged provider effects
+are asserted. `scripts/verify.py` builds both test variants and includes the
+Python PTY driver in lint/format checks. Production packaging uses its own fresh
+feature-free target and never copies either test binary.
+
 The current schema-23 account-management source and testing installer passed the
 complete offline gate on September 12: all 34 commands exited 0, normal and
 test-harness workspace configurations passed 322 tests each with zero failed or

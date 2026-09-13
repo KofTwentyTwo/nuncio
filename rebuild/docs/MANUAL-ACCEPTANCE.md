@@ -1,5 +1,25 @@
 # Manual provider acceptance worksheet
 
+## Guided account setup in the testing build
+
+For approved account-connection steps below, use
+`./bin/nuncio-cli --profile laptop-qa account add` and follow
+[ACCOUNT-SETUP.md](ACCOUNT-SETUP.md). Verify the actual installed commit first.
+Use direct hidden terminal entry for MailPlus passwords. Google-enabled testing
+builds carry Nuncio's app registration; no per-account Cloud project or JSON file
+is required. The registration has not yet been created, so current unconfigured
+builds explicitly refuse Google sign-in. Named Google resources and any repository
+secret creation still require separate authorization.
+
+Record the account address, provider, build commit, result and timestamp; never
+record passwords, authorization codes or tokens. Confirm the account shown after
+browser consent is the intended identity. Check that the account remains usable
+after daemon restart, and perform the native Keychain observations in X01. For
+MailPlus, record the selected TLS ports and Sent-copy policy before authorizing a
+send. These manual results are still pending; automated PTY tests establish only
+the synthetic service behavior. James's successful account-free laptop quick start
+does not establish these account-credential checks.
+
 Status: **deferred and not authorized**. James currently requires full local Google and Synology mock services. No live account, recipient, calendar, read, send, invitation, configuration change or cleanup is authorized by this worksheet. Complete all independent implementation and offline verification first. The named-resource approval below is a later, separate step; no credentials belong in this document or chat.
 
 Use verified extracted production artifacts in a new disposable profile. Current feature artifacts and passing mocks do not prove Google or Synology compatibility. Record the production artifact SHA-256 and actual provider versions; never infer that remote CI ran from local results.

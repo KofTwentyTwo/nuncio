@@ -1,5 +1,12 @@
 # Current delivery and acceptance state
 
+## Guided account setup
+
+- [x] Implement direct guided CLI account setup and hidden secret input.
+- [x] Prepare bundled Nuncio Google registration and optional trusted-push CI input; app registration and repository secret are not created yet.
+- [x] All six real PTY/daemon setup cases passed in the first complete workspace run, including bundled registration and rejected late callbacks.
+- [ ] Run relevant gates, refresh artifacts/docs, and commit/push the checked update.
+
 ## Curl bootstrap follow-up
 
 - [x] Implement the public Bash entry point with a pinned/checksummed Python installer and unchanged latest-successful-build selection.

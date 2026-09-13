@@ -41,6 +41,31 @@ egress denial. Pre-pull the exact Dovecot, Mailpit and HAProxy images listed in
 python3 rebuild/scripts/package.py --output rebuild/dist/final-candidate
 ```
 
+For a Google-enabled candidate, the maintainer supplies the downloaded Desktop
+OAuth JSON once, from a private regular file outside the repository:
+
+```sh
+python3 rebuild/scripts/package.py --output rebuild/dist/google-candidate --google-client-config /PRIVATE/nuncio-desktop.json
+```
+
+No registration exists yet; the default candidate explicitly reports Google
+sign-in unavailable. The optional registration is embedded in the CLI, allowing
+`account add` and `account reauth-google` to use browser sign-in without per-user
+JSON files. A Desktop client is a public client: identifiers and the optional
+client secret are extractable from a distributed binary, unlike account refresh
+tokens stored in the OS keystore. The package records only `google_oauth.configured`
+and a registration fingerprint in build metadata. The source JSON is not packaged.
+Reproducibility also requires that fingerprint to match. Ambient registration
+environment variables are refused by the packager; the explicit file controls the
+build. For testing CI, the maintainer can separately authorize setting the repository
+secret `NUNCIO_GOOGLE_DESKTOP_CLIENT_JSON` to the downloaded registration. Only a
+push on the named testing branch receives that optional input. The wrapper writes
+a mode-0600 temporary file, removes the JSON from child-process environments, and
+cleans the file after success or failure. Pull requests and other refs build
+without it; a supplied registration on those events is refused. Secret creation
+and Google consent configuration require separate maintainer action; this change
+creates no Google resources or repository secrets.
+
 Packaging reserves a fresh, exclusive `target/package-production` directory, builds only the production
 daemon/CLI, rejects test features/mock artifacts, verifies the frozen v2 descriptor,
 collects complete dependency/native notices, and emits a versioned tar.gz, checksum,

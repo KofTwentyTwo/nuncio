@@ -177,6 +177,15 @@ pub enum CalendarCommand {
 
 #[derive(Subcommand)]
 pub enum AccountCommand {
+    /// Add an account with guided prompts and hidden password entry.
+    Add {
+        /// Developer override for the build's Google Desktop registration.
+        #[arg(long)]
+        client_config: Option<PathBuf>,
+        /// Print the Google consent URL instead of opening a browser.
+        #[arg(long)]
+        no_browser: bool,
+    },
     /// Probe and save public IMAP/SMTP settings for the same IMAP principal.
     EditImap {
         #[arg(long)]
@@ -192,7 +201,7 @@ pub enum AccountCommand {
     /// Add a Google account and wait for browser consent by default.
     AddGoogle {
         #[arg(long)]
-        client_config: PathBuf,
+        client_config: Option<PathBuf>,
         #[arg(long)]
         login_hint: Option<String>,
         #[arg(long)]
@@ -205,7 +214,7 @@ pub enum AccountCommand {
         #[arg(long)]
         account: String,
         #[arg(long)]
-        client_config: PathBuf,
+        client_config: Option<PathBuf>,
         #[arg(long)]
         no_browser: bool,
         #[arg(long)]

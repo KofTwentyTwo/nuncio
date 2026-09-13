@@ -236,7 +236,9 @@ jobs:
       - name: Run required offline checks with egress denied
         run: python3 scripts/egress.py --evidence test-results/rebuild-release-check-egress.json -- python3 scripts/verify.py --job rebuild-release-check
       - name: Verify local production archive
-        run: python3 scripts/egress.py --evidence test-results/package-egress.json -- python3 scripts/package.py --output dist
+        env:
+          NUNCIO_DESKTOP_OAUTH_JSON: ${{ github.event_name == 'push' && github.ref == 'refs/heads/feature/nuncio-google-first-rebuild' && secrets.NUNCIO_GOOGLE_DESKTOP_CLIENT_JSON || '' }}
+        run: python3 scripts/package-testing.py
       - name: Retain verified Apple Silicon testing archive
         if: runner.os == 'macOS' && github.event_name == 'push' && github.ref == 'refs/heads/feature/nuncio-google-first-rebuild'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

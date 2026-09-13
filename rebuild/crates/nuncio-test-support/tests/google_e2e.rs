@@ -2,6 +2,8 @@
 use nuncio_test_support::{google::Seed, process::E2eHarness};
 #[path = "support/account_management_e2e.rs"]
 mod account_management_e2e;
+#[path = "support/account_setup_e2e.rs"]
+mod account_setup_e2e;
 #[path = "support/calendar_write_e2e.rs"]
 mod calendar_write_e2e;
 #[path = "support/draft_e2e.rs"]
