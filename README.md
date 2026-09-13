@@ -3,15 +3,14 @@
 **A local-first mail and calendar engine written in Rust.**
 
 > **Status: pre-alpha; active implementation is in [`rebuild/`](rebuild/README.md)
-> (September 12, 2026).** The current engine/API/CLI, account-management additions,
-> and testing installer passed all 34 offline gate commands, with 322 tests in
-> each workspace configuration and no failures or ignored tests. Signed/pushed
-> `164b021` also passed fresh repeatable local packaging. All ten current-source rebuild CI jobs, seven security jobs
-> and the actual testing-download/temporary installation passed.
-> Earlier schema-22 checkpoints passed Linux/macOS CI. Live Google,
-> Synology MailPlus, and native-keystore acceptance remain unverified.
-> See the [implementation report](rebuild/docs/IMPLEMENTATION-REPORT.md) for the
-> exact evidence and [current work](rebuild/docs/SESSION-STATE.md) for progress.
+> (September 13, 2026).** Engine/API/CLI and guided account setup passed the full
+> 35-command offline gate, with 328 tests in each workspace configuration.
+> Signed/pushed `b2b3ed5` passed fresh repeatable Apple Silicon packaging and the
+> corrected Linux/macOS scheduler regression. Its hosted CI and latest-build
+> installer qualification are in progress. Google app registration, live Google/
+> MailPlus compatibility and native-keystore acceptance remain unverified.
+> See the [implementation report](rebuild/docs/IMPLEMENTATION-REPORT.md) and
+> [current work](rebuild/docs/SESSION-STATE.md) for exact evidence.
 
 ## What Nuncio is
 

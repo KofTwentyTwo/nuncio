@@ -6,8 +6,9 @@
 - [x] Prepare bundled Nuncio Google registration and optional trusted-push CI input; app registration and repository secret are not created yet.
 - [x] All six real PTY/daemon setup cases passed in the first complete workspace run, including bundled registration and rejected late callbacks.
 - [x] Full35-command gate passed (328 tests per workspace); signed/pushed78d4d9e.
-- [ ] Finish evidence-backed scheduler test correction and relevant Linux/macOS checks; sign/push.
-- [ ] Verify all hosted jobs, clean reproducible packages and actual latest-build temporary installation.
+- [x] Evidence-backed scheduler correction passed Linux22/macOS22 and fmt/bothClippy; signed/pushed b2b3ed5.
+- [x] Two clean b2b3ed5 production builds: identical8dc16d97 archives,22 extracted checks and469 manifest entries each.
+- [ ] Verify the second timing correction (bounded beta progress), checkpoint it, rebuild packages, then pass hosted CI and latest-build temporary installation.
 - [ ] Finalize guides/evidence and send concise updated setup instructions.
 
 ## Curl bootstrap follow-up

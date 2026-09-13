@@ -3,10 +3,12 @@
 ## Guided setup follow-up (September 13)
 
 The CLI now guides input over the existing 49-RPC account API; schema 23 and the
-engine's credential/account authority are unchanged. The first complete workspace
-run passed 328 tests, including all 6 new controlling-terminal cases. The remainder
-of the full gate and new delivery qualification are tracked in
-[VERIFICATION.md](VERIFICATION.md); prior artifacts below retain their own source.
+engine's credential/account authority are unchanged. The full35-command gate
+passed; both workspace configurations passed328 tests, including all6 new terminal
+cases. Signed/pushed b2b3ed5 also passed corrected scheduler checks on Linux/macOS
+and two reproducible local production packages. Hosted CI and latest-build
+installation remain pending in [VERIFICATION.md](VERIFICATION.md). Prior artifacts
+below retain their own source.
 
 | Setup requirement | Implementation | Executable evidence | External condition |
 |---|---|---|---|
@@ -17,7 +19,7 @@ of the full gate and new delivery qualification are tracked in
 
 ## Earlier delivered baseline
 
-Current schema-23 account/installer source passed the complete offline gate:
+The earlier schema-23 account/installer source passed the complete offline gate:
 all 34 commands exited 0, both workspace configurations passed 322 tests with zero
 failed/ignored, all 22 script regressions passed, and 411 captured source hashes
 stayed unchanged. Receipts are in

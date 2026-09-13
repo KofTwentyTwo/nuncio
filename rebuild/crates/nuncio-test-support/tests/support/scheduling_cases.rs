@@ -291,6 +291,7 @@ async fn polling_pauses_revoked_and_disconnected_accounts_then_resumes_after_rec
 
 #[tokio::test]
 async fn polling_honors_remote_retry_deadlines_across_restart_and_keeps_other_scopes_running() {
+    const PROVIDER_BACKOFF_SECS: u64 = 20;
     let mut h = SystemHarness::with_polling(Seed::TwoAccounts, 100)
         .await
         .unwrap();
@@ -304,7 +305,7 @@ async fn polling_honors_remote_retry_deadlines_across_restart_and_keeps_other_sc
             phase: Phase::Before,
             action: FaultAction::Status {
                 code: 429,
-                retry_after_secs: Some(6),
+                retry_after_secs: Some(PROVIDER_BACKOFF_SECS),
             },
         })
         .await;
@@ -332,7 +333,7 @@ async fn polling_honors_remote_retry_deadlines_across_restart_and_keeps_other_sc
     let retry_at = gmail.next_attempt_at_ms.unwrap();
     assert_eq!(gmail.phase, "backoff");
     assert!(
-        retry_at >= 1772895606000,
+        retry_at >= 1772895600000 + i64::try_from(PROVIDER_BACKOFF_SECS * 1000).unwrap(),
         "HTTP Retry-After must dominate exponential retry: {retry_at}"
     );
     assert!(gmail.last_success_at_ms.is_none());
@@ -358,13 +359,25 @@ async fn polling_honors_remote_retry_deadlines_across_restart_and_keeps_other_sc
             .next_attempt_at_ms,
         Some(retry_at)
     );
-    tokio::time::sleep(Duration::from_millis(1400)).await;
-    assert_eq!(
-        calls(&h, "alpha@example.test", "/gmail/").await,
-        1,
-        "restart ignored provider guidance"
-    );
-    assert!(calls(&h, "beta@example.test", "/gmail/").await > before_beta);
+    // Wait for observable progress, not a fixed sleep. Leave enough provider
+    // backoff to prove another account runs and explicit sync remains cancellable.
+    let progress_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        assert_eq!(
+            calls(&h, "alpha@example.test", "/gmail/").await,
+            1,
+            "restart ignored provider guidance"
+        );
+        if calls(&h, "beta@example.test", "/gmail/").await > before_beta {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < progress_deadline,
+            "other account did not progress during backoff: {:?}",
+            status(&h).await
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     // Explicit sync queues and can be cancelled while the provider deadline remains pending.
     let run = h
         .authenticated()
@@ -423,7 +436,8 @@ async fn polling_honors_remote_retry_deadlines_across_restart_and_keeps_other_sc
     }
     // Provider backoff and sync convergence are separate bounded phases. A
     // valid slow response must not spend the recovery budget waiting to retry.
-    let eligibility_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let eligibility_deadline =
+        tokio::time::Instant::now() + Duration::from_secs(PROVIDER_BACKOFF_SECS);
     loop {
         let remote_calls = calls(&h, "alpha@example.test", "/gmail/").await;
         let current = status(&h).await;

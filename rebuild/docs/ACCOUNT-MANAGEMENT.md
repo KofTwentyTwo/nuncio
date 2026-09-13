@@ -40,8 +40,10 @@ addresses and stable subjects are provider-owned identities, not editable names.
 
 ## Add or reauthenticate Google
 
-After account access is authorized, supply the downloaded Desktop OAuth client
-registration from a private regular file outside the repository, mode 0600:
+In a Google-enabled build, use `account add` for guided setup or omit
+`--client-config` from these scriptable commands. Nuncio app registration remains
+pending. Developers can explicitly override a bundled registration using a private
+regular file outside the repository, mode 0600:
 
 ```sh
 nuncio-cli account add-google --client-config /PRIVATE/PATH/google-desktop.json

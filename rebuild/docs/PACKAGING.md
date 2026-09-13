@@ -1,12 +1,14 @@
 # Local packages and operation
 
 For a laptop download without compiling, use [TESTING-INSTALL.md](TESTING-INSTALL.md).
-The current local schema-23 account/CLI package is verified at signed/pushed
-`164b021`. The full 34-command gate passed; two fresh clean builds produced the
-same `4a9e33a9` archive, with 22 extracted checks and 467 manifest entries each.
-The selected path and full hashes are in [IMPLEMENTATION-REPORT.md](IMPLEMENTATION-REPORT.md).
-Its current hosted CI/testing download also passed. Older schema-22 packages
-and their receipts remain preserved; use each archive's own metadata.
+The current local guided-setup package is verified at signed/pushed `b2b3ed5`.
+Two fresh clean builds produced the same `8dc16d97` archive, with 22 extracted
+checks, 469 manifest entries and 237 dependency notices each. The full guided
+setup gate passed, including 328 tests per workspace configuration; the scheduler
+correction passed the Linux/macOS system suites and both Clippy configurations.
+Hosted CI and latest-build installer qualification are still pending.
+Exact paths and hashes are in [IMPLEMENTATION-REPORT.md](IMPLEMENTATION-REPORT.md).
+Earlier packages and receipts remain preserved under their own source identities.
 
 Candidates are versioned local archives, not installed or public releases. Use the
 archive's adjacent SHA-256 sidecar to verify it before extraction. The adjacent

@@ -22,22 +22,36 @@ Tracked regression adds the valid latency, continuous pre-deadline request check
 and success-after-deadline assertion; engine/adapter behavior is unchanged.
 
 Relevant regression passed: macOS scheduler22/22, fmt and bothClippy
-(shell67502/0); independent Linux22/22 (shell20835/0). Evidence: `test-results/account-setup-ux/`, especially
-`linux/{latency-red,latency-green,regression}.{log,json}` and
-`scheduler-regression.json`. Next sign/push the correction, verify
-actual hosted CI, build/check two clean production packages, then exercise the
-public installer into a fresh temporary prefix. No normal installation or native
-credential access. Exact handles: `test-results/checkpoint-final/current-execution.json`.
+(shell67502/0); independent Linux22/22 (shell20835/0). Correction signed/pushed
+`b2b3ed5732f5884d1a1dc6b33daf18aa3cc3bc85`, with exact remote/signature receipt.
+Two fresh production builds passed (81893/0): identical8dc16d97 archives,
+22 extracted checks,469 manifest entries and237 notices each. Retained extraction:
+`/private/tmp/nuncio-account-setup-package-ijqr8s4r/nuncio-0.1.0-rc-aarch64-apple-darwin-b2b3ed5732f5`.
+Exact hashes/metadata: `test-results/account-setup-ux/package-final.json`.
+
+Hosted rebuild34770885579 failed the earlier fixed1.4sec beta-progress
+assertion (job103760149174); other jobs/security remain under watcher40728.
+The next correction waits up to8sec for independently observed beta Gmail
+progress during a20sec provider backoff, checking alpha makes no early requests.
+The explicit cancellation and8sec post-eligibility recovery assertions remain.
+Relevant checks passed: macOS22/22 plus fmt/bothClippy (92540/0),
+Linux22/22 (51695/0). No engine behavior changed.
+Next observe their exact terminal results, then run the prepared
+`test-results/account-setup-ux/installer/verify-public.py` against the successful
+build. Final docs/checkpoint and concise setup email follow. No normal installation,
+native credential access or live account action. Latest exact handles:
+`test-results/checkpoint-final/current-execution.json`.
 
 The existing guide is [ACCOUNT-SETUP.md](ACCOUNT-SETUP.md); original scope and
 remaining external acceptance are preserved. James reports the prior laptop quick
 start worked; named live/native checks remain deferred, and the full goal remains
 incomplete. App registration is a one-time maintainer task, not per-account setup.
 
-Latest hourly email: September13 at11:13:42Central, verified SENT message
-`1a09b8bbf47dac5f`, exact plain/HTML and233140-byte23-task chart.
-Next due12:13:42Central/17:13:42UTC during active execution. Receipt:
-`test-results/status-emails/2026-09-13-1115*`.
+Latest hourly email: September13 at12:13:53Central, verified SENT message
+`1a09bc2db1046d78`, exact plain/HTML and233793-byte23-task chart. Guided setup
+estimated90% with0.5–1.25 active hours remaining at send time. Next due
+13:13:53Central/18:13:53UTC during active execution. Receipt/body/chart:
+`test-results/status-emails/2026-09-13-1214*`.
 
 ## Curl-to-Bash testing installation delivered
 

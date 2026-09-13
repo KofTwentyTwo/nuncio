@@ -3,15 +3,13 @@
 Independent Rust workspace for the approved Google-first engine and CLI rebuild.
 It includes SQLCipher storage, authenticated local gRPC, Gmail/Calendar reads and
 writes, IMAP folder/flag operations, SMTP with separate delivery/Sent-copy receipts,
-encrypted backup/restore, migration, repair, and resource budgets. Software
-checkpoint `6ff9bb9` passed the complete offline gate, all ten Linux/macOS CI jobs,
-and repeatable local Apple Silicon packaging; documentation checkpoint `7390e77`
-also passed all ten CI jobs. Current account-management additions use schema 23
-and seven additive account RPCs (49 total). The current full offline gate passed
-all 34 commands: 322 tests in each workspace configuration, zero failed/ignored,
-22 script regressions, and all 411 captured source hashes unchanged. Signed/pushed
-`164b021` also passed fresh repeatable local packaging. All ten current-source hosted rebuild jobs, seven security jobs and the actual
-testing-download/temporary installation passed; [the report](docs/IMPLEMENTATION-REPORT.md) records the evidence.
+encrypted backup/restore, migration, repair, and resource budgets. Current schema-23 account management uses 49 authenticated RPCs.
+Guided `account add` includes hidden passwords, optional advanced MailPlus
+settings and bundled Google registration support. The full 35-command offline
+gate passed: 328 tests per workspace configuration, zero failed/ignored. Signed/
+pushed `b2b3ed5` passed reproducible Apple Silicon packaging and the Linux/macOS
+scheduler regression. Hosted CI and latest-build installer qualification remain
+in progress; [the report](docs/IMPLEMENTATION-REPORT.md) records exact evidence.
 
 Install the latest Apple Silicon testing build without cloning or compiling:
 

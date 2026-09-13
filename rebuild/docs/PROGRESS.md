@@ -1,40 +1,42 @@
-# Delivery progress estimates
+# Nuncio progress estimates
 
-September 13 follow-up: guided account setup is implemented and undergoing its
-full verification/delivery gate. Latest chart email 1a09b8bbf47dac5f (11:13:42 Central)
-includes 23 tasks: the original 20 below, the completed curl bootstrap, guided setup
-estimated 75% (0.5–1.5 active hours), and one-time Google app registration 0%
-(0.5–1 hour plus external approval delays). The first workspace run passed 328 tests
-including 6 new terminal cases. Estimates below describe the previous delivered
-baseline; they do not qualify the new testing artifact. Named live/native
-acceptance remains separate at 3–6 hours. Next hourly report is due 17:13:42 UTC
-during active execution. No inactive-session scheduler is established.
+September13,2026: the guided setup implementation and reproducible local packages
+passed. Current hosted CI and public installation remain. Percentages are
+engineering estimates for the named deliverable; live/native acceptance remains
+separate and the full goal is incomplete.
 
-September 12, 2026 — expanded account-management delivery and newly requested security work. Historical 6ff9bb9 software and 7390e77 documentation each passed all 10 hosted rebuild jobs; current account/installer source passed its full offline gate; fresh repeatable local packages also passed; all10hosted rebuild jobs,7securityjobs and actualtesting-artifact installation also passed. Percentages are engineering estimates, not measured completion or delivery promises. 100% means the stated task/deliverable and its applicable offline checks passed, with actual hosted and live acceptance tracked separately. Shared verification is counted once under Task 14; active hours exclude external waiting and unforeseen defects. Native apps remain excluded.
-
-| Task | Estimated complete | Remaining hours | Remaining work / evidence |
+| Major task | Complete | Active hours left | Evidence / remaining work |
 |---|---:|---:|---|
-| 01 Workspace, encrypted lifecycle and status | 100% | 0 | Schema23 lifecycle/storage and full offline gate passed. |
-| 02 Independent stateful Google mock | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
-| 03 System and subprocess E2E harnesses | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
-| 04 Google OAuth and account lifecycle | 100% | 0 | Google/IMAP add, versioned edit, reauth/wait/cancel and lifecycle passed through engine/API/CLI offline; live acceptance counted under16. |
-| 05 Gmail initial sync, MIME and attachments | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
-| 06 Gmail incremental sync and reconciliation | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
-| 07 Calendar sync and agenda | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
-| 08 Background sync and change streaming | 100% | 0 | Pause/archive admission, scheduling and streaming passed the full gate. |
-| 09 Durable drafts and operation journal | 100% | 0 | Archived upload/new-intent rejection and retained lost-ack evidence passed. |
-| 10 Gmail send and mail mutations | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
-| 11 Calendar writes, RSVP and free/busy | 100% | 0 | Current full offline regression passed; named live acceptance remains separate. |
-| 12 Synology IMAP/SMTP mail support | 100% | 0 | Full independent IMAP/SMTP gate passed:2contract/28system/14actualCLI. |
-| 13 Export, backup, restore and repair | 100% | 0 | Schema23 backup/restore/repair passed, including46migration SIGKILL boundaries. |
-| 14 Adversarial checks and resource bounds | 100% | 0 | All34commands passed,322tests per workspace,196auth cases,46migration cases and411source hashes unchanged. |
-| 15 Local packages, API contract and CI | 100% | 0 | Signed/pushed164b021, fresh4a9e33a9 local package pair, all10hosted jobs and actual a9e9a1f7 testing package/install verified. |
-| 16 Provider acceptance and final report | 50% | 3–6* | Report/matrix/handoff prepared; named Google/Synology/native acceptance remains deferred. Final report checkpoint is being closed. |
+| 01 Workspace, encrypted lifecycle and status | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 02 Independent stateful Google mock | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 03 System and subprocess E2E harnesses | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 04 Google OAuth and account lifecycle | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 05 Gmail initial sync, MIME and attachments | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 06 Gmail incremental sync and reconciliation | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 07 Calendar sync and agenda | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 08 Background sync and change streaming | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 09 Durable drafts and operation journal | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 10 Gmail send and mail mutations | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 11 Calendar writes, RSVP and free/busy | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 12 Synology IMAP/SMTP mail support | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 13 Export, backup, restore and repair | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 14 Adversarial checks and resource bounds | 100% | 0 | Full current offline regression passed; live acceptance remains separate. New guided-setup download qualification is tracked under task22. |
+| 15 Local packages, API contract and CI | 100% | 0 | Earlier full delivery passed; current guided-setup package and CI qualification tracked under22. |
+| 16 Provider acceptance and final report | 50% | 3–6* | Named Google/Synology/native-keystore acceptance remains explicitly deferred; worksheet now includes concrete native checks. |
 | 17 Original-workspace dependency remediation | 100% | 0 | All11PRs reviewed/incorporated or superseded; original790tests and fresh-index audit pass. Final yank/label correction signed/pushed; all3current hosted advisory jobs pass. |
-| 18 Development security scanning | 100% | 0 | All7hosted security jobs passed at164b021;9actionalerts fixed, no newfindings;44prior classifiedalerts remain open. Development promotion/settings remain separately unapproved. |
+| 18 Development security scanning | 100% | 0 | All7hosted security jobs passed at78d4d9e. Earlier findings remain classified; no claim of changed default branch settings. |
 | 19 API publication design | 100% | 0 | SemVer/gRPC docs/client/compatibility proposal delivered. Publication pipeline implementation and remote publication are future scope, not claimed complete. |
 | 20 Post-engine product roadmap | 100% | 0 | Senior PO/PM milestone plan delivered; its future implementation is outside this goal. |
+| 21 Curl-to-Bash testing installer | 100% | 0 | Public pipeline and temporary installation verified; James reports laptop quick start worked. |
+| 22 Guided account setup | 95% | 0.25–1 | Code, offline regression and two clean production packages pass. Current hosted CI and public installation remain. |
+| 23 Google application registration | 0% | 0.5–1* | One-time maintainer Cloud/consent registration, then Google-enabled build; no client exists yet. |
 
-Estimated remaining active offline work:0.5–1 hour for the final report checkpoint and handoff; all implementation, local artifacts, actualsoftwareCI/security and installer checks passed. Live/native acceptance adds3–6hours after named-resource authorization and remains deferred. The estimate fell because the full updated offline gate now passes. API publication design and post-engine milestone planning are delivered; their proposed implementations are not silently added to the current goal.
+Guided setup delivery:0.25–1 active hour, including hosted wait/verification.
+One-time Google app registration:0.5–1 active hour plus external delays. Deferred
+live/native acceptance:3–6hours when authorized. No future native-app/API-publication
+implementation has been added to this goal.
 
-Every hourly email includes all 16 original major tasks and these material follow-ups as a PNG chart, matching HTML table and plain-text fallback. Latest independently verified email: 1a0967dcff0032a4 at 11:40 Central with the20-task chart; next due 12:40 Central / 17:40 UTC during active execution. Reports use actual evidence and refresh estimates before sending. No unattended inactive-session scheduler has been established.
+Latest hourly email: message1a09bc2db1046d78 at12:13:53Central, verified SENT with
+exact plain/HTML and233793-byte23-task chart. It estimated guided setup90% before
+package verification completed. Next due13:13:53Central/18:13:53UTC during active
+execution. No inactive-session scheduler is established.

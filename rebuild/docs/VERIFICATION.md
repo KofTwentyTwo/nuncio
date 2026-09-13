@@ -1,5 +1,28 @@
 # Verification evidence
 
+## Guided setup local production qualification
+
+Signed/pushed b2b3ed5 corrects the scheduler test after the retained RED/GREEN
+experiment. Signature and exact remote head verified in
+`account-setup-ux/scheduler-checkpoint-receipt.json`. Package pair81893 exited0:
+two fresh, clean, production-only builds have identical archive SHA256
+`8dc16d97c28bd88e6a55077f047996fba0e80b085a45b3ebb003bab7e06408ee`.
+Each passed22 extracted checks and independent469-file manifest verification;
+237 dependency notices, no test features, Google registration configured=false.
+Extracted add/add-google/reauth-google help and version passed; nonterminal guided
+add returned2 before creating a profile. Full argv/statuses/hashes and retained
+extraction: `account-setup-ux/{package-commands,package-final}.json`.
+
+Hosted rebuild34770885579 failed the earlier fixed1.4sec beta Gmail progress
+assertion; job103760149174 and full log/receipt are retained. This is a different
+phase from the first final-recovery timeout. A new test correction replaces the
+sleep with a bounded8sec independent beta request observation while a20sec
+provider backoff leaves room to verify explicit cancellation. Alpha no-early-read
+and8sec post-eligibility recovery assertions remain. Relevant checks passed: macOS22/22 and fmt/bothClippy (92540/0),
+Linux22/22 (51695/0); other hosted jobs remain under watcher40728. Public latest-build installation must wait for successful CI;
+local package checks do not establish that outcome. Documentation changes after
+b2b3ed5 are report-only and do not relabel these frozen artifacts.
+
 ## September 13 — full guided setup gate and hosted scheduler diagnostic
 
 `account-setup-ux/full-second-egress.json` and `all/results.json`: shell61754 exited0,
