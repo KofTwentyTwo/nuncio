@@ -1,5 +1,17 @@
 # Rebuild session state
 
+## Selected-candidate handoff correction
+
+The manual worksheet's `dist/final-candidate/EVIDENCE.json` now selects verified
+software82a92a0 and local archive5dbed9e9. Its embedded metadata and both binary
+hashes were checked against the actual archive; all352production source hashes
+remain unchanged. The former164b021 evidence is preserved byte-for-byte in
+`EVIDENCE-before-guided-setup-82a92a0.json`. No archive or executable was changed.
+Receipt: `test-results/account-setup-ux/candidate-selection/receipt.json`.
+This documentation-only checkpoint uses `[skip ci]`; existing82a92a0 CI remains
+the software qualification. External registration/live/native acceptance remains
+pending; no independent implementation or live process remains.
+
 ## Latest continuation — guided setup delivered
 
 Signed/pushed software `82a92a06eec5c6a674dde25981293404fd074b59` is qualified:
