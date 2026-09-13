@@ -11,7 +11,8 @@
 - [x] Bounded beta-progress correction passed Linux22/macOS22/fmt/bothClippy; signed/pushed82a92a0. Fresh package pair passed with identical5dbed9e9 archives.
 - [x] All ten hosted rebuild and seven security jobs passed at82a92a0; public installer selected the exact source and verified469 files/ARM64/guided commands.
 - [x] Final guides, evidence and concise setup email prepared; sent message1a09be026ffbf31b independently verified. This report-only checkpoint records the completed delivery.
-- [ ] One-time Google app registration: owner question pending; named Google Cloud/repository-secret changes require approval.
+- [x] Google registration owner supplied; concrete [setup proposal](GOOGLE-APP-REGISTRATION.md) prepared and checked against official Google docs/current implementation.
+- [ ] Obtain approval and create the proposed Google Cloud app/repository secret, then qualify a Google-enabled testing artifact; local private worksheet records the owner and secure path.
 - [ ] Original named live Google/Synology/native acceptance remains deferred.
 
 ## Curl bootstrap follow-up

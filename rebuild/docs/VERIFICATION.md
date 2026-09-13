@@ -1,5 +1,26 @@
 # Verification evidence
 
+## Google registration owner supplied — September 13
+
+The user supplied the owner account. The concrete proposed Cloud/consent/Desktop
+client and GitHub-secret settings are in [GOOGLE-APP-REGISTRATION.md](GOOGLE-APP-REGISTRATION.md);
+the owner address and exact secure file destination are retained only in the
+ignored local `test-results/google-app-registration/APPROVAL.md`. Approval for
+those remote settings is pending. No Google Cloud or live account action ran.
+Current official Google documentation and the implemented scopes/trusted-push
+workflow were checked. External Testing requires reconnection after seven days
+for these scopes. Software82a92a0 qualification remains unchanged; no rebuild
+is needed for this documentation-only checkpoint. Exact validation and checkpoint
+receipts belong in `test-results/google-app-registration/`.
+
+Documentation checks passed: 366 source/test/script files match qualified
+82a92a0, ten local links resolve, whitespace and scoped Gitleaks exit 0. The
+initial source comparison used a pre-correction receipt and detected the known
+scheduler test change; comparison against qualified82a92a0 resolved that baseline
+selection error. Both results are retained. The updated hourly email was verified
+SENT at13:55:25Central, message1a09c1fcdf16d47c, exact plain/HTML and234378-byte
+23-task chart metadata. Next due14:55:25Central during active execution.
+
 ## Selected-candidate handoff correction
 
 The manual worksheet's `dist/final-candidate/EVIDENCE.json` now selects verified
