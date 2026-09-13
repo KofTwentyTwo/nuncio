@@ -5,6 +5,20 @@ September 12, 2026. The corrected hosted security run at signed/pushed
 run and all finding classifications remain below. Scan success, mandatory merge
 enforcement, and provider acceptance are separate facts.
 
+## September 13 guided-setup security result
+
+All seven jobs in [run 34771537540](https://github.com/KofTwentyTwo/nuncio/actions/runs/34771537540)
+passed on `82a92a0`. The branch now has 45 open CodeQL findings, including the
+44 previously classified findings and new [alert 64](https://github.com/KofTwentyTwo/nuncio/security/code-scanning/64).
+The new high-severity report targets JSON transcript output in the synthetic PTY
+test driver. Inspection verified that it checks terminal echo, rejects supplied
+fixture passwords in the transcript before output, receives only test-harness
+inputs from its Rust callers, and is absent from production package manifests.
+No production credential exposure was demonstrated. The finding remains open;
+no dismissal, suppression or assertion change was made. Review evidence and
+source hashes: `test-results/account-setup-ux/security-alert-64-review.json`.
+Earlier counts below describe their named historical scans.
+
 ## Current hosted verification at 164b021
 
 [Run 34704460237](https://github.com/KofTwentyTwo/nuncio/actions/runs/34704460237)

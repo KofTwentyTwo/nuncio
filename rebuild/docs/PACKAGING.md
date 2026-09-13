@@ -1,12 +1,13 @@
 # Local packages and operation
 
 For a laptop download without compiling, use [TESTING-INSTALL.md](TESTING-INSTALL.md).
-The current local guided-setup package is verified at signed/pushed `b2b3ed5`.
-Two fresh clean builds produced the same `8dc16d97` archive, with 22 extracted
+The current local guided-setup package is verified at signed/pushed `82a92a0`.
+Two fresh clean builds produced the same `5dbed9e9` archive, with 22 extracted
 checks, 469 manifest entries and 237 dependency notices each. The full guided
 setup gate passed, including 328 tests per workspace configuration; the scheduler
 correction passed the Linux/macOS system suites and both Clippy configurations.
-Hosted CI and latest-build installer qualification are still pending.
+All ten hosted rebuild jobs, seven security jobs and the actual public testing
+installation passed.
 Exact paths and hashes are in [IMPLEMENTATION-REPORT.md](IMPLEMENTATION-REPORT.md).
 Earlier packages and receipts remain preserved under their own source identities.
 
@@ -130,7 +131,7 @@ directory beneath the explicit `~/.local/opt/nuncio-testing` prefix and refuses
 existing destinations. It verifies CI provenance, digests, package contents and
 architecture without compiling or executing the downloaded binaries. Use the
 printed binary paths; it does not modify PATH, profiles, production executables
-or login services. Download and temporary installation of the `164b021` CI archive
+or login services. Download and temporary installation of the `82a92a0` CI archive
 have passed the checks in [TESTING-INSTALL.md](TESTING-INSTALL.md). For a manually
 extracted local candidate, likewise choose a new version-specific directory and
 preserve older candidates. No normal-environment installation has been performed

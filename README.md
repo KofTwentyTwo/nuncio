@@ -5,9 +5,9 @@
 > **Status: pre-alpha; active implementation is in [`rebuild/`](rebuild/README.md)
 > (September 13, 2026).** Engine/API/CLI and guided account setup passed the full
 > 35-command offline gate, with 328 tests in each workspace configuration.
-> Signed/pushed `b2b3ed5` passed fresh repeatable Apple Silicon packaging and the
-> corrected Linux/macOS scheduler regression. Its hosted CI and latest-build
-> installer qualification are in progress. Google app registration, live Google/
+> Signed/pushed `82a92a0` passed fresh repeatable Apple Silicon packaging and the
+> corrected Linux/macOS scheduler regression. All ten hosted rebuild jobs, seven security jobs and
+> the actual public testing installation passed. Google app registration, live Google/
 > MailPlus compatibility and native-keystore acceptance remain unverified.
 > See the [implementation report](rebuild/docs/IMPLEMENTATION-REPORT.md) and
 > [current work](rebuild/docs/SESSION-STATE.md) for exact evidence.

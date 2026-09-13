@@ -1,7 +1,7 @@
 # Nuncio progress estimates
 
 September13,2026: the guided setup implementation and reproducible local packages
-passed. Current hosted CI and public installation remain. Percentages are
+passed. Current hosted CI and public installation passed. Percentages are
 engineering estimates for the named deliverable; live/native acceptance remains
 separate and the full goal is incomplete.
 
@@ -28,10 +28,10 @@ separate and the full goal is incomplete.
 | 19 API publication design | 100% | 0 | SemVer/gRPC docs/client/compatibility proposal delivered. Publication pipeline implementation and remote publication are future scope, not claimed complete. |
 | 20 Post-engine product roadmap | 100% | 0 | Senior PO/PM milestone plan delivered; its future implementation is outside this goal. |
 | 21 Curl-to-Bash testing installer | 100% | 0 | Public pipeline and temporary installation verified; James reports laptop quick start worked. |
-| 22 Guided account setup | 95% | 0.25–1 | Code, offline regression and two clean production packages pass. Current hosted CI and public installation remain. |
+| 22 Guided account setup | 100% | 0 | Implementation, full offline checks, reproducible packages, all 17 hosted jobs and public installation passed. |
 | 23 Google application registration | 0% | 0.5–1* | One-time maintainer Cloud/consent registration, then Google-enabled build; no client exists yet. |
 
-Guided setup delivery:0.25–1 active hour, including hosted wait/verification.
+Guided setup delivery and the concise setup email are verified.
 One-time Google app registration:0.5–1 active hour plus external delays. Deferred
 live/native acceptance:3–6hours when authorized. No future native-app/API-publication
 implementation has been added to this goal.

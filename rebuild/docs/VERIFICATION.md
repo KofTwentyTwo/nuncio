@@ -1,6 +1,61 @@
 # Verification evidence
 
-## Guided setup local production qualification
+## Final handoff
+
+The concise setup email was sent to james@kof22.com at12:45:53Central,
+message1a09be026ffbf31b. Independent readback verified SENT,recipient,subject
+and exact plain/HTML bodies. It provides update/startup/guided account-add
+instructions and clearly states the missing Google registration. Exact payload
+and receipt: `account-setup-ux/setup-email-{draft,receipt}.json`.
+
+All ten hosted job-evidence ZIPs passed digest verification:73command exits0
+and156recorded Rust test-result groups, with no failed/ignored tests. These
+include repeated and platform-specific executions, not156unique tests. Final
+report-only file/link/secret/source checks and signed/pushed receipt are under
+`account-setup-ux/final-docs/`. This checkpoint uses `[skip ci]` to record existing
+results without relabeling the82a92a0 software/artifacts or claiming another CI run.
+
+## Final hosted and public-installation result
+
+Source82a92a0: rebuild34771537477 passed10/10; security34771537540 passed7/7.
+Watcher86694 exited0 after independent terminal run/head/job API checks.
+All ten retained job-evidence ZIP digests and command exits were verified;
+Rust results had no failures or ignored tests. The actual Linux system artifact
+records22/22Google system tests, including the corrected scheduler case.
+Evidence: `account-setup-ux/hosted-delivery-final.json` and
+`account-setup-ux/hosted-evidence/{all-job-evidence,system-summary}.json`.
+
+Public installer58846 exited0, selecting exact source82a92a0, run34771537477,
+attempt1/artifact10322850026. Hosted package SHA256
+`9dc2d94e25ae7abc7316c453a95a6fbf5c8e9a3034e885385d587f51e9b448ef`;
+469 manifest entries,both ARM64 headers/versions,guided help and nonterminal
+refusal independently verified. Profile creation did not occur. Normal-environment
+snapshots stayed unchanged. Commands, hashes and retained temporary path:
+`account-setup-ux/installer/{public-pipeline,public-verification,guided-command-checks}.json`.
+All352source hashes recorded by the local package remain unchanged; final edits
+are documentation only. No native/live compatibility or remote CI is inferred
+from local checks. CodeQL alert64 was reviewed as a synthetic PTY-harness output
+finding;45classified alerts remain open, with no dismissal or suppression.
+
+## Final guided setup candidate82a92a0
+
+Second timing correction: hosted b2b3ed5 job103760149174 failed the fixed1.4sec
+beta-progress assumption. The corrected test observes independent beta Gmail
+requests within8sec during20sec provider backoff; it continually rejects early
+alpha requests, preserves explicit cancellation, and retains8sec recovery after
+eligibility. macOS92540/0 and Linux51695/0 each passed22/22; fmt/bothClippy passed.
+Signed/pushed82a92a0 and exact remote/signature verified in
+`account-setup-ux/progress-checkpoint-receipt.json`.
+
+Fresh package pair34590/0 produced identical5dbed9e9 archives, each with22 extracted
+checks,469 verified files and237 notices. Google registration remains absent;
+actual extracted help/version/nonterminal refusal passed. Exact argv/statuses and
+full hashes: `account-setup-ux/{final-package-commands,final-package-final}.json`.
+Current hosted rebuild34771537477/security34771537540 and public installation
+are pending. Prior b2b3ed5 security passed7/7; its rebuild was cancelled on the new
+push after its recorded failure. Prior artifacts retain their own identities.
+
+## Earlier b2b3ed5 local production qualification
 
 Signed/pushed b2b3ed5 corrects the scheduler test after the retained RED/GREEN
 experiment. Signature and exact remote head verified in
@@ -50,7 +105,7 @@ fmt/bothClippy (67502/0, all4commands0). Do not infer hosted success from the
 local reproduction. Initial macOS wrapper exit71 was the
 outer sandbox refusing nested sandbox-exec, then rerun with narrow escalation.
 
-## September 13 — guided account setup in progress
+## Historical checkpoint — guided account setup in progress
 
 Checkpoint qualification: both `workspace` and `workspace-test-harness`
 commands exited 0 with 328 passed, zero failed and zero ignored each. All six new

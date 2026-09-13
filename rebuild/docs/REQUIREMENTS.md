@@ -5,9 +5,10 @@
 The CLI now guides input over the existing 49-RPC account API; schema 23 and the
 engine's credential/account authority are unchanged. The full35-command gate
 passed; both workspace configurations passed328 tests, including all6 new terminal
-cases. Signed/pushed b2b3ed5 also passed corrected scheduler checks on Linux/macOS
-and two reproducible local production packages. Hosted CI and latest-build
-installation remain pending in [VERIFICATION.md](VERIFICATION.md). Prior artifacts
+cases. Signed/pushed 82a92a0 also passed corrected scheduler checks on Linux/macOS
+and two reproducible local production packages. All ten hosted rebuild jobs,
+seven security jobs and the actual public installation passed; exact evidence is
+in [VERIFICATION.md](VERIFICATION.md). Prior artifacts
 below retain their own source.
 
 | Setup requirement | Implementation | Executable evidence | External condition |
@@ -59,11 +60,11 @@ public contract archive or documentation site.
 | AM07 API and CLI parity | [account contract](../crates/nuncio-proto/proto/nuncio/v2/accounts.proto), [daemon API](../crates/nunciod/src/accounts.rs), [wire compatibility](../crates/nuncio-proto/tests/contract.rs) | Seven additive RPCs; retained old descriptor comparison; all 49 RPCs included in the 196-case auth matrix; actual text/JSON CLI checks | Old-wire compatibility and all 196 auth cases passed |
 | AM08 Verification and alpha delivery | [verification](VERIFICATION.md), [installer](TESTING-INSTALL.md), [packaging](PACKAGING.md) | Full offline gate, clean production package pair, exact hosted CI artifact and temporary-prefix installation receipt | Full offline gate, local package pair, actual10-job CI and temporary installer passed |
 
-## R01–R16 at current checkpoint 164b021
+## R01–R16 at current software checkpoint 82a92a0
 
 The matrix maps the approved September 10 requirements to current implementation
 and the new full offline regression. "Passed offline" is not live-provider
-sign-off. Hosted delivery at164b021 is verified; the full goal remains incomplete
+sign-off. Hosted delivery at `82a92a0` is verified; the full goal remains incomplete
 for the named live/native acceptance conditions. Task estimates are separate in [PROGRESS.md](PROGRESS.md).
 
 All test paths below are under `crates/nuncio-test-support/tests/` unless stated
@@ -88,8 +89,8 @@ storage, parsing and provider implementations.
 | R11 Export, encrypted backup/restore, migration and repair | Passed offline | [backup](../crates/nuncio-engine/src/store/backup.rs), [recovery](../crates/nuncio-engine/src/engine/recovery.rs), [Maintenance API](../crates/nuncio-proto/proto/nuncio/v2/maintenance.proto) | `recovery_e2e`, `migration_e2e`, `repair_system`, `repair_e2e`; 46 schema migration SIGKILL cases, five restore crash points, PDF/request fidelity and original preservation | Full integrated regression and final extracted-artifact checks passed |
 | R12 CLI/API parity, paging, byte streams and change replay | Passed offline | [CLI](../crates/nuncio-cli/src/main.rs), [protobuf contract](../crates/nuncio-proto/proto/nuncio/v2), [independent generated client](../clients/smoke/README.md) | Actual CLI suites, `cli_change_watch_replays_jsonl_and_rejects_a_future_revision`; external `clients/smoke/tests/daemon.rs` status/watch test and normal/build dependency-tree check | Frozen descriptor/client/archive verified; full integrated runner passed |
 | R13 Independent stateful Google mock and fault effects | Passed offline | [mock service](../crates/nuncio-test-support/src/google/mod.rs), [contract suite](../crates/nuncio-test-support/tests/google_mock_contract.rs) | 26 independent contract tests pass, including OAuth/HTTP validation, faults, remote state, notifications and limited-writer private-event enforcement | Full integrated regression passed; mocks cannot establish live equivalence |
-| R14 Separate real-store system and daemon/CLI E2E tests | Passed offline | [process harness](../crates/nuncio-test-support/src/process.rs), [system harness](../crates/nuncio-test-support/tests/support/system.rs), [runner](../scripts/verify.py) | All required named suites exist and have prior recorded runs; full `--all` passed. Independent generated-client test also passes under actual macOS egress denial | Full local run and independent-server egress passed; all ten current hosted jobs34704460234 passed |
-| R15 Encryption, key separation, auth/TLS, inert display and test-hook exclusion | Passed offline | [security suites](../crates/nuncio-test-support/tests/security_system.rs), [subprocess security](../crates/nuncio-test-support/tests/security_e2e.rs), [release isolation](../crates/nuncio-test-support/tests/release_isolation.rs) | 196 invalid-auth cases; wrong-key/ordinary-SQLite rejection; encrypted DB/WAL/FTS/backup and original-log canaries; hostile-content/resource bounds; fresh production hook exclusion | Dependency findings resolved; Clean 164b021 archive and full regression passed; actual security run34704460237 passed; native-keystore acceptance remains in R02 |
+| R14 Separate real-store system and daemon/CLI E2E tests | Passed offline | [process harness](../crates/nuncio-test-support/src/process.rs), [system harness](../crates/nuncio-test-support/tests/support/system.rs), [runner](../scripts/verify.py) | All required named suites exist and have prior recorded runs; full `--all` passed. Independent generated-client test also passes under actual macOS egress denial | Full local run and independent-server egress passed; all ten current hosted jobs in34771537477 passed |
+| R15 Encryption, key separation, auth/TLS, inert display and test-hook exclusion | Passed offline | [security suites](../crates/nuncio-test-support/tests/security_system.rs), [subprocess security](../crates/nuncio-test-support/tests/security_e2e.rs), [release isolation](../crates/nuncio-test-support/tests/release_isolation.rs) | 196 invalid-auth cases; wrong-key/ordinary-SQLite rejection; encrypted DB/WAL/FTS/backup and original-log canaries; hostile-content/resource bounds; fresh production hook exclusion | Dependency findings resolved; Clean82a92a0 archive and full regression passed; actual security run34771537540 passed; native-keystore acceptance remains in R02 |
 | R16 Reproducible artifacts, CI, operating instructions and final evidence | Externally pending | [API](API.md), [running](RUNNING.md), [recovery](RECOVERY.md), [manual worksheet](MANUAL-ACCEPTANCE.md) | Local production binaries/hashes and signed checkpoints recorded; external-client foundation verified; manual worksheet prepared | Local archive, descriptor, full offline gate, actual10-jobCI and hosted installer passed; named live/native acceptance remains pending |
 
 Live worksheet rows G01–G10, S01–S05 and X01 are all unapproved/unverified. The

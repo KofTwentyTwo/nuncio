@@ -7,9 +7,9 @@ encrypted backup/restore, migration, repair, and resource budgets. Current schem
 Guided `account add` includes hidden passwords, optional advanced MailPlus
 settings and bundled Google registration support. The full 35-command offline
 gate passed: 328 tests per workspace configuration, zero failed/ignored. Signed/
-pushed `b2b3ed5` passed reproducible Apple Silicon packaging and the Linux/macOS
-scheduler regression. Hosted CI and latest-build installer qualification remain
-in progress; [the report](docs/IMPLEMENTATION-REPORT.md) records exact evidence.
+pushed `82a92a0` passed reproducible Apple Silicon packaging and the Linux/macOS
+scheduler regression. All ten hosted rebuild jobs, seven security jobs and the actual public testing
+installation passed; [the report](docs/IMPLEMENTATION-REPORT.md) records exact evidence.
 
 Install the latest Apple Silicon testing build without cloning or compiling:
 
@@ -42,5 +42,5 @@ Synology MailPlus, and native-keystore acceptance remain deferred and unverified
 native apps are excluded. Earlier failures and later corrections remain in the
 verification history. The old archive does not qualify new account-management
 source. The testing installer and API publication proposal are repository work;
-the testing download is verified at164b021. Public API distribution and a formal
+the testing download is verified at `82a92a0`. Public API distribution and a formal
 release remain separate future work.

@@ -9,7 +9,7 @@ curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-
 After starting `./bin/nunciod --profile laptop-qa`, use a second terminal in the
 installation directory to run `./bin/nuncio-cli --profile laptop-qa account add`.
 See the [guided account setup](ACCOUNT-SETUP.md). This command is part of the
-September 13 update; wait for its successful build before downloading it.
+September 13 update, verified at successful build `82a92a0`.
 
 Use macOS 15 or newer, native ARM64 Python 3.11+ available as `python3`, and
 GitHub CLI (`gh`) 2.100+. Authenticate once with
@@ -21,6 +21,15 @@ manager or changing your environment. The default testing prefix is
 ```sh
 curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-google-first-rebuild/install-testing.sh | bash -s -- --prefix "$HOME/.local/opt/nuncio-testing"
 ```
+
+The latest verification selected `82a92a0`, successful run `34771537477`, attempt1,
+artifact10322850026. The public curl pipeline and temporary installation passed:
+469 manifest entries, both ARM64 executable headers, versions, guided command
+help and nonterminal refusal were independently checked. Normal-environment
+snapshots stayed unchanged; no daemon or account action ran. Hosted rebuild
+passed all ten jobs and security passed all seven. Exact commands, hashes and
+retained path: `test-results/account-setup-ux/installer/public-verification.json`.
+Google registration is absent in this build; MailPlus guided setup is available.
 
 The public pipeline was verified on September 12 using bootstrap checkpoint
 `57c619e`: it selected successful build `c662e48`, run `34706301412` attempt 1,

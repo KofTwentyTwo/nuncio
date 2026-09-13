@@ -1,6 +1,43 @@
 # Rebuild session state
 
-## September 13 — guided setup delivery and CI correction
+## Latest continuation — guided setup delivered
+
+Signed/pushed software `82a92a06eec5c6a674dde25981293404fd074b59` is qualified:
+full guided-setup offline gate35/0 (328 tests per workspace), followed by both
+scheduler corrections passing Linux22/macOS22 and fmt/bothClippy. Fresh clean
+package pair34590/0 produced identical5dbed9e9 archives,22 extracted checks and
+469 manifest entries each. All ten hosted rebuild jobs in34771537477 and all
+seven security jobs in34771537540 passed; watcher86694 exited0 and is finished.
+All ten job-evidence ZIPs were digest-verified and their command results checked.
+
+Actual public installer58846/0 selected this source, run34771537477 attempt1,
+artifact10322850026. Hosted archive9dc2d94e,469-file manifest,both ARM64 binaries,
+versions,guided command help and nonterminal refusal were checked independently.
+Normal-environment snapshots were unchanged; no daemon or live/native account
+access occurred. Exact receipts and retained paths:
+`test-results/account-setup-ux/{hosted-delivery-final,final-package-final}.json`,
+`hosted-evidence/all-job-evidence.json` and `installer/public-verification.json`.
+
+The security scan leaves45 open classified alerts; new64 concerns synthetic PTY
+transcript reporting. The driver rejects supplied fixture passwords before output
+and is excluded from production packages. No production credential exposure was
+demonstrated; no alert was dismissed or suppressed. Exact review retained.
+
+The concise setup email was sent and independently verified (exact plain/HTML,
+SENT and recipient) at12:45:53Central: message1a09be026ffbf31b. It gives update,
+startup and one guided account-add command, and identifies Google registration
+as pending. Receipt: `test-results/account-setup-ux/setup-email-receipt.json`.
+This final documentation-only checkpoint uses `[skip ci]`; its own remote CI is
+not claimed. Signature/push evidence belongs in `account-setup-ux/final-docs/`.
+Software, package and hosted qualification retain source82a92a0. No watcher or
+test process remains active. Resume for concrete laptop feedback or the missing
+Google registration owner/setup authorization; do not repeat unchanged builds.
+Google app registration is absent, and its owner question remains pending.
+Registration/settings changes and named live/native acceptance are unapproved;
+the original full goal remains incomplete. Latest exact state:
+`test-results/checkpoint-final/current-execution.json`.
+
+## History — guided setup implementation and earlier CI
 
 Signed/pushed software `78d4d9e2cf76c78fb6c02832589b63439fd7dae9` implements
 `account add`, hidden terminal password entry, advanced verified-TLS MailPlus

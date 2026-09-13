@@ -8,8 +8,11 @@
 - [x] Full35-command gate passed (328 tests per workspace); signed/pushed78d4d9e.
 - [x] Evidence-backed scheduler correction passed Linux22/macOS22 and fmt/bothClippy; signed/pushed b2b3ed5.
 - [x] Two clean b2b3ed5 production builds: identical8dc16d97 archives,22 extracted checks and469 manifest entries each.
-- [ ] Verify the second timing correction (bounded beta progress), checkpoint it, rebuild packages, then pass hosted CI and latest-build temporary installation.
-- [ ] Finalize guides/evidence and send concise updated setup instructions.
+- [x] Bounded beta-progress correction passed Linux22/macOS22/fmt/bothClippy; signed/pushed82a92a0. Fresh package pair passed with identical5dbed9e9 archives.
+- [x] All ten hosted rebuild and seven security jobs passed at82a92a0; public installer selected the exact source and verified469 files/ARM64/guided commands.
+- [x] Final guides, evidence and concise setup email prepared; sent message1a09be026ffbf31b independently verified. This report-only checkpoint records the completed delivery.
+- [ ] One-time Google app registration: owner question pending; named Google Cloud/repository-secret changes require approval.
+- [ ] Original named live Google/Synology/native acceptance remains deferred.
 
 ## Curl bootstrap follow-up
 
