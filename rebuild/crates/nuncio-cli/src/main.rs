@@ -6,11 +6,14 @@ mod changes;
 mod credentials;
 mod draft_upload;
 mod drafts;
+mod help_text;
+mod human;
 mod mail;
 mod operations;
 mod output;
 mod output_file;
 mod repair;
+mod usage;
 
 use args::{Args, Command, SystemCommand};
 use clap::Parser;
@@ -46,11 +49,12 @@ async fn main() -> std::process::ExitCode {
                 std::process::ExitCode::from(1)
             };
         }
-        Err(_) => {
-            return output::emit(
-                Err(AppError::invalid()),
-                std::env::args_os().any(|value| value == "--json"),
-            )
+        Err(error) => {
+            return if std::env::args_os().any(|value| value == "--json") {
+                output::emit(Err(AppError::invalid()), true)
+            } else {
+                usage::emit(&error)
+            };
         }
     };
     let json = args.json;
@@ -192,7 +196,8 @@ async fn run(args: Args) -> Result<serde_json::Value, AppError> {
 }
 
 fn rpc_error(status: tonic::Status) -> AppError {
-    match status.code() {
+    let guidance = rpc_guidance(&status);
+    let mut error = match status.code() {
         tonic::Code::OutOfRange => AppError {
             code: "resnapshot_required",
             message:
@@ -215,7 +220,7 @@ fn rpc_error(status: tonic::Status) -> AppError {
         },
         tonic::Code::NotFound => AppError {
             code: "not_found",
-            message: "Requested resource was not found",
+            message: "Resource not found for this account; copy its local ID from the matching list command and check --account",
             sync_run: None,
             operation: None,
             recovery: None,
@@ -223,7 +228,7 @@ fn rpc_error(status: tonic::Status) -> AppError {
         },
         tonic::Code::FailedPrecondition | tonic::Code::Aborted => AppError {
             code: "conflict",
-            message: "The requested action conflicts with current state",
+            message: "This action conflicts with current state; inspect the account/resource and use its latest version or ETag before retrying",
             sync_run: None,
             operation: None,
             recovery: None,
@@ -231,11 +236,94 @@ fn rpc_error(status: tonic::Status) -> AppError {
         },
         _ => AppError {
             code: "operation_failed",
-            message: "Engine operation failed",
+            message: "The engine could not complete this action; inspect the daemon log and any returned operation or sync run",
             sync_run: None,
             operation: None,
             recovery: None,
             exit: 1,
         },
+    };
+    if let Some(message) = guidance {
+        error.message = message;
+    }
+    error
+}
+
+fn rpc_guidance(status: &tonic::Status) -> Option<&'static str> {
+    use tonic::Code;
+    // Recognize only fixed API messages; never print arbitrary server details.
+    Some(match (status.code(), status.message()) {
+        (Code::Unauthenticated, "Account authorization is required") => "Account sign-in is required. Use account add for a new account, or account reauth-google / account reauth-imap for a saved account; see their --help.",
+        (Code::Unauthenticated, "Required Google permissions were not granted") => "Required Google permissions were not granted. Repeat Google sign-in and grant the requested Gmail and Calendar access; see docs/GOOGLE-SETUP.md.",
+        (Code::FailedPrecondition, "Mail server TLS verification failed") => "Mail server TLS verification failed. Check the server hostname, certificate and trusted CA in the account settings; use account add or account edit-imap.",
+        (Code::FailedPrecondition, "Mail server does not support a required protocol capability") => "The mail server lacks a required protocol capability; compare its settings with docs/COMPATIBILITY.md.",
+        (Code::FailedPrecondition, "Provider account identity does not match the saved account") => "Sign-in selected a different account. Reauthenticate using the saved identity, or use account add for a separate account.",
+        (Code::FailedPrecondition, "Account lifecycle does not permit this action; restore archived accounts and resolve remote-effect uncertainty before deletion") => "Account state prevents this action. Inspect account show; restore an archived account before reconnecting and resolve uncertain operations before permanent deletion.",
+        (Code::Aborted, "Account configuration changed; read the latest version") => "The account configuration changed. Read account show and repeat the edit using its current --version.",
+        (Code::FailedPrecondition, "The local resource changed; read its latest version before editing") => "The resource changed. Read its show/get result and repeat the edit using the current version or ETag.",
+        (Code::FailedPrecondition, "The query snapshot changed; restart pagination") => "Cached results changed during pagination. Start the list/search again without --page-token, then use its new page tokens.",
+        (Code::FailedPrecondition, "Different work is already active for this account and scope") => "Other work is active for this account and scope. Inspect its sync run or operation and wait for it to finish before retrying.",
+        (Code::Unavailable, "Provider service is unavailable") => "The provider is unavailable. Check account status and daemon logs; inspect any queued operation before retrying a write.",
+        (Code::Unavailable, "Provider service requested a later attempt") => "The provider requested a delay. Wait before checking again; queued work retains its retry schedule.",
+        (Code::ResourceExhausted, "Too many pending authorization sessions or accounts") => "Too many accounts or pending sign-in sessions. Inspect account list and cancel unused sessions with account auth-cancel.",
+        (Code::ResourceExhausted, "Query result is too large; request a smaller page") => "The result exceeds the response limit. Retry with a smaller --page-size.",
+        (Code::InvalidArgument, "Invalid account configuration") => "The account configuration is invalid. Check account setup help, or use account add for guided input; see docs/ACCOUNT-SETUP.md.",
+        (Code::Internal, "Secure credential storage is unavailable") => "The secure credential store is unavailable. Unlock the OS credential store and inspect the daemon log before retrying account setup.",
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod rpc_error_tests {
+    #[test]
+    fn provider_errors_explain_the_right_recovery_without_echoing_server_text() {
+        use tonic::{Code, Status};
+        for (code, message, guidance) in [
+            (
+                Code::Unauthenticated,
+                "Account authorization is required",
+                "reauth",
+            ),
+            (
+                Code::Unauthenticated,
+                "Required Google permissions were not granted",
+                "Google permissions",
+            ),
+            (
+                Code::FailedPrecondition,
+                "Mail server TLS verification failed",
+                "certificate",
+            ),
+            (
+                Code::Unavailable,
+                "Provider service is unavailable",
+                "provider",
+            ),
+            (
+                Code::FailedPrecondition,
+                "The query snapshot changed; restart pagination",
+                "--page-token",
+            ),
+        ] {
+            let error = super::rpc_error(Status::new(code, message));
+            assert!(
+                error.message.contains(guidance),
+                "wrong recovery for {message}: {}",
+                error.message
+            );
+            assert!(!error.message.contains("start 'nunciod"));
+        }
+        let local = super::rpc_error(Status::unauthenticated("Profile authorization required"));
+        assert!(local.message.contains("--profile"));
+        for code in [
+            Code::Unauthenticated,
+            Code::FailedPrecondition,
+            Code::Unavailable,
+            Code::Internal,
+        ] {
+            let error = super::rpc_error(Status::new(code, "private-server-token\u{1b}[2J"));
+            assert!(!error.message.contains("private-server-token"));
+            assert!(!error.message.contains('\u{1b}'));
+        }
     }
 }

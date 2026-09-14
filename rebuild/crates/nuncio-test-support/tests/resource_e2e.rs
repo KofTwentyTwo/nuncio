@@ -365,8 +365,8 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
             iteration_index,
             started.elapsed().as_millis()
         );
-        result(
-            h.cli(&[
+        let downloaded = h
+            .cli(&[
                 "--json",
                 "mail",
                 "attachment",
@@ -379,8 +379,38 @@ async fn actual_daemon_transfers_sixteen_mib_and_rss_stabilizes_after_repeated_f
                 "--output",
                 file.to_str().unwrap(),
             ])
-            .await?,
-        );
+            .await;
+        if downloaded.is_err() {
+            // Preserve numeric progress in the CI log without exposing MIME,
+            // credentials or private profile files. A responsive status RPC
+            // distinguishes a stalled stream from an unavailable daemon/store.
+            let partial_bytes: Vec<_> = std::fs::read_dir(&h.artifacts)?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp"))
+                .filter_map(|entry| entry.metadata().ok().map(|metadata| metadata.len()))
+                .collect();
+            eprintln!(
+                "resource_download_failure iteration={iteration_index} partial_bytes={partial_bytes:?} daemon_stats={:?}",
+                process_stats(pid)
+            );
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                h.cli(&["--json", "system", "status"]),
+            )
+            .await
+            {
+                Ok(Ok(status)) => eprintln!(
+                    "resource_download_failure status_exit={} resources={:?}",
+                    status.status,
+                    status
+                        .json()
+                        .ok()
+                        .map(|value| value["result"]["resources"].clone())
+                ),
+                _ => eprintln!("resource_download_failure status_unavailable=true"),
+            }
+        }
+        result(downloaded?);
         assert_eq!(std::fs::read(&file)?, payload);
         std::fs::remove_file(&file)?;
         eprintln!(

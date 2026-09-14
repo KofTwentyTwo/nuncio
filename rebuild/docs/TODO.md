@@ -1,11 +1,28 @@
 # Current delivery and acceptance state
 
+## Startup progress logging
+
+- [ ] Reproduce missing startup phases for fresh/reopened profiles and failed startup.
+- [ ] Add INFO progress, DEBUG migration detail and safe readiness counts/timing.
+- [ ] Verify phase order, failed-stage visibility, privacy and independent provider state.
+- [ ] Checkpoint/push and verify actual hosted testing download with startup logging.
+
+## CLI usability audit
+
+- [x] Audit 71 help pages; reproduce generic argument/runtime errors and JSON-only default output.
+- [x] Complete descriptions, actionable errors, examples and human-readable results; retain explicit JSON and output safety.
+- [x] Verify every help page plus actual human/JSON subprocess commands and provider effects offline; full 35-command gate and eight final review checks pass.
+- [ ] Run relevant gates, checkpoint/push and qualify actual testing download; keep the separate resource timeout evidence.
+
 ## Daemon running logs
 
 - [x] Reproduce absent default logs and log-level help.
 - [x] Add safe application logging for lifecycle, synchronization and writes.
 - [x] Verify levels, raw-log privacy, ready output and offline subprocess behavior (Google3/3, independent IMAP/SMTP1/1).
-- [ ] Run quality gates, signed checkpoint/push and actual testing delivery.
+- [x] Full35-command offline gate and signed a5b71ba checkpoint/push.
+- [ ] Diagnose hosted Ubuntu large-attachment E2E timeout; preserve strict byte/memory assertions and failing evidence.
+- [ ] Qualify actual hosted checks and verify fresh/update public installer delivery.
+- [x] Email concise install/test/update instructions; explain permanent paths and absence of unattended self-updates.
 
 ## Current delivery report alignment
 

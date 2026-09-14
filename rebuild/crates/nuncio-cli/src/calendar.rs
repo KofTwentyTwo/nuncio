@@ -22,7 +22,9 @@ pub async fn run(
         .max_decoding_message_size(16 * 1024 * 1024);
     match command {
         CalendarCommand::FreeBusy { account, file } => {
-            let mut request = free_busy::read(&file)?;
+            let mut request = free_busy::read(&file).map_err(|error| error.input_context(
+                "Invalid availability query: --file needs schema_version 1, RFC3339 from/to, time_zone and provider_calendar_ids (at most 128 KiB). See 'calendar free-busy --help'."
+            ))?;
             request.account_id = account;
             json(
                 client
@@ -40,7 +42,9 @@ pub async fn run(
             file,
             wait,
         } => {
-            let mut request = action::read(&file)?;
+            let mut request = action::read(&file).map_err(|error| error.input_context(
+                "Invalid calendar action: --file needs schema_version 1, action, scope, notifications and matching event fields (at most 1 MiB). See 'calendar change --help'."
+            ))?;
             request.account_id = account;
             request.calendar_id = calendar;
             request.request_id = request_id;

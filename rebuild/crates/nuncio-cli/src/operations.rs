@@ -146,7 +146,9 @@ pub(crate) async fn run(
             file,
             accept_duplicate_risk,
         } => {
-            let decision = read_decision(&file, accept_duplicate_risk)?;
+            let decision = read_decision(&file, accept_duplicate_risk).map_err(|error| error.input_context(
+                "Invalid recovery decision: --file needs a supported decision and its evidence/reason (at most 16 KiB). See 'operation resolve --help'."
+            ))?;
             client
                 .resolve_operation(v2::ResolveOperationRequest {
                     account_id: account,

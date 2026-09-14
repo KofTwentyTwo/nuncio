@@ -123,7 +123,9 @@ async fn guided_setup_missing_registration_and_declined_consent_are_inert() -> R
     .await?;
     assert_eq!(missing["exit_status"], 2);
     let transcript = missing["transcript"].as_str().unwrap();
-    assert!(transcript.contains("Google sign-in is not enabled in this build"));
+    assert!(transcript.contains("Google sign-in needs an app registration"));
+    assert!(transcript.contains("--client-config"));
+    assert!(transcript.contains("docs/GOOGLE-SETUP.md"));
     assert!(!transcript.contains("Email address"));
     let declined = terminal::run(&h, &["account", "add"], json!([
         {"prompt":"Provider", "answer":"invalid"}, {"prompt":"Provider", "answer":"2"},

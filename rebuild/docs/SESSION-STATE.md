@@ -1,5 +1,54 @@
 # Rebuild session state
 
+## Startup visibility follow-up — approved, September 14
+
+James requested detailed progress during server startup and asked whether it is
+in the latest build. Answered: basic logging is implemented/tested, but the
+latest qualified download remains f14b02a without it; the preceding candidate
+failed a hosted attachment deadline. Expand INFO progress before/after profile
+locking, credential-store access, encrypted DB/schema initialization, recovery,
+account loading and worker startup. Include safe counts and startup time at
+readiness; DEBUG may show individual committed migrations. Never log paths,
+keys, addresses or content, and never publish ready after a failed stage.
+
+Preserve the CLI delivery work. Finish its frozen-source gate and final help
+checks, then checkpoint/push it. Two new startup subprocess regressions are
+prepared in `test-results/startup-logging/tests.rs`; append to the existing
+`support/logging_e2e.rs` and reproduce failure before adding instrumentation.
+Check new/existing profiles, ordered phases, failed second-instance startup,
+unchanged readiness JSON, original-log privacy and independent remote state.
+Then implement only the described logging, verify relevant/full gates, checkpoint
+and qualify hosted/current download. No live-provider or normal-install action.
+
+## CLI usability audit — verified locally, checkpoint pending
+
+Implemented readable CLI results/errors by default, retained explicit `--json`
+and JSONL watch, completed all command/option descriptions and examples, and
+added safe missing-argument guidance. File formats and UUID retry IDs are now
+explained. Known provider auth/TLS/availability failures get appropriate recovery
+instructions; arbitrary server error text remains redacted. API codes, exit
+statuses, provider behavior and original byte exports are unchanged.
+
+Full frozen-source gate passed all 35 commands: 345 tests per workspace
+configuration, zero failures/ignored. Separate Google E2E 39, IMAP E2E 16 and all
+system/security/resource/release/dependency/client checks pass. Archived evidence:
+`test-results/cli-usability/gate-final.json` and `gate-final/`. Final review then
+changed only args.rs, help_text.rs and main.rs for leaf input-format help and
+known-RPC-message guidance. A new RPC-guidance regression failed before the fix.
+Eight supplementary checks pass: CLI 22 normal/23 harness tests, both Clippy
+configurations, formatting, production CLI build and the complete help audit.
+The harness runner initially omitted NUNCIO_E2E_DAEMON; the corrected environment
+passed without a source/assertion change. Exact source delta and logs:
+`final-leaf-summary.json`; final source hashes: `final-source.json`.
+
+The final production-binary audit passes 71 help pages, 531 visible option entries
+and 192 argument-error cases without creating a profile or disclosing rejected
+values. The actual human-mode daemon/CLI walkthrough independently verifies one
+remote send; hostile content is tested in both output modes. Next: scoped review,
+signed CLI checkpoint/push, actual hosted watcher, then the approved startup
+logging follow-up above. The installer still selects qualified f14b02a; no new
+candidate is claimed downloadable until actual hosted/package checks pass.
+
 ## Daemon running logs — in progress, September 14
 
 User requested visible running output and a configurable info/debug default.
@@ -19,7 +68,24 @@ security/resource/release isolation and external-client boundaries. Exact
 counts and archived logs: test-results/daemon-logging/gate-final.json.
 The first gate stopped because Ruff was absent from PATH; the rerun used the
 already installed project-local Ruff. No source change or skipped check.
-Next: signed commit/push and actual hosted/testing artifact qualification.
+Signed and pushed a5b71ba8a2e14cc2efe9831913127b474c34b81d; exact remote ref
+and signature were verified. Hosted rebuild34863965649 has an Ubuntu resource
+E2E failure: attachment download iteration4 exceeded the CLI40-second deadline
+after four successful16MiB downloads. Google E2E38, including all new logging
+cases, passed there; the macOS E2E job passed. Do not qualify this candidate or
+relax resource assertions. The unchanged Linux reproduction passed (1/1) in an
+offline ARM64 container; evidence: test-results/daemon-logging/linux-resource/.
+Actual CI finished9/10rebuild and7/7security. A test-only diagnostic now reports
+partial bytes and bounded daemon health on failure. macOS resource3/3 and Linux
+diagnostic case1/1 pass, as do format/Clippy. A temporary injected stream stall
+verified262144partial bytes, status_exit0, and preservation of the original
+timeout failure. This proves the diagnostic, not the cause of the CI stall.
+Next: diagnose the timeout, apply a verified fix if required, then qualify actual
+hosted and public installer delivery. The installer still selects f14b02a.
+Install/update instructions were emailed to james@kof22.com at10:58:55Central,
+message1a0a0a495ab2a856; SENT and exact plain/HTML content verified. They explain
+the permanent command and executable paths, stop/update/restart, Google setup,
+and that unattended self-updates are not implemented.
 Evidence goes in test-results/daemon-logging/. The full goal still needs the
 previously deferred live/native acceptance; this is independent authorized work.
 

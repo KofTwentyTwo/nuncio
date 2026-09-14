@@ -174,7 +174,9 @@ pub async fn run(
             file,
             wait,
         } => {
-            let action = read_action(&file)?;
+            let action = read_action(&file).map_err(|error| error.input_context(
+                "Invalid mail action file: --file needs schema_version 1 and the fields for its action (at most 8 KiB). See 'mail change --help'."
+            ))?;
             let op = client
                 .change_message(v2::ChangeMessageRequest {
                     account_id: account,

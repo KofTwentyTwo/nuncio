@@ -9,6 +9,28 @@ synthetic services; live Google/Synology and native-keystore acceptance remain
 pending. See the [implementation report](IMPLEMENTATION-REPORT.md) for current
 source-specific results and the [testing installer](TESTING-INSTALL.md) for downloads.
 
+## Read mail for one account
+
+Keep the daemon running in another terminal with the same `--profile`.
+List accounts, copy the matching **local ID**, then replace `ACCOUNT_ID` below:
+
+```sh
+~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account list
+~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa sync --account ACCOUNT_ID --wait
+~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa mail list --account ACCOUNT_ID
+```
+
+`sync` downloads mail; `mail list` reads the local cache. An empty list can mean
+synchronization has not run yet. Use `mail read --account ACCOUNT_ID --message
+MESSAGE_ID` for a message listed there. A profile can contain several accounts;
+an email address or display name is not the account ID.
+
+Normal results are readable text. Add `--json` for scripts. Missing arguments
+print the required option, usage and the relevant `--help` command. For example,
+`mail list` explains that `--account` is required and points to `account list`.
+The [CLI audit](CLI-USABILITY-AUDIT.md) records the changed output contract and
+verification; the [testing guide](TESTING-INSTALL.md) identifies the qualified build.
+
 ## Running logs
 
 The foreground daemon writes activity with UTC timestamps to stderr at **info** level
@@ -372,12 +394,18 @@ For later explicitly authorized live checks, use [MANUAL-ACCEPTANCE.md](MANUAL-A
 
 ## JSON, exit codes and scripts
 
-Normal command output is JSON. `--json` selects compact output; otherwise it is
-indented. Successful responses use `{"schema_version":1,"result":...}`. Errors
-use `{"schema_version":1,"error":{"code":...,"message":...,"retryable":...}}`
-and also write a fixed human-readable message to stderr. Some errors include the
-last durable `operation`, `sync_run` or `recovery` receipt. Parse the error code and
-receipt as well as the process exit. Help/version output is ordinary CLI text.
+Normal command output is readable text with labeled fields and numbered lists.
+IDs, versions, coverage and pagination tokens remain visible; empty lists say
+`No items`. Errors go to stderr with the missing option or next action, and no
+JSON envelope is printed in human mode. Help explains each command and option,
+where IDs come from, local versus remote effects and the relevant file formats.
+
+Use **`--json` explicitly in scripts**. Successful responses retain
+`{"schema_version":1,"result":...}`; errors retain
+`{"schema_version":1,"error":{"code":...,"message":...,"retryable":...}}`
+and a safe stderr message. Some errors include the last durable `operation`,
+`sync_run` or `recovery` receipt. Parse the code and receipt as well as the exit
+status. Help/version remain text; `system watch` always remains JSONL.
 
 | Exit | Meaning |
 |---:|---|

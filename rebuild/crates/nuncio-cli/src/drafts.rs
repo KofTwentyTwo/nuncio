@@ -57,10 +57,14 @@ pub async fn run(
                 .read_to_end(&mut bytes)
                 .map_err(|_| file_error())?;
             if bytes.len() > 8 * 1024 * 1024 {
-                return Err(AppError::invalid());
+                return Err(AppError::invalid().input_context(
+                    "Draft JSON exceeds 8 MiB; attach large files with 'mail draft attach'.",
+                ));
             }
             let content: v2::DraftContent =
-                serde_json::from_slice(&bytes).map_err(|_| AppError::invalid())?;
+                serde_json::from_slice(&bytes).map_err(|_| AppError::invalid().input_context(
+                    "Invalid draft JSON in --file; use recipient arrays, subject and text as shown in 'mail draft save --help'."
+                ))?;
             json(
                 client
                     .save_draft(v2::SaveDraftRequest {
@@ -170,7 +174,7 @@ pub(crate) fn regular_file(path: &std::path::Path) -> Result<std::fs::File, AppE
 pub(crate) fn file_error() -> AppError {
     AppError {
         code: "file_io",
-        message: "Unable to read a stable regular draft or attachment file",
+        message: "Could not read the input file; use an existing, readable regular file that stays unchanged during the command",
         exit: 1,
         sync_run: None,
         operation: None,

@@ -34,8 +34,10 @@ The permanent commands are in `~/.local/opt/nuncio-testing/bin/`. Rerun the
 installer to update them; each verified update keeps this path. Start the daemon
 with `~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa`, then add an
 account using `~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account add`.
-The daemon prints running activity at **info** level; use `--log-level debug`
-for more detail. [Logging options](rebuild/docs/RUNNING.md#running-logs).
+The current source adds daemon activity at **info** level (`--log-level debug`
+for more detail) and readable CLI output by default; scripts use `--json`.
+Testing-download qualification is in progress. [CLI usability audit](rebuild/docs/CLI-USABILITY-AUDIT.md)
+and [logging options](rebuild/docs/RUNNING.md#running-logs).
 [Guided setup](rebuild/docs/ACCOUNT-SETUP.md) uses direct prompts and hidden passwords.
 Follow the [Google setup walkthrough](rebuild/docs/GOOGLE-SETUP.md) to register
 the app once and connect using a private local client file. Shared registration

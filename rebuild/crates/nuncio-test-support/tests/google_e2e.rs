@@ -6,6 +6,8 @@ mod account_management_e2e;
 mod account_setup_e2e;
 #[path = "support/calendar_write_e2e.rs"]
 mod calendar_write_e2e;
+#[path = "support/cli_human_e2e.rs"]
+mod cli_human_e2e;
 #[path = "support/draft_e2e.rs"]
 mod draft_e2e;
 #[path = "support/logging_e2e.rs"]

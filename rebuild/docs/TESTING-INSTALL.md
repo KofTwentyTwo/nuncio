@@ -6,6 +6,11 @@ Run this from any directory; no checkout or local build is needed:
 curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-google-first-rebuild/install-testing.sh | bash
 ```
 
+The engine does not update itself. The command above is the permanent testing
+installer URL for both first installation and later updates. Keep this branch
+and bootstrap file available as the testing-channel entry point when development
+moves elsewhere; changing the implementation behind it must preserve this URL.
+
 The installation always uses **`~/.local/opt/nuncio-testing`** by default.
 Rerun the same command to update it. Installing the same version again succeeds.
 The permanent startup commands are:
@@ -14,8 +19,11 @@ The permanent startup commands are:
 ~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa
 ```
 
-The daemon shows running activity at **info** level. For more detail, add
-`--log-level debug`. [Log levels and saving output](RUNNING.md#running-logs).
+The pending logging/usability build adds running activity at **info** level
+and `--log-level debug`, plus readable CLI output with explicit `--json` for
+scripts. The installer currently selects the earlier passing f14b02a build;
+it will select a newer build only after its required CI succeeds.
+[Log levels and saving output](RUNNING.md#running-logs).
 
 In a second terminal:
 

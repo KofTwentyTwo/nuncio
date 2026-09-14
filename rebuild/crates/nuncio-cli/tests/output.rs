@@ -82,3 +82,91 @@ fn account_without_an_action_preserves_json_errors_for_scripts() {
         assert!(value.get("result").is_none());
     }
 }
+
+#[test]
+fn missing_mail_account_explains_selection_without_creating_a_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("unused-profile");
+    let output = Command::new(env!("CARGO_BIN_EXE_nuncio-cli"))
+        .env_clear()
+        .args(["--profile", "laptop-qa", "--data-dir"])
+        .arg(&data)
+        .args(["mail", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("--account <ACCOUNT_ID>"), "{error}");
+    assert!(error.contains("account list"), "{error}");
+    assert!(error.contains("Usage: nuncio-cli mail list"), "{error}");
+    assert!(!error.contains("schema_version"));
+    assert!(!data.exists());
+}
+
+#[test]
+fn normal_runtime_errors_are_actionable_text_and_json_remains_explicit() {
+    let output = Command::new(env!("CARGO_BIN_EXE_nuncio-cli"))
+        .env_clear()
+        .args(["--endpoint", "http://127.0.0.1:1", "system", "status"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("nunciod"), "{error}");
+    assert!(error.contains("--profile"), "{error}");
+    assert!(!error.contains("schema_version"));
+}
+
+#[test]
+fn helpful_parse_errors_never_echo_untrusted_argument_values() {
+    let secret = "private-token-DO-NOT-ECHO\u{1b}[2J";
+    for args in [
+        vec![
+            "mail",
+            "list",
+            "--account",
+            "local-account",
+            "--page-size",
+            secret,
+        ],
+        vec!["mail", secret],
+        vec!["mail", "list", secret],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_nuncio-cli"))
+            .env_clear()
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("Usage:"), "{error}");
+        assert!(!error.contains("private-token"));
+        assert!(!error.contains('\u{1b}'));
+    }
+}
+
+#[test]
+fn write_request_ids_explain_the_required_uuid_before_connecting() {
+    let output = Command::new(env!("CARGO_BIN_EXE_nuncio-cli"))
+        .env_clear()
+        .args([
+            "mail",
+            "send",
+            "--account",
+            "account",
+            "--draft",
+            "draft",
+            "--request-id",
+            "send-1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("--request-id"), "{error}");
+    assert!(error.contains("UUID"), "{error}");
+}

@@ -60,10 +60,12 @@ fn registration(path: &Path) -> Result<Registration, AppError> {
 
 fn selected_registration(path: Option<std::path::PathBuf>) -> Result<Registration, AppError> {
     if let Some(path) = path {
-        return registration(&path);
+        return registration(&path).map_err(|error| error.input_context(
+            "Cannot read Google registration; --client-config needs a private Desktop OAuth JSON with an installed.client_id field (at most 64 KiB). See docs/GOOGLE-SETUP.md."
+        ));
     }
     let client_id = option_env!("NUNCIO_GOOGLE_CLIENT_ID").filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| wizard::error("google_setup_required", "Google sign-in is not enabled in this build. Ask the Nuncio maintainer for a Google-enabled testing build.", 2))?;
+        .ok_or_else(|| wizard::error("google_setup_required", "Google sign-in needs an app registration. Supply its Desktop JSON with --client-config; see docs/GOOGLE-SETUP.md for the one-time setup.", 2))?;
     Ok(Registration {
         client_id: client_id.to_owned(),
         client_secret: option_env!("NUNCIO_GOOGLE_CLIENT_SECRET")

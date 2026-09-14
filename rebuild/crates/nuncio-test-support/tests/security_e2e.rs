@@ -97,6 +97,16 @@ async fn actual_cli_renders_hostile_mail_as_data_and_never_uses_received_attachm
                 "active terminal control escaped rendering"
             );
         }
+        if !json_mode {
+            assert_eq!(output.status, 0);
+            let text = std::str::from_utf8(&output.stdout)?;
+            assert!(text.contains("Subject: Hostile"));
+            assert!(text.contains("concealed"));
+            assert!(text.contains("<script>fetch("));
+            assert!(text.contains("../escape.txt"));
+            assert!(!text.trim_start().starts_with('{'));
+            continue;
+        }
         let read = result(output);
         assert!(
             read["text"].as_str().unwrap().contains(controls),

@@ -8,9 +8,10 @@ engine/storage dependencies out of their applications.
 The source of truth is [`crates/nuncio-proto/proto/nuncio/v2`](../crates/nuncio-proto/proto/nuncio/v2).
 `nuncio-proto::DESCRIPTOR` embeds the generated six-file descriptor set. The
 current source has 49 RPCs, including seven additive account-management methods;
-the previous `6ff9bb9` package has 42. The current `164b021` package
-and full offline gate passed, including previous-wire compatibility and all
-196 invalid-auth cases. Current-source hosted verification also passed at164b021. The independent [generated-client smoke](../clients/smoke/README.md)
+the previous `6ff9bb9` package has 42. Account-management qualification at
+`164b021` passed previous-wire compatibility and all 196 invalid-auth cases.
+Later qualified testing source and current CLI/logging follow-up evidence are
+identified in [the implementation report](IMPLEMENTATION-REPORT.md). The independent [generated-client smoke](../clients/smoke/README.md)
 has its own workspace/lockfile and no engine or Nuncio client-library dependency.
 Its baseline local and hosted checks passed; see [VERIFICATION.md](VERIFICATION.md).
 The [API publication/SemVer plan](API-PUBLICATION-PLAN.md) is a proposal: no
@@ -87,7 +88,9 @@ Their scopes and queue/byte/page semantics are documented in
 ## CLI representation
 
 The CLI's versioned JSON output and versioned action-file schemas are separate
-from the protobuf package version. See [RUNNING.md](RUNNING.md) for command and
+from the protobuf package version. Normal results are human-readable; scripts
+must select `--json`. JSON envelopes and exit codes retain their contract, while
+`system watch` always emits JSONL. See [RUNNING.md](RUNNING.md) for command and
 payload examples, JSON/streaming conventions, binary output and exit statuses.
 Secrets use private files or standard input as documented. Automated examples and
 acceptance tests use the independent local providers; live acceptance remains a

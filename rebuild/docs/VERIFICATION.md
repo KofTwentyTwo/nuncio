@@ -1,5 +1,39 @@
 # Verification evidence
 
+## CLI usability — September 14, final review
+
+Full frozen-source offline gate passed: 35/35 commands, exit 0. Both workspace
+configurations passed 345 tests with zero failures or ignored tests; these are
+repeated configurations, not 690 unique tests. Separate Google E2E 39, IMAP/SMTP
+E2E 16, Google system 22, IMAP system 28, security E2E 2 and resource E2E 3 passed.
+All 40 script tests, both Clippy configurations, formatting, dependency review,
+release isolation and the independent generated client also pass. Commands,
+counts and archived logs: `test-results/cli-usability/gate-final.json` and
+`gate-final/`. All 368 recorded source hashes matched at completion.
+
+Before the changes, missing-account/runtime/parser-privacy/human-output tests
+failed as expected. Later regressions exposed absent UTC dates and undocumented
+UUID request IDs; those failures and fixes are retained. The actual help audit
+passes 71 pages, 531 option entries and 192 argument-error cases, with no profile
+creation or rejected-value disclosure. The real human-mode daemon/CLI walkthrough
+covers status, accounts, mail/calendar reads, drafts and a send whose single
+remote effect is checked independently. Hostile-content tests check human and
+lossless JSON output separately; byte exports and remote-state checks remain.
+
+Final review adds leaf-level account/backup file-format help and corrects known
+provider errors that were mislabeled as local profile/daemon problems. These
+three source files are a supplementary delta, verified after the full gate.
+All eight supplementary checks pass: 22 normal/23 harness CLI tests, both Clippy
+configurations, formatting, production CLI build and all 71/531/192 help cases.
+The RPC-guidance regression failed first (exit 101). The first harness check
+failed because its runner omitted NUNCIO_E2E_DAEMON; the corrected environment
+passed without source/assertion changes. `final-leaf-summary.json` and
+`final-source.json` record the exact checks, source delta and hashes. Arbitrary server
+text remains redacted; machine codes, exit statuses and provider behavior remain.
+Checkpoint, actual hosted qualification and updated public download are pending.
+Detailed startup phases are a separate approved follow-up, prepared in
+`test-results/startup-logging/`; they are not yet implemented or tested.
+
 ## Daemon running logs — September 14, in progress
 
 Regressions reproduced the absent --log-level/help (exit101) and missing default
@@ -23,7 +57,14 @@ security/resource/release isolation and external-client checks pass. Original
 logs are retained in gate-final/; gate-final.json records commands and counts.
 The first full gate stopped on missing Ruff in PATH; using the existing local
 Ruff executable fixed that environment issue without source changes or skipped
-checks. Current-source hosted checks and new download qualification are next.
+checks. Signed/pushed a5b71ba is being checked in actual hosted runs34863965649
+and34863965688. Ubuntu resource E2E failed at attachment iteration4 with CLI
+invocation15 exceeding40seconds; previous four downloads and Google E2E38 pass.
+The macOS E2E job passed. The raw failed job log is retained as
+ubuntu-e2e-failed-job.log; independent offline Linux reproduction is under
+linux-resource/. Current-source download qualification has not passed.
+Installer instructions email1a0a0a495ab2a856 was verified SENT with exact
+plain/HTML content; receipt: test-results/status-emails/2026-09-14-install-and-update-receipt.json.
 
 ## Delivery report alignment — September 13
 
