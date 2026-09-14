@@ -20,7 +20,10 @@ curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-
 Requires macOS 15+, Python 3.11+ and authenticated GitHub CLI 2.100+;
 [details and custom prefix](docs/TESTING-INSTALL.md).
 
-Add an account with `./bin/nuncio-cli --profile laptop-qa account add`.
+The permanent commands are in `~/.local/opt/nuncio-testing/bin/`. Rerun the
+installer to update them; each verified update keeps this path. Start the daemon
+with `~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa`, then add an
+account using `~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account add`.
 [Guided setup](docs/ACCOUNT-SETUP.md) uses direct prompts and hidden passwords.
 Google sign-in requires the one-time Nuncio app registration, which has not yet been created.
 

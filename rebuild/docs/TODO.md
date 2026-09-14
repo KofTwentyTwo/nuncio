@@ -1,5 +1,13 @@
 # Current delivery and acceptance state
 
+## Stable installer paths
+
+- [x] Keep permanent default-prefix commands; retain verified versioned builds.
+- [x] Verify repeat installation, updates, old-layout migration, failure recovery, tampering and concurrent-installer refusal:20 installer tests pass.
+- [x] Full40 script tests, Ruff check/format, Bash syntax and ShellCheck pass; immutable source pin independently checked.
+- [ ] Checkpoint/push integrated bootstrap and documentation; verify actual hosted CI.
+- [ ] Verify public curl installer twice with the same temporary prefix and retain exact receipts; no normal-environment installation.
+
 ## Individual-account help follow-up
 
 - [x] Clarify account IDs, profiles, individual actions, and command examples.

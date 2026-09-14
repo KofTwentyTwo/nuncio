@@ -1,9 +1,10 @@
 # Connect an account
 
-Start your testing daemon, then open a second terminal in the installed directory:
+Start your testing daemon, then open a second terminal. The testing installer
+keeps these command paths stable across updates:
 
 ```sh
-./bin/nuncio-cli --profile laptop-qa account add
+~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account add
 ```
 
 Choose **Google** or **Synology MailPlus / IMAP**. The command guides you through
@@ -54,8 +55,8 @@ URL manually. These are optional developer controls.
 Use the same `--profile laptop-qa` on subsequent commands:
 
 ```sh
-./bin/nuncio-cli --profile laptop-qa account list
-./bin/nuncio-cli --profile laptop-qa account show --account ACCOUNT_ID
+~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account list
+~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account show --account ACCOUNT_ID
 ```
 
 Find your email address in the list and replace `ACCOUNT_ID` with that entry's

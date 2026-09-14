@@ -30,13 +30,16 @@ curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-
 Requires macOS 15+, Python 3.11+ and authenticated GitHub CLI 2.100+;
 [details and custom prefix](rebuild/docs/TESTING-INSTALL.md).
 
-Add an account with `./bin/nuncio-cli --profile laptop-qa account add`.
+The permanent commands are in `~/.local/opt/nuncio-testing/bin/`. Rerun the
+installer to update them; each verified update keeps this path. Start the daemon
+with `~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa`, then add an
+account using `~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account add`.
 [Guided setup](rebuild/docs/ACCOUNT-SETUP.md) uses direct prompts and hidden passwords.
 Google sign-in requires the one-time Nuncio app registration, which has not yet been created.
 
 For Apple Silicon laptop testing, the [testing installer](rebuild/docs/TESTING-INSTALL.md)
 downloads an eligible verified CI package without compiling locally. The first real download/temporary installation is verified at `164b021`; it
-selects a fully successful retained testing-branch run. It installs into a separate versioned prefix without starting a
+selects a fully successful retained testing-branch run. It activates verified builds at a stable testing path without starting a
 service. No public release or live-provider readiness is implied.
 
 The [proposed post-engine roadmap](rebuild/docs/POST-ENGINE-ROADMAP.md) starts

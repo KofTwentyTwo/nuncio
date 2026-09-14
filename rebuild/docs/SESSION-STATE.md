@@ -1,5 +1,32 @@
 # Rebuild session state
 
+## Stable installer paths — local verification complete
+
+The requested installer fix keeps startup commands at
+`~/.local/opt/nuncio-testing/bin/{nunciod,nuncio-cli}`. Verified versioned builds
+are retained; `bin -> current/bin` and one atomic `current` replacement activate
+updates. Repeat installation verifies and reuses the existing build. An OS lock
+prevents concurrent activation. Old-layout migration, failed downloads/copies,
+interrupted activation, tampering and unrelated-path preservation are covered.
+No profile, account, shell configuration or running daemon is modified.
+
+The failing stable-path regression was reproduced first (exit 1). All 20 installer
+tests now pass. The complete script suite passes 40 tests; Ruff check/format,
+Bash syntax and ShellCheck all exit 0. Installer source/tests are signed locally
+at `0c7083bf8edd4bd0334fef3b9d28ec4a62146d31`. The public bootstrap now pins that
+exact source with SHA-256
+`b8856606bcdcc211e2b34c147902109895818cc4825afd8e12b082d4f6d396a0`;
+`git show` bytes were independently matched. Relevant logs and exact commands:
+`test-results/stable-installer/{red,installer-checks,checks,pin-source}.json`.
+
+Next action: checkpoint the integrated bootstrap and guides, push the checked
+branch tip, observe actual hosted CI, and run the public installer twice into the
+same private temporary prefix. Public installation and hosted results for this
+change are not yet claimed. The last qualified application download is7508e25;
+the installer's immutable source pin is independent of the selected app build.
+Google registration approval and named live/native acceptance remain pending.
+Latest continuation: `test-results/checkpoint-final/current-execution.json`.
+
 ## Individual-account CLI help — delivered at7508e25
 
 The user reported unclear account targeting. The account help now explains

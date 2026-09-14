@@ -4,8 +4,8 @@ nuncio_install_testing() (
   set -euo pipefail
   umask 077
 
-  installer_commit='13dbe549cb386fe641ef82922916fafe7cc9cf5c'
-  installer_sha256='d786aa95d485bcc13cbb627ccd761bc3621109a04263bdc5c05cd9d02ccd0aff'
+  installer_commit='0c7083bf8edd4bd0334fef3b9d28ec4a62146d31'
+  installer_sha256='b8856606bcdcc211e2b34c147902109895818cc4825afd8e12b082d4f6d396a0'
 
   for prerequisite in python3 gh curl shasum; do
     if ! command -v "$prerequisite" >/dev/null 2>&1; then

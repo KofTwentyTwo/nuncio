@@ -126,16 +126,19 @@ Inspect the durable operation and independent provider evidence first.
 
 ## Testing installation and removal
 
-The repository [testing installer](TESTING-INSTALL.md) uses a version/source/run
-directory beneath the explicit `~/.local/opt/nuncio-testing` prefix and refuses
-existing destinations. It verifies CI provenance, digests, package contents and
-architecture without compiling or executing the downloaded binaries. Use the
-printed binary paths; it does not modify PATH, profiles, production executables
-or login services. Download and temporary installation of the `82a92a0` CI archive
-have passed the checks in [TESTING-INSTALL.md](TESTING-INSTALL.md). For a manually
-extracted local candidate, likewise choose a new version-specific directory and
-preserve older candidates. No normal-environment installation has been performed
-here. Native application packaging is outside this goal.
+The repository [testing installer](TESTING-INSTALL.md) exposes permanent commands
+at `~/.local/opt/nuncio-testing/bin/`. Updates verify a retained build completely,
+then atomically switch `current`; `bin` points through that link. Older builds
+remain in their version/source/run directories. Installing the same verified
+build again succeeds after its installed files and receipt are rechecked.
+
+The installer verifies CI provenance, digests, package contents and architecture
+without compiling or executing the downloaded binaries. Stop and restart the
+daemon through the permanent path to use an update. It does not modify PATH,
+profiles, production executables or login services. For a manually extracted
+local candidate, choose a separate directory and preserve older candidates.
+No normal-environment installation has been performed here. Native application
+packaging is outside this goal.
 
 For rollback, stop the daemon and choose a binary compatible with the profile's
 schema, or restore a verified backup into a new directory. An older binary must

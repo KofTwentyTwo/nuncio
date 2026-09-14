@@ -1,102 +1,96 @@
-# Download a testing build on Apple Silicon
+# Install and update the testing build
 
-Run this from any directory; no repository checkout or local build is needed:
+Run this from any directory; no checkout or local build is needed:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-google-first-rebuild/install-testing.sh | bash
 ```
 
-After starting `./bin/nunciod --profile laptop-qa`, use a second terminal in the
-installation directory to run `./bin/nuncio-cli --profile laptop-qa account add`.
-See the [guided account setup](ACCOUNT-SETUP.md). This command is part of the
-September 13 update, verified at successful build `82a92a0`.
-
-Use macOS 15 or newer, native ARM64 Python 3.11+ available as `python3`, and
-GitHub CLI (`gh`) 2.100+. Authenticate once with
-`gh auth login --hostname github.com`; artifact downloads need Actions read
-access. Missing prerequisites produce instructions without installing a package
-manager or changing your environment. The default testing prefix is
-`~/.local/opt/nuncio-testing`. To choose a different prefix:
+The installation always uses **`~/.local/opt/nuncio-testing`** by default.
+Rerun the same command to update it. Installing the same version again succeeds.
+The permanent startup commands are:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-google-first-rebuild/install-testing.sh | bash -s -- --prefix "$HOME/.local/opt/nuncio-testing"
+~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa
 ```
 
-The latest verification selected `82a92a0`, successful run `34771537477`, attempt1,
-artifact10322850026. The public curl pipeline and temporary installation passed:
-469 manifest entries, both ARM64 executable headers, versions, guided command
-help and nonterminal refusal were independently checked. Normal-environment
-snapshots stayed unchanged; no daemon or account action ran. Hosted rebuild
-passed all ten jobs and security passed all seven. Exact commands, hashes and
-retained path: `test-results/account-setup-ux/installer/public-verification.json`.
-Google registration is absent in this build; MailPlus guided setup is available.
-
-The public pipeline was verified on September 12 using bootstrap checkpoint
-`57c619e`: it selected successful build `c662e48`, run `34706301412` attempt 1,
-and installed into a fresh private temporary prefix. All 467 file-manifest
-entries and both ARM64 binaries were independently checked; both `--version`
-commands passed. Normal-environment snapshots were unchanged. No local build,
-daemon startup or provider action occurred. The new bootstrap has nine offline
-subprocess regressions; all 31 installer/script tests and static checks passed.
-Exact commands, hashes and retained installation path are in
-`test-results/curl-bootstrap/public-verification.json` and [VERIFICATION.md](VERIFICATION.md).
-Bootstrap checkpoint `57c619e` subsequently passed all ten jobs in
-[rebuild run 34710211208](https://github.com/KofTwentyTwo/nuncio/actions/runs/34710211208)
-and all seven jobs in
-[security run 34710211290](https://github.com/KofTwentyTwo/nuncio/actions/runs/34710211290).
-The public pipeline receipt above identifies the build selected at its own run
-time; later installation may select a newer successful build.
-
-The public Bash bootstrap downloads the reviewed Python installer from an
-immutable source commit and checks its SHA-256 before executing it in isolated
-Python mode. Downloads use HTTPS and a private temporary directory that is
-removed on exit. The pinned installer still selects the latest eligible build;
-its pin does not pin the application version. Maintainers changing the Python
-installer must first checkpoint that source, then update the bootstrap commit
-and checksum together; the offline pin test catches a stale checksum.
-
-The bootstrap is currently on `feature/nuncio-google-first-rebuild`; it has not
-been merged into `dev` or `main`. Its full invocation and verification receipts
-are recorded in [VERIFICATION.md](VERIFICATION.md). The Python installer
-downloads the newest retained, successful **push** build from
-`KofTwentyTwo/nuncio`, branch `feature/nuncio-google-first-rebuild`, workflow
-`rebuild-ci.yml`; newer unfinished or failed work is not installed. No Rust,
-Cargo, compiler, or local build is needed. Each install gets its own version,
-source, run, and attempt directory beneath the explicit testing prefix. Existing
-directories are refused and preserved; PATH, shell profiles, production binaries,
-services, accounts, and data profiles are unchanged. The script prints the exact
-installed path, version, full source commit, CI link, package hash, and a safe
-`nuncio-cli --help` command. Its `TESTING-INSTALL.json` retains that provenance.
-
-If you already have this feature branch checked out, the equivalent command is:
+In a second terminal:
 
 ```sh
-python3 rebuild/scripts/install-testing.py --prefix "$HOME/.local/opt/nuncio-testing"
+~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account add
+~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account list
 ```
 
-All CI jobs must finish successfully before a build is eligible. The installer
-checks the GitHub ZIP digest, adjacent package checksum, complete file manifest,
+See [guided account setup](ACCOUNT-SETUP.md) and
+[individual-account commands](ACCOUNT-MANAGEMENT.md#work-on-one-account).
+Google still needs Nuncio's one-time app registration before browser sign-in can
+connect a real account. Named live-provider testing remains separately controlled.
+
+## Prerequisites and custom location
+
+Use macOS 15+, native ARM64 Python 3.11+ available as `python3`, and GitHub CLI
+2.100+. Authenticate once with `gh auth login --hostname github.com`; downloads
+need Actions read access. The installer reports missing prerequisites and does
+not install a package manager or modify your shell configuration.
+
+To use a different permanent location, supply the same prefix for each update:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KofTwentyTwo/nuncio/feature/nuncio-google-first-rebuild/install-testing.sh | bash -s -- --prefix "$HOME/Applications/Nuncio-Testing"
+```
+
+Use that directory's `bin/nunciod` and `bin/nuncio-cli`. From a checked-out repo,
+the equivalent is `python3 rebuild/scripts/install-testing.py --prefix PATH`.
+
+## Updates and recovery
+
+The installer retains each verified build in a version/source/run directory.
+The `current` link selects a complete build; the permanent `bin` link points to
+`current/bin`. Activation is an atomic replacement of `current`, so an update
+cannot expose a partially copied build. A lock prevents concurrent installers
+from activating different builds in the same prefix.
+
+Failed downloads and copy failures preserve the active build. If activation is
+interrupted, rerun the installer; it verifies an existing completed build before
+reusing it. A repeat install also verifies all installed files, their permissions,
+and the receipt. Unexpected files, modified builds, and unrelated objects at
+`bin` or `current` are refused and preserved. Existing installations in the older
+version-directory layout are reused after verification; no manual move is needed.
+
+Stop a running daemon with Ctrl-C or authenticated `system shutdown`, then restart
+it through the permanent `bin/nunciod` path. An already running process continues
+using its old binary until restart. Use the permanent command paths after updates;
+a shell already inside an older version directory stays in that directory.
+
+The selected build's provenance is in `current/TESTING-INSTALL.json`. Older builds
+are retained for recovery; stop the daemon before explicitly running an older
+build's binaries, and check schema compatibility in [RECOVERY.md](RECOVERY.md).
+Older binaries cannot downgrade a data schema. For uninstall, stop the daemon
+and remove the testing application prefix only. Preserve data profiles, backups,
+and Keychain records unless their deletion is separately intended.
+
+## What the installer verifies
+
+The Bash bootstrap fetches the Python installer from an immutable commit and
+checks its SHA-256 before executing it in isolated Python mode. The installer
+selects the newest retained successful push build on
+`KofTwentyTwo/nuncio`'s `feature/nuncio-google-first-rebuild` branch and
+`rebuild-ci.yml` workflow. Failed or unfinished builds are ineligible.
+
+It checks the GitHub artifact digest, package checksum, complete manifest,
 clean-source production metadata, 22 extracted-binary check results, and both
-ARM64 Mach-O executable headers before copying files. It refuses unsafe archive
-paths, links, special files, unexpected contents, and changing CI attempts. This
-establishes CI source and integrity evidence; it does **not** establish developer
-code signing, notarization, live-provider acceptance, or native-keystore behavior.
-It does not execute downloaded binaries or start a daemon. Use the exact installed
-binary paths and the packaged [running guide](RUNNING.md) for separately chosen
-testing-profile/account actions. To remove an unused build, delete only its printed
-installation directory; retain profiles, backups, and Keychain entries. Choosing
-older binaries is not a database-schema downgrade. Builds expire after 14 days:
-if none is available, the installer reports that honestly and installs nothing.
-The first actual delivery passed on September 12 at commit `164b021`, successful
-[run34704460234](https://github.com/KofTwentyTwo/nuncio/actions/runs/34704460234),
-attempt1. All eleven artifacts were retained and digest-checked. The unmodified
-installer downloaded artifact10301603739 and installed its 467-entry package into
-a fresh temporary prefix; normal-environment snapshots stayed unchanged. Separate
-help/version/account-command checks passed27parser cases. Full system/E2E behavior
-is recorded in [VERIFICATION.md](VERIFICATION.md); no daemon or live account was
-started during installer verification. Exact package/ZIP hashes are in the
-[implementation report](IMPLEMENTATION-REPORT.md). Older evidence-only runs cannot
-supply binaries. No GitHub release or tag is created. See GitHub's
-[artifact API](https://docs.github.com/en/rest/actions/artifacts) and
-[workflow-run API](https://docs.github.com/en/rest/actions/workflow-runs) for the
-download provenance fields.
+ARM64 executable headers. Unsafe archive paths, links, special files, changing
+CI attempts and mismatched provenance are refused. Builds expire after 14 days;
+if no eligible build remains, installation fails without activating anything.
+The installer does not run downloaded executables, start services or access mail.
+
+This verifies source and integrity, not developer code signing, notarization,
+live-provider compatibility or native Keychain acceptance. Actual delivery receipts
+and historical checks are in [VERIFICATION.md](VERIFICATION.md) and the latest
+[session state](SESSION-STATE.md). No GitHub release or tag is created.
+
+Maintainers first checkpoint a changed Python installer locally, then update the
+bootstrap's immutable commit and checksum together. Run installer, bootstrap and
+script checks before pushing the integrated result; verify the actual public
+bootstrap and installation afterward. The bootstrap source pin is independent of
+the application version it selects.
