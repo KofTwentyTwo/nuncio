@@ -5,6 +5,24 @@ September 12, 2026. The corrected hosted security run at signed/pushed
 run and all finding classifications remain below. Scan success, mandatory merge
 enforcement, and provider acceptance are separate facts.
 
+## September 14 Rustls advisory follow-up
+
+[Security run34873494213](https://github.com/KofTwentyTwo/nuncio/actions/runs/34873494213)
+passed all four CodeQL jobs but rejected all three dependency graphs at92e9394.
+[RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285) affects the
+locked Rustls0.23.43/0.23.44 and is patched in0.23.45. All three lockfiles are
+now updated; the original also takes Rustls's required AWS-LC/webpki minimums.
+No scanner policy, ignore list or test assertion changed.
+
+The freshly fetched advisory database is e2e640471715167f73e22eaf761f2e547adafeec
+(September14,17:35UTC). Both cargo-audit and cargo-deny pass for every corrected
+lock; each original lock first failed with the actual advisory. Original
+formatting, Clippy and790tests pass with external egress denied. The patched
+rebuild35-command gate passes, including348tests in each workspace and the
+independent client. Subsequent hosted/package qualification remains pending.
+Evidence: `test-results/startup-logging/rustls/`. Earlier successful scans below
+apply to their recorded dates and sources; they do not clear this new finding.
+
 ## September 13 guided-setup security result
 
 All seven jobs in [run 34771537540](https://github.com/KofTwentyTwo/nuncio/actions/runs/34771537540)

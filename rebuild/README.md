@@ -26,8 +26,10 @@ The permanent commands are in `~/.local/opt/nuncio-testing/bin/`. Rerun the
 installer to update them; each verified update keeps this path. Start the daemon
 with `~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa`, then add an
 account using `~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account add`.
-The current source adds daemon activity at **info** level (`--log-level debug`
-for more detail) and readable CLI output by default; scripts use `--json`.
+The current source reports startup stages and running activity at **info** level
+(`--log-level debug` adds detail), and readable CLI output is now the default;
+scripts use `--json`. Rustls0.23.45 addresses RUSTSEC-2026-0285 across all three
+lockfiles. The previous download predates this fix; new qualification is pending.
 Testing-download qualification is in progress. [CLI usability audit](docs/CLI-USABILITY-AUDIT.md)
 and [logging options](docs/RUNNING.md#running-logs).
 [Guided setup](docs/ACCOUNT-SETUP.md) uses direct prompts and hidden passwords.

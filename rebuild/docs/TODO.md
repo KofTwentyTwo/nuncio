@@ -1,10 +1,16 @@
 # Current delivery and acceptance state
 
+## Rustls security update
+
+- [x] Refresh advisory database and reproduce the hosted RUSTSEC-2026-0285 finding.
+- [x] Update all three lockfiles to Rustls 0.23.45; verify original790, rebuild35-command gate and independent client.
+- [ ] Checkpoint/push and qualify actual hosted/public installer delivery with startup logging.
+
 ## Startup progress logging
 
-- [ ] Reproduce missing startup phases for fresh/reopened profiles and failed startup.
-- [ ] Add INFO progress, DEBUG migration detail and safe readiness counts/timing.
-- [ ] Verify phase order, failed-stage visibility, privacy and independent provider state.
+- [x] Reproduce missing startup phases for fresh/reopened profiles and failed startup (two RED regressions).
+- [x] Add INFO progress, DEBUG migration detail and safe readiness counts/timing.
+- [x] Verify phase order, failed-stage visibility, privacy and independent provider state; separate Google E2E 41/41 passes.
 - [ ] Checkpoint/push and verify actual hosted testing download with startup logging.
 
 ## CLI usability audit
@@ -12,7 +18,8 @@
 - [x] Audit 71 help pages; reproduce generic argument/runtime errors and JSON-only default output.
 - [x] Complete descriptions, actionable errors, examples and human-readable results; retain explicit JSON and output safety.
 - [x] Verify every help page plus actual human/JSON subprocess commands and provider effects offline; full 35-command gate and eight final review checks pass.
-- [ ] Run relevant gates, checkpoint/push and qualify actual testing download; keep the separate resource timeout evidence.
+- [x] Run full local verification and sign/push CLI92e9394; preserve its failed hosted advisory evidence.
+- [ ] Qualify the patched startup/CLI testing download through actual hosted and public installer checks.
 
 ## Daemon running logs
 

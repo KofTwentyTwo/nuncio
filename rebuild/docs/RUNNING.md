@@ -33,10 +33,36 @@ verification; the [testing guide](TESTING-INSTALL.md) identifies the qualified b
 
 ## Running logs
 
-The foreground daemon writes activity with UTC timestamps to stderr at **info** level
-by default. It reports startup, account connection and changes, sync runs and
-processed counts, write attempts and their durable outcomes, worker failures,
-and shutdown. Account and operation IDs match the CLI's IDs.
+The foreground daemon writes activity with UTC timestamps to stderr at **info**
+level by default. Startup shows configuration validation, listener binding,
+profile locking, credential-store access, encrypted database/schema checks,
+interrupted-work recovery, account loading and background worker startup. Each
+completion message follows the corresponding successful step. The final ready
+line includes API/schema versions, account count, background-sync state and
+elapsed startup milliseconds.
+
+A shortened example (timestamps and some intermediate messages omitted):
+
+```text
+INFO Preparing local profile
+INFO Profile lock acquired
+INFO Accessing credential store for profile keys
+INFO Profile keys ready
+INFO Opening encrypted database
+INFO Database encryption verified
+INFO Checking database schema current_schema=23 target_schema=23
+INFO Database schema ready schema_version=23
+INFO Recovering local drafts and durable operations
+INFO Starting background workers
+INFO Daemon ready endpoint=127.0.0.1:9421 api_version=nuncio.v2 ...
+```
+
+If startup waits at credential-store access, check for an OS approval prompt or
+locked keychain. A failed step leaves its last progress message visible and does
+not publish readiness. Debug logging also reports each committed database
+migration. After startup, logs report account changes, sync runs and processed
+counts, write attempts/outcomes, worker failures and shutdown. Opaque account and
+operation IDs match the CLI's IDs; profile paths and private contents are omitted.
 
 ```sh
 ~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa
@@ -168,7 +194,7 @@ When credential replacement has committed but deletion of the previous secret fa
 
 Add `--wait` to wait up to 30 seconds, or later use `operation wait --account ACCOUNT --operation ID`. Success means a recorded Google submission acknowledgement or matching positive Sent evidence. It does not establish final recipient delivery; Google's sending pipeline can fail after a successful API response. [Gmail error and sending-limit guidance](https://developers.google.com/workspace/gmail/api/guides/handle-errors).
 
-Inspect `operation show`, `operation list`, and `operation attempts`, always with `--account`; show/attempts take `--operation`. Attempts are newest first, with receipt source, provider ID and observation timestamp. List/history pages are bound to account, query, page size and global revision. Restart pagination after a revision conflict. `operation show` includes frozen sender, recipients, Message-ID and draft version in desired_state_json, plus audited resolutions. Wait failures retain the last operation under JSON `error.operation`; a timeout or stopped CLI leaves the daemon's durable work running.
+Inspect `operation show`, `operation list`, and `operation attempts`, always with `--account`; show/attempts take `--operation`. Attempts are newest first, with receipt source, provider ID and observation timestamp. List/history pages are bound to account, query, page size and global revision. Restart pagination after a revision conflict. `operation show` includes frozen sender, recipients, Message-ID and draft version in desired_state_json, plus audited resolutions. Wait failures show the operation ID, state and inspection command in readable mode. With `--json`, the complete last operation remains under `error.operation`. A timeout or stopped CLI leaves the daemon's durable work running.
 
 `operation cancel` succeeds only while work is queued and undispatched. An interrupted running send becomes uncertain and is reconciled without resending. Automatic reconciliation searches the selected account's Sent messages for the frozen Message-ID, verifies sender/recipient/subject/MIME headers and exact body bytes, and requires a unique match. Provider MIME normalization or missing/ambiguous evidence can leave the result uncertain. Absence never proves non-delivery. Automatic request retries are disabled in the HTTP library; the journal owns each attempt. Positive rejection permits bounded retries with backoff and persisted provider guidance. A post-submission server failure or lost/malformed acknowledgement enters reconciliation. [Gmail message/search contract](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages).
 
@@ -199,7 +225,7 @@ Transient failures use exponential backoff with jitter, bounded at five minutes 
 
 `system status` includes a `sync` entry per account/scope: phase, run ID, processed count, last success, age, next scheduled attempt, error code, and coverage freshness. An active run is queued/running; inactive entries are waiting, backoff, or paused. `manual` appears only when an isolated test disables automatic scheduling. Coverage is unavailable before the first complete sync and stale after errors or two missed polling intervals; inspect Mail/Calendar query coverage for payload availability and the precise agenda window. A scheduler storage failure is visible as `scheduler_error`.
 
-`sync --wait` and `calendar refresh --wait` exit successfully only on a completed run. A failed wait, timeout, or RPC disconnection includes the last known `error.sync_run` receipt in JSON; use its account/id with `system sync-status` to inspect the durable result. A timeout or stopped CLI does not cancel the daemon's work. Plain `sync` returns a queue receipt, whose state is distinct from success.
+`sync --wait` and `calendar refresh --wait` exit successfully only on a completed run. A failed wait, timeout, or RPC disconnection shows the last known run ID, state and inspection command. With `--json`, the complete receipt remains under `error.sync_run`; use its account/id with `system sync-status` to inspect the durable result. A timeout or stopped CLI does not cancel the daemon's work. Plain `sync` returns a queue receipt, whose state is distinct from success.
 
 ## Resource status
 
@@ -253,7 +279,7 @@ Pending changes to one provider message execute in insertion order, including eq
 
 ## Calendar changes
 
-Get local calendar/event IDs and the current ETag with `calendar list`, `calendar agenda` and `calendar get`. Submit an action with `calendar change --account ACCOUNT --calendar CALENDAR --request-id UUID --file ACTION.json --wait`. The same account/request ID and identical action returns the same durable operation. A changed request under that ID conflicts. `--wait` exits0 only for applied work; conflicts or unresolved notification outcomes exit5 and include the operation in JSON. Cancelling a CLI does not cancel daemon work.
+Get local calendar/event IDs and the current ETag with `calendar list`, `calendar agenda` and `calendar get`. Submit an action with `calendar change --account ACCOUNT --calendar CALENDAR --request-id UUID --file ACTION.json --wait`. The same account/request ID and identical action returns the same durable operation. A changed request under that ID conflicts. `--wait` exits0 only for applied work; conflicts or unresolved notification outcomes exit 5 and show the operation ID and state. Use `--json` for the complete operation receipt. Cancelling a CLI does not cancel daemon work.
 
 Each file is one JSON object, at most1MiB, with integer schema_version1, explicit scope (`single` or `series`) and notifications (`none`, `all` or `external_only`). Missing/unknown versions, unknown fields, duplicate version fields and explicit null field values are rejected. Use clear_fields for removal of summary, description, location, recurrence, reminders or color_id. A field cannot be set and cleared together. Example files:
 

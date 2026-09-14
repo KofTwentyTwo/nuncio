@@ -142,7 +142,13 @@ fn open_with_options(
             row.get::<_, i64>(0)
         })
         .map_err(|_| StoreError::KeyOrCorrupt)?;
-    migrations::check_version(&connection)?;
+    tracing::info!("Database encryption verified");
+    let schema_version = migrations::check_version(&connection)?;
+    tracing::info!(
+        current_schema = schema_version,
+        target_schema = migrations::VERSION,
+        "Checking database schema"
+    );
     connection.pragma_update(None, "cipher_memory_security", true)?;
     connection.pragma_update(None, "temp_store", "MEMORY")?;
     connection.pragma_update(None, "foreign_keys", true)?;
@@ -154,6 +160,10 @@ fn open_with_options(
     }
     connection.pragma_update(None, "synchronous", "FULL")?;
     migrations::migrate(&mut connection, store_options)?;
+    tracing::info!(
+        schema_version = migrations::VERSION,
+        "Database schema ready"
+    );
     Ok((connection, lock))
 }
 

@@ -1,53 +1,58 @@
 # Rebuild session state
 
-## Startup visibility follow-up — approved, September 14
+## CLI, startup logging and Rustls patch — local verification passed
 
-James requested detailed progress during server startup and asked whether it is
-in the latest build. Answered: basic logging is implemented/tested, but the
-latest qualified download remains f14b02a without it; the preceding candidate
-failed a hosted attachment deadline. Expand INFO progress before/after profile
-locking, credential-store access, encrypted DB/schema initialization, recovery,
-account loading and worker startup. Include safe counts and startup time at
-readiness; DEBUG may show individual committed migrations. Never log paths,
-keys, addresses or content, and never publish ready after a failed stage.
+September 14, 2026. The CLI defaults to readable results and useful errors;
+`--json` retains machine envelopes. All 71 help pages, 531 visible options and
+192 argument cases were audited. Startup now reports 20 ordered phases at INFO,
+with safe schema/account counts and elapsed time at readiness. DEBUG includes
+committed migrations. Running sync/account/operation/shutdown events remain.
+Original stderr is tested for privacy; readiness stdout/file contracts are unchanged.
 
-Preserve the CLI delivery work. Finish its frozen-source gate and final help
-checks, then checkpoint/push it. Two new startup subprocess regressions are
-prepared in `test-results/startup-logging/tests.rs`; append to the existing
-`support/logging_e2e.rs` and reproduce failure before adding instrumentation.
-Check new/existing profiles, ordered phases, failed second-instance startup,
-unchanged readiness JSON, original-log privacy and independent remote state.
-Then implement only the described logging, verify relevant/full gates, checkpoint
-and qualify hosted/current download. No live-provider or normal-install action.
+The current source passed the full 35-command offline gate at 18:23:24 UTC:
+348 tests per workspace configuration, zero failures/ignored in either run.
+These are repeated configurations, not 696 unique tests. Separate Google mock 26,
+system 22 and E2E 41 pass; independent IMAP contract 2, system 28 and subprocess 16
+pass. Recovery, migration, reconciliation, security, resource bounds, release
+isolation and the independent API client pass. All 40 script tests, both Clippy
+configurations, formatting, dependency policy and client boundaries pass.
+Exact commands, exits, counts and archived logs:
+`test-results/startup-logging/patched-gate-final.json` and `patched-gate/`.
+All 369 recorded source hashes matched at completion (`patched-source.json`).
 
-## CLI usability audit — verified locally, checkpoint pending
+Actual CLI checkpoint 92e9394 passed hosted macOS/Ubuntu E2E but failed the newly
+published RUSTSEC-2026-0285 advisory. All three locks now use Rustls 0.23.45.
+The original also advances AWS-LC/webpki to Rustls's new required minimums.
+Six fresh cargo-audit/cargo-deny checks pass; all three old locks first failed
+with the actual advisory. Database: e2e640471715167f73e22eaf761f2e547adafeec.
+Original formatting, Clippy and 790 tests pass with external egress denied.
+Evidence: `test-results/startup-logging/rustls/`. No scanner policy or assertion
+was weakened. The first wrapper selected a database lock file, then lacked
+cargo-audit on PATH; both were corrected using the existing project-local tool.
+The earlier startup verifier 9436 was stopped during a workspace run (exit 143);
+that interrupted run is not a pass and is superseded by the complete gate above.
 
-Implemented readable CLI results/errors by default, retained explicit `--json`
-and JSONL watch, completed all command/option descriptions and examples, and
-added safe missing-argument guidance. File formats and UUID retry IDs are now
-explained. Known provider auth/TLS/availability failures get appropriate recovery
-instructions; arbitrary server error text remains redacted. API codes, exit
-statuses, provider behavior and original byte exports are unchanged.
+Four production preflight/parser checks passed without profile creation or
+Keychain access (`local-production/checks.json`). They verify INFO/debug/off
+startup behavior and the user's exact missing-account CLI example. The startup
+regressions failed before instrumentation; fresh/reopened startup order and
+failed startup without false readiness now pass against independent provider
+state. Production code changes are static lifecycle log events plus the TLS
+patch: no API, schema or provider-operation behavior changed.
 
-Full frozen-source gate passed all 35 commands: 345 tests per workspace
-configuration, zero failures/ignored. Separate Google E2E 39, IMAP E2E 16 and all
-system/security/resource/release/dependency/client checks pass. Archived evidence:
-`test-results/cli-usability/gate-final.json` and `gate-final/`. Final review then
-changed only args.rs, help_text.rs and main.rs for leaf input-format help and
-known-RPC-message guidance. A new RPC-guidance regression failed before the fix.
-Eight supplementary checks pass: CLI 22 normal/23 harness tests, both Clippy
-configurations, formatting, production CLI build and the complete help audit.
-The harness runner initially omitted NUNCIO_E2E_DAEMON; the corrected environment
-passed without a source/assertion change. Exact source delta and logs:
-`final-leaf-summary.json`; final source hashes: `final-source.json`.
+Next: final scoped review, signed checkpoint/push, observe the exact source in
+all 17 hosted jobs, then verify actual public fresh/update installations. The
+installer still selects f14b02a, which predates logging and the security fix.
+James confirmed that old source on Grogu and still saw no logging; this does not
+exercise the new implementation. Give the exact newly qualified commit before
+asking him to reinstall. The prior a5b Ubuntu attachment timeout did not recur in
+CLI 92 CI or the current local runs; its root cause remains unproven, and its strict
+assertions plus failure diagnostics remain. Do not claim it was fixed by repetition.
 
-The final production-binary audit passes 71 help pages, 531 visible option entries
-and 192 argument-error cases without creating a profile or disclosing rejected
-values. The actual human-mode daemon/CLI walkthrough independently verifies one
-remote send; hostile content is tested in both output modes. Next: scoped review,
-signed CLI checkpoint/push, actual hosted watcher, then the approved startup
-logging follow-up above. The installer still selects qualified f14b02a; no new
-candidate is claimed downloadable until actual hosted/package checks pass.
+Hourly report 1a0a1075028ddac0 was sent to james@kof22.com at 12:46:46 Central;
+plain/HTML and 251183-byte chart metadata were independently verified. Next due:
+13:46:46 Central during active work. Named live Google/Synology/native acceptance
+and Google registration remain deferred; the full goal is not complete.
 
 ## Daemon running logs — in progress, September 14
 

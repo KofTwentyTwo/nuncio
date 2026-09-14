@@ -476,6 +476,7 @@ impl Engine {
     ) -> Result<Self, EngineError> {
         #[cfg(feature = "test-harness")]
         http.refresh_test_clock().await?;
+        tracing::info!("Preparing local profile");
         let directory = config.directory.clone();
         let secrets = config.secrets.clone();
         let profile = tokio::task::spawn_blocking(move || {
@@ -488,8 +489,10 @@ impl Engine {
             #[cfg(feature = "test-harness")]
             test_config: http.test_config.clone(),
         };
+        tracing::info!("Opening encrypted database");
         let store =
             Store::open_with_options(&config.directory, profile.database_key, options).await?;
+        tracing::info!("Checking interrupted restore jobs");
         if let Err(error) = recovery::recover_restores(
             &store,
             config.directory.clone(),
@@ -508,8 +511,10 @@ impl Engine {
             store.clone(),
             profile_lock.clone(),
         );
+        tracing::info!("Recovering local drafts and durable operations");
         store.recover_draft_uploads().await?;
         store.recover_operations(http.clock.now_ms()).await?;
+        tracing::info!("Loading account state and credential cleanup");
         let accounts =
             crate::accounts::Accounts::new(store.clone(), profile.id.to_string(), secrets, http)
                 .await?;
@@ -519,6 +524,8 @@ impl Engine {
             store.clone(),
             mail.coordinator.clone(),
         );
+        tracing::info!("Recovery checks complete");
+        tracing::info!("Starting background workers");
         let scheduler =
             crate::scheduler::Scheduler::start(store.clone(), mail.clone(), calendar.clone())
                 .await?;
@@ -528,6 +535,10 @@ impl Engine {
             accounts.clone(),
             mail.coordinator.clone(),
             compose_slots.clone(),
+        );
+        tracing::info!(
+            background_sync = scheduler.enabled,
+            "Background workers started"
         );
         Ok(Self {
             maintenance,

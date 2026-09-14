@@ -178,6 +178,7 @@ fn commit(
             .map_err(|_| StoreError::Unavailable)?;
     }
     transaction.commit()?;
+    tracing::debug!(schema_version = version, "Database migration committed");
     #[cfg(feature = "test-harness")]
     if let Some(config) = &options.test_config {
         config

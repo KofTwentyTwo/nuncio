@@ -28,6 +28,8 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(config: config::Config) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    tracing::info!("Validating startup configuration");
     if std::env::vars_os().any(|(name, _)| name.to_string_lossy().starts_with("NUNCIO_TEST_")) {
         return Err("Test environment controls are unsupported".into());
     }
@@ -45,6 +47,7 @@ async fn run(config: config::Config) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .map_err(|_| "Daemon address is unavailable")?;
+    tracing::info!(bind = %config.bind, "Local API listener bound");
     let secrets: Arc<dyn SecretStore> = Arc::new(OsKeyring);
     #[cfg(feature = "test-harness")]
     let secrets: Arc<dyn SecretStore> = match config.test_secrets_file {
@@ -80,6 +83,7 @@ async fn run(config: config::Config) -> Result<(), String> {
         .map_err(|_| "Bound address is unavailable")?;
     tracing::debug!("Application diagnostics enabled; protocol wire logging is disabled");
     let ready = serde_json::json!({"event":"ready", "endpoint":format!("http://{address}"), "profile_id":status.profile_id, "api_version":status.api_version,"pid":std::process::id()});
+    tracing::info!("Publishing daemon readiness");
     if let Some(path) = config.ready_file {
         if publish_readiness(&path, &ready).is_err() {
             let _ = engine.shutdown().await;
@@ -89,7 +93,7 @@ async fn run(config: config::Config) -> Result<(), String> {
         }
     }
     writeln!(std::io::stdout().lock(), "{ready}").map_err(|_| "Readiness output failed")?;
-    tracing::info!(endpoint = %address, api_version = %status.api_version, accounts = status.storage.account_count, "Daemon ready");
+    tracing::info!(endpoint = %address, api_version = %status.api_version, schema_version = status.storage.schema_version, accounts = status.storage.account_count, background_sync = status.background_sync, startup_ms = started.elapsed().as_millis() as u64, "Daemon ready");
     nunciod::serve(engine, listener)
         .await
         .map_err(|error| error.to_string())

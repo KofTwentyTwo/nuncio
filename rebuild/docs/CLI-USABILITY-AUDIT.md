@@ -30,7 +30,10 @@ The full frozen-source offline gate passed all 35 commands and 345 tests per
 workspace configuration. Final account/backup help and known-RPC-message guidance
 passed eight supplementary checks, including CLI 22 normal/23 harness tests,
 both Clippy configurations and the complete production-binary help audit.
-Exact three-file source delta: final-leaf-summary.json. Hosted delivery is pending.
+Exact three-file source delta: final-leaf-summary.json. Signed/pushed92e9394
+passed both hosted macOS/Ubuntu E2E jobs; new Rustls advisory failures blocked
+delivery. All three locks are patched in the startup-logging follow-up. Its full
+verification and actual hosted/public artifact qualification are pending.
 
 | Finding | Change / evidence |
 |---|---|

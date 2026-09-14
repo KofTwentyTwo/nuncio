@@ -1,5 +1,59 @@
 # Verification evidence
 
+## CLI, startup logging and Rustls patch — local verification passed
+
+September 14, 2026. The CLI defaults to readable results and useful errors;
+`--json` retains machine envelopes. All 71 help pages, 531 visible options and
+192 argument cases were audited. Startup now reports 20 ordered phases at INFO,
+with safe schema/account counts and elapsed time at readiness. DEBUG includes
+committed migrations. Running sync/account/operation/shutdown events remain.
+Original stderr is tested for privacy; readiness stdout/file contracts are unchanged.
+
+The current source passed the full 35-command offline gate at 18:23:24 UTC:
+348 tests per workspace configuration, zero failures/ignored in either run.
+These are repeated configurations, not 696 unique tests. Separate Google mock 26,
+system 22 and E2E 41 pass; independent IMAP contract 2, system 28 and subprocess 16
+pass. Recovery, migration, reconciliation, security, resource bounds, release
+isolation and the independent API client pass. All 40 script tests, both Clippy
+configurations, formatting, dependency policy and client boundaries pass.
+Exact commands, exits, counts and archived logs:
+`test-results/startup-logging/patched-gate-final.json` and `patched-gate/`.
+All 369 recorded source hashes matched at completion (`patched-source.json`).
+
+Actual CLI checkpoint 92e9394 passed hosted macOS/Ubuntu E2E but failed the newly
+published RUSTSEC-2026-0285 advisory. All three locks now use Rustls 0.23.45.
+The original also advances AWS-LC/webpki to Rustls's new required minimums.
+Six fresh cargo-audit/cargo-deny checks pass; all three old locks first failed
+with the actual advisory. Database: e2e640471715167f73e22eaf761f2e547adafeec.
+Original formatting, Clippy and 790 tests pass with external egress denied.
+Evidence: `test-results/startup-logging/rustls/`. No scanner policy or assertion
+was weakened. The first wrapper selected a database lock file, then lacked
+cargo-audit on PATH; both were corrected using the existing project-local tool.
+The earlier startup verifier 9436 was stopped during a workspace run (exit 143);
+that interrupted run is not a pass and is superseded by the complete gate above.
+
+Four production preflight/parser checks passed without profile creation or
+Keychain access (`local-production/checks.json`). They verify INFO/debug/off
+startup behavior and the user's exact missing-account CLI example. The startup
+regressions failed before instrumentation; fresh/reopened startup order and
+failed startup without false readiness now pass against independent provider
+state. Production code changes are static lifecycle log events plus the TLS
+patch: no API, schema or provider-operation behavior changed.
+
+Next: final scoped review, signed checkpoint/push, observe the exact source in
+all 17 hosted jobs, then verify actual public fresh/update installations. The
+installer still selects f14b02a, which predates logging and the security fix.
+James confirmed that old source on Grogu and still saw no logging; this does not
+exercise the new implementation. Give the exact newly qualified commit before
+asking him to reinstall. The prior a5b Ubuntu attachment timeout did not recur in
+CLI 92 CI or the current local runs; its root cause remains unproven, and its strict
+assertions plus failure diagnostics remain. Do not claim it was fixed by repetition.
+
+Hourly report 1a0a1075028ddac0 was sent to james@kof22.com at 12:46:46 Central;
+plain/HTML and 251183-byte chart metadata were independently verified. Next due:
+13:46:46 Central during active work. Named live Google/Synology/native acceptance
+and Google registration remain deferred; the full goal is not complete.
+
 ## CLI usability — September 14, final review
 
 Full frozen-source offline gate passed: 35/35 commands, exit 0. Both workspace
@@ -31,8 +85,10 @@ passed without source/assertion changes. `final-leaf-summary.json` and
 `final-source.json` record the exact checks, source delta and hashes. Arbitrary server
 text remains redacted; machine codes, exit statuses and provider behavior remain.
 Checkpoint, actual hosted qualification and updated public download are pending.
-Detailed startup phases are a separate approved follow-up, prepared in
-`test-results/startup-logging/`; they are not yet implemented or tested.
+Detailed startup phases are a separate approved follow-up described above.
+CLI checkpoint 92e9394 is signed/pushed; actual rebuild 34873494142 and security
+34873494213 are being observed. Scoped review passed 96 links, whitespace and
+Gitleaks. Source-specific hosted/download qualification remains pending.
 
 ## Daemon running logs — September 14, in progress
 

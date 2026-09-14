@@ -45,6 +45,7 @@ pub(crate) fn prepare(directory: &Path, secrets: &dyn SecretStore) -> Result<Pro
     if !lock.try_lock_exclusive().map_err(StoreError::from)? {
         return Err(StoreError::Locked.into());
     }
+    tracing::info!("Profile lock acquired");
     let path = directory.join("profile.json");
     reject_symlink(&path)?;
     let existing_database = directory.join("store.db").exists();
@@ -88,12 +89,15 @@ pub(crate) fn prepare(directory: &Path, secrets: &dyn SecretStore) -> Result<Pro
             .map_err(StoreError::from)?;
         manifest
     };
+    tracing::info!(existing_database, "Profile metadata ready");
+    tracing::info!("Accessing credential store for profile keys");
     let database_key = key(
         secrets,
         &format!("{}/profile/database", manifest.id),
         !existing_database,
     )?;
     let api_key = key(secrets, &format!("{}/profile/api", manifest.id), true)?;
+    tracing::info!("Profile keys ready");
     let authorization = Zeroizing::new(format!("Bearer {}", hex::encode(api_key.as_slice())));
     Ok(Profile {
         id: manifest.id,
