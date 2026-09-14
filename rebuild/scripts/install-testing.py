@@ -2,6 +2,7 @@
 """Download a verified macOS Apple Silicon testing build; never compile or start it."""
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlencode
 
@@ -310,6 +312,115 @@ def verify_package(root: Path, commit: str) -> dict:
     return metadata
 
 
+def private_directory(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise ValueError("Testing directory must be owned by you and not writable by others.")
+
+
+@contextmanager
+def installation_lock(prefix: Path):
+    descriptor = os.open(prefix / ".install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError(
+                "Testing installation lock must be a private regular file owned by you."
+            )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError(
+                "Another installer is running for this testing directory; retry later."
+            ) from error
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def check_activation_paths(prefix: Path) -> None:
+    commands = prefix / "bin"
+    if os.path.lexists(commands) and (
+        not commands.is_symlink() or os.readlink(commands) != "current/bin"
+    ):
+        raise ValueError("Existing testing bin path is not managed by this installer; preserved.")
+    current = prefix / "current"
+    if not os.path.lexists(current):
+        return
+    if not current.is_symlink():
+        raise ValueError("Existing testing current path is not a managed link; preserved.")
+    target = os.readlink(current)
+    if len(safe_path(target).parts) != 1:
+        raise ValueError("Existing testing current link leaves its directory; preserved.")
+    previous = prefix / target
+    private_directory(previous)
+    receipt_path = previous / "TESTING-INSTALL.json"
+    info = receipt_path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+        raise ValueError("Existing current link has no regular installation receipt; preserved.")
+    receipt = json.loads(receipt_path.read_text())
+    if not isinstance(receipt, dict):
+        raise ValueError("Existing current link has an invalid installation receipt; preserved.")
+    commit = receipt.get("commit", "")
+    version = receipt.get("version", "")
+    if (
+        receipt.get("repository") != REPOSITORY
+        or receipt.get("branch") != BRANCH
+        or receipt.get("host") != HOST
+        or not isinstance(commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}", commit) is None
+        or any(
+            type(receipt.get(key)) is not int or receipt[key] < 1
+            for key in ("run_id", "run_attempt")
+        )
+        or target
+        != f"nuncio-{version}-rc-{HOST}-{commit[:12]}-run-{receipt['run_id']}-attempt-{receipt['run_attempt']}"
+    ):
+        raise ValueError(
+            "Existing current link does not identify a managed testing build; preserved."
+        )
+
+
+def verify_installed(destination: Path, source: Path, receipt: dict) -> None:
+    private_directory(destination)
+    entries = list(destination.rglob("*"))
+    for path in entries:
+        info = path.lstat()
+        if (
+            not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode))
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o022
+        ):
+            raise ValueError("Existing installation contains unsafe files; preserved.")
+    expected = {
+        str(path.relative_to(source)): (digest(path), stat.S_IMODE(path.stat().st_mode))
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+    actual = {
+        str(path.relative_to(destination)): (digest(path), stat.S_IMODE(path.stat().st_mode))
+        for path in entries
+        if path.is_file() and path != destination / "TESTING-INSTALL.json"
+    }
+    if (
+        expected != actual
+        or json.loads((destination / "TESTING-INSTALL.json").read_text()) != receipt
+    ):
+        raise ValueError("Existing installation differs from the verified download; preserved.")
+
+
+def activate(prefix: Path, destination: Path) -> None:
+    commands = prefix / "bin"
+    if not commands.is_symlink():
+        commands.symlink_to("current/bin", target_is_directory=True)
+    # Publish one pointer after the entire immutable build is verified. An existing
+    # daemon keeps running its old executable until the user explicitly restarts it.
+    with tempfile.TemporaryDirectory(prefix=".activate-", dir=prefix) as directory:
+        link = Path(directory) / "current"
+        link.symlink_to(destination.name, target_is_directory=True)
+        os.replace(link, prefix / "current")
+
+
 def install(prefix: Path) -> Path:
     check_host()
     version = re.search(r"gh version (\d+)\.(\d+)\.(\d+)", gh(["--version"]))
@@ -338,42 +449,44 @@ def install(prefix: Path) -> Path:
         if prefix.is_symlink():
             raise ValueError("Testing prefix must be a real directory, not a symlink.")
         prefix.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = prefix.stat()
-        if info.st_uid != os.getuid() or info.st_mode & 0o022:
-            raise ValueError("Testing prefix must be owned by you and not writable by others.")
+        private_directory(prefix)
         destination = prefix / f"{root.name}-run-{run['id']}-attempt-{run['run_attempt']}"
-        try:
-            destination.mkdir(mode=0o700)
-        except FileExistsError as error:
-            raise ValueError(f"Testing installation already exists: {destination}") from error
-        try:
-            shutil.copytree(root, destination, dirs_exist_ok=True)
-            destination.chmod(0o700)
-            receipt = {
-                "repository": REPOSITORY,
-                "branch": BRANCH,
-                "commit": commit,
-                "version": json.loads((root / "BUILD-METADATA.json").read_text())["version"],
-                "host": HOST,
-                "run_id": run["id"],
-                "run_attempt": run["run_attempt"],
-                "run_url": run_url,
-                "artifact_id": artifact["id"],
-                "artifact_sha256": artifact["digest"].removeprefix("sha256:"),
-                "package_sha256": digest(temporary / (root.name + ".tar.gz")),
-                "live_acceptance": "unverified",
-                "notarization": "not established",
-            }
-            (destination / "TESTING-INSTALL.json").write_text(json.dumps(receipt, indent=2) + "\n")
-        except (OSError, ValueError):
-            shutil.rmtree(destination)
-            raise
+        receipt = {
+            "repository": REPOSITORY,
+            "branch": BRANCH,
+            "commit": commit,
+            "version": json.loads((root / "BUILD-METADATA.json").read_text())["version"],
+            "host": HOST,
+            "run_id": run["id"],
+            "run_attempt": run["run_attempt"],
+            "run_url": run_url,
+            "artifact_id": artifact["id"],
+            "artifact_sha256": artifact["digest"].removeprefix("sha256:"),
+            "package_sha256": digest(temporary / (root.name + ".tar.gz")),
+            "live_acceptance": "unverified",
+            "notarization": "not established",
+        }
+        with installation_lock(prefix):
+            check_activation_paths(prefix)
+            if os.path.lexists(destination):
+                verify_installed(destination, root, receipt)
+            else:
+                with tempfile.TemporaryDirectory(prefix=".install-", dir=prefix) as directory:
+                    staged = Path(directory) / "package"
+                    staged.mkdir(mode=0o700)
+                    shutil.copytree(root, staged, dirs_exist_ok=True)
+                    staged.chmod(0o700)
+                    (staged / "TESTING-INSTALL.json").write_text(
+                        json.dumps(receipt, indent=2) + "\n"
+                    )
+                    verify_installed(staged, root, receipt)
+                    os.rename(staged, destination)
+            activate(prefix, destination)
     print(f"Installed testing version {receipt['version']} ({HOST}) from {commit}.")
     print(f"Successful CI: {run_url}\nPackage SHA-256: {receipt['package_sha256']}")
-    print(
-        f"Installation: {destination}\nInspect: {shlex.quote(str(destination / 'bin/nuncio-cli'))} --help"
-    )
-    return destination
+    print(f"Installation: {prefix}\nInspect: {shlex.quote(str(prefix / 'bin/nuncio-cli'))} --help")
+    print("Updates keep this path. Restart a running daemon to use the new build.")
+    return prefix
 
 
 def main() -> int:
@@ -382,7 +495,7 @@ def main() -> int:
         "--prefix",
         type=Path,
         default=Path.home() / ".local/opt/nuncio-testing",
-        help="testing-only parent directory (default: ~/.local/opt/nuncio-testing)",
+        help="stable testing installation directory (default: ~/.local/opt/nuncio-testing)",
     )
     args = parser.parse_args()
     install(args.prefix)

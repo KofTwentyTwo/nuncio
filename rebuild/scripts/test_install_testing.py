@@ -1,6 +1,7 @@
 """Testing downloads must never install unverified or unsafe archive content."""
 
 import copy
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -125,10 +126,10 @@ def fixture_zip(files):
 class GitHubProcess:
     """Only the external gh process is stubbed; archive/filesystem code is real."""
 
-    def __init__(self, blob):
+    def __init__(self, blob, run_id=42):
         self.blob = blob
-        self.runs = [fixture_run()]
-        self.refreshed = fixture_run()
+        self.runs = [fixture_run(run_id)]
+        self.refreshed = fixture_run(run_id)
         self.artifact = {
             "id": 9,
             "name": f"nuncio-testing-aarch64-apple-darwin-{COMMIT}-attempt-1",
@@ -136,7 +137,7 @@ class GitHubProcess:
             "size_in_bytes": len(blob),
             "digest": "sha256:" + sha(blob),
             "workflow_run": {
-                "id": 42,
+                "id": run_id,
                 "repository_id": 7,
                 "head_repository_id": 7,
                 "head_sha": COMMIT,
@@ -165,7 +166,7 @@ class GitHubProcess:
                 if query.get("branch") != [BRANCH] or query.get("event") != ["push"]:
                     raise AssertionError("Run query must select the testing branch push workflow")
                 data = json.dumps([{"workflow_runs": self.runs}])
-            elif url.path.endswith("/runs/42/artifacts"):
+            elif url.path.endswith(f"/runs/{self.refreshed['id']}/artifacts"):
                 data = json.dumps([{"artifacts": [self.artifact]}])
             elif url.path.endswith("/runs/43/artifacts"):
                 data = json.dumps([{"artifacts": []}])
@@ -173,7 +174,7 @@ class GitHubProcess:
                 kwargs["stdout"].write(self.blob)
                 self.downloaded = True
                 return subprocess.CompletedProcess(command, 0)
-            elif url.path.endswith("/runs/42"):
+            elif url.path.endswith(f"/runs/{self.refreshed['id']}"):
                 data = json.dumps(self.refreshed)
             else:
                 raise AssertionError(f"Unexpected GitHub endpoint: {endpoint}")
@@ -209,7 +210,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--prefix", result.stdout)
 
-    def test_verified_download_installs_only_versioned_private_files_and_receipt(self):
+    def test_verified_download_uses_stable_paths_and_repeat_install_is_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             production = root / "bin" / "nunciod"
@@ -217,19 +218,133 @@ class InstallerTests(unittest.TestCase):
             production.write_bytes(b"preserve production")
             github = GitHubProcess(fixture_zip(fixture_package()))
             destination = self.install(root, github)
-            self.assertEqual(destination.parent, root / "testing")
+            self.assertEqual(destination, root / "testing")
             self.assertTrue(os.access(destination / "bin/nunciod", os.X_OK))
             self.assertEqual(production.read_bytes(), b"preserve production")
-            receipt = json.loads((destination / "TESTING-INSTALL.json").read_text())
+            receipt = json.loads((destination / "current/TESTING-INSTALL.json").read_text())
             self.assertEqual(receipt["commit"], COMMIT)
             self.assertEqual(receipt["run_id"], 42)
             self.assertEqual(receipt["artifact_id"], 9)
             self.assertEqual(receipt["artifact_sha256"], sha(github.blob))
             self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(list((root / "testing").iterdir()), [destination])
-            with self.assertRaisesRegex(ValueError, "already exists"):
+            selected = (destination / "current").resolve()
+            self.assertEqual(os.readlink(destination / "bin"), "current/bin")
+            self.assertEqual(selected.parent, destination.resolve())
+            before = (selected / "TESTING-INSTALL.json").read_bytes()
+            self.assertEqual(self.install(root, github), destination)
+            self.assertEqual((destination / "current").resolve(), selected)
+            self.assertEqual((selected / "TESTING-INSTALL.json").read_bytes(), before)
+            self.assertEqual(
+                {p.name for p in destination.iterdir()},
+                {selected.name, "current", "bin", ".install.lock"},
+            )
+
+    def test_update_changes_stable_commands_and_preserves_older_builds_and_profiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = GitHubProcess(fixture_zip(fixture_package()))
+            prefix = self.install(root, first)
+            previous = (prefix / "current").resolve()
+            profile = root / "profile"
+            profile.mkdir()
+            (profile / "keep").write_bytes(b"account data")
+            self.assertEqual(
+                self.install(root, GitHubProcess(fixture_zip(fixture_package()), run_id=44)), prefix
+            )
+            current = (prefix / "current").resolve()
+            self.assertNotEqual(current, previous)
+            self.assertEqual((prefix / "bin/nuncio-cli").resolve(), current / "bin/nuncio-cli")
+            self.assertEqual(
+                json.loads((current / "TESTING-INSTALL.json").read_text())["run_id"], 44
+            )
+            self.assertEqual(
+                json.loads((previous / "TESTING-INSTALL.json").read_text())["run_id"], 42
+            )
+            self.assertEqual((profile / "keep").read_bytes(), b"account data")
+
+    def test_legacy_versioned_install_is_verified_before_becoming_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            github = GitHubProcess(fixture_zip(fixture_package()))
+            prefix = self.install(root, github)
+            selected = (prefix / "current").resolve()
+            (prefix / "current").unlink()
+            (prefix / "bin").unlink()
+            self.assertEqual(self.install(root, github), prefix)
+            self.assertEqual((prefix / "current").resolve(), selected)
+            (selected / "README.md").write_text("local change")
+            with self.assertRaisesRegex(ValueError, "existing|Existing"):
                 self.install(root, github)
-            self.assertTrue((destination / "TESTING-INSTALL.json").exists())
+            self.assertEqual((selected / "README.md").read_text(), "local change")
+            self.assertEqual((prefix / "current").resolve(), selected)
+
+    def test_failed_activation_keeps_old_commands_and_retry_activates_complete_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix = self.install(root, GitHubProcess(fixture_zip(fixture_package())))
+            selected = (prefix / "current").resolve()
+            newer = GitHubProcess(fixture_zip(fixture_package()), run_id=44)
+            with patch.object(
+                self.installer.os, "replace", side_effect=OSError("activation failed")
+            ):
+                with self.assertRaisesRegex(OSError, "activation failed"):
+                    self.install(root, newer)
+            self.assertEqual((prefix / "current").resolve(), selected)
+            self.assertEqual((prefix / "bin/nuncio-cli").resolve(), selected / "bin/nuncio-cli")
+            self.assertEqual(self.install(root, newer), prefix)
+            self.assertNotEqual((prefix / "current").resolve(), selected)
+            self.assertTrue((selected / "bin/nuncio-cli").exists())
+
+    def test_bad_update_preserves_the_active_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix = self.install(root, GitHubProcess(fixture_zip(fixture_package())))
+            selected = (prefix / "current").resolve()
+            with self.assertRaises(ValueError):
+                self.install(
+                    root, GitHubProcess(fixture_zip(fixture_package(checksum_bad=True)), 44)
+                )
+            self.assertEqual((prefix / "current").resolve(), selected)
+            self.assertTrue((prefix / "bin/nunciod").is_file())
+
+    def test_unmanaged_activation_paths_are_preserved(self):
+        for name, target in [
+            ("current", None),
+            ("current", "../outside"),
+            ("bin", None),
+            ("bin", "../outside"),
+            (".install.lock", "../outside"),
+        ]:
+            with self.subTest(name=name, target=target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                prefix = root / "testing"
+                prefix.mkdir()
+                outside = root / "outside"
+                outside.write_bytes(b"preserve")
+                path = prefix / name
+                if target is None:
+                    path.mkdir()
+                    (path / "keep").write_bytes(b"preserve")
+                else:
+                    path.symlink_to(target)
+                with self.assertRaises((ValueError, OSError)):
+                    self.install(root, GitHubProcess(fixture_zip(fixture_package())))
+                self.assertEqual(outside.read_bytes(), b"preserve")
+                if target is None:
+                    self.assertEqual((path / "keep").read_bytes(), b"preserve")
+                else:
+                    self.assertEqual(os.readlink(path), target)
+
+    def test_another_install_holds_the_lock_without_changing_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix = self.install(root, GitHubProcess(fixture_zip(fixture_package())))
+            selected = (prefix / "current").resolve()
+            with (prefix / ".install.lock").open("r+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(ValueError, "installer|installation"):
+                    self.install(root, GitHubProcess(fixture_zip(fixture_package()), 44))
+            self.assertEqual((prefix / "current").resolve(), selected)
 
     def test_refuses_unsupported_platforms_before_downloading(self):
         for system, machine, version in (
@@ -371,7 +486,7 @@ class InstallerTests(unittest.TestCase):
             with patch.object(self.installer.shutil, "copytree", fail_copy):
                 with self.assertRaisesRegex(OSError, "synthetic disk failure"):
                     self.install(root, GitHubProcess(fixture_zip(fixture_package())))
-            self.assertEqual(list(prefix.iterdir()), [sentinel])
+            self.assertEqual({p.name for p in prefix.iterdir()}, {sentinel.name, ".install.lock"})
             self.assertEqual(sentinel.read_bytes(), b"preserved")
 
     def test_refuses_unknown_failed_fork_or_rerun_provenance(self):
@@ -425,7 +540,7 @@ class InstallerTests(unittest.TestCase):
             github.runs.insert(0, older)
             destination = self.install(Path(directory), github)
             self.assertEqual(
-                json.loads((destination / "TESTING-INSTALL.json").read_text())["run_id"], 42
+                json.loads((destination / "current/TESTING-INSTALL.json").read_text())["run_id"], 42
             )
 
     def test_newer_evidence_only_run_does_not_hide_last_retained_package(self):
@@ -434,7 +549,7 @@ class InstallerTests(unittest.TestCase):
             github.runs.insert(0, fixture_run(43))
             destination = self.install(Path(directory), github)
             self.assertEqual(
-                json.loads((destination / "TESTING-INSTALL.json").read_text())["run_id"], 42
+                json.loads((destination / "current/TESTING-INSTALL.json").read_text())["run_id"], 42
             )
 
     def test_gh_failures_do_not_echo_credentials(self):
