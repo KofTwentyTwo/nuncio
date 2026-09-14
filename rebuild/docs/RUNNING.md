@@ -4,13 +4,43 @@ For laptop setup, start with [the guided account command](ACCOUNT-SETUP.md).
 The lower-level commands below remain available for scripts and diagnostics.
 
 This workspace provides the daemon, authenticated local API, and reference CLI
-for Google Gmail/Calendar and IMAP/SMTP mail. Current schema-23 account management
-passed the full offline gate and fresh repeatable local Apple Silicon packaging
-at signed/pushed `164b021`. Its ten-job hosted CI and first eligible testing-download/temporary installation
-verification also passed. Provider tests use independent synthetic services;
-live Google/Synology and native-keystore acceptance remain deferred/unverified.
-See the [testing installer](TESTING-INSTALL.md) for download instructions and
-[PACKAGING.md](PACKAGING.md) for the verified local artifact and its evidence.
+for Google Gmail/Calendar and IMAP/SMTP mail. Provider tests use independent
+synthetic services; live Google/Synology and native-keystore acceptance remain
+pending. See the [implementation report](IMPLEMENTATION-REPORT.md) for current
+source-specific results and the [testing installer](TESTING-INSTALL.md) for downloads.
+
+## Running logs
+
+The foreground daemon writes activity with UTC timestamps to stderr at **info** level
+by default. It reports startup, account connection and changes, sync runs and
+processed counts, write attempts and their durable outcomes, worker failures,
+and shutdown. Account and operation IDs match the CLI's IDs.
+
+```sh
+~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa
+# More application diagnostics:
+~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa --log-level debug
+```
+
+Choose `off`, `error`, `warn`, `info`, `debug`, or `trace` with `--log-level`;
+restart the daemon to change it. Stop the existing instance before starting
+another. Readiness stays a single JSON object on stdout, so scripts can continue
+to use stdout or `--ready-file`. Fatal startup errors remain visible even with
+logging off. An idle daemon waits quietly until work starts.
+
+Logs exclude addresses, mail/calendar contents, credentials, and provider wire
+traffic at every level. `RUST_LOG` cannot enable dependency logs. For detailed
+sync or operation receipts, use `system sync-status` and `operation show` or
+`operation attempts`; logs are diagnostic output, not the durable audit record.
+To keep a private log file while running:
+
+```sh
+umask 077
+~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa --log-level debug 2>>nunciod.log
+```
+
+The shell appends stderr to that file; Nuncio does not rotate or retain logs
+itself. Without redirection, activity appears live in the daemon's terminal.
 
 ## Offline development
 

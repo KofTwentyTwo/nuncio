@@ -66,8 +66,13 @@ impl OperationWorker {
             composition,
         });
         let stopping = stop.clone();
+        tracing::debug!("Operation worker starting");
         let task = tokio::spawn(async move {
             if run(service, stopping).await.is_err() {
+                tracing::error!(
+                    error_code = "operation_worker_unavailable",
+                    "Operation worker stopped unexpectedly"
+                );
                 failed.send_replace(Some("operation_worker_unavailable".into()));
             }
         });

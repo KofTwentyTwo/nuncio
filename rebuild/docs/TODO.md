@@ -1,5 +1,12 @@
 # Current delivery and acceptance state
 
+## Daemon running logs
+
+- [x] Reproduce absent default logs and log-level help.
+- [x] Add safe application logging for lifecycle, synchronization and writes.
+- [x] Verify levels, raw-log privacy, ready output and offline subprocess behavior (Google3/3, independent IMAP/SMTP1/1).
+- [ ] Run quality gates, signed checkpoint/push and actual testing delivery.
+
 ## Current delivery report alignment
 
 - [x] Distinguish latest qualified testing download f14b02a from retained reproducible local candidate82a92a0 in both READMEs, main report, requirement matrix and manual worksheet.

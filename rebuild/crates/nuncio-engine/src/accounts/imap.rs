@@ -247,6 +247,7 @@ impl Accounts {
             return Err(error.into());
         }
         let credential_cleanup_pending = self.cleanup().await.is_err();
+        tracing::info!(account_id = %id, provider = "imap", credential_cleanup_pending, "Account connected");
         Ok(ImapConnection {
             account: self.row(&id).await?.into(),
             capabilities,

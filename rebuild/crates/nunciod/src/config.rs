@@ -6,6 +6,9 @@ use std::{net::SocketAddr, path::PathBuf};
 pub struct Config {
     #[arg(long, default_value = "127.0.0.1:9421")]
     pub bind: SocketAddr,
+    /// Application log verbosity on stderr (mail contents and credentials are excluded).
+    #[arg(long, value_enum, default_value = "info")]
+    pub log_level: crate::logging::LogLevel,
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
     #[arg(long, default_value = "default")]

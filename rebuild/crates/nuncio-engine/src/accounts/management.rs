@@ -16,11 +16,12 @@ impl Accounts {
         let gate = self.gate(id).await;
         let _access = gate.lock().await;
         let _mutation = self.mutations.lock().await;
-        Ok(self
+        let account = self
             .store
             .edit_account_name(id.into(), version, name)
-            .await?
-            .into())
+            .await?;
+        tracing::info!(account_id = id, "Account display name updated");
+        Ok(account.into())
     }
 
     pub async fn lifecycle(
@@ -49,6 +50,7 @@ impl Accounts {
         } else {
             false
         };
+        tracing::info!(account_id = id, state = %row.state, archived = row.archived, cleanup_pending = pending, "Account lifecycle changed");
         Ok((row.into(), pending))
     }
 
@@ -73,6 +75,11 @@ impl Accounts {
         self.cancel_account_sessions(id).await;
         *access = None;
         let pending = self.cleanup().await.is_err();
+        tracing::info!(
+            account_id = id,
+            cleanup_pending = pending,
+            "Account permanently deleted"
+        );
         Ok((preview, pending))
     }
 

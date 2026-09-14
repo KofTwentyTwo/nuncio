@@ -1,4 +1,5 @@
 mod config;
+mod logging;
 use clap::Parser;
 use nuncio_engine::{
     engine::{Engine, EngineConfig},
@@ -9,8 +10,16 @@ use std::{io::Write, sync::Arc};
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let config = config::Config::parse();
+    if let Err(message) = logging::init(config.log_level) {
+        let _ = writeln!(std::io::stderr().lock(), "{message}");
+        return std::process::ExitCode::from(1);
+    }
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Daemon starting");
     match run(config).await {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(()) => {
+            tracing::info!("Daemon stopped");
+            std::process::ExitCode::SUCCESS
+        }
         Err(message) => {
             let _ = writeln!(std::io::stderr().lock(), "{message}");
             std::process::ExitCode::from(1)
@@ -69,6 +78,7 @@ async fn run(config: config::Config) -> Result<(), String> {
     let address = listener
         .local_addr()
         .map_err(|_| "Bound address is unavailable")?;
+    tracing::debug!("Application diagnostics enabled; protocol wire logging is disabled");
     let ready = serde_json::json!({"event":"ready", "endpoint":format!("http://{address}"), "profile_id":status.profile_id, "api_version":status.api_version,"pid":std::process::id()});
     if let Some(path) = config.ready_file {
         if publish_readiness(&path, &ready).is_err() {
@@ -79,6 +89,7 @@ async fn run(config: config::Config) -> Result<(), String> {
         }
     }
     writeln!(std::io::stdout().lock(), "{ready}").map_err(|_| "Readiness output failed")?;
+    tracing::info!(endpoint = %address, api_version = %status.api_version, accounts = status.storage.account_count, "Daemon ready");
     nunciod::serve(engine, listener)
         .await
         .map_err(|error| error.to_string())

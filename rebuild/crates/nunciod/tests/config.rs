@@ -40,3 +40,36 @@ fn production_binary_rejects_test_secret_flags() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn daemon_help_explains_default_info_and_available_log_levels() {
+    let output = Command::new(env!("CARGO_BIN_EXE_nunciod"))
+        .env_clear()
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--log-level"));
+    assert!(help.contains("[default: info]"));
+    for level in ["off", "error", "warn", "info", "debug", "trace"] {
+        assert!(help.contains(level));
+    }
+}
+
+#[test]
+fn invalid_log_level_is_rejected_before_creating_a_profile() {
+    let temporary = tempfile::tempdir().unwrap();
+    let profile = temporary.path().join("must-not-create");
+    let output = Command::new(env!("CARGO_BIN_EXE_nunciod"))
+        .env_clear()
+        .args(["--log-level", "everything", "--data-dir"])
+        .arg(&profile)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!profile.exists());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("invalid value"));
+    assert!(error.contains("possible values"));
+}

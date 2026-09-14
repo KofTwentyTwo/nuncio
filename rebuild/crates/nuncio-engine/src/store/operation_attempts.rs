@@ -194,7 +194,9 @@ impl Store {
             tx.execute("INSERT INTO operation_attempts(account_id,operation_id,ordinal,kind,started_at_ms) VALUES (?1,?2,?3,?4,?5)",params![account,id,ordinal,kind,now])?;
             tx.execute("UPDATE operations SET state=CASE ?3 WHEN 'dispatch' THEN 'running' ELSE 'uncertain' END,version=version+1,updated_at_ms=?4,next_attempt_at_ms=NULL WHERE account_id=?1 AND id=?2",params![account,id,kind,now])?;
             super::changes::record(&tx,Some(&account),"operation",Some(&id))?;
-            tx.commit()?;Ok(OperationAttempt {ordinal,kind:kind.into(),started_at_ms:now,finished_at_ms:None,outcome:None,error_code:None,receipts:Vec::new()})
+            tx.commit()?;
+            tracing::info!(account_id = %account, operation_id = %id, attempt = ordinal, kind = %kind, "Operation attempt started");
+            Ok(OperationAttempt {ordinal,kind:kind.into(),started_at_ms:now,finished_at_ms:None,outcome:None,error_code:None,receipts:Vec::new()})
         }).await
     }
     pub async fn finish_operation_attempt(
@@ -331,7 +333,13 @@ impl Store {
             tx.execute("UPDATE operation_attempts SET finished_at_ms=?4,outcome=?5,error_code=?6 WHERE account_id=?1 AND operation_id=?2 AND ordinal=?3",params![account,id,ordinal,now,result,error])?;
             tx.execute("UPDATE operations SET state=?3,version=version+1,updated_at_ms=?4,error_code=?5,next_attempt_at_ms=?6,needs_reconciliation=?7 WHERE account_id=?1 AND id=?2",params![account,id,state,now,error,next,reconcile])?;
             super::changes::record(&tx,Some(&account),"operation",Some(&id))?;
-            let result=operations::get(&tx,&account,&id)?;tx.commit()?;Ok(result)
+            let result=operations::get(&tx,&account,&id)?;tx.commit()?;
+            if matches!(result.state.as_str(), "failed" | "uncertain" | "conflict") {
+                tracing::warn!(account_id = %account, operation_id = %id, attempt = ordinal, state = %result.state, error_code = result.error_code.as_deref().unwrap_or("none"), "Operation attempt finished");
+            } else {
+                tracing::info!(account_id = %account, operation_id = %id, attempt = ordinal, state = %result.state, "Operation attempt finished");
+            }
+            Ok(result)
         }).await
     }
     pub async fn operation_attempts(
@@ -362,7 +370,11 @@ impl Store {
                 tx.execute("UPDATE operations SET state='uncertain',needs_reconciliation=1,version=version+1,updated_at_ms=?3,next_attempt_at_ms=NULL,error_code='interrupted' WHERE account_id=?1 AND id=?2",params![account,id,now])?;
                 super::changes::record(&tx,Some(account),"operation",Some(id))?;
             }
-            tx.commit()?;Ok(pending.len()as u64)
+            tx.commit()?;
+            if !pending.is_empty() {
+                tracing::warn!(count = pending.len(), "Interrupted operations require reconciliation");
+            }
+            Ok(pending.len()as u64)
         }).await
     }
 }

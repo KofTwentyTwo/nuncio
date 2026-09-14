@@ -1,5 +1,30 @@
 # Verification evidence
 
+## Daemon running logs — September 14, in progress
+
+Regressions reproduced the absent --log-level/help (exit101) and missing default
+activity after a successful actual CLI sync (exit101). The initial E2E sandbox
+run was denied loopback binding; the authorized local-listener rerun reproduced
+the real missing-output failure. New Google subprocess cases pass3/3: default
+info Gmail/Calendar progress, quiet levels, original-output privacy through trace,
+and uncertain send reconciliation with exactly one independently observed send.
+Two first-pass test defects were corrected: string-kind output formatting and
+reusing an account whose deliberate403 fault had invalidated authorization.
+The assertions remain strict; each verbosity scenario now has its own account.
+
+Implementation: nunciod/src/{logging,config,main,server}.rs; engine account,
+sync/scheduler, and durable operation-attempt boundaries. Only application
+tracing targets are allowed; existing protocol log compile-time limits remain.
+Evidence: test-results/daemon-logging/. Full offline gate passed35/35 commands
+(exit0). Both workspace configurations passed337 tests, zero failed/ignored;
+Google E2E38 and independent IMAP/SMTP E2E16 passed separately. Formatting, both
+Clippy configurations,40 script tests, dependency advisories/licenses/sources,
+security/resource/release isolation and external-client checks pass. Original
+logs are retained in gate-final/; gate-final.json records commands and counts.
+The first full gate stopped on missing Ruff in PATH; using the existing local
+Ruff executable fixed that environment issue without source changes or skipped
+checks. Current-source hosted checks and new download qualification are next.
+
 ## Delivery report alignment — September 13
 
 The continuation audit found stale current-build claims in the main report,

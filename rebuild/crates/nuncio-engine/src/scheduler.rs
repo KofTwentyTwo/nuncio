@@ -26,11 +26,20 @@ impl Scheduler {
     ) -> Result<Self, StoreError> {
         let (poll, enabled) = mail.accounts.http.sync_policy();
         store.configure_poll_interval(poll).await?;
+        tracing::info!(
+            enabled,
+            poll_interval_ms = poll,
+            "Background sync configured"
+        );
         let (stop, stopped) = watch::channel(false);
         let (failed, error) = watch::channel(None);
         let task = enabled.then(|| {
             tokio::spawn(async move {
                 if let Err(error) = run(store, mail, calendar, stopped, poll).await {
+                    tracing::error!(
+                        error_code = error.code(),
+                        "Background sync stopped unexpectedly"
+                    );
                     failed.send_replace(Some(error.code().into()));
                 }
             })
@@ -91,6 +100,7 @@ async fn run(
         // Rust does not guarantee that Instant includes suspend time. Reconcile
         // persisted wall deadlines after a forward wall/monotonic discrepancy.
         if now.saturating_sub(previous_wall) > elapsed.saturating_add(1000) {
+            tracing::debug!("Clock jump or wake detected; checking sync deadlines");
             deadlines.clear();
         }
         previous_wall = now;

@@ -283,6 +283,7 @@ impl Accounts {
             .set_account_state(id.into(), "disconnected".into())
             .await?;
         *access = None;
+        tracing::info!(account_id = id, "Account disconnected");
         self.cleanup().await
     }
     pub async fn check(&self, id: &str) -> Result<Account, AccountError> {
@@ -715,6 +716,7 @@ impl Accounts {
             slot.status.account_id = Some(id.clone());
             slot.status.warning_code = cleanup_pending.then(|| "credential_cleanup_pending".into());
         }
+        tracing::info!(account_id = %id, provider = "google", cleanup_pending, "Account connected");
         Ok((id, cleanup_pending))
     }
     async fn row(&self, id: &str) -> Result<StoredAccount, AccountError> {

@@ -1,9 +1,9 @@
 # Nuncio progress estimates
 
-September13,2026: the guided setup implementation and reproducible local packages
-passed. Current hosted CI and public installation passed. Percentages are
-engineering estimates for the named deliverable; live/native acceptance remains
-separate and the full goal is incomplete.
+September14,2026: daemon activity logging is implemented and its focused Google
+and independent IMAP/SMTP checks pass. The full35-command regression passed; hosted/testing delivery is
+in progress under task24. Rows01–23 retain prior qualified work; percentages are
+engineering estimates, and live/native acceptance remains separate.
 
 | Major task | Complete | Active hours left | Evidence / remaining work |
 |---|---:|---:|---|
@@ -29,14 +29,15 @@ separate and the full goal is incomplete.
 | 20 Post-engine product roadmap | 100% | 0 | Senior PO/PM milestone plan delivered; its future implementation is outside this goal. |
 | 21 Curl-to-Bash testing installer | 100% | 0 | Public pipeline and temporary installation verified; James reports laptop quick start worked. |
 | 22 Guided account setup | 100% | 0 | Implementation, full offline checks, reproducible packages, all 17 hosted jobs and public installation passed. |
-| 23 Google application registration | 0% | 0.5–1* | One-time maintainer Cloud/consent registration, then Google-enabled build; no client exists yet. |
+| 23 Google application registration | 0% | 0.5–1* | Laptop walkthrough prepared; registration creation remains pending. The current CLI accepts a private local Desktop JSON without waiting for a shared build. |
+| 24 Visible daemon logs and levels | 95% | 0.25–0.75 | Full35-command offline gate passed, including log privacy and independent remote effects; signed push and actual hosted/current artifact qualification remain. |
 
 Guided setup delivery and the concise setup email are verified.
 One-time Google app registration:0.5–1 active hour plus external delays. Deferred
 live/native acceptance:3–6hours when authorized. No future native-app/API-publication
 implementation has been added to this goal.
 
-Latest hourly email: message1a09bc2db1046d78 at12:13:53Central, verified SENT with
-exact plain/HTML and233793-byte23-task chart. It estimated guided setup90% before
-package verification completed. Next due13:13:53Central/18:13:53UTC during active
-execution. No inactive-session scheduler is established.
+Latest hourly chart email: message1a09d5480258dced, September13 at19:32Central.
+Updated laptop instructions were separately sent September14 at09:22Central
+(message1a0a04c78dba5481). Hourly reporting applies during active execution;
+no inactive-session scheduler is established.

@@ -12,6 +12,8 @@ workspace = true
 test-harness = ["nuncio-engine/test-harness"]
 
 [dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
 nuncio-engine = { path = "../nuncio-engine" }
 nuncio-proto = { path = "../nuncio-proto" }
 tokio.workspace = true

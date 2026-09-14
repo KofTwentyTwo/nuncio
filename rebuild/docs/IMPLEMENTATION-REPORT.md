@@ -27,6 +27,16 @@ registration has not been created; the current package reports Google sign-in
 unavailable before asking for account details. No per-account credential JSON is
 needed in the normal guided flow.
 
+The daemon now has timestamped stderr [activity logs](RUNNING.md#running-logs),
+defaulting to info, with `--log-level` controls. It logs safe local IDs, progress
+counts and durable outcomes; even trace excludes provider wire traffic and
+private content. Focused actual Google and independent IMAP/SMTP logging tests
+pass; the full35-command offline gate also passed, with current-source delivery
+qualification next as recorded in
+[VERIFICATION.md](VERIFICATION.md). The [Google setup walkthrough](GOOGLE-SETUP.md)
+uses the already-shipped local client-file option without waiting for a shared
+registration build.
+
 Durable intent, explicit uncertainty, crash reconciliation, raw export, encrypted backup/restore and repair work through the engine/API/CLI. Tests inspect independent provider state, received bytes and send/copy/notification effects instead of inferring remote success from local records. The [R01–R16 and AM01–AM08 matrix](REQUIREMENTS.md) maps requirements to implementation and evidence.
 
 ## Verification by source

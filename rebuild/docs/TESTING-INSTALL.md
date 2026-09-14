@@ -14,6 +14,9 @@ The permanent startup commands are:
 ~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa
 ```
 
+The daemon shows running activity at **info** level. For more detail, add
+`--log-level debug`. [Log levels and saving output](RUNNING.md#running-logs).
+
 In a second terminal:
 
 ```sh

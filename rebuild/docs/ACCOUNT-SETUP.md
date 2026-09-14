@@ -32,6 +32,9 @@ retrying. Ctrl-C before the final confirmation submits no sign-in.
 
 ## Google
 
+For the current testing build, follow [the one-time Google setup walkthrough](GOOGLE-SETUP.md).
+It lets you connect on your laptop using a local Desktop client file.
+
 In a Google-enabled build, enter your email address and finish sign-in in your
 browser. Nuncio requests Gmail and Calendar access, including write permissions.
 Check the selected Google identity before approving. The confirmed identity is

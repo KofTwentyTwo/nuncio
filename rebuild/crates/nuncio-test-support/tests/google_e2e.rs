@@ -8,6 +8,8 @@ mod account_setup_e2e;
 mod calendar_write_e2e;
 #[path = "support/draft_e2e.rs"]
 mod draft_e2e;
+#[path = "support/logging_e2e.rs"]
+mod logging_e2e;
 #[path = "support/mail_change_e2e.rs"]
 mod mail_change_e2e;
 #[path = "support/scheduling_e2e.rs"]

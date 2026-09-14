@@ -74,6 +74,7 @@ impl MailSync {
         let job_fetch = fetch.clone();
         let task = tokio::spawn(async move {
             let _admission = admission;
+            let started = std::time::Instant::now();
             let work_stop = stopped.clone();
             let work = async {
                 let _permit = service
@@ -101,13 +102,16 @@ impl MailSync {
             };
             let result =
                 tokio::select! {result=work=>result,_=stopped.changed()=>Err(MailError::Cancelled)};
+            if result.is_ok() {
+                tracing::info!(account_id = %work_run.account_id, run_id = %work_run.id, scope = %work_run.scope, elapsed_ms = started.elapsed().as_millis() as u64, "Sync completed");
+            }
             if let Err(error) = result {
                 let state = if matches!(error, MailError::Cancelled) {
                     "cancelled"
                 } else {
                     "failed"
                 };
-                let _ = service
+                let recorded = service
                     .store
                     .finish_sync_run_error(
                         work_run.account_id,
@@ -117,6 +121,9 @@ impl MailSync {
                         service.now().unwrap_or(work_run.started_at_ms),
                     )
                     .await;
+                if recorded.is_err() {
+                    tracing::error!("Sync failure could not be recorded in storage");
+                }
             }
         });
         jobs.insert(

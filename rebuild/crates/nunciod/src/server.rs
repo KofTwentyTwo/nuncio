@@ -251,6 +251,7 @@ pub async fn serve(engine: Engine, listener: TcpListener) -> Result<(), EngineEr
                 _ = stopped.changed() => {},
                 _ = tokio::signal::ctrl_c() => {},
             }
+            tracing::info!("Shutdown requested; draining workers and closing storage");
             stop.send_replace(true);
         })
         .await;

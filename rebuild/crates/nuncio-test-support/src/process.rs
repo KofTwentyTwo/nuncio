@@ -238,6 +238,9 @@ impl E2eHarness {
         Ok(harness)
     }
     pub async fn restart(&mut self) -> Result<(), TestError> {
+        self.restart_with_log_level(None).await
+    }
+    pub async fn restart_with_log_level(&mut self, level: Option<&str>) -> Result<(), TestError> {
         if self.child.is_some() {
             return Err(error("stop or force-kill the daemon before restarting"));
         }
@@ -267,7 +270,11 @@ impl E2eHarness {
                 .artifacts
                 .join(format!("daemon-{}.stderr.log", self.generation)),
         )?;
-        let child = isolated_command(&self.daemon_path, &self.artifacts.join("tmp"))
+        let mut command = isolated_command(&self.daemon_path, &self.artifacts.join("tmp"));
+        if let Some(level) = level {
+            command.args(["--log-level", level]);
+        }
+        let child = command
             .args(["--bind", "127.0.0.1:0", "--data-dir"])
             .arg(&self.directory)
             .arg("--test-secrets-file")

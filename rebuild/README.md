@@ -26,8 +26,12 @@ The permanent commands are in `~/.local/opt/nuncio-testing/bin/`. Rerun the
 installer to update them; each verified update keeps this path. Start the daemon
 with `~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa`, then add an
 account using `~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account add`.
+The daemon prints running activity at **info** level; add `--log-level debug`
+for more detail. [Logging options](docs/RUNNING.md#running-logs).
 [Guided setup](docs/ACCOUNT-SETUP.md) uses direct prompts and hidden passwords.
-Google sign-in requires the one-time Nuncio app registration, which has not yet been created.
+Follow the [Google setup walkthrough](docs/GOOGLE-SETUP.md) to register the app
+once and connect using a private local client file. Shared registration has not
+yet been bundled into testing builds.
 
 - [Run locally](docs/RUNNING.md) and [verify/use local packages](docs/PACKAGING.md)
 - [Account management](docs/ACCOUNT-MANAGEMENT.md)
@@ -47,5 +51,5 @@ Synology MailPlus, and native-keystore acceptance remain deferred and unverified
 native apps are excluded. Earlier failures and later corrections remain in the
 verification history. The old archive does not qualify new account-management
 source. The testing installer and API publication proposal are repository work;
-the testing download is verified at `82a92a0`. Public API distribution and a formal
+current source-specific download verification is in the report. Public API distribution and a formal
 release remain separate future work.

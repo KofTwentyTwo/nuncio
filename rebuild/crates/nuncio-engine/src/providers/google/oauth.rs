@@ -130,6 +130,7 @@ pub(crate) async fn begin(
     let mut tasks = accounts.tasks.lock().await;
     tasks.retain(|task| !task.is_finished());
     tasks.push(task);
+    tracing::info!(session_id = %session.session_id, "Google sign-in started; waiting for browser consent");
     Ok(session)
 }
 
@@ -316,6 +317,7 @@ async fn accept(
                         }
                         .into();
                         slot.status.error_code = Some(error.code().into());
+                        tracing::warn!(session_id = %callback.session, error_code = error.code(), "Google sign-in failed");
                     }
                 }
             }

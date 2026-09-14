@@ -1,5 +1,8 @@
 # One-time Google registration
 
+For hands-on laptop instructions, use [GOOGLE-SETUP.md](GOOGLE-SETUP.md).
+The local client-file path works before the shared build registration below.
+
 Status: proposed, awaiting explicit approval. The owner has been supplied in the
 private local approval record. Creating this registration lets testing builds
 offer browser sign-in through `nuncio-cli --profile laptop-qa account add`.

@@ -96,6 +96,7 @@ impl Store {
             super::schedules::started(&transaction,&account,&id)?;
             super::changes::record(&transaction,Some(&account),"sync_run",Some(&id))?;
             transaction.commit()?;
+            tracing::info!(account_id = %account, run_id = %id, scope = %scope, mode = %mode, "Sync queued");
             Ok(run)
         }).await
     }
@@ -126,6 +127,7 @@ impl Store {
             if changed!=1 {return Err(StoreError::InvalidInput);}
             super::changes::record(&transaction,Some(&account),"sync_run",Some(&id))?;
             transaction.commit()?;
+            tracing::info!(account_id = %account, run_id = %id, scope = %run.scope, "Sync started");
             Ok(())
         }).await
     }
@@ -150,6 +152,7 @@ impl Store {
             if changed!=1 {return Err(StoreError::InvalidInput);}
             super::changes::record(&transaction,Some(&account),"sync_run",Some(&id))?;
             transaction.commit()?;
+            tracing::info!(account_id = %account, run_id = %id, processed, "Sync progress");
             Ok(())
         }).await
     }
@@ -176,6 +179,7 @@ impl Store {
             super::schedules::failed(&transaction,&account,&id,now)?;
             super::changes::record(&transaction,Some(&account),"sync_run",Some(&id))?;
             transaction.commit()?;
+            tracing::warn!(account_id = %account, run_id = %id, state = %state, error_code = %code, "Sync stopped");
             Ok(())
         }).await
     }

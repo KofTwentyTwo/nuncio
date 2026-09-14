@@ -1,5 +1,28 @@
 # Rebuild session state
 
+## Daemon running logs — in progress, September 14
+
+User requested visible running output and a configurable info/debug default.
+Implement timestamped stderr application logs, default info, with --log-level
+for troubleshooting. Preserve readiness JSON on stdout and existing wire-log
+protections; allow only application tracing targets and safe IDs/counts/codes.
+Plan: reproduce missing output/options, add startup/sync/account/write/shutdown
+events, test actual daemon/CLI against independent offline providers, run the
+relevant quality gates, then signed commit/push and verify testing delivery.
+The user also requested hands-on Google setup instructions; GOOGLE-SETUP.md
+now documents the current Console flow and already-shipped --client-config
+route, allowing setup on the remote laptop without a build or repository secret.
+No live account or Google Cloud setting was accessed.
+Full offline gate passed:35/35 commands exit0, including both workspace
+configurations, named provider/system/subprocess suites, dependency review,
+security/resource/release isolation and external-client boundaries. Exact
+counts and archived logs: test-results/daemon-logging/gate-final.json.
+The first gate stopped because Ruff was absent from PATH; the rerun used the
+already installed project-local Ruff. No source change or skipped check.
+Next: signed commit/push and actual hosted/testing artifact qualification.
+Evidence goes in test-results/daemon-logging/. The full goal still needs the
+previously deferred live/native acceptance; this is independent authorized work.
+
 ## Delivery report alignment — September 13
 
 The continuation audit found stale current-build claims in the main report,
