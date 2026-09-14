@@ -1,21 +1,16 @@
 # Nuncio rebuild implementation report
 
-The latest verified testing download is signed/pushed `779264348db7240bfc368a5a5e5650f57e9d0b80`.
-It includes the complete engine/API/CLI, account management, readable output,
-actionable help, detailed startup/activity logs, stable installer paths and the
-Rustls patch. All ten hosted rebuild jobs, seven security jobs and actual public
-fresh/update checks passed. The full 35-command local gate passed 348 tests in each
-workspace. Two clean local production archives are byte-identical.
+## IMAP correction delivered at bb70f95 — September 14
 
-**The full goal remains incomplete until separately authorized Google, Synology
-and native-keystore acceptance passes.** One-time Google app registration remains
-pending. Native apps remain future work; passing mocks is not live compatibility.
+Signed/pushed `bb70f95f9376cf695b09eb3c4ad3c5d2b6369bf4` is the latest verified testing download. It fixes two independently reproduced defects: a concurrent arrival could fail initial sync with `unavailable`, and a legitimate flag notification could be rejected as an invalid response. Bounded reconciliation reuses this run's downloaded bodies, refreshes flags and removes expunged staged entries. Publication remains atomic; repeated churn or UID identity changes fail explicitly. The exact laptop trigger is still unproven.
 
-Laptop feedback has since reopened initial IMAP-sync reliability and native startup
-latency. Concurrent-arrival and flag-notification failures are reproduced and
-corrected locally; full qualification is still in progress. The published source
-above remains the last qualified download. [Current investigation](SESSION-STATE.md)
-and [bounded implementation plan](PLAN-IMAP-CATCHUP.md) record this follow-up.
+The full 35-command offline gate passed at 20:28:40 UTC: 359 tests in each workspace configuration, zero failures/ignored. Separate Google mock/system/E2E passed 26/22/42; IMAP contract/system/actual subprocess passed 2/34/17. Recovery, security, resource, migration, isolation and independent API-client checks passed. All 372 frozen source hashes matched. Commands, statuses and archived logs: `test-results/startup-delay/full-gate-final.json` and `full-gate/`; earlier RED and fixture-failure evidence remains preserved.
+
+Actual [rebuild 34893237733](https://github.com/KofTwentyTwo/nuncio/actions/runs/34893237733) passed ten jobs; [security 34893237713](https://github.com/KofTwentyTwo/nuncio/actions/runs/34893237713) passed seven. Its 45 open CodeQL findings retain the prior IDs/rules/paths/severities and were seen at this source; none were dismissed. Two clean production archives are identical `e4686b640bc5967a57327f6f39c0eff50af7b9e809ebb490260caac02848d92f`, each with 479 manifest entries, 241 notices and 22 extracted checks. `dist/final-candidate/EVIDENCE.json` selects this pair and preserves the previous selection.
+
+Actual public fresh/update installations selected source bb70f95, run 34893237733, attempt 1, artifact 10368252298. Hosted archive: `5d5cc63579b801653ca6c328e644929c300463094dec5e097d9132d2d02c235d`. All 479 files, ARM64 binaries, 71 help pages/531 options/192 argument cases and exact safe typo suggestions passed. Production INFO/debug/off preflight passed before profile/Keychain access. Update retained the prior 7792643 bytes and permanent bin paths. Evidence: `test-results/startup-delay/{installer,update}/public-verification.json`. Normal environment unchanged; no serving production daemon or live-provider action by the agent.
+
+Startup logs now time individual profile-key lookups, obsolete credential cleanup and interrupted-sync recovery. Synthetic encrypted cleanup of 66,524 staged entries took 2.548 seconds and preserved published mail; it does not explain the laptop's 240-second native pause. Next: stop/update/restart on the laptop, retain the existing profile/account, and report the new phase timings plus sync outcome. Google registration and separately authorized named Google/Synology/native acceptance remain pending; the full goal is incomplete. [Operating instructions](RUNNING.md), [recovery](RECOVERY.md), [compatibility limits](COMPATIBILITY.md) and [requirement matrix](REQUIREMENTS.md).
 
 ## Delivered behavior
 
@@ -36,7 +31,7 @@ defaulting to info, with `--log-level` controls. It logs safe local IDs, progres
 counts and durable outcomes; even trace excludes provider wire traffic and
 private content. Focused actual Google and independent IMAP/SMTP logging tests
 pass; detailed startup stages include schema/account counts and elapsed time.
-The full 35-command gate passed 348 tests per workspace; actual hosted/public
+The full 35-command gate passed 359 tests per workspace; actual hosted/public
 qualification is recorded in
 [VERIFICATION.md](VERIFICATION.md). The [Google setup walkthrough](GOOGLE-SETUP.md)
 uses the already-shipped local client-file option without waiting for a shared
@@ -44,33 +39,48 @@ registration build.
 
 Durable intent, explicit uncertainty, crash reconciliation, raw export, encrypted backup/restore and repair work through the engine/API/CLI. Tests inspect independent provider state, received bytes and send/copy/notification effects instead of inferring remote success from local records. The [R01–R16 and AM01–AM08 matrix](REQUIREMENTS.md) maps requirements to implementation and evidence.
 
-## Verification by source
+## Current artifact paths (bb70f95)
+
+Local archive: `dist/startup-delay/a/nuncio-0.1.0-rc-aarch64-apple-darwin-bb70f95f9376.tar.gz`; its `b/` sibling is identical. Hosted update check: `/private/tmp/nuncio-curl-acceptance-x1oe5_4u/testing prefix`. These temporary installations do not modify the normal environment.
+
+| Artifact | SHA-256 |
+|---|---|
+| Local archive | `e4686b640bc5967a57327f6f39c0eff50af7b9e809ebb490260caac02848d92f` |
+| Local daemon | `5665c85f6b230fd3a732f076544831d41ad7df14c08a4eb06f69670f7159d400` |
+| Local CLI | `b840bac57b65e51d1338233755cf855381a8aa401fac42dd3754a0af66f1c258` |
+| Hosted archive | `5d5cc63579b801653ca6c328e644929c300463094dec5e097d9132d2d02c235d` |
+| Hosted daemon | `b8386a142fb630e8b5d50ad43de6755db2fcad43b81dba86c95b7db897e867de` |
+| Hosted CLI | `4ecabfdc7ca7fac9bbe5709c202289f01735a01b7cbe41a63249fea322fa1301` |
+
+Production metadata records clean bb70f95, ARM64, Rust 1.97.1 and no test features or bundled Google registration. Local and hosted archives have separate build environments and hashes. Packaged documentation is a build-time snapshot; this report records subsequent qualification.
+
+## Retained verification by earlier source
 
 Repeated workspace and named executions are not additional unique tests. Exact commands, exit statuses and earlier failures remain in [VERIFICATION.md](VERIFICATION.md).
 
 | Check | Observed result | Evidence under `test-results/` |
 |---|---|---|
-| Full current gate (7792643) | All 35 commands exit 0; 348 tests per workspace, zero failed/ignored | `startup-logging/patched-gate-final.json`; `startup-logging/patched-gate/` |
+| Earlier gate (7792643) | All 35 commands exit 0; 348 tests per workspace, zero failed/ignored | `startup-logging/patched-gate-final.json`; `startup-logging/patched-gate/` |
 | Separate Google suites (7792643) | Mock 26; system 22; actual daemon/CLI E2E 41; operation system 8; all pass | `startup-logging/patched-gate/`, named logs |
 | Separate IMAP/SMTP suites (7792643) | Contract 2; system 28; actual CLI E2E 16; all pass with independent effects | Same archived gate plus `all/independent-services/` |
 | Recovery and isolation (7792643) | Recovery 5; repair 2/2; 46 migration crash cases; reconciliation 3; multi-engine 1 | Same archived gate and individual migration receipts |
 | Security and resources (7792643) | Security 3/2, 196 invalid-auth cases across 49 RPCs; resources 4/3; release isolation 2; all pass | Same archived gate |
 | Supporting checks (7792643) | Independent servers, 40 script tests, fmt, both Clippy, dependency policy and generated-client boundaries pass | Same archived gate |
 | Rustls patch (7792643) | All three locks at 0.23.45; six refreshed advisory checks pass; original 790 tests/fmt/Clippy pass with egress denied | `startup-logging/rustls/` |
-| Current local package pair (7792643) | Two clean identical archives; 22 extracted checks, 478 files and 241 notices each | `startup-logging/package-pair.json` |
+| Earlier local package pair (7792643) | Two clean identical archives; 22 extracted checks, 478 files and 241 notices each | `startup-logging/package-pair.json` |
 | Scheduler correction | Controlled Linux latency RED 101 then GREEN 0; corrected complete Linux 22/macOS 22 and fmt/both Clippy pass | `account-setup-ux/linux/`; `scheduler-progress-regression.json` |
 | Retained local package pair (82a92a0) | Two clean builds; identical archives/binaries;22 extracted checks,469 manifest entries and237 notices each | `account-setup-ux/{final-package-final,final-package-commands}.json` |
-| Current hosted rebuild (7792643) | All ten jobs passed at the exact source | [Run 34880705357](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705357); `startup-logging/hosted-delivery-final.json` |
-| Current hosted security (7792643) | All seven jobs passed; same 45 prior finding IDs/rules/paths/severities, all seen at this source | [Run 34880705426](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705426); `startup-logging/codeql-alert-comparison.json` |
+| Earlier hosted rebuild (7792643) | All ten jobs passed at the exact source | [Run 34880705357](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705357); `startup-logging/hosted-delivery-final.json` |
+| Earlier hosted security (7792643) | All seven jobs passed; same 45 prior finding IDs/rules/paths/severities, all seen at this source | [Run 34880705426](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705426); `startup-logging/codeql-alert-comparison.json` |
 | Account help (7508e25) | 14 CLI/15 harness tests, all 21 action help pages, seven examples and packaged checks passed | `account-help/` |
 | Stable installer (f14b02a) | 20 installer cases and 40 total script tests; Ruff/format/Bash/ShellCheck passed. Both digest-verified hosted lint archives show 40 tests and nine commands passed per platform | `stable-installer/checks.json`; `stable-installer/hosted-scripts/verification.json` |
-| Current public installer (7792643) | Fresh/update pass; 478 files, ARM64 binaries, startup preflight, 71 help pages/531 options/192 argument cases; prior build preserved | `startup-logging/installer/`; `startup-logging/update/public-verification.json` |
+| Earlier public installer (7792643) | Fresh/update pass; 478 files, ARM64 binaries, startup preflight, 71 help pages/531 options/192 argument cases; prior build preserved | `startup-logging/installer/`; `startup-logging/update/public-verification.json` |
 
 Automated provider tests stayed offline. Parent/child egress checks denied external traffic while allowing loopback; local independent servers used synthetic accounts. Resource tests retain their original 10,000-message, large-transfer, memory and concurrency assertions. Passing mocks is not live-provider compatibility; local checks do not prove remote CI ran.
 
-## Current reproducible local candidate (7792643)
+## Retained reproducible local candidate (7792643)
 
-`dist/final-candidate/EVIDENCE.json` now selects this independently verified
+`dist/final-candidate/EVIDENCE.json` previously selected this independently verified
 local archive; the preceding selection is preserved in
 `test-results/startup-logging/previous-final-candidate-evidence.json`.
 
@@ -123,7 +133,7 @@ The public bootstrap was separately verified at 57c619e selecting c662e48, with
 all 467 manifest entries and both ARM64 binaries checked. Neither earlier result
 is used as proof that the new guided setup download has qualified.
 
-## Latest verified testing download (7792643)
+## Earlier verified testing download (7792643)
 
 The hosted archive SHA-256 is `b7af0ad42609fcfe7df18f0bb2e598c56987a0b248db4ebd6a838e1e2ff72d3f`.
 The public installer selected artifact 10363403258, run 34880705357

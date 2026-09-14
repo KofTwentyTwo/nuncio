@@ -1,10 +1,10 @@
 # Local packages and operation
 
 For a laptop download without compiling, use [TESTING-INSTALL.md](TESTING-INSTALL.md).
-The current local package is verified at signed/pushed `7792643`.
-Two clean builds produced the identical `29b9e6b2` archive, with 22 extracted
-checks, 478 manifest entries and 241 dependency notices each. Its full 35-command
-gate passed 348 tests per workspace configuration, including separate provider
+The current local package is verified at signed/pushed `bb70f95`.
+Two clean builds produced the identical `e4686b64` archive, with 22 extracted
+checks, 479 manifest entries and 241 dependency notices each. Its full 35-command
+gate passed 359 tests per workspace configuration, including separate provider
 and release/client checks. The corrected original workspace passed 790 tests.
 All ten actual hosted rebuild jobs, seven security jobs and public fresh/update
 installer checks passed. The hosted archive has its own recorded build environment

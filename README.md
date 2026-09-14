@@ -3,12 +3,12 @@
 **A local-first mail and calendar engine written in Rust.**
 
 > **Status: pre-alpha; active implementation is in [`rebuild/`](rebuild/README.md)
-> (September 14, 2026).** Latest verified testing download: `7792643`. It includes
+> (September 14, 2026).** Latest verified testing download: `bb70f95`. It includes
 > readable CLI output, complete help, detailed startup/activity logs, guided
 > account management, permanent installer paths and the Rustls security patch.
 > All ten hosted rebuild jobs, seven security jobs and actual public fresh/update
 > checks passed. The same source has two identical clean local archives and a
-> full 35-command gate with 348 tests per workspace. Google registration and named
+> full 35-command gate with 359 tests per workspace. Google registration and named
 > live Google/MailPlus/native-keystore acceptance remain pending. See the
 > [report](rebuild/docs/IMPLEMENTATION-REPORT.md) and [current state](rebuild/docs/SESSION-STATE.md).
 
@@ -37,8 +37,8 @@ account using `~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa ac
 The current source reports startup stages and running activity at **info** level
 (`--log-level debug` adds detail), and readable CLI output is now the default;
 scripts use `--json`. Rustls 0.23.45 addresses RUSTSEC-2026-0285 across all three
-lockfiles. The downloaded package was checked for these changes.
-Public fresh/update qualification passed at 7792643. [CLI usability audit](rebuild/docs/CLI-USABILITY-AUDIT.md)
+lockfiles. The downloaded package also includes bounded IMAP catch-up, granular credential/recovery timings and safe CLI typo suggestions. The laptop startup pause still needs a retest.
+Public fresh/update qualification passed at bb70f95. [CLI usability audit](rebuild/docs/CLI-USABILITY-AUDIT.md)
 and [logging options](rebuild/docs/RUNNING.md#running-logs).
 [Guided setup](rebuild/docs/ACCOUNT-SETUP.md) uses direct prompts and hidden passwords.
 Follow the [Google setup walkthrough](rebuild/docs/GOOGLE-SETUP.md) to register
@@ -48,7 +48,7 @@ has not yet been bundled into testing builds.
 For Apple Silicon laptop testing, the [testing installer](rebuild/docs/TESTING-INSTALL.md)
 downloads a verified successful CI package without compiling locally. It
 activates each build at the same testing path and retains older versions for
-recovery. Actual installation and update passed at `7792643`. It starts no service. No public release or live-provider readiness is implied.
+recovery. Actual installation and update passed at `bb70f95`. It starts no service. No public release or live-provider readiness is implied.
 
 The [proposed post-engine roadmap](rebuild/docs/POST-ENGINE-ROADMAP.md) starts
 after engine/CLI acceptance and sequences a native Mac alpha, daily mail,

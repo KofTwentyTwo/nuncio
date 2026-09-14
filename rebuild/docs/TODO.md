@@ -8,7 +8,8 @@
 - [x] Finish broader regression, including added UID epoch and strict notification parser cases; all 35 offline commands passed, 359 tests per workspace configuration.
 - [x] Verify granular recovery logs (6 subprocess cases) and 66,524-entry cleanup (2.548 s); native four-minute cause remains unproven.
 - [x] Verify safe option suggestions (CLI output 9) and missing-snapshot human walkthrough (1); JSON contract unchanged.
-- [ ] Run required offline gates, signed checkpoint/push and qualify hosted/public testing delivery.
+- [x] Full 35-command gate, signed/pushed bb70f95, all 17 hosted jobs, reproducible local pair and public fresh/update delivery passed.
+- [ ] Laptop retest: confirm initial IMAP sync outcome and identify the slow native startup phase from new timings.
 
 ## Rustls security update
 

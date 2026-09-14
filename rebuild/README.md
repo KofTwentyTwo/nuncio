@@ -6,10 +6,10 @@ writes, IMAP folder/flag operations, SMTP with separate delivery/Sent-copy recei
 encrypted backup/restore, migration, repair, and resource budgets. Current schema-23 account management uses 49 authenticated RPCs.
 Guided `account add` includes hidden passwords, optional advanced MailPlus
 settings and bundled Google registration support. The latest verified testing
-build is `7792643`, with readable CLI output, complete help, detailed startup/activity
+build is `bb70f95`, with readable CLI output, complete help, detailed startup/activity
 logs and the Rustls patch. All ten rebuild/seven security jobs and actual public
 fresh/update checks passed. Two clean local archives are identical; the full
-35-command gate passed 348 tests per workspace. [The report](docs/IMPLEMENTATION-REPORT.md)
+35-command gate passed 359 tests per workspace. [The report](docs/IMPLEMENTATION-REPORT.md)
 records exact source/artifact evidence and the pending live/native acceptance.
 
 Install the latest Apple Silicon testing build without cloning or compiling:
@@ -28,8 +28,8 @@ account using `~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa ac
 The current source reports startup stages and running activity at **info** level
 (`--log-level debug` adds detail), and readable CLI output is now the default;
 scripts use `--json`. Rustls 0.23.45 addresses RUSTSEC-2026-0285 across all three
-lockfiles. The downloaded package was checked for these changes.
-Public fresh/update qualification passed at 7792643. [CLI usability audit](docs/CLI-USABILITY-AUDIT.md)
+lockfiles. The downloaded package also includes bounded IMAP catch-up, granular credential/recovery timings and safe CLI typo suggestions. The laptop startup pause still needs a retest.
+Public fresh/update qualification passed at bb70f95. [CLI usability audit](docs/CLI-USABILITY-AUDIT.md)
 and [logging options](docs/RUNNING.md#running-logs).
 [Guided setup](docs/ACCOUNT-SETUP.md) uses direct prompts and hidden passwords.
 Follow the [Google setup walkthrough](docs/GOOGLE-SETUP.md) to register the app

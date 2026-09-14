@@ -1,35 +1,10 @@
 # Requirement-to-evidence matrix
 
-## Active IMAP reliability correction
+## Current delivery evidence (bb70f95)
 
-Laptop feedback reopened R09 verification. Independent Dovecot reproduced initial
-sync failures from concurrent arrivals and legitimate flag notifications. The
-correction has passing targeted system and actual daemon/CLI crash checks;
-`imap_read_system::catchup` covers arrivals, flags, expunges, repeated churn and
-UID epoch resets, while `imap_catchup_e2e` verifies atomic publication and exact
-remote/raw observations across crashes. R12 gains a 66,524-entry recovery workload
-(2.548 seconds locally); R15 gains safe option suggestions and unavailable-snapshot
-guidance. The full gate and new delivery qualification are still running. These
-results do not establish the exact live trigger or explain the 240-second native
-startup pause. [Current evidence and next action](SESSION-STATE.md).
+The full offline gate (35 commands; 359 tests per workspace), separate Google E2E 42 and IMAP system/E2E 34/17 passed. All ten actual rebuild and seven security jobs passed. Two clean production archives are identical, with 479 files and 22 extracted checks each. Actual public fresh/update installations verified this source, complete packaged help and safe typo guidance; the earlier build and permanent paths were preserved. Exact hashes, commands and limits are in [the report](IMPLEMENTATION-REPORT.md) and [verification](VERIFICATION.md).
 
-## Current delivery evidence (7792643)
-
-The latest verified testing download is 7792643. It includes readable CLI output,
-complete help, startup/activity logging and Rustls 0.23.45. The full 35-command gate
-passed 348 tests per workspace, with separate Google E2E 41 and IMAP/SMTP E2E 16.
-All ten hosted rebuild and seven security jobs passed at this exact source.
-Two clean local archives are identical; each has 478 manifest entries and 22 extracted
-checks. Actual public fresh/update installations verified the same 478-file hosted
-package, ARM64 binaries, production startup preflight and 71 help/192 argument cases.
-The permanent f14b02a prefix updated successfully and preserved the previous build.
-Exact source/run/archive/binary hashes are in [the report](IMPLEMENTATION-REPORT.md)
-and [verification](VERIFICATION.md); local selection: `dist/final-candidate/EVIDENCE.json`.
-
-The R01–R16 and AM01–AM08 rows below retain their implementation/effect evidence
-and explicit live/native acceptance gaps. Passing offline or delivery checks does
-not convert a missing live result into a pass. Prior source-specific artifacts
-remain preserved.
+R09's additional `imap_read_system::catchup` and `imap_catchup_e2e` checks cover arrivals, flags, expunges, repeated churn, UID epoch changes and actual daemon crashes, independently checking remote effects and raw bytes. R14 gains a 66,524-entry cleanup workload (2.548 seconds locally); R12 gains helpful CLI error/coverage output, and R15 retains strict parser/privacy checks. The exact live failure and 240-second native startup delay remain unproven. R01–R16 and AM01–AM08 retain their explicit live/native gaps below; passing mocks does not establish live compatibility.
 
 ## Guided setup follow-up (September 13)
 
@@ -95,7 +70,7 @@ public contract archive or documentation site.
 
 The matrix maps the approved September 10 requirements to current implementation
 and the recorded offline regressions. "Passed offline" is not live-provider
-sign-off. Hosted delivery at `7792643` is verified; the full goal remains incomplete
+sign-off. Hosted delivery at `bb70f95` is verified; the full goal remains incomplete
 for the named live/native acceptance conditions. Task estimates are separate in [PROGRESS.md](PROGRESS.md).
 
 All test paths below are under `crates/nuncio-test-support/tests/` unless stated
@@ -115,14 +90,14 @@ storage, parsing and provider implementations.
 | R06 Mail flags, labels, folder copy/move, trash and restore | Externally pending | [mail changes](../crates/nuncio-engine/src/operations/mail_change.rs), [IMAP transfers](../crates/nuncio-engine/src/providers/imap/transfers.rs) | `support/mail_change_system`, `support/mail_change_e2e`; `imap_write_system` and `imap_folder_e2e`/`imap_trash_e2e` verify exact remote placements and unrelated-message preservation | Integrated regression passed; live mailbox compatibility pending; permanent purge excluded |
 | R07 Calendar writes, scopes, RSVP, notifications and free/busy | Externally pending | [change validation](../crates/nuncio-engine/src/domain/calendar_change.rs), [Google writes](../crates/nuncio-engine/src/providers/google/calendar_write.rs) | `support/calendar_write_system`, `support/calendar_write_e2e`; new limited-writer tests check private denial, valid edits, restart and independent notification counts | Limited-writer full regression passed; integrated egress passed; named live event/notification checks pending |
 | R08 Durable intent, idempotency, safe retry and uncertainty | Passed offline | [worker](../crates/nuncio-engine/src/operations.rs), [operation store](../crates/nuncio-engine/src/store/operations.rs), [Operations API](../crates/nuncio-proto/proto/nuncio/v2/operations.proto) | `operation_system`, `reconciliation_system`, Google/SMTP crash cases, restored send reconciliation; no blind retry after ambiguous sends/copies/notifications | Full integrated regression passed; provider uncertainty remains explicit by design |
-| R09 Synology IMAP/SMTP mail parity | Externally pending | [IMAP transport](../crates/nuncio-engine/src/providers/imap/mod.rs), [SMTP](../crates/nuncio-engine/src/providers/imap/smtp.rs), [Sent handling](../crates/nuncio-engine/src/providers/imap/sent.rs) | `imap_contract`, `imap_system`, `imap_e2e`; independent Dovecot/Mailpit receipts, UID epochs, folder encoding, TLS, exact copy/flag/delivery observations | Optional LIST-hint cursor correction:7projection tests and full34-command regression pass. Live MailPlus version/capabilities and actual Sent policy unverified |
+| R09 Synology IMAP/SMTP mail parity | Externally pending | [IMAP transport](../crates/nuncio-engine/src/providers/imap/mod.rs), [SMTP](../crates/nuncio-engine/src/providers/imap/smtp.rs), [Sent handling](../crates/nuncio-engine/src/providers/imap/sent.rs) | `imap_contract`, `imap_system`, `imap_e2e`; independent Dovecot/Mailpit receipts, UID epochs, folder encoding, TLS, exact copy/flag/delivery observations | Bounded initial-sync catch-up, strict flag notifications and atomic crash publication pass; full 35-command gate, independent IMAP system 34 and subprocess 17. Exact laptop trigger, live MailPlus version/capabilities and actual Sent policy remain unverified |
 | R10 Scheduled sync, isolation, bounded work and observable progress | Passed offline | [scheduler](../crates/nuncio-engine/src/scheduler.rs), [resource budgets](../crates/nuncio-engine/src/resources.rs), [System status](../crates/nuncio-proto/proto/nuncio/v2/system.proto) | `google_e2e::daemon_polling_refreshes_mail_and_calendar_without_manual_sync`; scheduling/cancellation suites; `resource_system` admission recovery and `resource_e2e` status/restart checks | Full integrated regression passed; counters reset on process restart |
 | R11 Export, encrypted backup/restore, migration and repair | Passed offline | [backup](../crates/nuncio-engine/src/store/backup.rs), [recovery](../crates/nuncio-engine/src/engine/recovery.rs), [Maintenance API](../crates/nuncio-proto/proto/nuncio/v2/maintenance.proto) | `recovery_e2e`, `migration_e2e`, `repair_system`, `repair_e2e`; 46 schema migration SIGKILL cases, five restore crash points, PDF/request fidelity and original preservation | Full integrated regression and final extracted-artifact checks passed |
 | R12 CLI/API parity, paging, byte streams and change replay | Passed offline | [CLI](../crates/nuncio-cli/src/main.rs), [protobuf contract](../crates/nuncio-proto/proto/nuncio/v2), [independent generated client](../clients/smoke/README.md) | Actual CLI suites, `cli_change_watch_replays_jsonl_and_rejects_a_future_revision`; external `clients/smoke/tests/daemon.rs` status/watch test and normal/build dependency-tree check | Frozen descriptor/client/archive verified; full integrated runner passed |
 | R13 Independent stateful Google mock and fault effects | Passed offline | [mock service](../crates/nuncio-test-support/src/google/mod.rs), [contract suite](../crates/nuncio-test-support/tests/google_mock_contract.rs) | 26 independent contract tests pass, including OAuth/HTTP validation, faults, remote state, notifications and limited-writer private-event enforcement | Full integrated regression passed; mocks cannot establish live equivalence |
 | R14 Separate real-store system and daemon/CLI E2E tests | Passed offline | [process harness](../crates/nuncio-test-support/src/process.rs), [system harness](../crates/nuncio-test-support/tests/support/system.rs), [runner](../scripts/verify.py) | All required named suites exist and have prior recorded runs; full `--all` passed. Independent generated-client test also passes under actual macOS egress denial | Full local run and independent-server egress passed; all ten current hosted jobs in 34793311166 passed |
-| R15 Encryption, key separation, auth/TLS, inert display and test-hook exclusion | Passed offline | [security suites](../crates/nuncio-test-support/tests/security_system.rs), [subprocess security](../crates/nuncio-test-support/tests/security_e2e.rs), [release isolation](../crates/nuncio-test-support/tests/release_isolation.rs) | 196 invalid-auth cases; wrong-key/ordinary-SQLite rejection; encrypted DB/WAL/FTS/backup and original-log canaries; hostile-content/resource bounds; fresh production hook exclusion | Dependency findings resolved; Current 7792643 local pair and hosted archive passed; actual security run 34880705426 passed; native-keystore acceptance remains in R02 |
-| R16 Reproducible artifacts, CI, operating instructions and final evidence | Externally pending | [API](API.md), [running](RUNNING.md), [recovery](RECOVERY.md), [manual worksheet](MANUAL-ACCEPTANCE.md) | Local production binaries/hashes and signed checkpoints recorded; external-client foundation verified; manual worksheet prepared | Retained local pair, descriptor and full offline gate passed; current 7792643 hosted CI and permanent-path installer passed; named live/native acceptance remains pending |
+| R15 Encryption, key separation, auth/TLS, inert display and test-hook exclusion | Passed offline | [security suites](../crates/nuncio-test-support/tests/security_system.rs), [subprocess security](../crates/nuncio-test-support/tests/security_e2e.rs), [release isolation](../crates/nuncio-test-support/tests/release_isolation.rs) | 196 invalid-auth cases; wrong-key/ordinary-SQLite rejection; encrypted DB/WAL/FTS/backup and original-log canaries; hostile-content/resource bounds; fresh production hook exclusion | Dependency findings resolved; Current bb70f95 local pair and hosted archive passed; actual security run 34893237713 passed; native-keystore acceptance remains in R02 |
+| R16 Reproducible artifacts, CI, operating instructions and final evidence | Externally pending | [API](API.md), [running](RUNNING.md), [recovery](RECOVERY.md), [manual worksheet](MANUAL-ACCEPTANCE.md) | Local production binaries/hashes and signed checkpoints recorded; external-client foundation verified; manual worksheet prepared | Retained local pair, descriptor and full offline gate passed; current bb70f95 hosted CI and permanent-path installer passed; named live/native acceptance remains pending |
 
 Live worksheet rows G01–G10, S01–S05 and X01 are all unapproved/unverified. The
 status-email connector is separately authorized and provides no rebuilt-provider
