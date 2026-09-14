@@ -1,31 +1,58 @@
 # Verification evidence
 
-## Stable installer paths — local verification complete
+## Stable installer paths — delivered at f14b02a
 
-The requested installer fix keeps startup commands at
+The installer keeps startup commands at
 `~/.local/opt/nuncio-testing/bin/{nunciod,nuncio-cli}`. Verified versioned builds
 are retained; `bin -> current/bin` and one atomic `current` replacement activate
 updates. Repeat installation verifies and reuses the existing build. An OS lock
 prevents concurrent activation. Old-layout migration, failed downloads/copies,
 interrupted activation, tampering and unrelated-path preservation are covered.
-No profile, account, shell configuration or running daemon is modified.
+Stop and restart the daemon through the permanent command path to use an update.
+No profile, account or shell configuration is changed by installation.
 
 The failing stable-path regression was reproduced first (exit 1). All 20 installer
-tests now pass. The complete script suite passes 40 tests; Ruff check/format,
-Bash syntax and ShellCheck all exit 0. Installer source/tests are signed locally
-at `0c7083bf8edd4bd0334fef3b9d28ec4a62146d31`. The public bootstrap now pins that
-exact source with SHA-256
+tests pass. The complete script suite passes 40 tests; Ruff check/format,
+Bash syntax and ShellCheck all exit 0. Source/tests were signed at
+`0c7083bf8edd4bd0334fef3b9d28ec4a62146d31`, then the bootstrap and guides were
+integrated in signed/pushed `f14b02a223ba95d95a0ce3f3e8f680910189869e`.
+The bootstrap's immutable source SHA-256 is
 `b8856606bcdcc211e2b34c147902109895818cc4825afd8e12b082d4f6d396a0`;
-`git show` bytes were independently matched. Relevant logs and exact commands:
-`test-results/stable-installer/{red,installer-checks,checks,pin-source}.json`.
+historical `git show` bytes were independently matched. All 67 checked local
+documentation links resolve; whitespace and scoped Gitleaks passed.
 
-Next action: checkpoint the integrated bootstrap and guides, push the checked
-branch tip, observe actual hosted CI, and run the public installer twice into the
-same private temporary prefix. Public installation and hosted results for this
-change are not yet claimed. The last qualified application download is7508e25;
-the installer's immutable source pin is independent of the selected app build.
-Google registration approval and named live/native acceptance remain pending.
-Latest continuation: `test-results/checkpoint-final/current-execution.json`.
+Actual rebuild 34793311166 passed all ten jobs; security 34793311124 passed all
+seven at f14b02a. Watcher 93018 exited 0. Exact run/job/API observations are in
+`test-results/stable-installer/hosted-delivery-final.json`. Both hosted lint
+evidence archives were digest-verified: all 40 script tests
+and all nine commands passed on macOS and Linux. Exact logs and artifact digests
+are in `test-results/stable-installer/hosted-scripts/verification.json`.
+Local tests are not used as a substitute for these hosted results.
+
+Actual public curl-to-Bash checks passed: fresh installation, repeat installation,
+and migration from the old layout using the qualified 7508e25 package. Both
+binary inodes and the receipt were preserved on reuse. After CI completed, the
+same public command updated that same prefix to f14b02a and retained every byte
+of the previous build. Both permanent command paths worked. The new package's
+470 manifest files, production metadata, ARM64 binaries,
+versions and eight CLI cases passed. Archive SHA-256:
+`1c6283dfdf16b37c8ebcf359c65387cffd1de985211fd0b645c4d645ff834f5d`.
+Selected CI run 34793311166 attempt 1,
+artifact 10328798490. Retained temporary prefix:
+`/private/tmp/nuncio-curl-acceptance-01p6bwb2/testing prefix`.
+Normal-environment snapshots were unchanged. No daemon, provider action, normal
+installation or local compilation ran during these public installer checks.
+
+Exact commands, exit statuses and retained installations:
+`test-results/stable-installer/{red,installer-checks,checks,pin-source}.json`,
+`installer/public-verification.json`, `installer/repeat-and-migration.json`,
+`update/public-verification.json` and `checkpoint-receipt.json`.
+This final report-only checkpoint uses `[skip ci]`; it claims no separate CI run
+or fresh local reproducible build pair. Prior candidate evidence is preserved.
+No watcher or test process remains active. Next action: laptop feedback or the
+pending Google registration approval; named live/native acceptance remains
+deferred and the original full goal is incomplete. Latest continuation:
+`test-results/checkpoint-final/current-execution.json`.
 
 ## Individual-account CLI help — delivered at7508e25
 
