@@ -1,5 +1,18 @@
 # Requirement-to-evidence matrix
 
+## Active IMAP reliability correction
+
+Laptop feedback reopened R09 verification. Independent Dovecot reproduced initial
+sync failures from concurrent arrivals and legitimate flag notifications. The
+correction has passing targeted system and actual daemon/CLI crash checks;
+`imap_read_system::catchup` covers arrivals, flags, expunges, repeated churn and
+UID epoch resets, while `imap_catchup_e2e` verifies atomic publication and exact
+remote/raw observations across crashes. R12 gains a 66,524-entry recovery workload
+(2.548 seconds locally); R15 gains safe option suggestions and unavailable-snapshot
+guidance. The full gate and new delivery qualification are still running. These
+results do not establish the exact live trigger or explain the 240-second native
+startup pause. [Current evidence and next action](SESSION-STATE.md).
+
 ## Current delivery evidence (7792643)
 
 The latest verified testing download is 7792643. It includes readable CLI output,

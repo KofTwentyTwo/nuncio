@@ -318,6 +318,8 @@ async fn daemon_startup_reports_ordered_phases_for_new_and_existing_profiles() {
             "Profile lock acquired",
             "Profile metadata ready",
             "Accessing credential store for profile keys",
+            "Reading profile key from credential store",
+            "Profile key lookup complete",
             "Profile keys ready",
             "Opening encrypted database",
             "Database encryption verified",
@@ -326,6 +328,10 @@ async fn daemon_startup_reports_ordered_phases_for_new_and_existing_profiles() {
             "Checking interrupted restore jobs",
             "Recovering local drafts and durable operations",
             "Loading account state and credential cleanup",
+            "Credential cleanup started",
+            "Credential cleanup complete",
+            "Recovering interrupted sync runs",
+            "Interrupted sync recovery complete",
             "Recovery checks complete",
             "Starting background workers",
             "Background workers started",
@@ -409,4 +415,90 @@ async fn daemon_startup_failure_reports_last_phase_without_false_readiness_or_pr
         before
     );
     h.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn daemon_reports_pending_credential_deletion_without_exposing_or_removing_current_secrets() {
+    use nuncio_engine::{
+        secrets::{test_store::FileTestStore, SecretStore},
+        store::Store,
+    };
+    let mut h = E2eHarness::start(Seed::TwoAccounts).await.unwrap();
+    let account = h.connect_google("alpha@example.test").await.unwrap();
+    assert_eq!(
+        h.cli(&["--json", "account", "pause", "--account", &account])
+            .await
+            .unwrap()
+            .status,
+        0
+    );
+    let status = h
+        .cli(&["--json", "system", "status"])
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let profile = status["result"]["profile_id"].as_str().unwrap();
+    h.shutdown().await.unwrap();
+    let secrets = FileTestStore::new(h.secrets_file.clone());
+    let key = secrets
+        .get(&format!("{profile}/profile/database"))
+        .unwrap()
+        .unwrap();
+    let old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&h.secrets_file).unwrap()).unwrap();
+    let reference = format!(
+        "{profile}/account/{account}/google/{}",
+        "50ab57b7-559b-4400-a112-c0dd382f63c9"
+    );
+    let store = Store::open(&h.directory, key).await.unwrap();
+    store.prepare_credential(reference.clone()).await.unwrap();
+    secrets
+        .put(&reference, b"pending-cleanup-secret-canary")
+        .unwrap();
+    store.close().await.unwrap();
+    let remote = serde_json::to_value(h.google.control().snapshot().await).unwrap();
+    h.restart().await.unwrap();
+    assert_eq!(
+        h.cli(&["--json", "system", "status"]).await.unwrap().status,
+        0
+    );
+    h.shutdown().await.unwrap();
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&h.secrets_file).unwrap()).unwrap();
+    assert_eq!(
+        current, old,
+        "startup removes only the journaled obsolete credential"
+    );
+    assert_eq!(
+        serde_json::to_value(h.google.control().snapshot().await).unwrap(),
+        remote
+    );
+    let logs = std::fs::read_to_string(h.artifacts.join("daemon-2.stderr.log")).unwrap();
+    let started = logs
+        .lines()
+        .find(|line| line.contains("Credential cleanup started"))
+        .unwrap();
+    assert!(started.contains("pending=1"));
+    let deleted = logs
+        .lines()
+        .find(|line| line.contains("Credential deletion complete"))
+        .unwrap();
+    assert!(deleted.contains("completed=1"));
+    assert!(deleted.contains("remaining=0"));
+    assert!(deleted.contains("elapsed_ms="));
+    for purpose in ["database", "api"] {
+        let line = logs
+            .lines()
+            .find(|line| {
+                line.contains("Profile key lookup complete")
+                    && line.contains(&format!("purpose=\"{purpose}\""))
+            })
+            .unwrap();
+        assert!(line.contains("elapsed_ms="));
+        assert!(line.contains("present=true"));
+    }
+    assert!(!logs.contains(&reference));
+    assert!(!logs.contains("pending-cleanup-secret-canary"));
+    assert_private_data_absent(&h, &logs);
 }

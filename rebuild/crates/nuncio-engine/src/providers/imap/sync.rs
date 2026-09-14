@@ -24,7 +24,6 @@ pub(crate) async fn sync(
     run: &SyncRun,
     stop: watch::Receiver<bool>,
 ) -> Result<(), MailError> {
-    let account: AccountId = run.account_id.parse().map_err(|_| MailError::Provider)?;
     service
         .store
         .begin_sync_run(run.account_id.clone(), run.id.clone(), None)
@@ -44,67 +43,15 @@ pub(crate) async fn sync(
                 .await?;
             continue;
         }
-        let (folder, count) = read::examine(&mut connection, folder).await?;
-        let epoch = folder.uid_validity.ok_or(MailError::Provider)?;
-        let next = folder.uid_next.ok_or(MailError::Provider)?;
-        let id = service
-            .store
-            .stage_imap_mailbox(run.account_id.clone(), run.id.clone(), folder.clone())
-            .await?;
-        let uids = read::inventory(&mut connection, next, count).await?;
-        for group in uids.chunks(256) {
-            let numbers = group
-                .iter()
-                .map(|u| NonZeroU32::new(*u).ok_or(MailError::Provider))
-                .collect::<Result<Vec<_>, _>>()?;
-            let batch = uid_batches(&numbers, 256)
-                .map_err(|_| MailError::Provider)?
-                .into_iter()
-                .next()
-                .ok_or(MailError::Provider)?;
-            let messages = read::metadata(&mut connection, &batch).await?;
-            let mut seen = BTreeSet::new();
-            for message in messages {
-                if group.binary_search(&message.uid).is_err() || !seen.insert(message.uid) {
-                    return Err(MailError::Provider);
-                }
-                let placement = ImapPlacement::new(account, id, epoch, message.uid)
-                    .map_err(|_| MailError::Provider)?;
-                ingest(
-                    service,
-                    run,
-                    &mut connection,
-                    placement,
-                    message,
-                    stop.clone(),
-                )
-                .await?;
-                processed += 1;
-            }
-            if seen.len() != group.len() {
-                return Err(MailError::Provider);
-            }
-            service
-                .store
-                .sync_run_progress(run.account_id.clone(), run.id.clone(), processed, None)
-                .await?;
-            service.accounts.http.resources.page_stored();
-        }
-        // A reset, append or expunge during collection invalidates this generation.
-        // Nothing staged becomes visible until every mailbox finished positively.
-        let (final_folder, final_count) = read::examine(&mut connection, folder.clone()).await?;
-        if final_count != count
-            || final_folder.uid_validity != folder.uid_validity
-            || final_folder.uid_next != folder.uid_next
-            || final_folder.highest_mod_seq != folder.highest_mod_seq
-            || read::inventory(&mut connection, next, count).await? != uids
-        {
-            return Err(MailError::Unavailable);
-        }
-        service
-            .store
-            .stage_absent_imap_mail(run.account_id.clone(), run.id.clone(), id, epoch, uids)
-            .await?;
+        mailbox(
+            service,
+            run,
+            &mut connection,
+            folder,
+            &mut processed,
+            stop.clone(),
+        )
+        .await?;
     }
     service
         .checkpoint("imap-before-promotion", stop.clone())
@@ -115,6 +62,94 @@ pub(crate) async fn sync(
         .await?;
     service.checkpoint("imap-after-promotion", stop).await?;
     Ok(())
+}
+
+// Catch up at most three times. A UID's content is immutable within its mailbox
+// epoch (RFC 9051 2.3.1.1), so later passes only download previously unseen UIDs.
+// Publication still requires a complete, positively validated inventory.
+async fn mailbox(
+    service: &MailSync,
+    run: &SyncRun,
+    connection: &mut super::Connection,
+    folder: crate::domain::imap::ImapMailboxState,
+    processed: &mut u64,
+    stop: watch::Receiver<bool>,
+) -> Result<(), MailError> {
+    let account: AccountId = run.account_id.parse().map_err(|_| MailError::Provider)?;
+    let (mut folder, mut count) = read::examine(connection, folder).await?;
+    for pass in 1..=3 {
+        connection.flags_changed = false;
+        let epoch = folder.uid_validity.ok_or(MailError::Provider)?;
+        let next = folder.uid_next.ok_or(MailError::Provider)?;
+        let id = service
+            .store
+            .stage_imap_mailbox(run.account_id.clone(), run.id.clone(), folder.clone())
+            .await?;
+        let uids = read::inventory(connection, next, count).await?;
+        for group in uids.chunks(256) {
+            let numbers = group
+                .iter()
+                .map(|u| NonZeroU32::new(*u).ok_or(MailError::Provider))
+                .collect::<Result<Vec<_>, _>>()?;
+            let batch = uid_batches(&numbers, 256)
+                .map_err(|_| MailError::Provider)?
+                .into_iter()
+                .next()
+                .ok_or(MailError::Provider)?;
+            let messages = read::metadata(connection, &batch).await?;
+            let mut seen = BTreeSet::new();
+            for message in messages {
+                if group.binary_search(&message.uid).is_err() || !seen.insert(message.uid) {
+                    return Err(MailError::Provider);
+                }
+                let placement = ImapPlacement::new(account, id, epoch, message.uid)
+                    .map_err(|_| MailError::Provider)?;
+                let reused = pass > 1
+                    && service
+                        .store
+                        .refresh_staged_imap_mail(run.id.clone(), placement, message.flags.clone())
+                        .await?;
+                if !reused {
+                    ingest(service, run, connection, placement, message, stop.clone()).await?;
+                    *processed += 1;
+                }
+            }
+            if seen.len() != group.len() {
+                return Err(MailError::Provider);
+            }
+            service
+                .store
+                .sync_run_progress(run.account_id.clone(), run.id.clone(), *processed, None)
+                .await?;
+            service.accounts.http.resources.page_stored();
+        }
+        let (after, after_count) = read::examine(connection, folder.clone()).await?;
+        if after.uid_validity != folder.uid_validity {
+            tracing::warn!(account_id = %run.account_id, run_id = %run.id, mailbox_id = %id,
+                "IMAP mailbox identity changed during sync; a fresh sync is required");
+            return Err(MailError::MailboxChanged);
+        }
+        let unchanged = after_count == count
+            && after.uid_next == folder.uid_next
+            && after.highest_mod_seq == folder.highest_mod_seq
+            && !connection.flags_changed;
+        if unchanged
+            && read::inventory(connection, next, count).await? == uids
+            && !connection.flags_changed
+        {
+            service
+                .store
+                .stage_absent_imap_mail(run.account_id.clone(), run.id.clone(), id, epoch, uids)
+                .await?;
+            return Ok(());
+        }
+        tracing::info!(account_id = %run.account_id, run_id = %run.id, mailbox_id = %id,
+            pass, pass_limit = 3, previous_count = count, current_count = after_count,
+            "IMAP mailbox changed during download; reconciling downloaded messages");
+        folder = after;
+        count = after_count;
+    }
+    Err(MailError::MailboxChanged)
 }
 
 async fn ingest(

@@ -11,6 +11,12 @@ workspace. Two clean local production archives are byte-identical.
 and native-keystore acceptance passes.** One-time Google app registration remains
 pending. Native apps remain future work; passing mocks is not live compatibility.
 
+Laptop feedback has since reopened initial IMAP-sync reliability and native startup
+latency. Concurrent-arrival and flag-notification failures are reproduced and
+corrected locally; full qualification is still in progress. The published source
+above remains the last qualified download. [Current investigation](SESSION-STATE.md)
+and [bounded implementation plan](PLAN-IMAP-CATCHUP.md) record this follow-up.
+
 ## Delivered behavior
 
 The Rust daemon owns SQLCipher storage, credentials, account isolation, synchronization and durable operations. The authenticated `nuncio.v2` loopback gRPC API has 49 RPCs and an independent CLI. Google support includes OAuth/refresh, Gmail initial/history synchronization, offline search and MIME/attachment reads, durable drafts, sending and mail mutations, Calendar discovery/synchronization, recurring-event occurrences, writes, RSVP and free/busy. MailPlus support uses IMAP/SMTP for folder/UID/flag synchronization, copy/move/trash/restore, submission and separate delivery/Sent-copy receipts. Live MailPlus compatibility is not established by the independent servers.

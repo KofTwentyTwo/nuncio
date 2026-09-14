@@ -95,8 +95,14 @@ pub(crate) fn prepare(directory: &Path, secrets: &dyn SecretStore) -> Result<Pro
         secrets,
         &format!("{}/profile/database", manifest.id),
         !existing_database,
+        "database",
     )?;
-    let api_key = key(secrets, &format!("{}/profile/api", manifest.id), true)?;
+    let api_key = key(
+        secrets,
+        &format!("{}/profile/api", manifest.id),
+        true,
+        "api",
+    )?;
     tracing::info!("Profile keys ready");
     let authorization = Zeroizing::new(format!("Bearer {}", hex::encode(api_key.as_slice())));
     Ok(Profile {
@@ -111,8 +117,18 @@ fn key(
     secrets: &dyn SecretStore,
     name: &str,
     may_create: bool,
+    purpose: &'static str,
 ) -> Result<Zeroizing<Vec<u8>>, EngineError> {
-    if let Some(value) = secrets.get(name)? {
+    let started = std::time::Instant::now();
+    tracing::info!(purpose, "Reading profile key from credential store");
+    let stored = secrets.get(name)?;
+    tracing::info!(
+        purpose,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        present = stored.is_some(),
+        "Profile key lookup complete"
+    );
+    if let Some(value) = stored {
         if value.len() != 32 {
             return Err(EngineError::MissingKey);
         }

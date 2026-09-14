@@ -170,3 +170,36 @@ fn write_request_ids_explain_the_required_uuid_before_connecting() {
     assert!(error.contains("--request-id"), "{error}");
     assert!(error.contains("UUID"), "{error}");
 }
+
+#[test]
+fn misspelled_options_suggest_declared_names_without_echoing_supplied_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("unused-profile");
+    for option in ["--acount", "--acount=private-token-canary"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_nuncio-cli"))
+            .env_clear()
+            .args(["--data-dir"])
+            .arg(&data)
+            .args(["mail", "list", option, "private-value-canary"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("Did you mean '--account'?"), "{error}");
+        assert!(!error.contains("private-token-canary"));
+        assert!(!error.contains("private-value-canary"));
+        assert!(!data.exists());
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_nuncio-cli"))
+        .env_clear()
+        .args(["--json", "mail", "list", "--acount", "private-value-canary"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_input");
+    assert!(!String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("private-value-canary"));
+}

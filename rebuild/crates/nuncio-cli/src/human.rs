@@ -3,6 +3,11 @@ use std::fmt::Write;
 
 pub fn render(value: &Value) -> String {
     let mut output = String::new();
+    if value.get("items").is_some_and(Value::is_array)
+        && value.pointer("/coverage/state").and_then(Value::as_str) == Some("unavailable")
+    {
+        output.push_str("No completed local mail snapshot is available.\nMail becomes visible after the first successful sync. Check 'nuncio-cli system status' for progress or errors, using the same --profile.\n\n");
+    }
     fields(&mut output, value, 0);
     output.trim_end().to_owned()
 }

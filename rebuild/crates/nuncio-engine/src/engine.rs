@@ -518,7 +518,13 @@ impl Engine {
         let accounts =
             crate::accounts::Accounts::new(store.clone(), profile.id.to_string(), secrets, http)
                 .await?;
+        tracing::info!("Recovering interrupted sync runs");
+        let sync_recovery_started = std::time::Instant::now();
         let mail = crate::mail::MailSync::new(accounts.clone(), store.clone()).await?;
+        tracing::info!(
+            elapsed_ms = sync_recovery_started.elapsed().as_millis() as u64,
+            "Interrupted sync recovery complete"
+        );
         let calendar = crate::calendar::CalendarSync::new(
             accounts.clone(),
             store.clone(),

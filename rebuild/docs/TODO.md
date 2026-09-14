@@ -1,5 +1,15 @@
 # Current delivery and acceptance state
 
+## Active IMAP sync failure and startup delay
+
+- [x] Obtain full timestamps: 240-second recovery pause; sync fails after 66,524 entries, 8 ms after its final batch.
+- [x] Reproduce initial-sync failure from one concurrent arrival against independent Dovecot (expected RED exit 101).
+- [x] Implement bounded catch-up and expunge/flag handling; initial system 5 and actual subprocess crash 1 pass with independent effects.
+- [x] Finish broader regression, including added UID epoch and strict notification parser cases; all 35 offline commands passed, 359 tests per workspace configuration.
+- [x] Verify granular recovery logs (6 subprocess cases) and 66,524-entry cleanup (2.548 s); native four-minute cause remains unproven.
+- [x] Verify safe option suggestions (CLI output 9) and missing-snapshot human walkthrough (1); JSON contract unchanged.
+- [ ] Run required offline gates, signed checkpoint/push and qualify hosted/public testing delivery.
+
 ## Rustls security update
 
 - [x] Refresh advisory database and reproduce the hosted RUSTSEC-2026-0285 finding.

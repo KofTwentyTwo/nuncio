@@ -34,6 +34,18 @@ pub fn emit(error: &clap::Error) -> std::process::ExitCode {
         }
     }
     let (mut command, path) = selected_command();
+    if let Some(clap::error::ContextValue::String(suggestion)) =
+        error.get(ContextKind::SuggestedArg)
+    {
+        if let Some(name) = command
+            .get_arguments()
+            .filter_map(|argument| argument.get_long())
+            .find(|name| suggestion == &format!("--{name}"))
+        {
+            text.push_str(&format!("Did you mean '--{name}'?\n"));
+        }
+    }
+
     if matches!(
         error.kind(),
         ErrorKind::InvalidValue | ErrorKind::ValueValidation

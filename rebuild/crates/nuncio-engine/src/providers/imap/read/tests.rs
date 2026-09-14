@@ -66,6 +66,7 @@ async fn sparse_high_uids_are_bounded_by_message_count_not_uid_number_space() {
             .map_err(|(error, _)| error)
             .unwrap();
         let mut connection = Connection {
+            flags_changed: false,
             session,
             capabilities: Default::default(),
         };
@@ -76,5 +77,24 @@ async fn sparse_high_uids_are_bounded_by_message_count_not_uid_number_space() {
         } else {
             assert!(found.is_err());
         }
+    }
+}
+
+#[test]
+fn unsolicited_flags_are_distinct_from_complete_requested_message_data() {
+    for (wire, expected) in [
+        ("* 1 FETCH (FLAGS (\\Seen))\r\n", Ok(true)),
+        ("* 1 FETCH (UID 5 FLAGS (\\Seen) MODSEQ (17))\r\n", Ok(true)),
+        ("* 1 FETCH (UID 5 FLAGS () RFC822.SIZE 4 INTERNALDATE \"01-Jan-2026 12:00:00 +0000\")\r\n", Ok(false)),
+        ("* 1 FETCH (UID 5 BODY[] {4}\r\nbody)\r\n", Ok(false)),
+        ("* 1 FETCH (UID 5 FLAGS () FLAGS ())\r\n", Err(())),
+        ("* 1 FETCH (UID 0 FLAGS ())\r\n", Err(())),
+        ("* 1 FETCH (UID 5 UID 5 FLAGS ())\r\n", Err(())),
+        ("* 1 FETCH (UID 5 FLAGS () MODSEQ (0))\r\n", Err(())),
+        ("* 1 FETCH (UID 5)\r\n", Ok(false)),
+    ] {
+        let (rest,response)=async_imap::imap_proto::parser::parse_response(wire.as_bytes()).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(flags_update(&response).map_err(|_|()),expected,"{wire}");
     }
 }

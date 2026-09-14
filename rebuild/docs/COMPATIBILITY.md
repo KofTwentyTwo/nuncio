@@ -5,10 +5,10 @@ Dovecot/Mailpit servers. Live Gmail/Calendar, Synology DSM/MailPlus versions and
 native OS-keychain operation remain unverified. The separate
 [manual worksheet](MANUAL-ACCEPTANCE.md) identifies the exact checks and approvals
 required. A passing mock or local CI-equivalent run cannot fill those evidence gaps.
-Current schema-23 account source passed its full offline gate, and the selected
-Apple Silicon archive at `164b021` passed fresh repeatable packaging. Its hosted
-Linux/macOS CI and actual testing-download checks also passed. Historical hosted
-baseline runs remain separately recorded in [VERIFICATION.md](VERIFICATION.md).
+The latest qualified testing source is 7792643; its actual CI, public installation
+and local packaging receipts are recorded in [VERIFICATION.md](VERIFICATION.md).
+A laptop-reported initial IMAP failure and startup delay are being corrected;
+see [the current state](SESSION-STATE.md) for unreleased work and test evidence.
 
 | Area | Implemented behavior and current limits |
 |---|---|
@@ -21,7 +21,7 @@ baseline runs remain separately recorded in [VERIFICATION.md](VERIFICATION.md).
 | Synology calendar | Calendar functionality in this goal uses Google Calendar. Synology Calendar/CalDAV is not part of the approved MailPlus IMAP/SMTP adapter. |
 | IMAP servers | The adapter is exercised against local independent implementations; compatibility with arbitrary IMAP/SMTP servers is not inferred. Renamed/retired folders and UID epochs retain separate identities. A message trashed by another client has no provable local original folder; choose an explicit Move instead of guessed restore. |
 | Payload/resource limits | Default64MiB per payload, bounded streams/queues,2 concurrent network exchanges and64 active/waiting admissions. Metadata/RSS workloads have machine-specific results; these are not universal latency or memory guarantees. |
-| Native credentials/platforms | Native macOS Keychain and Linux Secret Service are the selected production stores; automated tests use synthetic stores. Current Ubuntu 24.04 and macOS 15 CI and packaging commands passed at `164b021`. The retained local archive is macOS ARM64; the hosted ARM64 archive was independently downloaded, verified and installed into a temporary prefix. Native-keystore acceptance, Windows, and additional package architectures are not established. The [testing installer](TESTING-INSTALL.md) supports native Apple Silicon macOS 15+ only. |
+| Native credentials/platforms | Native macOS Keychain and Linux Secret Service are the selected production stores; automated tests use synthetic stores. Current Ubuntu 24.04 and macOS 15 CI and packaging commands passed at `7792643`. The retained local archive is macOS ARM64; the hosted ARM64 archive was independently downloaded, verified and installed into a temporary prefix. Native-keystore acceptance, Windows, and additional package architectures are not established. The [testing installer](TESTING-INSTALL.md) supports native Apple Silicon macOS 15+ only. |
 | API clients | Versioned authenticated `nuncio.v2`, opaque local IDs, scoped page/revision tokens, byte streams and committed-change replay. A separately generated status/watch client passes baseline actual-daemon tests without engine/storage dependencies. New account methods require the current source; publication/SemVer tooling remains a [proposal](API-PUBLICATION-PLAN.md). Native apps remain outside scope. |
 
 Polling and provider reads establish eventual local convergence; this tool does
@@ -30,3 +30,16 @@ is lost. It retains durable intent, observations and uncertainty instead of sile
 repeating potentially completed actions. Check [RECOVERY.md](RECOVERY.md) before
 resolving such work or restoring an older profile snapshot. Original application
 data is preserved; rebuild-schema migrations are not a legacy-data importer.
+
+## Active mailbox synchronization
+
+The catch-up correction under verification retries a changed mailbox at most
+three times in the same run, retaining already downloaded bodies only within
+that mailbox’s unchanged UIDVALIDITY. Flag notifications are validated separately
+from requested metadata/body responses. An expunged staged message is omitted
+from the final snapshot. Published mail stays unchanged until the entire run
+commits; an empty cache with unavailable coverage is not evidence of an empty
+remote mailbox. Repeated changes or an identity reset report `mailbox_changed`;
+transport loss and changes that interrupt bounded inventory/body reads can still
+fail the run. Retry when the connection/mailbox is stable. This is eventual
+convergence, not a transaction spanning remote mailboxes.

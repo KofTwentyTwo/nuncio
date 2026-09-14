@@ -25,6 +25,17 @@ synchronization has not run yet. Use `mail read --account ACCOUNT_ID --message
 MESSAGE_ID` for a message listed there. A profile can contain several accounts;
 an email address or display name is not the account ID.
 
+`Coverage: unavailable` means no completed local snapshot exists. The processed
+counter measures downloaded entries; a failed first sync can leave the visible
+list empty. Inspect `system sync-status --account ACCOUNT_ID --run SYNC_RUN_ID`
+with the same profile and read the daemon’s last warnings. The catch-up correction
+under verification is recorded in [the current state](SESSION-STATE.md); it handles
+mailbox changes without publishing a partial generation. `mailbox_changed` means
+the mailbox identity changed or catch-up reached its three-pass bound. Retry
+`sync --account ACCOUNT_ID` after the connection/mailbox stabilizes; keep the
+existing profile. `--wait` waits up to five minutes; timing out does not cancel
+the durable sync run.
+
 Normal results are readable text. Add `--json` for scripts. Missing arguments
 print the required option, usage and the relevant `--help` command. For example,
 `mail list` explains that `--account` is required and points to `account list`.
@@ -56,6 +67,14 @@ INFO Recovering local drafts and durable operations
 INFO Starting background workers
 INFO Daemon ready endpoint=127.0.0.1:9421 api_version=nuncio.v2 ...
 ```
+
+The recovery-diagnostics correction under verification separates database/API
+key lookups, obsolete credential deletion and interrupted-sync recovery. It logs
+counts and elapsed time without keys or mail content. Use the exact last phase
+to locate a pause; choosing Always Allow does not establish that later credential
+operations completed. The testing binaries currently have ad-hoc code signatures,
+so a later build can have a different Keychain identity. Native acceptance is
+still pending; [compatibility limits](COMPATIBILITY.md) remain explicit.
 
 If startup waits at credential-store access, check for an OS approval prompt or
 locked keychain. A failed step leaves its last progress message visible and does

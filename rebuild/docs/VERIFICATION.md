@@ -1,5 +1,21 @@
 # Verification evidence
 
+## Active IMAP sync failure and startup delay — September 14
+
+The user’s run processed 66,524 entries, then failed with `unavailable` 8 ms after its last batch. No completed snapshot was published. Startup took 251.686 seconds: 11.638 seconds at profile-key access and 240.040 seconds in the combined account-credential cleanup / interrupted-sync recovery phase. Three native prompts were reported. The existing logs do not establish which recovery operation caused the four-minute pause; static ad-hoc signing inspection does not prove that cause.
+
+The independent Dovecot system regression now reproduces a concrete defect: append one message while initial sync downloads, and the complete run fails `unavailable` (exit 101, expected assertion; `test-results/startup-delay/arrival-red.json` and log). A bounded three-pass mailbox reconciliation is implemented. It retains same-run immutable bodies within one UIDVALIDITY, refreshes flags, reconciles expunged staged rows, and keeps atomic publication and strict protocol checks. Mailbox identity changes or continuous churn remain failures with a specific code. This is a proven offline defect, not yet the proven live Synology trigger.
+
+Targeted checks pass: CLI output 9, startup/privacy subprocess 6, human walkthrough 1, IMAP catch-up system 5 and actual subprocess crash E2E 1 (two crash boundaries); all six commands exit 0 (`targeted-checks.json`). A concurrent flag update first reproduced `invalid_provider_response`; valid unsolicited flag notifications are now handled separately, with all four initial cases passing including disabled optional capabilities (`catchup-notifications.json`). The added UID epoch and strict parser cases also pass in the full gate. A 66,524-entry encrypted staging cleanup passes in 2.548 seconds, preserves published mail and leaves no staged children/FK violations (`large-cleanup.json`). This does not prove native Keychain latency.
+
+Both complete workspace configurations passed 359 tests each, zero failures/ignored (exit 0); these are repeated configurations, not 718 unique tests. The separate required suites also passed: Google mock 26/system 22/E2E 42; independent IMAP contract 2/system 34/actual subprocess 17; all recovery, migration, reconciliation, security, resource and release-isolation suites, plus the independent API client. Five production preflight/typo checks also pass without profile or Keychain access (`local-production/checks.json`).
+
+All 35 offline commands passed at 20:28:40 UTC, including 40 script regressions, both Clippy configurations, formatting, dependency policy and client boundaries. All 372 recorded source hashes matched. Exact commands, exit statuses and test counts: `test-results/startup-delay/full-gate-final.json`; complete archived logs: `full-gate/`. The first gate's older transfer-test initializer compile failure is preserved in `initial-full-gate-test-fixture-error/` and corrected; no assertions were weakened.
+
+Changes are ready for a signed checkpoint/push. Next: qualify the exact committed source through actual hosted jobs, clean local production archives and public fresh/update installs, then send the laptop retest instructions. Qualified software remains 7792643 until that delivery passes. No schema, credential format, native Keychain or live provider change. See [the bounded follow-up plan](PLAN-IMAP-CATCHUP.md).
+
+Hourly status email `1a0a17628e4c5104` sent September 14 at 14:47:50 Central to james@kof22.com. SENT, recipient, exact plain/HTML bodies and 251798-byte chart metadata verified. It reports passing targeted fixes, full verification still running, qualified public source still 7792643, and native/live gaps. The 25-task chart reopens IMAP/reliability/delivery/logging/help follow-ups; 2–4 active hours estimated, overlapping task estimates and CI waits excluded. Next hourly report due 15:47:50 Central while active; no inactive-session scheduler.
+
 ## CLI, startup logging and Rustls patch — delivered at 7792643
 
 September 14, 2026. The CLI defaults to readable results and useful errors;

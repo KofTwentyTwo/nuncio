@@ -40,7 +40,7 @@ async fn copyuid_evidence_requires_exact_identity_and_survives_only_valid_lost_a
         });
         let wire=ImapWire::new(Wire::test(tcp),std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),262144,0).unwrap();
         let session=async_imap::Client::new(wire).authenticate("PLAIN",Plain{bytes:zeroize::Zeroizing::new(b"\0synthetic\0synthetic".to_vec()),used:false}).await.map_err(|(e,_)|e).unwrap();
-        let mut connection=Connection{session,capabilities:Default::default()};
+        let mut connection=Connection{session,capabilities:Default::default(),flags_changed:false};
         let source=ImapPlacement::new(AccountId::generate(),ImapMailboxId::generate(),9001,11).unwrap();
         let payload=ImapTransferPayload{restore_origin:None,source,source_mailbox:MailboxName::from_unicode("INBOX").unwrap(),destination:ImapMailboxId::generate(),destination_mailbox:MailboxName::from_unicode("Archive").unwrap(),destination_uid_validity:std::num::NonZeroU32::new(9010).unwrap(),mode:ImapTransferMode::Move};
         let result=copy_or_move(&mut connection,&payload,ImapTransferMode::Move).await;

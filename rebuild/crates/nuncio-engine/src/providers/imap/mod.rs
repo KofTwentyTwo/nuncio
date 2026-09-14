@@ -71,6 +71,7 @@ async fn probe_inner(
 pub(crate) struct Connection {
     session: async_imap::Session<wire::ImapWire>,
     pub capabilities: ImapCapabilities,
+    pub(super) flags_changed: bool,
 }
 pub(crate) async fn open(
     config: &ImapAccountConfig,
@@ -159,6 +160,7 @@ async fn open_inner(
     Ok(Connection {
         session,
         capabilities,
+        flags_changed: false,
     })
 }
 

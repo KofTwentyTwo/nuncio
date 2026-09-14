@@ -777,7 +777,17 @@ impl Accounts {
             .map_err(|_| AccountError::Secret)
     }
     async fn cleanup(&self) -> Result<(), AccountError> {
-        for reference in self.store.credential_cleanup().await? {
+        let pending = self.store.credential_cleanup().await?;
+        let total = pending.len();
+        let started = Instant::now();
+        tracing::info!(pending = total, "Credential cleanup started");
+        for (index, reference) in pending.into_iter().enumerate() {
+            let deletion_started = Instant::now();
+            tracing::info!(
+                completed = index,
+                remaining = total - index,
+                "Deleting obsolete credential"
+            );
             self.validate_reference(&reference)?;
             let secrets = self.secrets.clone();
             let name = reference.clone();
@@ -786,7 +796,18 @@ impl Accounts {
                 .map_err(|_| AccountError::Secret)?
                 .map_err(|_| AccountError::Secret)?;
             self.store.finish_credential_cleanup(reference).await?;
+            tracing::info!(
+                completed = index + 1,
+                remaining = total - index - 1,
+                elapsed_ms = deletion_started.elapsed().as_millis() as u64,
+                "Credential deletion complete"
+            );
         }
+        tracing::info!(
+            completed = total,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Credential cleanup complete"
+        );
         Ok(())
     }
     pub async fn shutdown(&self) {

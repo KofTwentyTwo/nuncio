@@ -1,5 +1,30 @@
 use super::*;
 impl Store {
+    pub(crate) async fn refresh_staged_imap_mail(
+        &self,
+        run: String,
+        placement: ImapPlacement,
+        flags: ImapFlags,
+    ) -> Result<bool, StoreError> {
+        let account = placement.account_id.to_string();
+        let provider = placement
+            .provider_id()
+            .map_err(|_| StoreError::InvalidInput)?;
+        let json = serde_json::to_string(&ImapMessageState { placement, flags })
+            .map_err(|_| StoreError::InvalidInput)?;
+        self.execute(move |c| {
+            let tx = c.transaction()?;
+            check_run(&tx, &account, &run)?;
+            validate_message(&tx, &account, &run, &provider, &json)?;
+            let changed = tx.execute(
+                "UPDATE staged_messages SET provider_json=?4 WHERE account_id=?1 AND run_id=?2 AND provider_id=?3 AND deleted=0",
+                params![account, run, provider, json],
+            )?;
+            tx.commit()?;
+            Ok(changed == 1)
+        }).await
+    }
+
     pub(crate) async fn stage_cached_imap_mail(
         &self,
         run: String,
@@ -40,6 +65,9 @@ impl Store {
             let tx=c.transaction()?;check_run(&tx,&account,&run)?;
             let staged:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM staged_imap_mailboxes WHERE account_id=?1 AND run_id=?2 AND id=?3 AND json_extract(state_json,'$.uid_validity')=?4)",params![account,run,mailbox.to_string(),epoch],|r|r.get(0))?;
             if !staged {return Err(StoreError::InvalidInput);}
+            // A message staged on an earlier pass may have been expunged before
+            // the final inventory. Remove its staged children through the FK cascade.
+            tx.execute("DELETE FROM staged_messages WHERE account_id=?1 AND run_id=?2 AND json_extract(provider_json,'$.placement.mailbox_id')=?3 AND json_extract(provider_json,'$.placement.uid_validity')=?4 AND json_extract(provider_json,'$.placement.uid') NOT IN (SELECT value FROM json_each(?5))",params![account,run,mailbox.to_string(),epoch,uids])?;
             tx.execute("INSERT INTO staged_messages(account_id,run_id,provider_id,body_availability,deleted) SELECT m.account_id,?2,m.provider_id,'missing',1 FROM messages m JOIN imap_placements p ON p.account_id=m.account_id AND p.message_id=m.id WHERE p.account_id=?1 AND p.mailbox_id=?3 AND p.uid_validity=?4 AND p.uid NOT IN (SELECT value FROM json_each(?5)) ON CONFLICT(account_id,run_id,provider_id) DO UPDATE SET deleted=1",params![account,run,mailbox.to_string(),epoch,uids])?;
             tx.commit()?;Ok(())
         }).await

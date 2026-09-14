@@ -28,6 +28,15 @@ async fn readable_cli_runs_mail_calendar_drafts_and_send_with_independent_effect
     let accounts = human(h.cli(&["account", "list"]).await?);
     assert!(accounts.contains(&account));
     assert!(accounts.contains("alpha@example.test"));
+    let unsynced = human(h.cli(&["mail", "list", "--account", &account]).await?);
+    assert!(unsynced.contains("No completed local mail snapshot"));
+    assert!(unsynced.contains("system status"));
+    let machine = h
+        .cli(&["--json", "mail", "list", "--account", &account])
+        .await?
+        .json()?;
+    assert_eq!(machine["result"]["coverage"]["state"], "unavailable");
+    assert_eq!(machine["result"]["items"], json!([]));
     assert!(
         human(h.cli(&["sync", "--account", &account, "--wait"]).await?)
             .contains("State: succeeded")
@@ -48,6 +57,19 @@ async fn readable_cli_runs_mail_calendar_drafts_and_send_with_independent_effect
         .await?
     )
     .contains("Multipart fixture"));
+    let empty_search = human(
+        h.cli(&[
+            "mail",
+            "search",
+            "--account",
+            &account,
+            "--query",
+            "notpresentanywhere",
+        ])
+        .await?,
+    );
+    assert!(empty_search.contains("No items"));
+    assert!(!empty_search.contains("No completed local mail snapshot"));
     let messages = h
         .cli(&["--json", "mail", "list", "--account", &account])
         .await?

@@ -1,3 +1,4 @@
+mod catchup;
 mod fetch;
 mod repair;
 use super::*;

@@ -137,6 +137,7 @@ async fn sent_search_is_bounded_by_sequence_windows_and_rejects_stale_or_ambiguo
             .map_err(|(e, _)| e)
             .unwrap();
         let mut connection = Connection {
+            flags_changed: false,
             session,
             capabilities: Default::default(),
         };

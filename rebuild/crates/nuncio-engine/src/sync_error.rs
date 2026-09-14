@@ -6,11 +6,13 @@ pub enum SyncError {
     Account(#[from] AccountError),
     #[error(transparent)]
     Storage(#[from] StoreError),
-    #[error("Google provider is unavailable")]
+    #[error("Provider is unavailable")]
     Unavailable,
+    #[error("IMAP mailbox changed during synchronization; retry the sync")]
+    MailboxChanged,
     #[error("Google provider requested a later attempt")]
     RetryAfter(i64),
-    #[error("Google provider returned an invalid response")]
+    #[error("Provider returned an invalid response")]
     Provider,
     #[error("Provider resource was not found")]
     NotFound,
@@ -29,6 +31,7 @@ impl SyncError {
             Self::Account(e) => e.code(),
             Self::Storage(_) => "storage",
             Self::Unavailable | Self::RetryAfter(_) => "unavailable",
+            Self::MailboxChanged => "mailbox_changed",
             Self::Provider => "invalid_provider_response",
             Self::NotFound => "not_found",
             Self::TooLarge => "too_large",

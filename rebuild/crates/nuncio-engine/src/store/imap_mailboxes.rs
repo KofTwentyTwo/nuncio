@@ -30,7 +30,7 @@ impl Store {
                 Some(id)=>id,
                 None=>tx.query_row("SELECT id FROM imap_mailboxes WHERE account_id=?1 AND name=?2 AND retired=0",params![account,state.name.as_str()],|r|r.get(0)).optional()?.unwrap_or_else(||ImapMailboxId::generate().to_string()),
             };
-            let count:u32=tx.query_row("SELECT count(*) FROM staged_imap_mailboxes WHERE account_id=?1 AND run_id=?2",params![account,run],|r|r.get(0))?;
+            let count:u32=tx.query_row("SELECT count(*) FROM staged_imap_mailboxes WHERE account_id=?1 AND run_id=?2 AND id<>?3",params![account,run,id],|r|r.get(0))?;
             if count>=4096 {return Err(StoreError::ResultTooLarge);}
             tx.execute("INSERT INTO staged_imap_mailboxes(account_id,run_id,id,name,state_json) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account_id,run_id,id) DO UPDATE SET state_json=excluded.state_json",params![account,run,id,state.name.as_str(),serde_json::to_string(&state).map_err(|_|StoreError::InvalidInput)?])?;
             tx.execute("INSERT INTO staged_collections(account_id,run_id,provider_id,name,kind) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account_id,run_id,provider_id) DO UPDATE SET name=excluded.name,kind=excluded.kind",params![account,run,id,state.name.as_str(),kind(&state)])?;

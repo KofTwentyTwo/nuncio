@@ -1,6 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[path = "support/imap_accounts_e2e.rs"]
 mod imap_accounts_e2e;
+#[path = "support/imap_catchup_e2e.rs"]
+mod imap_catchup_e2e;
 #[path = "support/imap_effects.rs"]
 mod imap_effects;
 #[path = "support/imap_logging_e2e.rs"]

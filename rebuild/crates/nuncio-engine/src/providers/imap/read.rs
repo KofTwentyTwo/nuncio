@@ -111,6 +111,10 @@ pub(super) async fn select(
         256 * 1024,
         0,
         |response| {
+            if flags_update(response)? {
+                connection.flags_changed = true;
+                return Ok(None);
+            }
             if let Response::MailboxData(MailboxDatum::Exists(value)) = response {
                 count = Some(*value);
             }
@@ -158,13 +162,19 @@ pub(super) async fn inventory(
             &format!("UID SEARCH {low}:{high} UID 1:{}", next - 1),
             128 * 1024,
             0,
-            |response| match response {
-                Response::MailboxData(MailboxDatum::Search(uids)) => Ok(Some(uids.clone())),
-                Response::Expunge(_) | Response::Vanished { .. } => Err(MailError::Unavailable),
-                Response::MailboxData(MailboxDatum::Exists(value)) if *value != count => {
-                    Err(MailError::Unavailable)
+            |response| {
+                if flags_update(response)? {
+                    connection.flags_changed = true;
+                    return Ok(None);
                 }
-                _ => Ok(None),
+                match response {
+                    Response::MailboxData(MailboxDatum::Search(uids)) => Ok(Some(uids.clone())),
+                    Response::Expunge(_) | Response::Vanished { .. } => Err(MailError::Unavailable),
+                    Response::MailboxData(MailboxDatum::Exists(value)) if *value != count => {
+                        Err(MailError::Unavailable)
+                    }
+                    _ => Ok(None),
+                }
             },
         )
         .await?;
@@ -199,6 +209,10 @@ pub(super) async fn metadata(
         2 * 1024 * 1024,
         0,
         |response| {
+            if flags_update(response)? {
+                connection.flags_changed = true;
+                return Ok(None);
+            }
             let Response::Fetch(_, values) = response else {
                 return Ok(None);
             };
@@ -245,6 +259,10 @@ pub(super) async fn body(
         limit + 256 * 1024,
         limit,
         |response| {
+            if flags_update(response)? {
+                connection.flags_changed = true;
+                return Ok(None);
+            }
             let Response::Fetch(_, values) = response else {
                 return Ok(None);
             };
@@ -275,6 +293,39 @@ pub(super) async fn body(
         return Err(MailError::Protocol);
     }
     items.into_iter().next().ok_or(MailError::Protocol)
+}
+
+// Servers may interleave unsolicited flag-only FETCH responses with a UID
+// command (RFC 3501 7.4.2). Validate these notifications separately from the
+// complete metadata/body response we requested, then reconcile their flags.
+fn flags_update(response: &Response<'_>) -> Result<bool, MailError> {
+    let Response::Fetch(_, values) = response else {
+        return Ok(false);
+    };
+    if !values.iter().any(|v| matches!(v, AttributeValue::Flags(_)))
+        || values.iter().any(|v| {
+            !matches!(
+                v,
+                AttributeValue::Flags(_) | AttributeValue::Uid(_) | AttributeValue::ModSeq(_)
+            )
+        })
+    {
+        return Ok(false);
+    }
+    let (mut flags, mut uid, mut mod_seq) = (false, false, false);
+    for value in values {
+        match value {
+            AttributeValue::Flags(v) if !flags => {
+                ImapFlags::new(v.iter().map(|s| s.to_string()).collect())
+                    .map_err(|_| MailError::Protocol)?;
+                flags = true;
+            }
+            AttributeValue::Uid(v) if !uid && *v != 0 => uid = true,
+            AttributeValue::ModSeq(v) if !mod_seq && *v != 0 => mod_seq = true,
+            _ => return Err(MailError::Protocol),
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

@@ -104,6 +104,7 @@ async fn appenduid_requires_exact_epoch_single_uid_and_valid_tag() {
             .map_err(|(e, _)| e)
             .unwrap();
         let mut connection = Connection {
+            flags_changed: false,
             session,
             capabilities: Default::default(),
         };
