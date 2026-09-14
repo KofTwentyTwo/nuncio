@@ -19,10 +19,12 @@ The permanent startup commands are:
 ~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa
 ```
 
-The pending logging/usability build adds running activity at **info** level
-and `--log-level debug`, plus readable CLI output with explicit `--json` for
-scripts. The installer currently selects the earlier passing f14b02a build;
-it will select a newer build only after its required CI succeeds.
+The verified testing build `7792643` reports startup stages and running activity
+at **info** level by default. Use `--log-level debug` for more detail. CLI output
+is readable by default; use `--json` for scripts. The public installer was verified
+for both a fresh installation and an update from f14b02a, including the packaged
+startup preflight and all 71 help pages/192 argument-error cases. The installer output
+must identify 7792643 or a later qualified build; 0.1.0 alone does not identify the source.
 [Log levels and saving output](RUNNING.md#running-logs).
 
 In a second terminal:

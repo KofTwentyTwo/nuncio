@@ -1,6 +1,6 @@
 # Rebuild session state
 
-## CLI, startup logging and Rustls patch — local verification passed
+## CLI, startup logging and Rustls patch — delivered at 7792643
 
 September 14, 2026. The CLI defaults to readable results and useful errors;
 `--json` retains machine envelopes. All 71 help pages, 531 visible options and
@@ -40,19 +40,48 @@ failed startup without false readiness now pass against independent provider
 state. Production code changes are static lifecycle log events plus the TLS
 patch: no API, schema or provider-operation behavior changed.
 
-Next: final scoped review, signed checkpoint/push, observe the exact source in
-all 17 hosted jobs, then verify actual public fresh/update installations. The
-installer still selects f14b02a, which predates logging and the security fix.
-James confirmed that old source on Grogu and still saw no logging; this does not
-exercise the new implementation. Give the exact newly qualified commit before
-asking him to reinstall. The prior a5b Ubuntu attachment timeout did not recur in
-CLI 92 CI or the current local runs; its root cause remains unproven, and its strict
-assertions plus failure diagnostics remain. Do not claim it was fixed by repetition.
+Signed/pushed `779264348db7240bfc368a5a5e5650f57e9d0b80`; signature and exact
+remote branch head verified. Actual rebuild 34880705357 passed all 10 jobs;
+security 34880705426 passed all 7. Its 45 open CodeQL findings have the same IDs,
+rules, paths and severities as the prior reviewed baseline and were all seen
+at this source. No findings were dismissed or suppressed. The comparison is
+recorded in `test-results/startup-logging/codeql-alert-comparison.json`.
 
-Hourly report 1a0a1075028ddac0 was sent to james@kof22.com at 12:46:46 Central;
-plain/HTML and 251183-byte chart metadata were independently verified. Next due:
-13:46:46 Central during active work. Named live Google/Synology/native acceptance
-and Google registration remain deferred; the full goal is not complete.
+Two clean local production archives are identical 29b9e6b2, with 478 manifest entries,
+241 notices and 22 extracted checks each. `dist/final-candidate/EVIDENCE.json` selects
+this 7792643 pair and preserves the earlier 82a92a0 selection. The actual public
+fresh/update pipelines both selected 7792643/run 34880705357/attempt 1/artifact 10363403258,
+hosted archive b7af0ad4. All 478 files, ARM64 headers/versions and 71 help pages,
+531 options and 192 argument cases passed in each installed package. Fresh production
+INFO/debug/off preflight passed before profile/Keychain access. The old f14b02a
+prefix updated through the same bin paths and retained every prior-build byte.
+Normal environment unchanged; no serving production daemon or live account action.
+Source-specific records: `test-results/startup-logging/{installer,update}/`.
+
+James's no-logging report came from f14b02a; the new public 7792643 is now verified.
+Email 1a0a13ee067320a5 contains the exact source, stop/update/debug-start/status
+commands and 25-task chart. SENT/recipient/subject/exact plain/HTML and 247874-byte
+chart metadata were independently verified at 13:47:27 Central. Next hourly report
+is due 14:47:27 Central during active work; no inactive-session scheduler exists.
+
+The older a5b Ubuntu attachment timeout did not recur in current local or hosted
+checks. Its cause remains unproven; strict assertions and diagnostic evidence
+are retained as a risk to investigate if it recurs, not a claimed root-cause fix.
+Current resource/delivery checks passed without weakened assertions.
+
+This report-only checkpoint records qualification of software 7792643; it does
+not introduce another tested build. Documentation/source checks and the signed
+commit/push receipt are in `test-results/startup-logging/final-report/`.
+
+Next: resume for laptop feedback on 7792643 or explicit Google registration/named live
+Google/Synology/native-keystore acceptance authorization. Those external checks
+remain deferred and the full goal is incomplete. Do not repeat unchanged builds
+or infer provider compatibility from mocks. All software/test/CI processes ended.
+
+## Earlier checkpoint history
+
+The entries below preserve intermediate results and pending actions at those
+checkpoints. The current delivery and next action are recorded above.
 
 ## Daemon running logs — in progress, September 14
 
@@ -108,7 +137,7 @@ This is a reporting correction with no implementation, artifact or authorization
 change. Verification inputs and subsequent checkpoint receipts are retained in
 `test-results/delivery-report-refresh/`. The prior installer turn made concrete
 progress; this continuation corrects the R16 handoff. No CI/test process is live.
-Validation passed:160 local links resolve, software matches qualified f14b02a,
+Validation passed: 160 local links resolve, software matches qualified f14b02a,
 both retained local archives match their identical recorded5dbed9e9 hash, and all
 470 current installed files plus binary hashes match their own f14b02a receipt.
 All16 requirement rows are retained, with eight still externally pending.
@@ -192,7 +221,7 @@ Signed/pushed7508e25194843e069bcabcdbd1e632d181ef4ac2; signature and exact
 remote head verified. Actual rebuild34776720576 passed all ten jobs; security
 34776720552 passed all seven. Watcher93518 exited0; exact terminal/API results
 are in `account-help/hosted-delivery-final.json`. Public installer15198 exited0,
-selected that source/run/attempt1 and artifact10323998130. The hosted archive
+selected that source/run/attempt 1 and artifact10323998130. The hosted archive
 SHA-256 is `7df994d6abd1af0031c032d57a02b4fcbcaf61b6df34596b70a5209548024caf`.
 All470manifest files, both ARM64 binaries/versions and eight packaged CLI cases
 were checked; no profile was created and normal-environment snapshots stayed
@@ -251,7 +280,7 @@ package pair34590/0 produced identical5dbed9e9 archives,22 extracted checks and
 seven security jobs in34771537540 passed; watcher86694 exited0 and is finished.
 All ten job-evidence ZIPs were digest-verified and their command results checked.
 
-Actual public installer58846/0 selected this source, run34771537477 attempt1,
+Actual public installer58846/0 selected this source, run34771537477 attempt 1,
 artifact10322850026. Hosted archive9dc2d94e,469-file manifest,both ARM64 binaries,
 versions,guided command help and nonterminal refusal were checked independently.
 Normal-environment snapshots were unchanged; no daemon or live/native account
@@ -406,9 +435,9 @@ Latest hourly email: September12,11:40Central, message/thread1a0967dcff0032a4 in
 
 All authorized account-management implementation and offline delivery checks passed. Signed/pushed software164b021 has49RPCs/schema23; full34-command gate4169 passed322tests per configuration and411unchanged source hashes. Fresh local pair36678 passed with identical4a9e33a9 archives/binaries,22extracted checks/467manifest entries/237notices each. Exact full hashes and operating/recovery instructions are in IMPLEMENTATION-REPORT.md and REQUIREMENTS.md. The earlier failed fixture/whitespace and security-yank results remain preserved in VERIFICATION.
 
-Actual rebuild34704460234 at164b021/attempt1 passed all10jobs; all11artifacts retained and independently digest/size/CRC checked (capture97079/0). Actual unmodified installer55011/0 selected artifact10301603739, validated its22package checks and467-entry manifest, and installed under `/private/tmp/nuncio-testing-164b021-blrvan5v/testing-prefix/nuncio-0.1.0-rc-aarch64-apple-darwin-164b021750a7-run-34704460234-attempt-1`. All27help/version/account parser checks passed. No compiler, daemon or provider action ran; normal-environment snapshots and installer source stayed unchanged. Hosted archivea9e9a1f7 is verified against its own environment/receipt, not assumed equal to local4a9e33a9. Evidence: test-results/testing-installer-current/.
+Actual rebuild34704460234 at164b021/attempt 1 passed all 10 jobs; all11artifacts retained and independently digest/size/CRC checked (capture97079/0). Actual unmodified installer55011/0 selected artifact10301603739, validated its22package checks and467-entry manifest, and installed under `/private/tmp/nuncio-testing-164b021-blrvan5v/testing-prefix/nuncio-0.1.0-rc-aarch64-apple-darwin-164b021750a7-run-34704460234-attempt-1`. All27help/version/account parser checks passed. No compiler, daemon or provider action ran; normal-environment snapshots and installer source stayed unchanged. Hosted archivea9e9a1f7 is verified against its own environment/receipt, not assumed equal to local4a9e33a9. Evidence: test-results/testing-installer-current/.
 
-Actual security34704460237 passed all7jobs. All3complete-lock scans passed;9action findings are fixed, no newfindings,44previously classified findings remainopen. Rust scanned435files, with23semantic warnings only in archivedreferencefiles. Source/sink classifications, exact analysis IDs and logs are in test-results/security-ci/hosted-34704460237/ and SECURITY-CI.md. No alerts dismissed, PRsmerged/closed or remote settings changed. All11openPRs reviewed and addressed by checked feature-branch replacements; later disposition remains separately authorized.
+Actual security34704460237 passed all 7jobs. All3complete-lock scans passed;9action findings are fixed, no newfindings,44previously classified findings remainopen. Rust scanned435files, with23semantic warnings only in archivedreferencefiles. Source/sink classifications, exact analysis IDs and logs are in test-results/security-ci/hosted-34704460237/ and SECURITY-CI.md. No alerts dismissed, PRsmerged/closed or remote settings changed. All11openPRs reviewed and addressed by checked feature-branch replacements; later disposition remains separately authorized.
 
 The requested future PO/PM roadmap and API-publication design are delivered and linked from READMEs. They do not authorize or expand native implementation. All delegated tasks are complete; no agent watcher remains necessary. Root is closing a documentation-only checkpoint, preserving411tested sources and the verified164b021 artifacts. Read test-results/checkpoint-final/current-execution.json and test-results/account-management-final-docs/ for its exact commit/push/CI receipt. A report-only push may trigger new hosted jobs; observe that exact run without claiming it already passed or rebuilding merely to relabel the software artifact.
 

@@ -1,6 +1,6 @@
 # Verification evidence
 
-## CLI, startup logging and Rustls patch — local verification passed
+## CLI, startup logging and Rustls patch — delivered at 7792643
 
 September 14, 2026. The CLI defaults to readable results and useful errors;
 `--json` retains machine envelopes. All 71 help pages, 531 visible options and
@@ -40,19 +40,48 @@ failed startup without false readiness now pass against independent provider
 state. Production code changes are static lifecycle log events plus the TLS
 patch: no API, schema or provider-operation behavior changed.
 
-Next: final scoped review, signed checkpoint/push, observe the exact source in
-all 17 hosted jobs, then verify actual public fresh/update installations. The
-installer still selects f14b02a, which predates logging and the security fix.
-James confirmed that old source on Grogu and still saw no logging; this does not
-exercise the new implementation. Give the exact newly qualified commit before
-asking him to reinstall. The prior a5b Ubuntu attachment timeout did not recur in
-CLI 92 CI or the current local runs; its root cause remains unproven, and its strict
-assertions plus failure diagnostics remain. Do not claim it was fixed by repetition.
+Signed/pushed `779264348db7240bfc368a5a5e5650f57e9d0b80`; signature and exact
+remote branch head verified. Actual rebuild 34880705357 passed all 10 jobs;
+security 34880705426 passed all 7. Its 45 open CodeQL findings have the same IDs,
+rules, paths and severities as the prior reviewed baseline and were all seen
+at this source. No findings were dismissed or suppressed. The comparison is
+recorded in `test-results/startup-logging/codeql-alert-comparison.json`.
 
-Hourly report 1a0a1075028ddac0 was sent to james@kof22.com at 12:46:46 Central;
-plain/HTML and 251183-byte chart metadata were independently verified. Next due:
-13:46:46 Central during active work. Named live Google/Synology/native acceptance
-and Google registration remain deferred; the full goal is not complete.
+Two clean local production archives are identical 29b9e6b2, with 478 manifest entries,
+241 notices and 22 extracted checks each. `dist/final-candidate/EVIDENCE.json` selects
+this 7792643 pair and preserves the earlier 82a92a0 selection. The actual public
+fresh/update pipelines both selected 7792643/run 34880705357/attempt 1/artifact 10363403258,
+hosted archive b7af0ad4. All 478 files, ARM64 headers/versions and 71 help pages,
+531 options and 192 argument cases passed in each installed package. Fresh production
+INFO/debug/off preflight passed before profile/Keychain access. The old f14b02a
+prefix updated through the same bin paths and retained every prior-build byte.
+Normal environment unchanged; no serving production daemon or live account action.
+Source-specific records: `test-results/startup-logging/{installer,update}/`.
+
+James's no-logging report came from f14b02a; the new public 7792643 is now verified.
+Email 1a0a13ee067320a5 contains the exact source, stop/update/debug-start/status
+commands and 25-task chart. SENT/recipient/subject/exact plain/HTML and 247874-byte
+chart metadata were independently verified at 13:47:27 Central. Next hourly report
+is due 14:47:27 Central during active work; no inactive-session scheduler exists.
+
+The older a5b Ubuntu attachment timeout did not recur in current local or hosted
+checks. Its cause remains unproven; strict assertions and diagnostic evidence
+are retained as a risk to investigate if it recurs, not a claimed root-cause fix.
+Current resource/delivery checks passed without weakened assertions.
+
+This report-only checkpoint records qualification of software 7792643; it does
+not introduce another tested build. Documentation/source checks and the signed
+commit/push receipt are in `test-results/startup-logging/final-report/`.
+
+Next: resume for laptop feedback on 7792643 or explicit Google registration/named live
+Google/Synology/native-keystore acceptance authorization. Those external checks
+remain deferred and the full goal is incomplete. Do not repeat unchanged builds
+or infer provider compatibility from mocks. All software/test/CI processes ended.
+
+## Earlier checkpoint history
+
+The entries below preserve intermediate results and pending actions at those
+checkpoints. The current delivery and next action are recorded above.
 
 ## CLI usability — September 14, final review
 
@@ -107,7 +136,7 @@ sync/scheduler, and durable operation-attempt boundaries. Only application
 tracing targets are allowed; existing protocol log compile-time limits remain.
 Evidence: test-results/daemon-logging/. Full offline gate passed35/35 commands
 (exit0). Both workspace configurations passed337 tests, zero failed/ignored;
-Google E2E38 and independent IMAP/SMTP E2E16 passed separately. Formatting, both
+Google E2E38 and independent IMAP/SMTP E2E 16 passed separately. Formatting, both
 Clippy configurations,40 script tests, dependency advisories/licenses/sources,
 security/resource/release isolation and external-client checks pass. Original
 logs are retained in gate-final/; gate-final.json records commands and counts.
@@ -136,7 +165,7 @@ This is a reporting correction with no implementation, artifact or authorization
 change. Verification inputs and subsequent checkpoint receipts are retained in
 `test-results/delivery-report-refresh/`. The prior installer turn made concrete
 progress; this continuation corrects the R16 handoff. No CI/test process is live.
-Validation passed:160 local links resolve, software matches qualified f14b02a,
+Validation passed: 160 local links resolve, software matches qualified f14b02a,
 both retained local archives match their identical recorded5dbed9e9 hash, and all
 470 current installed files plus binary hashes match their own f14b02a receipt.
 All16 requirement rows are retained, with eight still externally pending.
@@ -220,7 +249,7 @@ Signed/pushed7508e25194843e069bcabcdbd1e632d181ef4ac2; signature and exact
 remote head verified. Actual rebuild34776720576 passed all ten jobs; security
 34776720552 passed all seven. Watcher93518 exited0; exact terminal/API results
 are in `account-help/hosted-delivery-final.json`. Public installer15198 exited0,
-selected that source/run/attempt1 and artifact10323998130. The hosted archive
+selected that source/run/attempt 1 and artifact10323998130. The hosted archive
 SHA-256 is `7df994d6abd1af0031c032d57a02b4fcbcaf61b6df34596b70a5209548024caf`.
 All470manifest files, both ARM64 binaries/versions and eight packaged CLI cases
 were checked; no profile was created and normal-environment snapshots stayed
@@ -295,7 +324,7 @@ Evidence: `account-setup-ux/hosted-delivery-final.json` and
 `account-setup-ux/hosted-evidence/{all-job-evidence,system-summary}.json`.
 
 Public installer58846 exited0, selecting exact source82a92a0, run34771537477,
-attempt1/artifact10322850026. Hosted package SHA256
+attempt 1/artifact10322850026. Hosted package SHA256
 `9dc2d94e25ae7abc7316c453a95a6fbf5c8e9a3034e885385d587f51e9b448ef`;
 469 manifest entries,both ARM64 headers/versions,guided help and nonterminal
 refusal independently verified. Profile creation did not occur. Normal-environment
@@ -306,7 +335,7 @@ are documentation only. No native/live compatibility or remote CI is inferred
 from local checks. CodeQL alert64 was reviewed as a synthetic PTY-harness output
 finding;45classified alerts remain open, with no dismissal or suppression.
 
-## Final guided setup candidate82a92a0
+## Final guided setup candidate 82a92a0
 
 Second timing correction: hosted b2b3ed5 job103760149174 failed the fixed1.4sec
 beta-progress assumption. The corrected test observes independent beta Gmail
@@ -443,7 +472,7 @@ The tee retained exactly the bytes executed; SHA256
 `7b9d666a47365d664500c975f98d69fbb7bf601668c830afa2d4348fa7819be0`
 matched the reviewed bootstrap. It fetched the pinned Python source13dbe549,
 verified its checksum, then selected successful sourcec662e48/run34706301412
-attempt1/artifact10302106519. Installed package SHA256:
+attempt 1/artifact10302106519. Installed package SHA256:
 `ec7e02d16d02f0206f364d76400f94837231ac5039ed00a01077bb759d331bde`.
 All 467 manifest entries, clean metadata and both ARM64 headers were checked
 independently; both binaries' `--version` exited0. Normal-environment snapshots
@@ -507,11 +536,11 @@ The live/native acceptance condition remains deferred and unverified.
 
 ## September 12 — actual current CI and hosted installer passed
 
-Run34704460234 at signed/pushed164b021/attempt1 passed all10jobs; watcher62703/0. Capture97079/0 retained all11artifacts with independent GitHub SHA256/size and ZIP CRC verification; ten evidence command sets all exit0. Hosted totals: core162perplatform; mock26perplatform; E2E43perplatform; system39; IMAP/resource48; release/client3perplatform. Both production archive commands passed. Root independently parsed the retained logs: test-results/account-management-final-docs/hosted-counts.json.
+Run34704460234 at signed/pushed164b021/attempt 1 passed all 10 jobs; watcher62703/0. Capture97079/0 retained all11artifacts with independent GitHub SHA256/size and ZIP CRC verification; ten evidence command sets all exit0. Hosted totals: core162perplatform; mock26perplatform; E2E43perplatform; system39; IMAP/resource48; release/client3perplatform. Both production archive commands passed. Root independently parsed the retained logs: test-results/account-management-final-docs/hosted-counts.json.
 
-Actual installer55011/0 selected run34704460234/attempt1, artifact10301603739 (9,602,280bytes; ZIP SHA2562dc2926f53a6c92b256125fb1a5b41fdaba8f83b8a1132eb1e105c26249ffbe0; packagea9e9a1f7a9ee9672591252580ee1f47c453bd1627c043b7d2b0eba5692b3fa76). It installed into a new private temporary prefix. The467-entry installed manifest, clean metadata,22extracted checks and bothARM64headers were verified;27help/version/account parser checks all exit0. Normal-environment snapshot and installer source unchanged; no compiler, daemon or liveprovider ran. Exact commands, path, checks and allbytes: test-results/testing-installer-current/{verification-summary.json,installer.json,installer.stdout.log,TESTING-INSTALL.json,installed-integrity.json,normal-environment-comparison.json,downloaded-summary.json,hosted-test-summary.json,downloads/}. Hosted and local archives have different recorded environments and are not assumed byte-identical.
+Actual installer55011/0 selected run34704460234/attempt 1, artifact10301603739 (9,602,280bytes; ZIP SHA2562dc2926f53a6c92b256125fb1a5b41fdaba8f83b8a1132eb1e105c26249ffbe0; packagea9e9a1f7a9ee9672591252580ee1f47c453bd1627c043b7d2b0eba5692b3fa76). It installed into a new private temporary prefix. The467-entry installed manifest, clean metadata,22extracted checks and bothARM64headers were verified;27help/version/account parser checks all exit0. Normal-environment snapshot and installer source unchanged; no compiler, daemon or liveprovider ran. Exact commands, path, checks and allbytes: test-results/testing-installer-current/{verification-summary.json,installer.json,installer.stdout.log,TESTING-INSTALL.json,installed-integrity.json,normal-environment-comparison.json,downloaded-summary.json,hosted-test-summary.json,downloads/}. Hosted and local archives have different recorded environments and are not assumed byte-identical.
 
-Run34704460237 at164b021 passed all7securityjobs; watcher60584/0. All3advisory logs verify cargo-deny and full-lock cargo-audit ran (original509packages, rebuild375, client249). Four uploaded CodeQL analyses: Rust42findings/Python2/Actions0/JS0. Nine prior action alerts nowfixed; no newfindings,44prior classified open findings retained. Rust435files/412without-errors;23warnings only archivedreferencefiles. Exact summary/SARIF/deltas/7logs in test-results/security-ci/hosted-34704460237/. No suppressions or dismissals. SECURITY-CI.md records the implications and limits.
+Run34704460237 at164b021 passed all 7securityjobs; watcher60584/0. All3advisory logs verify cargo-deny and full-lock cargo-audit ran (original509packages, rebuild375, client249). Four uploaded CodeQL analyses: Rust42findings/Python2/Actions0/JS0. Nine prior action alerts nowfixed; no newfindings,44prior classified open findings retained. Rust435files/412without-errors;23warnings only archivedreferencefiles. Exact summary/SARIF/deltas/7logs in test-results/security-ci/hosted-34704460237/. No suppressions or dismissals. SECURITY-CI.md records the implications and limits.
 
 All account/installer/software verification is complete. Current dated docs/handoff are being checkpointed; source411hashes and production164b021 remain the qualification boundary. Live/native acceptance remains separately deferred/unverified.
 
@@ -520,7 +549,7 @@ All account/installer/software verification is complete. Current dated docs/hand
 
 Account checkpoint `164b021750a70b49a1e060602f653f22cd14a46c` signed/pushed after gate4169. The explicit 73-file staged set, 411 unchanged tested sources, 203 local links, balanced fences, scoped Gitleaks and final staged whitespace checks passed; signature and exact remote head verified (push9299/0). Initial staged whitespace exit2 identified two API-plan Markdown hard-break spaces; blank-line correction retained the content and source hashes. Receipts/logs preserve that failure and successful correction in `test-results/checkpoint-account-management/`.
 
-Fresh pair36678 exited0: both clean production archives SHA256 `4a9e33a91c11d3dbdf376ebd01827f9bd645f4fbbce03517fa8fad04f13af7cc`; identical daemon `402d81018ee2a98ea43e928711844aac3045f1df92a0d84c994c42669ab288e5` and CLI `68462388004977f37c24ddde391be118991c5220d4ba869631815acb3673478d`. Each passed22extracted checks and independent467-entry manifest, descriptor, clean/no-feature metadata, source/sidecar validation;237notices, no missing README links. Exact commands/comparison/receipts: `test-results/account-management-package/`. Selected new archive/sidecars/build logs are in `dist/final-candidate/verified/`; old b26d2c93 bytes and EVIDENCE-before-account-management-164b021.json are preserved. Repeatability is limited to the recorded platform/compiler/SDK/paths.
+Fresh pair36678 exited0: both clean production archives SHA256 `4a9e33a91c11d3dbdf376ebd01827f9bd645f4fbbce03517fa8fad04f13af7cc`; identical daemon `402d81018ee2a98ea43e928711844aac3045f1df92a0d84c994c42669ab288e5` and CLI `68462388004977f37c24ddde391be118991c5220d4ba869631815acb3673478d`. Each passed 22 extracted checks and independent467-entry manifest, descriptor, clean/no-feature metadata, source/sidecar validation;237notices, no missing README links. Exact commands/comparison/receipts: `test-results/account-management-package/`. Selected new archive/sidecars/build logs are in `dist/final-candidate/verified/`; old b26d2c93 bytes and EVIDENCE-before-account-management-164b021.json are preserved. Repeatability is limited to the recorded platform/compiler/SDK/paths.
 
 New actual CI runs34704460234(rebuild/installer) and34704460237(security) remain active at164b021. Their ignored receipts are separate from local package evidence. No current hosted/installer completion claim yet; live/native acceptance remains deferred.
 
@@ -657,7 +686,7 @@ metrics were copied separately before later runs. Original10k sync12,675/12,950/
 Original16MiB/64MiB+1 cases and memory/concurrency bounds passed unchanged.
 
 The new optional-LIST-hint regression failed before the production correction;
-all7projection tests and original independent-server cases now pass. Full stored
+all 7projection tests and original independent-server cases now pass. Full stored
 provider hints remain intact; only coverage-hash input excludes Marked/Unmarked.
 The v2 domain causes a one-time local coverage-token change, no schema/API change.
 Actual hosted34681263133 remains9passed/1IMAP failure on the prior checkpoint.
@@ -694,7 +723,7 @@ provider state. The v2 hash domain produces a one-time local coverage-token chan
 on the next promotion for existing profiles; no remote cursor, schema or API changes.
 
 New `engine/tests/imap_projection.rs` regression failed44102/101 before the fix;
-all7projection tests passed50258/0 (0.66s) afterward. It preserves stored hints,
+all 7projection tests passed50258/0 (0.66s) afterward. It preserves stored hints,
 folder identity and coverage across hint changes, while actual role/delimiter/
 UIDNEXT/HIGHESTMODSEQ/UIDVALIDITY changes alter coverage. Exact commands/exits:
 `test-results/ci-imap-cursor/interest-{red,green}.{json,log}`. Original independent
@@ -768,7 +797,7 @@ Actual hosted run34679663120 is in progress on that head; watcher38369, evidence
 confirms26tests/2commands0 and parent/child external denial. No overall CI pass yet.
 
 `python3 test-results/task16-promotion-package/run.py`, shell14220, exited0.
-Two fresh production builds from the clean checkpoint passed22extracted checks each
+Two fresh production builds from the clean checkpoint passed 22 extracted checks each
 and produced identical archives/binaries, with no tracked input changes or differing
 manifest files. All included manifest entries and package README links verified.
 Metadata: macOS ARM64/Rust1.97.1/Appleclang21, dirty:false, epoch1789196514,
@@ -797,7 +826,7 @@ retains that bookkeeping correction. The original package runner exited0 through
 all34 commands passed. Both workspace configurations passed307 tests each, zero
 failed/ignored. Separate named suites: Google mock26/system22/E2E27; operations6;
 IMAP contract2/system27/E2E13; recovery5; repair2/2; migration1 (44SIGKILL cases);
-reconciliation3; multi-engine1; security3/2; resource4/3; release-isolation2;
+reconciliation 3; multi-engine 1; security3/2; resource4/3; release-isolation2;
 external-client1. All6 independent Python service scripts,8script regressions,
 builds/format/Ruff/bothClippy/dependency/client-boundary checks passed. Repeated
 executions are not unique additional tests. Parent/child external egress denied,
@@ -982,7 +1011,7 @@ task16-package-final/; adjacent and selected-root EVIDENCE.json retain exact res
 Earlier documentation refresh30482 also passed (two e49121a archives/22checks each),
 but inspection found PACKAGING hard-coding its predecessor. Retained guidance-red
 inspection1 led to a generic metadata/checksum guide, verified in45789. No package
-code or production code changed. First inspection-reader attempt1 assumed an object
+code or production code changed. First inspection-reader attempt 1 assumed an object
 instead of the actual verification list; corrected reader0 confirmed all22 expected
 exits. Both are recorded separately from package/build success. Earlier47d65f and
 e49121a archives/receipts are preserved. Archived developer reports are dated
@@ -1019,7 +1048,7 @@ running; no overall hosted or live/native-keystore acceptance claim.
 Signed2e4d30ef9434638db4a5b824b490cdb4278bf13c committed/pushed after affected
 local gate91079 passed. Signature/push/exact ls-remote checks0; staged7files/
 27974diff bytes passed Gitleaks and whitespace0. Receipt: checkpoint-resource/.
-Actual hosted run34672641999 has all10jobs running at04:25UTC on that exact head; do not infer success:
+Actual hosted run34672641999 has all 10 jobs running at04:25UTC on that exact head; do not infer success:
 https://github.com/KofTwentyTwo/nuncio/actions/runs/34672641999.
 The superseded run terminated cancelled04:23UTC:3macOS passes/1macOS failure/
 6Ubuntu cancellations. Final job ledger: remote-ci/34671490682/run-final.json.
@@ -1190,7 +1219,7 @@ appropriate. Descriptor test1/0. Package script unit2/0. CI runner unit2/0 inclu
 actual exit17 propagation for all six jobs and complete18-suite group coverage.
 Evidence: task15-contract/. Full newly integrated runner and archive are pending.
 
-Linux egress first attempt16516/2 timed out with default ICMP rejection. Independent
+Linux egress first attempt 16516/2 timed out with default ICMP rejection. Independent
 TCP-reset diagnostic returned ECONNREFUSED with one counted rejection; the corrected
 rule then passed parent/child IPv4/IPv6 refusal with2 independently counted rejects
 per family. Success0/failure17 propagation and separate post-run chain/route cleanup
@@ -1508,7 +1537,7 @@ checks passed. This signature/remote verification is not remote-CI evidence.
 ## Restore retry capacity — full relevant gate verified
 
 `python3 test-results/task13-restore-retry/run-gate.py`: shell7100 terminal exit0,
-all7 commands passed: formatting, both workspace Clippy configurations, engine128,
+all 7 commands passed: formatting, both workspace Clippy configurations, engine128,
 actual daemon/CLI recoveryE2E5, IMAPE2E13, release-isolation2 with a fresh normal
 production build. Zero failed/ignored. `summarize.py` exited0 and recorded
 results.json, counts.json, source-hashes.json and artifacts.json in that directory.
@@ -1551,7 +1580,7 @@ Gitleaks8.30.1 staged scan with default rules and full redaction exited0; staged
 
 ## Startup ownership and relative restore — full relevant gate verified
 
-`python3 test-results/task13-startup-cleanup/run-gate.py` completed all7 commands exit0 (shell87318): fmt, both Clippy configurations, full engine126, actual recoveryE2E4, actual IMAPE2E13, and release-isolation2 with a fresh production build. Zero failed/ignored. `summarize.py` completed0 and recorded exact commands/results/counts/source hashes/artifact hashes. Daemon SHA256 `f67a6d53b62cd88d80f3e5b8f51d39fb6d36c0e14de562ba92f79563cf49acb1`; CLI `23f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1`. The following focused/paused entries are historical.
+`python3 test-results/task13-startup-cleanup/run-gate.py` completed all 7 commands exit0 (shell87318): fmt, both Clippy configurations, full engine126, actual recoveryE2E4, actual IMAPE2E13, and release-isolation2 with a fresh production build. Zero failed/ignored. `summarize.py` completed0 and recorded exact commands/results/counts/source hashes/artifact hashes. Daemon SHA256 `f67a6d53b62cd88d80f3e5b8f51d39fb6d36c0e14de562ba92f79563cf49acb1`; CLI `23f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1`. The following focused/paused entries are historical.
 
 Startup cancellation retains the source-profile lock inside blocking cleanup. Relative profiles now reach encrypted backup inspection, recover an actual persisted cleanup row, and can activate a new independent profile. Ancestor aliases such as macOS `/var` work; final owner symlinks and another owner's upload remain rejected. Existing stage/key/activation/lease tests and actual daemon/CLI crash/effect assertions remain intact. No schema/proto/dependency change. Initial fixture/Clippy/type errors and the alias regression are retained as gate-first-*, gate-second-* and gate-alias-failure-*; alias-focused.log passed13 tests after correction. Full Task13–16 remains incomplete; no package, install, live-compatibility or remote-CI claim.
 
@@ -1571,7 +1600,7 @@ The separate `single_component_relative_profile_recovers_failed_restore_without_
 
 ## Maintenance profile leases — verified schema22 follow-up
 
-`python3 test-results/task13-maintenance-ownership/run-gate.py` completed all7commands exit0 (shell25031): Rustfmt, bothClippy, full engine122, actual recoveryE2E4, actual IMAPE2E13 and production-isolation2 with a fresh normal release build. Zero failed/ignored. `summarize.py` verified statuses/counts and recorded source/artifact hashes. Daemon SHA256 `f0bcf60ac3db98dd0e3d4361e7a2b01420b6d2eabc10b5d5aad15d5aae13f8dc`; CLI `23f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1`. Source locations and exact commands/logs/red-green evidence are retained in that directory. The following focused-work section records chronology; its pending gate is now complete.
+`python3 test-results/task13-maintenance-ownership/run-gate.py` completed all 7commands exit0 (shell25031): Rustfmt, bothClippy, full engine122, actual recoveryE2E4, actual IMAPE2E13 and production-isolation2 with a fresh normal release build. Zero failed/ignored. `summarize.py` verified statuses/counts and recorded source/artifact hashes. Daemon SHA256 `f0bcf60ac3db98dd0e3d4361e7a2b01420b6d2eabc10b5d5aad15d5aae13f8dc`; CLI `23f75c75837bc64b25a40cdac3d5a3e0abcff436bbf8d75d161664ac3659d4b1`. Source locations and exact commands/logs/red-green evidence are retained in that directory. The following focused-work section records chronology; its pending gate is now complete.
 
 BackupArtifact, BackupUpload and BackupInput now retain the source profile lock alongside admission, through blocking work/output/cleanup and Engine shutdown. Three regressions prove source reopening is Locked until the last object drops, then original keys/identity survive. Existing cancelled restore and cleanup-failure recovery remain passing. No schema/proto/dependency changes; prior44-migration and Google21/26 full gate evidence remains for the preceding journal snapshot. Next startup-cancellation/relative-path tests and earlier artifact crash cleanup are recorded in SESSION-STATE. No full-goal, package/install/live compatibility or remoteCI claim.
 
@@ -1609,13 +1638,13 @@ An earlier run stopped on incorrect CLI guidance after the daemon died: generic 
 
 ## Detached restore ownership — verified schema21 gate
 
-`python3 test-results/task13-restore-worker/run-gate.py` completed with all7 commands exit0: Rustfmt, both Clippy configurations,17 lifecycle/maintenance/restore tests,3 Google recovery E2E,13 IMAP E2E and2 production-isolation tests with a fresh release build. Zero failed or ignored. Commands/logs/counts/hashes are in that directory. Current daemon SHA256 is `1fa76deee9552e6de1fefc6df198c56022a697b8b327c335fef3c7131470b99e`; CLI is `0018628d4f56a533203bc6ff906cc8b1bea6291ae07dba6c0d82329cdac9da40`. This is a focused gate, not a new full-engine total or remote CI run.
+`python3 test-results/task13-restore-worker/run-gate.py` completed with all 7 commands exit0: Rustfmt, both Clippy configurations,17 lifecycle/maintenance/restore tests,3 Google recovery E2E,13 IMAP E2E and2 production-isolation tests with a fresh release build. Zero failed or ignored. Commands/logs/counts/hashes are in that directory. Current daemon SHA256 is `1fa76deee9552e6de1fefc6df198c56022a697b8b327c335fef3c7131470b99e`; CLI is `0018628d4f56a533203bc6ff906cc8b1bea6291ae07dba6c0d82329cdac9da40`. This is a focused gate, not a new full-engine total or remote CI run.
 
 `restore_worker_ownership.rs` reproduced the source profile reopening after the awaiting caller was cancelled and the original engine shut down, while restore key creation remained blocked. `Engine` now holds its profile lock in an Arc; `restore_backup` retains a clone inside the blocking closure through restore completion and upload cleanup. The test verifies that a second engine receives Locked during the blocked work, then both original and restored profiles reopen successfully with distinct identities and unchanged original keys. It uses a deterministic private SecretStore barrier and RAII release, without adding a runtime test hook. The original red and focused green1/0/0 are retained. Durable process-death cleanup is the next separate change; no cleanup journal or schema22 exists yet.
 
 ## Restore path identity — verified schema21 gate
 
-`python3 test-results/task13-restore-paths/run-gate.py` completed with all7 commands exit0: Rustfmt, both Clippy configurations,8 restore tests,3 Google recovery E2E,13 full IMAP E2E,2 release-isolation tests and a fresh production build. Zero failed or ignored. Exact commands/statuses/logs, counts and hashes are retained in that directory. DDL and dependency versions are unchanged; no migration rerun was required. The previous complete engine suite was112 tests at the Sent gate; this focused change added2 tests and ran the relevant8 restore tests, not a new full-engine total.
+`python3 test-results/task13-restore-paths/run-gate.py` completed with all 7 commands exit0: Rustfmt, both Clippy configurations,8 restore tests,3 Google recovery E2E,13 full IMAP E2E,2 release-isolation tests and a fresh production build. Zero failed or ignored. Exact commands/statuses/logs, counts and hashes are retained in that directory. DDL and dependency versions are unchanged; no migration rerun was required. The previous complete engine suite was112 tests at the Sent gate; this focused change added2 tests and ran the relevant8 restore tests, not a new full-engine total.
 
 The new filesystem regression initially failed because replacing a stage's parent allowed the replacement stage to be activated. `store/restore/directory.rs` now retains parent/stage directory handles, checks device/inode identity before activation, renames relative to the retained parent with NOREPLACE, and treats changed post-rename visibility as activation uncertainty. Cleanup refuses a moved/replaced pathname and retains the moved encrypted stage. `restore_path_races.rs` covers6 activation/drop × replaced-parent/replaced-stage/symlink-parent cases. `restore_profile.rs` adds parent replacement during keystore writes and verifies that only new keys are rolled back while unrelated files/keys and the original backup survive. Normal existing-target and key-failure cleanup tests still pass. Crash-abandoned stage/key cleanup remains separate pending work.
 
@@ -1709,7 +1738,7 @@ Orphan FTS regression failed exit101 (actual2 versus expected1 search rows), `/t
 
 ## Latest recovery bounds and export protection gate
 
-`python3 test-results/task13-recovery-bounds/run-gate.py` exit0, all7commands0: Rustfmt, both workspaceClippy configurations, fullengine97, proto/CLI/daemon18, actual recovery_e2e1, actual imap_e2e10 (57.18s). All zero failed/ignored. Exact commands/statuses/logs and copied nested evidence/counts.json are retained in that directory. Source schema19, feature binaries current; production schema12 artifacts still stale. No remoteCI/live-provider/package claim.
+`python3 test-results/task13-recovery-bounds/run-gate.py` exit0, all 7commands0: Rustfmt, both workspaceClippy configurations, fullengine97, proto/CLI/daemon18, actual recovery_e2e1, actual imap_e2e10 (57.18s). All zero failed/ignored. Exact commands/statuses/logs and copied nested evidence/counts.json are retained in that directory. Source schema19, feature binaries current; production schema12 artifacts still stale. No remoteCI/live-provider/package claim.
 
 CLI mail raw/attachment/body now use shared output_file.rs protected-path validation before download. New actualGoogleE2E regression failed101,25pass1fail: absent active store.db-journal was created and command returned0. Authenticated status + shared canonical path refusal fixes it; repeated actualGoogleE2E26passed0failed/ignored (26.57s), build0/suite0. Evidence in task13-export-protection/{behavioral-red,green}. Existing-file/identity/atomic completion checks preserved.
 
@@ -1783,7 +1812,7 @@ Focused behavioral red: prior shell49006 exit101 InvalidInput at valid SMTP conf
 
 ## Latest verified SMTP resend checkpoint — schema18
 
-`python3 test-results/task12-smtp-resend/run-gate.py`: exit0, all7commands0. Rustfmt, normal/featureworkspaceClippy, engine79, IMAPsystem18, operation_system6, actualGoogleE2E26. Separate `python3 scripts/verify.py --suite imap_e2e`: build0/suite0,7passed0failed0ignored,38.98s; its logs/results were copied to task12-smtp-resend/imap-e2e-suite. Counts.json covers these distinct commands; zero failed/ignored. Current feature artifacts schema18, production Task11/schema12 stale. All12 preceding server-Sent gate checks also0; see task12-smtp-server/results.json. No process running, liveprovider/remoteCI/package/install claim.
+`python3 test-results/task12-smtp-resend/run-gate.py`: exit0, all 7commands0. Rustfmt, normal/featureworkspaceClippy, engine79, IMAPsystem18, operation_system6, actualGoogleE2E26. Separate `python3 scripts/verify.py --suite imap_e2e`: build0/suite0,7passed0failed0ignored,38.98s; its logs/results were copied to task12-smtp-resend/imap-e2e-suite. Counts.json covers these distinct commands; zero failed/ignored. Current feature artifacts schema18, production Task11/schema12 stale. All12 preceding server-Sent gate checks also0; see task12-smtp-server/results.json. No process running, liveprovider/remoteCI/package/install claim.
 
 Changes: original SMTP resend created a queued replacement without SMTPintent; new storage red101 NotFound demonstrated it. Capture now occurs in the same transaction as newoperation/blobs and originalresolution, with current configuration, newMessage-ID fingerprint and no reused acceptance. Fullengine79 includes malformed-Sent rollback, deleted draft/reopen/privateBcc/recipient/phase/idempotency assertions. New actualCLI test covers bothSentpolicies, lostoriginalack, duplicate-riskflag refusal, deleted draft/binarysource, exact newcontent/body/binary/recipients, distinctMessage-ID, independent twoSMTPdeliveries only after explicit newdecision, correctSentcopies and secondrestart/decisionreplay. New separate API test covers foreignaccount, false-risk, concurrent identicaldecisions, restart and independentcounts/receipts. Initial fixture compile errors (nonDebugvalues/private read_blob and temporaryRPCclients) corrected without changing productionvisibility/Debugderives or suppressing lints.
 
@@ -2158,7 +2187,7 @@ Explicit IMAP fetch: new system regression returned101/InvalidArgument on missin
 Sparse UID paging: synthetic protocol test failed101 on old `UID SEARCH UID 1:4096` versus required bounded sequence intersection; replaced with `UID SEARCH 1:1 UID 1:4294967294` for one extant message. RFC3501 section6.4.8 verified directly at https://www.rfc-editor.org/rfc/rfc3501.html#section-6.4.8. Focused unit1passed0; `python3 scripts/verify.py --suite imap_system` freshbuild0/suite0,6passed0failed0ignored. Expanded unit adds expunge/duplicate/out-of-range/zero/missing-result cases. Seven-command fetch/paging gate at `test-results/task12-fetch` running; no all-green claim after latest expansion yet.
 
 
-**Fetch/paging follow-up gate complete:** `python3 test-results/task12-fetch/run-gate.py`, all7commands exit0. Fmt, both workspaceClippy configurations, engine66, IMAPsystem6, actualIMAPE2E1 (including refetch and three prior SIGKILL cases), Googlesystem21. Zero failed/ignored. Exact commands/statuses and copied nested logs/results beside gate. Feature artifacts schema14; production remains schema12. No live compatibility or remote CI claim.
+**Fetch/paging follow-up gate complete:** `python3 test-results/task12-fetch/run-gate.py`, all 7commands exit0. Fmt, both workspaceClippy configurations, engine66, IMAPsystem6, actualIMAPE2E1 (including refetch and three prior SIGKILL cases), Googlesystem21. Zero failed/ignored. Exact commands/statuses and copied nested logs/results beside gate. Feature artifacts schema14; production remains schema12. No live compatibility or remote CI claim.
 
 
 IMAP flags regression: `cargo test --locked -p nuncio-test-support --features nuncio-engine/test-harness --test imap_system imap_flag_intents -- --nocapture` initial compile101 on unused dependency assumption; deterministic request UUIDs fixed test compilation. Rerun101/1failed at expected missing IMAP read/star capabilities. Full local services only. Implementation pending.

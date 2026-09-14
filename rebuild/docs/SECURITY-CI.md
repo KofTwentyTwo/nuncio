@@ -1,5 +1,19 @@
 # Security scanning in development
 
+## September 14 completed follow-up at 7792643
+
+[Rebuild34880705357](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705357)
+passed all 10 jobs; [security 34880705426](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705426)
+passed all 7, including all three corrected dependency graphs. The current 45 open
+CodeQL findings match the prior reviewed IDs/rules/paths/severities, all observed
+at 7792643. No new alert IDs or dismissals. The local full 35-command gate and
+original 790tests pass; two clean local packages and actual public fresh/update
+installations are verified. Rustls 0.23.45 is present in all three locks and in
+the downloaded package. Exact evidence: `test-results/startup-logging/`.
+
+Earlier dated scans below remain historical; a past success does not clear a
+subsequently published advisory. Live/provider/native acceptance remains separate.
+
 September 12, 2026. The corrected hosted security run at signed/pushed
 `164b021750a70b49a1e060602f653f22cd14a46c` passed all seven jobs. The earlier failed
 run and all finding classifications remain below. Scan success, mandatory merge
@@ -15,10 +29,10 @@ now updated; the original also takes Rustls's required AWS-LC/webpki minimums.
 No scanner policy, ignore list or test assertion changed.
 
 The freshly fetched advisory database is e2e640471715167f73e22eaf761f2e547adafeec
-(September14,17:35UTC). Both cargo-audit and cargo-deny pass for every corrected
+(September 14,17:35UTC). Both cargo-audit and cargo-deny pass for every corrected
 lock; each original lock first failed with the actual advisory. Original
 formatting, Clippy and790tests pass with external egress denied. The patched
-rebuild35-command gate passes, including348tests in each workspace and the
+rebuild 35-command gate passes, including348 tests in each workspace and the
 independent client. Subsequent hosted/package qualification remains pending.
 Evidence: `test-results/startup-logging/rustls/`. Earlier successful scans below
 apply to their recorded dates and sources; they do not clear this new finding.

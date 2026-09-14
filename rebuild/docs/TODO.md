@@ -3,38 +3,41 @@
 ## Rustls security update
 
 - [x] Refresh advisory database and reproduce the hosted RUSTSEC-2026-0285 finding.
-- [x] Update all three lockfiles to Rustls 0.23.45; verify original790, rebuild35-command gate and independent client.
-- [ ] Checkpoint/push and qualify actual hosted/public installer delivery with startup logging.
+- [x] Update all three lockfiles to Rustls 0.23.45; verify original 790, rebuild 35-command gate and independent client.
+- [x] Signed/pushed 7792643; all 17 hosted jobs and actual public fresh/update delivery with startup logging pass.
 
 ## Startup progress logging
 
 - [x] Reproduce missing startup phases for fresh/reopened profiles and failed startup (two RED regressions).
 - [x] Add INFO progress, DEBUG migration detail and safe readiness counts/timing.
 - [x] Verify phase order, failed-stage visibility, privacy and independent provider state; separate Google E2E 41/41 passes.
-- [ ] Checkpoint/push and verify actual hosted testing download with startup logging.
+- [x] Signed/pushed 7792643; verified both public installations, startup preflight and full packaged CLI audit.
 
 ## CLI usability audit
 
 - [x] Audit 71 help pages; reproduce generic argument/runtime errors and JSON-only default output.
 - [x] Complete descriptions, actionable errors, examples and human-readable results; retain explicit JSON and output safety.
 - [x] Verify every help page plus actual human/JSON subprocess commands and provider effects offline; full 35-command gate and eight final review checks pass.
-- [x] Run full local verification and sign/push CLI92e9394; preserve its failed hosted advisory evidence.
-- [ ] Qualify the patched startup/CLI testing download through actual hosted and public installer checks.
+- [x] Run full local verification and sign/push CLI 92e9394; preserve its failed hosted advisory evidence.
+- [x] Qualify 7792643 through all 17 hosted jobs and actual public fresh/update checks.
 
 ## Daemon running logs
 
 - [x] Reproduce absent default logs and log-level help.
 - [x] Add safe application logging for lifecycle, synchronization and writes.
-- [x] Verify levels, raw-log privacy, ready output and offline subprocess behavior (Google3/3, independent IMAP/SMTP1/1).
-- [x] Full35-command offline gate and signed a5b71ba checkpoint/push.
-- [ ] Diagnose hosted Ubuntu large-attachment E2E timeout; preserve strict byte/memory assertions and failing evidence.
-- [ ] Qualify actual hosted checks and verify fresh/update public installer delivery.
+- [x] Verify levels, raw-log privacy, ready output and offline subprocess behavior (Google 3/3, independent IMAP/SMTP 1/1).
+- [x] Full 35-command offline gate and signed a5b71ba checkpoint/push.
+- [x] Triage/reproduce the older hosted timeout and verify diagnostics; current local/hosted resource tests pass. Cause remains unproven and retained as a recurrence risk.
+- [x] Qualify actual hosted checks and fresh/update public installer delivery at 7792643.
 - [x] Email concise install/test/update instructions; explain permanent paths and absence of unattended self-updates.
 
 ## Current delivery report alignment
 
-- [x] Distinguish latest qualified testing download f14b02a from retained reproducible local candidate82a92a0 in both READMEs, main report, requirement matrix and manual worksheet.
-- [x] Source-specific validation passed:160 links, unchanged f14b02a software, two preserved local archives and470 installed files/binary hashes. Report-only checkpoint records this correction; exact push receipt is in test-results/delivery-report-refresh/.
+- [x] Align current reports with qualified 7792643, its two local archives and actual public fresh/update evidence.
+- [x] Preserve prior checkpoint results and separate pending live/native acceptance.
+
+- [x] Earlier report: distinguish then-qualified testing download f14b02a from retained reproducible local candidate 82a92a0 in both READMEs, main report, requirement matrix and manual worksheet.
+- [x] Source-specific validation passed: 160 links, unchanged f14b02a software, two preserved local archives and 470 installed files/binary hashes. Report-only checkpoint records this correction; exact push receipt is in test-results/delivery-report-refresh/.
 - [ ] Obtain the already requested Google registration setup approval and separately authorized named live/native acceptance; these remain external pending conditions.
 
 ## Stable installer paths
@@ -50,7 +53,7 @@
 - [x] Clarify account IDs, profiles, individual actions, and command examples.
 - [x] Reproduce/fix bare-account help with subprocess checks; preserve JSON errors.
 - [x] Relevant CLI gates:14 normal/15 harness tests, formatting, both Clippy configurations; all pass.
-- [x] Signed/pushed7508e25; all17hosted jobs pass. Actual public installer verified the new470-file Apple Silicon package and eight packaged CLI cases.
+- [x] Signed/pushed7508e25; all 17 hosted jobs pass. Actual public installer verified the new470-file Apple Silicon package and eight packaged CLI cases.
 - [x] Guides and resumable evidence updated; the bounded help fix is delivered.
 
 ## Guided account setup
@@ -58,7 +61,7 @@
 - [x] Implement direct guided CLI account setup and hidden secret input.
 - [x] Prepare bundled Nuncio Google registration and optional trusted-push CI input; app registration and repository secret are not created yet.
 - [x] All six real PTY/daemon setup cases passed in the first complete workspace run, including bundled registration and rejected late callbacks.
-- [x] Full35-command gate passed (328 tests per workspace); signed/pushed78d4d9e.
+- [x] Full 35-command gate passed (328 tests per workspace); signed/pushed78d4d9e.
 - [x] Evidence-backed scheduler correction passed Linux22/macOS22 and fmt/bothClippy; signed/pushed b2b3ed5.
 - [x] Two clean b2b3ed5 production builds: identical8dc16d97 archives,22 extracted checks and469 manifest entries each.
 - [x] Bounded beta-progress correction passed Linux22/macOS22/fmt/bothClippy; signed/pushed82a92a0. Fresh package pair passed with identical5dbed9e9 archives.
@@ -96,7 +99,7 @@ independent `164b021` qualification; no new hosted result is inferred.
 - [x] AM06–AM07 concurrency, recovery, migration and engine/API/CLI parity.
 - [x] AM08 full34-command gate, fresh clean164b021 package pair, actual10-jobCI and real hosted installer pass; alpha handoff documented.
 - [x] API publication and semantic-version research/plan delivered; proposed tooling and publication are separate future work.
-- [x] All 11 open PRs reviewed; relevant fixes tested and explicit later merge/closure dispositions recorded in OPEN-PR-REPORT.md. Follow-up lock/label checkpoint and hosted rerun remain pending.
+- [x] All 11 open PRs reviewed; relevant fixes tested and explicit later merge/closure dispositions recorded in OPEN-PR-REPORT.md. Subsequent lockfile updates and hosted checks are recorded above; merges/closures remain subject to the documented authorization boundary.
 - [x] Dependency remediation checked (790 tests and fresh-index audit), signed/pushed, and all3corrected hosted advisory jobs passed. Default branch/PR closure requires authorized integration.
 - [x] Development security CI implemented and actual7-job run34704460237 passed at164b021; findings classified,9actionalerts fixed. Remote protections and target-branch promotion remain unchanged/unapproved.
 - [x] Current README, operating/API/report and requirement matrix updated from exact164b021 gate/artifact/hosted evidence.
@@ -150,8 +153,8 @@ Full unbudgeted goal is active; inline execution; full offline Google/Synology m
 - [x] Positive client-Sent/restored accepted-SMTP recovery: full13-command offline gate passes, engine112/IMAPsystem26/actualCLI13; separate proof, atomic publication,12storagecases/7systemscenarios/2newCLIcrashcases. Production artifacts refreshed.
 - [x] Restore path identity: replacement regression reproduced and fixed; six path cases and engine key rollback verified. All7 gatecommands0 (8restore/3Google recovery/13IMAP/2release), production refreshed.
 - [x] Schema 22 streamed-restore crash cleanup: all 12 commands passed. Engine 119; API 20; recovery E2E 4 (five restore crash points); 44 migration SIGKILL cases; Google 21/26; IMAP 26/13; production isolation 2. Encrypted ownership journal, owned key/stage/upload cleanup, activated-key retention, backup authority exclusion and cleanup-failure reporting are verified. Production refreshed.
-- [x] Maintenance artifact profile leases: all7 gatecommands0, engine122/recoveryE2E4/IMAPE2E13/release2, three new lifecycle regressions; production refreshed.
-- [x] Startup cleanup cancellation and relative restore: all7 gatecommands0, engine126/recoveryE2E4/IMAPE2E13/release2 and fmt/bothClippy. Original profile ownership, relative/aliased paths, independent restored keys, symlink and cross-owner rejection verified. Production refreshed.
+- [x] Maintenance artifact profile leases: all 7 gatecommands0, engine122/recoveryE2E4/IMAPE2E13/release2, three new lifecycle regressions; production refreshed.
+- [x] Startup cleanup cancellation and relative restore: all 7 gatecommands0, engine126/recoveryE2E4/IMAPE2E13/release2 and fmt/bothClippy. Original profile ownership, relative/aliased paths, independent restored keys, symlink and cross-owner rejection verified. Production refreshed.
 - [x] Task13 restore-retry fix: full7-command gate passed; engine128, actual recoveryE2E5, IMAPE2E13, release-isolation2. Signed checkpoint57dd648 pushed and exact remote hash verified. Task14 is now underway. Further hardening requires a demonstrated R01–R16 failure; reconcile older TODO items with existing evidence before reopening work.
 - [x] Task13 original-operation reconciliation, owned stage/new-key cleanup and activation races have existing system/subprocess evidence. Historical schemas, backup WAL consistency and repair preservation are covered by the named suites in VERIFICATION. Retain precise limitations; avoid treating completed work or speculative audit ideas as new prerequisites.
 - [x] Task14 multi_engine_system and shared-harness gate: all6 commands passed (shell43253); multi-engine1, Google21, operations6, formatting/bothClippy. No production/dependency changes.

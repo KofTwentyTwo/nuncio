@@ -6,12 +6,11 @@ writes, IMAP folder/flag operations, SMTP with separate delivery/Sent-copy recei
 encrypted backup/restore, migration, repair, and resource budgets. Current schema-23 account management uses 49 authenticated RPCs.
 Guided `account add` includes hidden passwords, optional advanced MailPlus
 settings and bundled Google registration support. The latest verified testing
-build is `f14b02a`, with individual-account help and permanent installer paths.
-All ten hosted rebuild jobs, seven security jobs and actual public installation/
-update checks passed. The retained reproducible local candidate is 82a92a0;
-its full guided-setup gate passed 328 tests per workspace configuration.
-[The report](docs/IMPLEMENTATION-REPORT.md) distinguishes these source-specific
-results and the pending live/native acceptance.
+build is `7792643`, with readable CLI output, complete help, detailed startup/activity
+logs and the Rustls patch. All ten rebuild/seven security jobs and actual public
+fresh/update checks passed. Two clean local archives are identical; the full
+35-command gate passed 348 tests per workspace. [The report](docs/IMPLEMENTATION-REPORT.md)
+records exact source/artifact evidence and the pending live/native acceptance.
 
 Install the latest Apple Silicon testing build without cloning or compiling:
 
@@ -28,9 +27,9 @@ with `~/.local/opt/nuncio-testing/bin/nunciod --profile laptop-qa`, then add an
 account using `~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account add`.
 The current source reports startup stages and running activity at **info** level
 (`--log-level debug` adds detail), and readable CLI output is now the default;
-scripts use `--json`. Rustls0.23.45 addresses RUSTSEC-2026-0285 across all three
-lockfiles. The previous download predates this fix; new qualification is pending.
-Testing-download qualification is in progress. [CLI usability audit](docs/CLI-USABILITY-AUDIT.md)
+scripts use `--json`. Rustls 0.23.45 addresses RUSTSEC-2026-0285 across all three
+lockfiles. The downloaded package was checked for these changes.
+Public fresh/update qualification passed at 7792643. [CLI usability audit](docs/CLI-USABILITY-AUDIT.md)
 and [logging options](docs/RUNNING.md#running-logs).
 [Guided setup](docs/ACCOUNT-SETUP.md) uses direct prompts and hidden passwords.
 Follow the [Google setup walkthrough](docs/GOOGLE-SETUP.md) to register the app

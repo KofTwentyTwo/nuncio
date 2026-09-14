@@ -1,5 +1,19 @@
 # Dependency security remediation — September 12, 2026
 
+## September 14 completed follow-up at 7792643
+
+[Rebuild34880705357](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705357)
+passed all 10 jobs; [security 34880705426](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705426)
+passed all 7, including all three corrected dependency graphs. The current 45 open
+CodeQL findings match the prior reviewed IDs/rules/paths/severities, all observed
+at 7792643. No new alert IDs or dismissals. The local full 35-command gate and
+original 790tests pass; two clean local packages and actual public fresh/update
+installations are verified. Rustls 0.23.45 is present in all three locks and in
+the downloaded package. Exact evidence: `test-results/startup-logging/`.
+
+Earlier dated scans below remain historical; a past success does not clear a
+subsequently published advisory. Live/provider/native acceptance remains separate.
+
 Current hosted confirmation: [security run 34704460237](https://github.com/KofTwentyTwo/nuncio/actions/runs/34704460237)
 passed all seven jobs at signed/pushed `164b021`. The corrected original complete
 lock passed cargo-audit (509 packages), and rebuild/client advisory jobs passed.

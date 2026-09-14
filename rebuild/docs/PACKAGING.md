@@ -1,13 +1,14 @@
 # Local packages and operation
 
 For a laptop download without compiling, use [TESTING-INSTALL.md](TESTING-INSTALL.md).
-The current local guided-setup package is verified at signed/pushed `82a92a0`.
-Two fresh clean builds produced the same `5dbed9e9` archive, with 22 extracted
-checks, 469 manifest entries and 237 dependency notices each. The full guided
-setup gate passed, including 328 tests per workspace configuration; the scheduler
-correction passed the Linux/macOS system suites and both Clippy configurations.
-All ten hosted rebuild jobs, seven security jobs and the actual public testing
-installation passed.
+The current local package is verified at signed/pushed `7792643`.
+Two clean builds produced the identical `29b9e6b2` archive, with 22 extracted
+checks, 478 manifest entries and 241 dependency notices each. Its full 35-command
+gate passed 348 tests per workspace configuration, including separate provider
+and release/client checks. The corrected original workspace passed 790 tests.
+All ten actual hosted rebuild jobs, seven security jobs and public fresh/update
+installer checks passed. The hosted archive has its own recorded build environment
+and hash; equality with the local pair is not assumed.
 Exact paths and hashes are in [IMPLEMENTATION-REPORT.md](IMPLEMENTATION-REPORT.md).
 Earlier packages and receipts remain preserved under their own source identities.
 

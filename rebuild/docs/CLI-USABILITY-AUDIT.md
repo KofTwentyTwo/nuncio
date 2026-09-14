@@ -11,18 +11,18 @@ follow-up to the accepted engine/CLI scope; no new provider or API is needed.
       safe examples, file-format instructions, and local/remote effects.
 - [x] Add safe human output and actionable errors; keep machine JSON, uncertainty
       receipts, pagination, secret redaction and terminal control escaping intact.
-- [ ] Exercise the actual CLI against offline services, run relevant full checks,
-      checkpoint/push, then verify the downloadable testing artifact and update docs.
+- [x] Exercise the actual CLI offline; pass the full gate, signed checkpoint/push,
+      actual hosted jobs and both public fresh/update installations at 7792643.
 
 Initial findings: parser failures discard Clap's useful required-argument context;
 the error renderer prints both a generic sentence and a JSON envelope even without
 `--json`; numerous mail/calendar/system/draft/operation commands and options have
 no explanation. Some file parsers also collapse missing, malformed and unsupported
 input into the same message. Audit evidence belongs in `test-results/cli-usability/`.
-The separately observed Ubuntu large-attachment timeout is still unresolved;
-its strict checks and diagnostic evidence remain part of delivery qualification.
+The older Ubuntu attachment timeout remains unexplained. Current strict local
+and hosted resource checks pass; its failing evidence and diagnostics remain.
 
-The implemented audit covers 71 help pages,531 visible option entries (including
+The implemented audit covers 71 help pages, 531 visible option entries (including
 shared global options) and 192 actual missing/unknown-argument invocations. All
 192 passed without creating a profile, contacting a provider, printing rejected
 values, or changing the JSON error contract. All 31 blank descriptions are filled.
@@ -30,10 +30,11 @@ The full frozen-source offline gate passed all 35 commands and 345 tests per
 workspace configuration. Final account/backup help and known-RPC-message guidance
 passed eight supplementary checks, including CLI 22 normal/23 harness tests,
 both Clippy configurations and the complete production-binary help audit.
-Exact three-file source delta: final-leaf-summary.json. Signed/pushed92e9394
+Exact three-file source delta: final-leaf-summary.json. Signed/pushed 92e9394
 passed both hosted macOS/Ubuntu E2E jobs; new Rustls advisory failures blocked
 delivery. All three locks are patched in the startup-logging follow-up. Its full
-verification and actual hosted/public artifact qualification are pending.
+35-command verification, all 17 hosted jobs and actual public fresh/update
+qualification passed at 7792643. Both installed packages pass the 71/531/192 audit.
 
 | Finding | Change / evidence |
 |---|---|

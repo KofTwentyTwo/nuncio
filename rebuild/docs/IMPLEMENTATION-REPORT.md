@@ -1,17 +1,15 @@
 # Nuncio rebuild implementation report
 
-The latest verified testing download is signed/pushed
-`f14b02a223ba95d95a0ce3f3e8f680910189869e`. It includes the engine/API/CLI,
-account management, guided setup, individual-account help and permanent installer
-paths. All ten hosted rebuild jobs, seven security jobs and actual public
-installation/update checks passed at this source.
+The latest verified testing download is signed/pushed `779264348db7240bfc368a5a5e5650f57e9d0b80`.
+It includes the complete engine/API/CLI, account management, readable output,
+actionable help, detailed startup/activity logs, stable installer paths and the
+Rustls patch. All ten hosted rebuild jobs, seven security jobs and actual public
+fresh/update checks passed. The full 35-command local gate passed 348 tests in each
+workspace. Two clean local production archives are byte-identical.
 
-The retained reproducible local candidate is a separate build at `82a92a0`:
-two fresh builds produced identical archives after the full guided-setup gate
-and scheduler corrections passed. Its hashes remain identified below; they do
-not describe the newer download. **The full goal remains incomplete until
-separately authorized Google, Synology and native-keystore acceptance passes.**
-Native apps remain future work.
+**The full goal remains incomplete until separately authorized Google, Synology
+and native-keystore acceptance passes.** One-time Google app registration remains
+pending. Native apps remain future work; passing mocks is not live compatibility.
 
 ## Delivered behavior
 
@@ -31,8 +29,9 @@ The daemon now has timestamped stderr [activity logs](RUNNING.md#running-logs),
 defaulting to info, with `--log-level` controls. It logs safe local IDs, progress
 counts and durable outcomes; even trace excludes provider wire traffic and
 private content. Focused actual Google and independent IMAP/SMTP logging tests
-pass; the full35-command offline gate also passed, with current-source delivery
-qualification next as recorded in
+pass; detailed startup stages include schema/account counts and elapsed time.
+The full 35-command gate passed 348 tests per workspace; actual hosted/public
+qualification is recorded in
 [VERIFICATION.md](VERIFICATION.md). The [Google setup walkthrough](GOOGLE-SETUP.md)
 uses the already-shipped local client-file option without waiting for a shared
 registration build.
@@ -45,27 +44,52 @@ Repeated workspace and named executions are not additional unique tests. Exact c
 
 | Check | Observed result | Evidence under `test-results/` |
 |---|---|---|
-| Guided-setup baseline gate (78d4d9e) | All 35 commands exited0;328 tests per workspace configuration, zero failed/ignored | `all/results.json`; `account-setup-ux/full-second-egress.json` |
-| Separate Google suites | Mock 26; system 22; actual CLI E2E 35; operation system 8; all passed | `all/`, named logs |
-| Separate IMAP/SMTP suites | Contract 2; system 28; actual CLI E2E 15; all passed with independent remote effects | `all/`, named logs |
-| Recovery and isolation | Recovery 5; repair 2/2; all 46 migration before/after-commit SIGKILL cases; reconciliation 3; multi-engine 1; all passed | `all/`, retained individual migration receipts |
-| Security and resources | Security 3/2, 196 invalid-auth cases across 49 RPCs; resources 4/3; release isolation 2; all passed | `all/`, auth/encryption/hostile-content/resource receipts |
-| Supporting checks | Baseline independent Python server checks,34 script regressions, formatting, both Clippy configurations, dependency and generated-client boundaries passed | `all/`; `account-setup-ux/post-ci-checks.json` |
+| Full current gate (7792643) | All 35 commands exit 0; 348 tests per workspace, zero failed/ignored | `startup-logging/patched-gate-final.json`; `startup-logging/patched-gate/` |
+| Separate Google suites (7792643) | Mock 26; system 22; actual daemon/CLI E2E 41; operation system 8; all pass | `startup-logging/patched-gate/`, named logs |
+| Separate IMAP/SMTP suites (7792643) | Contract 2; system 28; actual CLI E2E 16; all pass with independent effects | Same archived gate plus `all/independent-services/` |
+| Recovery and isolation (7792643) | Recovery 5; repair 2/2; 46 migration crash cases; reconciliation 3; multi-engine 1 | Same archived gate and individual migration receipts |
+| Security and resources (7792643) | Security 3/2, 196 invalid-auth cases across 49 RPCs; resources 4/3; release isolation 2; all pass | Same archived gate |
+| Supporting checks (7792643) | Independent servers, 40 script tests, fmt, both Clippy, dependency policy and generated-client boundaries pass | Same archived gate |
+| Rustls patch (7792643) | All three locks at 0.23.45; six refreshed advisory checks pass; original 790 tests/fmt/Clippy pass with egress denied | `startup-logging/rustls/` |
+| Current local package pair (7792643) | Two clean identical archives; 22 extracted checks, 478 files and 241 notices each | `startup-logging/package-pair.json` |
 | Scheduler correction | Controlled Linux latency RED 101 then GREEN 0; corrected complete Linux 22/macOS 22 and fmt/both Clippy pass | `account-setup-ux/linux/`; `scheduler-progress-regression.json` |
 | Retained local package pair (82a92a0) | Two clean builds; identical archives/binaries;22 extracted checks,469 manifest entries and237 notices each | `account-setup-ux/{final-package-final,final-package-commands}.json` |
-| Current hosted rebuild (f14b02a) | All ten jobs passed; exact run/job results retained | [Run 34793311166](https://github.com/KofTwentyTwo/nuncio/actions/runs/34793311166); `stable-installer/hosted-delivery-final.json` |
-| Current hosted security (f14b02a) | All seven jobs passed; earlier detailed finding classification remains separately recorded | [Run 34793311124](https://github.com/KofTwentyTwo/nuncio/actions/runs/34793311124) |
+| Current hosted rebuild (7792643) | All ten jobs passed at the exact source | [Run 34880705357](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705357); `startup-logging/hosted-delivery-final.json` |
+| Current hosted security (7792643) | All seven jobs passed; same 45 prior finding IDs/rules/paths/severities, all seen at this source | [Run 34880705426](https://github.com/KofTwentyTwo/nuncio/actions/runs/34880705426); `startup-logging/codeql-alert-comparison.json` |
 | Account help (7508e25) | 14 CLI/15 harness tests, all 21 action help pages, seven examples and packaged checks passed | `account-help/` |
 | Stable installer (f14b02a) | 20 installer cases and 40 total script tests; Ruff/format/Bash/ShellCheck passed. Both digest-verified hosted lint archives show 40 tests and nine commands passed per platform | `stable-installer/checks.json`; `stable-installer/hosted-scripts/verification.json` |
-| Current public installer (f14b02a) | Fresh/repeat/legacy-migration checks passed, followed by update in the same prefix;470 files, both ARM64 binaries/versions and eight CLI cases passed; previous build preserved | `stable-installer/installer/`; `stable-installer/update/public-verification.json` |
+| Current public installer (7792643) | Fresh/update pass; 478 files, ARM64 binaries, startup preflight, 71 help pages/531 options/192 argument cases; prior build preserved | `startup-logging/installer/`; `startup-logging/update/public-verification.json` |
 
 Automated provider tests stayed offline. Parent/child egress checks denied external traffic while allowing loopback; local independent servers used synthetic accounts. Resource tests retain their original 10,000-message, large-transfer, memory and concurrency assertions. Passing mocks is not live-provider compatibility; local checks do not prove remote CI ran.
 
+## Current reproducible local candidate (7792643)
+
+`dist/final-candidate/EVIDENCE.json` now selects this independently verified
+local archive; the preceding selection is preserved in
+`test-results/startup-logging/previous-final-candidate-evidence.json`.
+
+```text
+dist/startup-logging/a/nuncio-0.1.0-rc-aarch64-apple-darwin-779264348db7.tar.gz
+```
+
+| Item | SHA-256 |
+|---|---|
+| Archive | `29b9e6b27472253d44746d1c28f2ddceb98d51a61d8f5687bc8a4fc202cffcbc` |
+| `bin/nunciod` | `5cd9e7663931d5509cd250e3f54567bd2e361133748ff5ac5486c4bc4fe08d23` |
+| `bin/nuncio-cli` | `6dea2a85bce2e06e2fbfa3e055998a7ceb6148a5937754e2f129a3d0de4acaa5` |
+| Frozen descriptor | `fa665cd63baac1ed7b5fbbfe561920231ce63c0785e5e98d960d0cc8e82a66f8` |
+
+The `b/` sibling is byte-identical. Each clean package has 478 manifest entries,
+241 notice entries and 22 passed extracted checks. Metadata records clean 7792643,
+Rust 1.97.1, Apple clang 21, ARM64 and no test features or bundled Google registration.
+`test-results/startup-logging/package-pair.json` records commands and exit statuses;
+parent/child egress denial is verified for both builds. Equality with a hosted
+archive is not assumed: its build environment and hash are verified separately.
+
 ## Retained reproducible local candidate (82a92a0)
 
-The locally built candidate selected by `dist/final-candidate/EVIDENCE.json` is
-under this isolated worktree's `rebuild/` directory. It remains preserved for its
-reproducibility evidence; it is not the latest testing download:
+The earlier local archive remains preserved under this isolated worktree's
+`rebuild/` directory for its source-specific reproducibility evidence:
 
 ```text
 dist/account-setup-ux-final/a/nuncio-0.1.0-rc-aarch64-apple-darwin-82a92a06eec5.tar.gz
@@ -93,38 +117,41 @@ The public bootstrap was separately verified at 57c619e selecting c662e48, with
 all 467 manifest entries and both ARM64 binaries checked. Neither earlier result
 is used as proof that the new guided setup download has qualified.
 
-## Latest verified testing download (f14b02a)
+## Latest verified testing download (7792643)
 
-The hosted archive SHA-256 is
-`1c6283dfdf16b37c8ebcf359c65387cffd1de985211fd0b645c4d645ff834f5d`.
-The public installer selected artifact 10328798490, run
-34793311166 attempt 1. The retained temporary prefix is:
+The hosted archive SHA-256 is `b7af0ad42609fcfe7df18f0bb2e598c56987a0b248db4ebd6a838e1e2ff72d3f`.
+The public installer selected artifact 10363403258, run 34880705357
+attempt 1. Both a fresh installation and an update from f14b02a passed. The retained
+update prefix is:
 
 ```text
 /private/tmp/nuncio-curl-acceptance-01p6bwb2/testing prefix
 ```
 
-Its `current/TESTING-INSTALL.json` identifies f14b02a and the exact selected
-artifact. Permanent commands are `bin/nunciod` and `bin/nuncio-cli`; their hashes
-were independently verified:
+Its `current/TESTING-INSTALL.json` identifies 7792643 and the selected artifact.
+Permanent commands remain `bin/nunciod` and `bin/nuncio-cli`; their hashes are:
 
 | Binary | SHA-256 |
 |---|---|
-| `bin/nunciod` | `35ca95b1b42b7afb33ab84b6adc06c53af00566a615a57280866b4c64e9ac08b` |
-| `bin/nuncio-cli` | `b5653ed76bbcfb4a55ac3dba8d06867c443b1090d9fba3e0f3bbb8b0bad96649` |
+| `bin/nunciod` | `8d0557e7d21d4b086f32791ee5252eb50e34513eb4a2e5c62ed12130a13e5262` |
+| `bin/nuncio-cli` | `906a7ffa8c16f470e0cf65ba9427d5b6f9ac0e213873ab3d3420921ec362798a` |
 
-Exact public-pipeline commands, provenance, manifest/header checks and unchanged
-normal-environment snapshots are in
-`test-results/stable-installer/update/public-verification.json`. The same prefix
-was first tested with 7508e25 for fresh/repeat/legacy-layout installation. The
-subsequent update retained that previous build byte-for-byte. No daemon or live
-account action ran during these installer checks.
+All 478 manifest files, ARM64 headers, versions and the complete 71/531/192 CLI audit
+passed in each installation. The fresh package also passed INFO/debug/off
+production startup preflight without creating a profile or touching Keychain.
+The previous f14b02a build remains byte-for-byte intact; its older 7508e25 predecessor
+is retained too. Normal installation, shell files and accounts were unchanged.
+Evidence: `test-results/startup-logging/{installer,update}/public-verification.json`,
+`packaged-log-checks.json` and `help-audit/audit-after.json` in the relevant directory.
+These production checks did not start a serving daemon or exercise live accounts;
+the full lifecycle behavior is verified separately through offline subprocess tests.
 
-The hosted archive has its own recorded build environment; equality to the
-older local candidate is not assumed. Its metadata reports
-`google_oauth.configured=false`. Artifacts expire after 14 days; the installer
-selects the newest successful retained eligible build. Packaged documents are
-build-time snapshots; the checkout's current report records later verification.
+The hosted archive has its own build environment and is not asserted byte-equal
+to the local pair. Its metadata reports `google_oauth.configured=false`.
+Artifacts expire after 14 days; the installer selects a successful retained eligible
+build. Packaged documents are build-time snapshots; this checkout report records
+subsequent verification. Historical f14b02a installer receipts remain in
+`test-results/stable-installer/` and retain their original source/hashes.
 
 ## Installation, operation and recovery
 

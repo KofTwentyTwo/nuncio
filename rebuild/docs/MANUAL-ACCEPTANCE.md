@@ -31,7 +31,7 @@ state and contents. For a testing download, use the installed prefix's
 `current/TESTING-INSTALL.json`, `current/BUILD-METADATA.json` and
 `current/SHA256.json`; record the actual source and archive checksum from that
 installation. In the checkout, `dist/final-candidate/EVIDENCE.json` selects the
-separately retained reproducible local candidate 82a92a0. It does not select the
+separately verified reproducible local candidate 7792643. It does not select the
 newest testing download. Do not mix their hashes or acceptance results. Follow
 [PACKAGING.md](PACKAGING.md) to extract a new acceptance copy. Historical report
 hashes are not a substitute for verifying the selected archive; all live rows below
