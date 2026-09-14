@@ -1,5 +1,11 @@
 # Current delivery and acceptance state
 
+## Current delivery report alignment
+
+- [x] Distinguish latest qualified testing download f14b02a from retained reproducible local candidate82a92a0 in both READMEs, main report, requirement matrix and manual worksheet.
+- [x] Source-specific validation passed:160 links, unchanged f14b02a software, two preserved local archives and470 installed files/binary hashes. Report-only checkpoint records this correction; exact push receipt is in test-results/delivery-report-refresh/.
+- [ ] Obtain the already requested Google registration setup approval and separately authorized named live/native acceptance; these remain external pending conditions.
+
 ## Stable installer paths
 
 - [x] Keep permanent default-prefix commands; retain verified versioned builds.

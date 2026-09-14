@@ -5,11 +5,13 @@ It includes SQLCipher storage, authenticated local gRPC, Gmail/Calendar reads an
 writes, IMAP folder/flag operations, SMTP with separate delivery/Sent-copy receipts,
 encrypted backup/restore, migration, repair, and resource budgets. Current schema-23 account management uses 49 authenticated RPCs.
 Guided `account add` includes hidden passwords, optional advanced MailPlus
-settings and bundled Google registration support. The full 35-command offline
-gate passed: 328 tests per workspace configuration, zero failed/ignored. Signed/
-pushed `82a92a0` passed reproducible Apple Silicon packaging and the Linux/macOS
-scheduler regression. All ten hosted rebuild jobs, seven security jobs and the actual public testing
-installation passed; [the report](docs/IMPLEMENTATION-REPORT.md) records exact evidence.
+settings and bundled Google registration support. The latest verified testing
+build is `f14b02a`, with individual-account help and permanent installer paths.
+All ten hosted rebuild jobs, seven security jobs and actual public installation/
+update checks passed. The retained reproducible local candidate is 82a92a0;
+its full guided-setup gate passed 328 tests per workspace configuration.
+[The report](docs/IMPLEMENTATION-REPORT.md) distinguishes these source-specific
+results and the pending live/native acceptance.
 
 Install the latest Apple Silicon testing build without cloning or compiling:
 

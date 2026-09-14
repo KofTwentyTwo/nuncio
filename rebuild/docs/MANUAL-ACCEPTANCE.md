@@ -3,7 +3,7 @@
 ## Guided account setup in the testing build
 
 For approved account-connection steps below, use
-`./bin/nuncio-cli --profile laptop-qa account add` and follow
+`~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa account add` and follow
 [ACCOUNT-SETUP.md](ACCOUNT-SETUP.md). Verify the actual installed commit first.
 Use direct hidden terminal entry for MailPlus passwords. Google-enabled testing
 builds carry Nuncio's app registration; no per-account Cloud project or JSON file
@@ -27,8 +27,12 @@ Use verified extracted production artifacts in a new disposable profile. Current
 Identify the selected artifact using its adjacent archive checksum and extracted-check
 receipt, then copy its exact archive and binary hashes into the approval record.
 `BUILD-METADATA.json` and `SHA256.json` inside that same archive identify its source
-state and contents. In the checkout, `dist/final-candidate/EVIDENCE.json` selects
-the current verified candidate and records any remaining conditions. Follow
+state and contents. For a testing download, use the installed prefix's
+`current/TESTING-INSTALL.json`, `current/BUILD-METADATA.json` and
+`current/SHA256.json`; record the actual source and archive checksum from that
+installation. In the checkout, `dist/final-candidate/EVIDENCE.json` selects the
+separately retained reproducible local candidate 82a92a0. It does not select the
+newest testing download. Do not mix their hashes or acceptance results. Follow
 [PACKAGING.md](PACKAGING.md) to extract a new acceptance copy. Historical report
 hashes are not a substitute for verifying the selected archive; all live rows below
 remain unapproved and unverified.

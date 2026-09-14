@@ -1,12 +1,17 @@
 # Nuncio rebuild implementation report
 
-The engine, authenticated API, CLI, account management, guided setup and testing
-installer are implemented at signed/pushed `82a92a06eec5c6a674dde25981293404fd074b59`.
-The full guided-setup offline gate passed, followed by the corrected Linux/macOS
-scheduler regression. Two fresh production builds produced identical verified
-Apple Silicon archives. All ten hosted rebuild jobs, seven security jobs and actual public testing
-installation passed. **The full goal remains incomplete until separately authorized Google,
-Synology and native-keystore acceptance passes.** Native apps remain future work.
+The latest verified testing download is signed/pushed
+`f14b02a223ba95d95a0ce3f3e8f680910189869e`. It includes the engine/API/CLI,
+account management, guided setup, individual-account help and permanent installer
+paths. All ten hosted rebuild jobs, seven security jobs and actual public
+installation/update checks passed at this source.
+
+The retained reproducible local candidate is a separate build at `82a92a0`:
+two fresh builds produced identical archives after the full guided-setup gate
+and scheduler corrections passed. Its hashes remain identified below; they do
+not describe the newer download. **The full goal remains incomplete until
+separately authorized Google, Synology and native-keystore acceptance passes.**
+Native apps remain future work.
 
 ## Delivered behavior
 
@@ -24,29 +29,33 @@ needed in the normal guided flow.
 
 Durable intent, explicit uncertainty, crash reconciliation, raw export, encrypted backup/restore and repair work through the engine/API/CLI. Tests inspect independent provider state, received bytes and send/copy/notification effects instead of inferring remote success from local records. The [R01–R16 and AM01–AM08 matrix](REQUIREMENTS.md) maps requirements to implementation and evidence.
 
-## Actual verification
+## Verification by source
 
 Repeated workspace and named executions are not additional unique tests. Exact commands, exit statuses and earlier failures remain in [VERIFICATION.md](VERIFICATION.md).
 
 | Check | Observed result | Evidence under `test-results/` |
 |---|---|---|
-| Full guided-setup offline gate | All 35 commands exited0;328 tests per workspace configuration, zero failed/ignored | `all/results.json`; `account-setup-ux/full-second-egress.json` |
+| Guided-setup baseline gate (78d4d9e) | All 35 commands exited0;328 tests per workspace configuration, zero failed/ignored | `all/results.json`; `account-setup-ux/full-second-egress.json` |
 | Separate Google suites | Mock 26; system 22; actual CLI E2E 35; operation system 8; all passed | `all/`, named logs |
 | Separate IMAP/SMTP suites | Contract 2; system 28; actual CLI E2E 15; all passed with independent remote effects | `all/`, named logs |
 | Recovery and isolation | Recovery 5; repair 2/2; all 46 migration before/after-commit SIGKILL cases; reconciliation 3; multi-engine 1; all passed | `all/`, retained individual migration receipts |
 | Security and resources | Security 3/2, 196 invalid-auth cases across 49 RPCs; resources 4/3; release isolation 2; all passed | `all/`, auth/encryption/hostile-content/resource receipts |
-| Supporting checks | Independent Python server checks,34 current script regressions, formatting, both Clippy configurations, dependency and generated-client boundaries passed | `all/`; `account-setup-ux/post-ci-checks.json` |
+| Supporting checks | Baseline independent Python server checks,34 script regressions, formatting, both Clippy configurations, dependency and generated-client boundaries passed | `all/`; `account-setup-ux/post-ci-checks.json` |
 | Scheduler correction | Controlled Linux latency RED 101 then GREEN 0; corrected complete Linux 22/macOS 22 and fmt/both Clippy pass | `account-setup-ux/linux/`; `scheduler-progress-regression.json` |
-| Fresh local packages | Two clean builds; identical archives/binaries;22 extracted checks,469 manifest entries and237 notices each | `account-setup-ux/{final-package-final,final-package-commands}.json` |
-| Current hosted rebuild | All ten jobs passed at 82a92a0; all ten evidence ZIP digests and command exits verified | [Run 34771537477](https://github.com/KofTwentyTwo/nuncio/actions/runs/34771537477) |
-| Current hosted security | All seven jobs passed; 45 open alerts reviewed, including one new synthetic terminal-harness finding; none dismissed | [Run 34771537540](https://github.com/KofTwentyTwo/nuncio/actions/runs/34771537540) |
-| Current public installer | Public curl installer selected82a92a0/run34771537477/attempt1/artifact10322850026;469 files, ARM64 headers and guided command checks passed | `account-setup-ux/installer/` |
+| Retained local package pair (82a92a0) | Two clean builds; identical archives/binaries;22 extracted checks,469 manifest entries and237 notices each | `account-setup-ux/{final-package-final,final-package-commands}.json` |
+| Current hosted rebuild (f14b02a) | All ten jobs passed; exact run/job results retained | [Run 34793311166](https://github.com/KofTwentyTwo/nuncio/actions/runs/34793311166); `stable-installer/hosted-delivery-final.json` |
+| Current hosted security (f14b02a) | All seven jobs passed; earlier detailed finding classification remains separately recorded | [Run 34793311124](https://github.com/KofTwentyTwo/nuncio/actions/runs/34793311124) |
+| Account help (7508e25) | 14 CLI/15 harness tests, all 21 action help pages, seven examples and packaged checks passed | `account-help/` |
+| Stable installer (f14b02a) | 20 installer cases and 40 total script tests; Ruff/format/Bash/ShellCheck passed. Both digest-verified hosted lint archives show 40 tests and nine commands passed per platform | `stable-installer/checks.json`; `stable-installer/hosted-scripts/verification.json` |
+| Current public installer (f14b02a) | Fresh/repeat/legacy-migration checks passed, followed by update in the same prefix;470 files, both ARM64 binaries/versions and eight CLI cases passed; previous build preserved | `stable-installer/installer/`; `stable-installer/update/public-verification.json` |
 
 Automated provider tests stayed offline. Parent/child egress checks denied external traffic while allowing loopback; local independent servers used synthetic accounts. Resource tests retain their original 10,000-message, large-transfer, memory and concurrency assertions. Passing mocks is not live-provider compatibility; local checks do not prove remote CI ran.
 
-## Verified local artifact
+## Retained reproducible local candidate (82a92a0)
 
-The selected archive is under this isolated worktree's `rebuild/` directory:
+The locally built candidate selected by `dist/final-candidate/EVIDENCE.json` is
+under this isolated worktree's `rebuild/` directory. It remains preserved for its
+reproducibility evidence; it is not the latest testing download:
 
 ```text
 dist/account-setup-ux-final/a/nuncio-0.1.0-rc-aarch64-apple-darwin-82a92a06eec5.tar.gz
@@ -74,28 +83,48 @@ The public bootstrap was separately verified at 57c619e selecting c662e48, with
 all 467 manifest entries and both ARM64 binaries checked. Neither earlier result
 is used as proof that the new guided setup download has qualified.
 
-The current hosted archive SHA256 is `9dc2d94e25ae7abc7316c453a95a6fbf5c8e9a3034e885385d587f51e9b448ef`.
-It was installed from artifact10322850026, run34771537477 attempt1, into:
+## Latest verified testing download (f14b02a)
+
+The hosted archive SHA-256 is
+`1c6283dfdf16b37c8ebcf359c65387cffd1de985211fd0b645c4d645ff834f5d`.
+The public installer selected artifact 10328798490, run
+34793311166 attempt 1. The retained temporary prefix is:
 
 ```text
-/private/tmp/nuncio-curl-acceptance-ndt9p63p/testing prefix/nuncio-0.1.0-rc-aarch64-apple-darwin-82a92a06eec5-run-34771537477-attempt-1
+/private/tmp/nuncio-curl-acceptance-01p6bwb2/testing prefix
 ```
 
-Exact public-pipeline argv, GitHub provenance, independent manifest/header checks
-and normal-environment snapshots are in
-`test-results/account-setup-ux/installer/public-verification.json`. The hosted
-archive uses its own recorded build environment; equality to the local archive
-is not assumed. Artifacts expire after14days; the installer selects the newest
-successful retained eligible build. No daemon or live/native account action ran.
+Its `current/TESTING-INSTALL.json` identifies f14b02a and the exact selected
+artifact. Permanent commands are `bin/nunciod` and `bin/nuncio-cli`; their hashes
+were independently verified:
+
+| Binary | SHA-256 |
+|---|---|
+| `bin/nunciod` | `35ca95b1b42b7afb33ab84b6adc06c53af00566a615a57280866b4c64e9ac08b` |
+| `bin/nuncio-cli` | `b5653ed76bbcfb4a55ac3dba8d06867c443b1090d9fba3e0f3bbb8b0bad96649` |
+
+Exact public-pipeline commands, provenance, manifest/header checks and unchanged
+normal-environment snapshots are in
+`test-results/stable-installer/update/public-verification.json`. The same prefix
+was first tested with 7508e25 for fresh/repeat/legacy-layout installation. The
+subsequent update retained that previous build byte-for-byte. No daemon or live
+account action ran during these installer checks.
+
+The hosted archive has its own recorded build environment; equality to the
+older local candidate is not assumed. Its metadata reports
+`google_oauth.configured=false`. Artifacts expire after 14 days; the installer
+selects the newest successful retained eligible build. Packaged documents are
+build-time snapshots; the checkout's current report records later verification.
 
 ## Installation, operation and recovery
 
 For a laptop download without compiling, follow [TESTING-INSTALL.md](TESTING-INSTALL.md).
-The installer selects a fully successful retained feature-branch build, validates
-GitHub provenance and package integrity, and copies it into a versioned prefix.
-Current-source installation passed into a fresh private temporary prefix, with
-469 manifest entries and normal-environment preservation independently checked. The installer does not
-start a daemon or alter PATH, normal profiles or accounts. [PACKAGING.md](PACKAGING.md)
+The installer selects a fully successful retained feature-branch build, verifies
+GitHub provenance and package integrity, then activates it through permanent
+`~/.local/opt/nuncio-testing/bin/` paths. Repeat installation verifies and reuses
+the existing build; earlier builds remain available for recovery. Stop and restart
+the daemon through the permanent path to use an update. The installer does not
+start a daemon or alter PATH, profiles or accounts. [PACKAGING.md](PACKAGING.md)
 describes local archive checks and extraction; help checks establish command
 availability, while separate system/E2E suites establish behavior.
 
@@ -107,7 +136,7 @@ Follow [RECOVERY.md](RECOVERY.md): preserve the original profile and keys, creat
 
 The original workspace dependency/security remediation passed formatting, strict Clippy, all 790 tests, old AES-GCM/age ciphertext compatibility and a full-lock audit with fresh registry/advisory indexes. All 11 open PRs were reviewed and incorporated or superseded on the feature branch; none were merged or closed. [OPEN-PR-REPORT.md](OPEN-PR-REPORT.md) gives exact heads and proposed later dispositions. [DEPENDENCY-SECURITY-REPORT.md](DEPENDENCY-SECURITY-REPORT.md) records versions and evidence.
 
-[SECURITY-CI.md](SECURITY-CI.md) records development triggers, full-lock scanning and actual findings. The first expanded run detected a yanked optional lock entry and nine mutable action references; both were corrected. The original 53 code alerts were individually classified; the guided setup scan adds one reviewed synthetic PTY-output alert, leaving45 open after the earlier nine fixes; reported Rust/Python credential flows were synthetic test fixtures or protected production paths, with no demonstrated production exposure in those traces. Archived reference files have documented semantic-extraction limits. No alerts were dismissed or suppressed and no remote protection settings were changed. Workflow presence does not establish mandatory merge enforcement.
+[SECURITY-CI.md](SECURITY-CI.md) records development triggers, full-lock scanning and actual findings. The first expanded run detected a yanked optional lock entry and nine mutable action references; both were corrected. The original 53 code alerts were individually classified; the guided setup scan adds one reviewed synthetic PTY-output alert, leaving45 open at that reviewed baseline after the earlier nine fixes; reported Rust/Python credential flows were synthetic test fixtures or protected production paths, with no demonstrated production exposure in those traces. Archived reference files have documented semantic-extraction limits. No alerts were dismissed or suppressed and no remote protection settings were changed. Workflow presence does not establish mandatory merge enforcement.
 
 [API-PUBLICATION-PLAN.md](API-PUBLICATION-PLAN.md) proposes independent SemVer contract artifacts, generated documentation and compatibility tooling; that publication pipeline is not claimed implemented. The requested [post-engine PO/PM roadmap](POST-ENGINE-ROADMAP.md) proposes Mac alpha → daily mail → daily calendar → dependable personal release after engine/CLI acceptance. Its staffing/effort assumptions are planning estimates. Native development and wider publication remain outside this goal.
 

@@ -3,14 +3,14 @@
 **A local-first mail and calendar engine written in Rust.**
 
 > **Status: pre-alpha; active implementation is in [`rebuild/`](rebuild/README.md)
-> (September 13, 2026).** Engine/API/CLI and guided account setup passed the full
-> 35-command offline gate, with 328 tests in each workspace configuration.
-> Signed/pushed `82a92a0` passed fresh repeatable Apple Silicon packaging and the
-> corrected Linux/macOS scheduler regression. All ten hosted rebuild jobs, seven security jobs and
-> the actual public testing installation passed. Google app registration, live Google/
-> MailPlus compatibility and native-keystore acceptance remain unverified.
-> See the [implementation report](rebuild/docs/IMPLEMENTATION-REPORT.md) and
-> [current work](rebuild/docs/SESSION-STATE.md) for exact evidence.
+> (September 13, 2026).** Latest verified testing download: `f14b02a`, including
+> guided account setup, individual-account help and permanent installer paths.
+> All ten hosted rebuild jobs, seven security jobs and actual public installation/
+> update checks passed. The retained reproducible local candidate is 82a92a0;
+> its full guided-setup gate passed 328 tests per workspace configuration.
+> Google app registration, live Google/MailPlus compatibility and native-keystore
+> acceptance remain unverified. See the [implementation report](rebuild/docs/IMPLEMENTATION-REPORT.md)
+> and [current work](rebuild/docs/SESSION-STATE.md) for source-specific evidence.
 
 ## What Nuncio is
 
@@ -38,9 +38,9 @@ account using `~/.local/opt/nuncio-testing/bin/nuncio-cli --profile laptop-qa ac
 Google sign-in requires the one-time Nuncio app registration, which has not yet been created.
 
 For Apple Silicon laptop testing, the [testing installer](rebuild/docs/TESTING-INSTALL.md)
-downloads an eligible verified CI package without compiling locally. The first real download/temporary installation is verified at `164b021`; it
-selects a fully successful retained testing-branch run. It activates verified builds at a stable testing path without starting a
-service. No public release or live-provider readiness is implied.
+downloads a verified successful CI package without compiling locally. It
+activates each build at the same testing path and retains older versions for
+recovery. Actual installation and update passed at `f14b02a`. It starts no service. No public release or live-provider readiness is implied.
 
 The [proposed post-engine roadmap](rebuild/docs/POST-ENGINE-ROADMAP.md) starts
 after engine/CLI acceptance and sequences a native Mac alpha, daily mail,

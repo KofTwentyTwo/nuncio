@@ -1,5 +1,30 @@
 # Verification evidence
 
+## Delivery report alignment — September 13
+
+The continuation audit found stale current-build claims in the main report,
+requirement matrix and READMEs. These now identify the qualified testing source
+f14b02a and its actual10-job rebuild/7-job security and public update evidence.
+The separately retained reproducible local candidate remains82a92a0; its archive
+hashes and evidence were preserved, not relabeled. The manual worksheet now
+selects a testing download from its own `current/TESTING-INSTALL.json` and uses
+permanent command paths. All live/native rows remain unapproved/unverified.
+
+This is a reporting correction with no implementation, artifact or authorization
+change. Verification inputs and subsequent checkpoint receipts are retained in
+`test-results/delivery-report-refresh/`. The prior installer turn made concrete
+progress; this continuation corrects the R16 handoff. No CI/test process is live.
+Validation passed:160 local links resolve, software matches qualified f14b02a,
+both retained local archives match their identical recorded5dbed9e9 hash, and all
+470 current installed files plus binary hashes match their own f14b02a receipt.
+All16 requirement rows are retained, with eight still externally pending.
+Whitespace and scoped secret scanning passed. This report-only checkpoint uses
+`[skip ci]`; it does not claim a separate hosted run or rebuild. Exact validation:
+`test-results/delivery-report-refresh/validation.json`.
+Next action after the documentation push: await the previously prepared Google
+registration approval and separately deferred named live/native acceptance.
+The full goal remains incomplete; do not restart unchanged builds.
+
 ## Stable installer paths — delivered at f14b02a
 
 The installer keeps startup commands at
